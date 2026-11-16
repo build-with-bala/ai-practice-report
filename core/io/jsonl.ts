@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs";
+
 export const MAX_LINE_BYTES = 33_554_432;
 
 export type JsonlItem =
@@ -11,15 +13,14 @@ export interface JsonlOpts {
   signal?: AbortSignal;
 }
 
-/** Stream a JSONL file with bounded memory. Never throws on bad input; a missing file yields nothing. */
+/**
+ * Stream a JSONL file with bounded memory. Bad *content* never throws (malformed lines yield
+ * `{skip:"parse"}`). A genuinely missing path yields nothing; any other I/O failure
+ * (EACCES, EISDIR, mid-read errors) throws so callers can record a coverage error.
+ */
 export async function* readJsonl(path: string, opts: JsonlOpts = {}): AsyncGenerator<JsonlItem> {
-  let stream: ReadableStream<Uint8Array>;
-  try {
-    stream = Bun.file(path).stream() as ReadableStream<Uint8Array>;
-  } catch {
-    return;
-  }
-  yield* readJsonlStream(stream, opts);
+  if (!existsSync(path)) return;
+  yield* readJsonlStream(Bun.file(path).stream() as ReadableStream<Uint8Array>, opts);
 }
 
 export async function* readJsonlStream(
@@ -29,12 +30,7 @@ export async function* readJsonlStream(
   const maxLine = opts.maxLineBytes ?? MAX_LINE_BYTES;
   const headBytes = opts.headBytes ?? 512;
   const decoder = new TextDecoder("utf-8");
-  let reader: ReadableStreamDefaultReader<Uint8Array>;
-  try {
-    reader = stream.getReader(); // Bun.file(...).stream() reports ENOENT here
-  } catch {
-    return;
-  }
+  const reader = stream.getReader();
 
   let parts: Uint8Array[] = [];
   let carry = 0;
@@ -64,14 +60,9 @@ export async function* readJsonlStream(
   try {
     for (;;) {
       if (opts.signal?.aborted) return;
-      let chunk: Uint8Array;
-      try {
-        const r = await reader.read();
-        if (r.done) break;
-        chunk = r.value;
-      } catch {
-        return; // unreadable file / mid-read error: stop quietly
-      }
+      const r = await reader.read();
+      if (r.done) break;
+      const chunk = r.value;
       let pos = 0;
       while (pos < chunk.length) {
         if (opts.signal?.aborted) return;

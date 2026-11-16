@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync, createWriteStream } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync, createWriteStream } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { once } from "node:events";
@@ -79,6 +79,60 @@ describe("readJsonl", () => {
   });
   test("missing file yields nothing", async () => {
     expect(await collect(path.join(dir, "nope.jsonl"))).toEqual([]);
+  });
+  test("directory path throws", async () => {
+    await expect(collect(dir)).rejects.toThrow();
+  });
+  test.skipIf(process.platform === "win32" || process.getuid?.() === 0)("unreadable file throws", async () => {
+    const p = put("locked.jsonl", '{"a":1}\n');
+    chmodSync(p, 0o000);
+    try {
+      await expect(collect(p)).rejects.toThrow();
+    } finally {
+      chmodSync(p, 0o600);
+    }
+  });
+
+  describe("splitter is chunk-size independent", () => {
+    const fixture =
+      '{"a":1}\r\n' + // CRLF
+      "\n" + // blank
+      '{"s":"héllo→世界😀"}\n' + // multibyte
+      "X".repeat(150) + "\n" + // oversize when max=100
+      '{"type":"blob","pad":"' + "p".repeat(20) + '"}\n' + // sniffed
+      "{bad\n" + // parse
+      "Y".repeat(120) + "\n" + // oversize
+      '{"z":9}\r\n' +
+      '{"last":true}'; // unterminated
+    const bytes = new TextEncoder().encode(fixture);
+    const run = async (size: number, max?: number) => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(c) {
+          for (let i = 0; i < bytes.length; i += size) c.enqueue(bytes.slice(i, i + size));
+          c.close();
+        },
+      });
+      const out: JsonlItem[] = [];
+      for await (const it of readJsonlStream(stream, { maxLineBytes: max, sniffSkip: (h) => h.includes('"type":"blob"') }))
+        out.push(it);
+      return out;
+    };
+    // sizes chosen so some chunk edge lands exactly on a newline / the end of an oversize line
+    const sizes = [1, 2, 3, 5, 7, 13, 64, 151, 152, bytes.length];
+    for (const max of [undefined, 100]) {
+      test(`max=${max ?? "default"}`, async () => {
+        const expected = await run(bytes.length, max);
+        for (const size of sizes) expect(await run(size, max)).toEqual(expected);
+        const ns = expected.map((i) => i.n);
+        expect(ns).toEqual(max === undefined ? [1, 3, 4, 5, 6, 7, 8, 9] : [1, 3, 4, 5, 6, 7, 8, 9]);
+        const kinds = expected.map((i) => ("skip" in i ? i.skip : "ok"));
+        expect(kinds).toEqual(
+          max === undefined
+            ? ["ok", "ok", "parse", "sniffed", "parse", "parse", "ok", "ok"]
+            : ["ok", "ok", "oversize", "sniffed", "parse", "oversize", "ok", "ok"],
+        );
+      });
+    }
   });
 
   test("bounded memory on a large file", async () => {
