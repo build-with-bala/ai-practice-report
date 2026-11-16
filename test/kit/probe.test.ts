@@ -58,6 +58,32 @@ describe("probe is structure-only", () => {
   });
 });
 
+describe("probe token filter", () => {
+  const bad = [CANARY.secret, CANARY.token, CANARY.mcp, CANARY.project, CANARY.host];
+  test("content-like type values and keys never print", async () => {
+    home = fakeHome();
+    const recs: unknown[] = bad.map((b) => ({ type: b, kind: b, [b]: 1 }));
+    recs.push({ type: CANARY.secret }, { type: CANARY.token }); // repeated: still rejected by predicate
+    const jl = home.writeJsonl("t.jsonl", recs);
+    const js = home.writeJson("t.json", Object.fromEntries(bad.map((b) => [b, { [b]: 1 }])));
+    const out = (await probeJsonl(jl)) + "\n" + probeJson(js);
+    expectNoCanaries(out);
+    expect(out).toContain("type=<other>");
+  });
+  test("ordinary schema tokens still print", async () => {
+    home = fakeHome();
+    const jl = home.writeJsonl("t.jsonl", [
+      { type: "user", message: {}, sessionId: "x", toolUseResult: 1, $set: 1 },
+      { type: "my_event" },
+      { type: "my_event" },
+      { type: "once_only" },
+    ]);
+    const out = await probeJsonl(jl);
+    for (const t of ["type=user", "type=my_event n=2", "$.message", "$.sessionId", "$.toolUseResult", "$.$set", "[type=my_event]"]) expect(out).toContain(t);
+    expect(out).not.toContain("once_only");
+  });
+});
+
 test("pbEncode round-trips varint/bytes/string", async () => {
   const { pbFields } = await import("../../core/io/protobuf");
   const m = pbFields(pbEncode([[1, 300], [2, "hi"], [3, 5n], [4, new Uint8Array([1, 2])]]));

@@ -6,13 +6,26 @@ import { readJsonl } from "../core/io/jsonl";
 import { openRo } from "../core/io/sqlite";
 import { TempRegistry } from "../core/io/temp";
 
-const KEY_RE = /^[A-Za-z_][A-Za-z0-9_]{0,40}$/;
-const TYPE_RE = /^[A-Za-z][A-Za-z0-9_.:-]{0,40}$/;
+const KNOWN_TYPES = new Set([
+  "user", "assistant", "system", "summary", "session_meta", "turn_context", "response_item", "event_msg",
+  "compacted", "file-history-snapshot", "queue-operation", "permission-mode", "pr-link", "cost-state", "ai-title",
+]);
+const SECRET_PREFIXES = ["sk-", "sk_", "gho_", "ghp_", "ghs_", "ghu_", "github_pat_", "xox", "akia", "AKIA", "eyJ"];
+
+/** Only schema-looking identifiers may be printed; anything else is content-like and gets collapsed. */
+export function isSchemaToken(s: string, kind: "key" | "type"): boolean {
+  if (s.length === 0 || s.length > 32) return false;
+  if (!/^(?:[a-z]|[_$][a-z])/.test(s)) return false;
+  const body = s.startsWith("$") ? s.slice(1) : s;
+  if (!(kind === "key" ? /^[A-Za-z0-9_]+$/ : /^[A-Za-z0-9_.:-]+$/).test(body)) return false;
+  if ((s.match(/[0-9]/g) ?? []).length > 2) return false;
+  return !SECRET_PREFIXES.some((p) => s.startsWith(p));
+}
 const TYPE_FIELDS = ["type", "kind", "record_type"] as const;
 const MAX_DEPTH = 8;
 const MAX_ARRAY_ELEMS = 20;
 const MAX_PATHS = 400;
-const MAX_TYPES = 50;
+const MAX_RAW_TYPES = 200;
 const MAX_CLASSES = 8;
 const MAX_JSON_BYTES = 256 * 1024 * 1024;
 
@@ -53,13 +66,27 @@ function walk(v: unknown, p: string, shape: Shape, depth: number): void {
   let hidden = 0;
   const hiddenVals: unknown[] = [];
   for (const k of Object.keys(obj)) {
-    if (KEY_RE.test(k)) walk(obj[k], `${p}.${k}`, shape, depth + 1);
+    if (isSchemaToken(k, "key")) walk(obj[k], `${p}.${k}`, shape, depth + 1);
     else {
       hidden++;
       if (hiddenVals.length < MAX_ARRAY_ELEMS) hiddenVals.push(obj[k]);
     }
   }
   if (hidden > 0) for (const hv of hiddenVals) walk(hv, `${p}.<k×${hidden}>`, shape, depth + 1);
+}
+
+function mergeShape(dst: Shape, src: Shape): void {
+  for (const [p, m] of src) {
+    for (const [c, n] of m) {
+      let d = dst.get(p);
+      if (!d) {
+        if (dst.size >= MAX_PATHS) break;
+        dst.set(p, (d = new Map()));
+      }
+      if (d.has(c) || d.size < MAX_CLASSES) d.set(c, (d.get(c) ?? 0) + n);
+      else d.set("+more", (d.get("+more") ?? 0) + n);
+    }
+  }
 }
 
 function renderShape(shape: Shape, indent = "  "): string[] {
@@ -71,7 +98,7 @@ function renderShape(shape: Shape, indent = "  "): string[] {
 }
 
 export async function probeJsonl(path: string, maxLines = 5000): Promise<string> {
-  const types = new Map<string, number>();
+  const types = new Map<string, number>(); // raw label -> count
   const shapes = new Map<string, Shape>();
   let seen = 0;
   let records = 0;
@@ -91,22 +118,41 @@ export async function probeJsonl(path: string, maxLines = 5000): Promise<string>
       for (const f of TYPE_FIELDS) {
         if (f in o) {
           const tv = o[f];
-          label = typeof tv === "string" && TYPE_RE.test(tv) ? `${f}=${tv}` : `${f}=<other>`;
+          label = typeof tv === "string" && tv.length <= 64 ? `${f}=${tv}` : `${f}=<other>`;
           break;
         }
       }
     } else label = `(${classOf(v)})`;
-    if (!types.has(label) && types.size >= MAX_TYPES) label = "(more types)";
+    if (!types.has(label) && types.size >= MAX_RAW_TYPES) label = "(more types)";
     types.set(label, (types.get(label) ?? 0) + 1);
     let shape = shapes.get(label);
     if (!shape) shapes.set(label, (shape = new Map()));
     walk(v, "$", shape, 0);
   }
+  // decide printable labels only now that occurrence counts are known
+  const printable = (raw: string): string => {
+    const eq = raw.indexOf("=");
+    if (eq < 0 || !(TYPE_FIELDS as readonly string[]).includes(raw.slice(0, eq))) return raw;
+    const val = raw.slice(eq + 1);
+    if (val === "<other>") return raw;
+    return isSchemaToken(val, "type") && (KNOWN_TYPES.has(val) || (types.get(raw) ?? 0) >= 2)
+      ? raw
+      : `${raw.slice(0, eq)}=<other>`;
+  };
+  const counts = new Map<string, number>();
+  const merged = new Map<string, Shape>();
+  for (const [raw, n] of types) {
+    const l = printable(raw);
+    counts.set(l, (counts.get(l) ?? 0) + n);
+    let dst = merged.get(l);
+    if (!dst) merged.set(l, (dst = new Map()));
+    mergeShape(dst, shapes.get(raw)!);
+  }
   const out = [`format: jsonl`, `lines=${seen} records=${records} skipped=${Object.entries(skips).sort().map(([k, n]) => `${k}:${n}`).join(",") || "0"}`];
-  for (const t of [...types.keys()].sort()) out.push(`${t} n=${types.get(t)}`);
-  for (const t of [...shapes.keys()].sort()) {
+  for (const t of [...counts.keys()].sort()) out.push(`${t} n=${counts.get(t)}`);
+  for (const t of [...merged.keys()].sort()) {
     out.push(`[${t}]`);
-    out.push(...renderShape(shapes.get(t)!));
+    out.push(...renderShape(merged.get(t)!));
   }
   return out.join("\n");
 }

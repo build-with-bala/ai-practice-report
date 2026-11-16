@@ -22,4 +22,21 @@ describe("canary harness", () => {
     a.self = a;
     expect(findCanaries(a)).toEqual([]);
   });
+  test("Error message, stack and nested cause", () => {
+    expect(findCanaries(new Error(CANARY.secret))).toEqual(["secret"]);
+    expect(findCanaries({ e: new Error("x", { cause: new Error(CANARY.token) }) })).toEqual(["token"]);
+  });
+  test("DataView, ArrayBuffer and non-Uint8 typed arrays", () => {
+    const bytes = new TextEncoder().encode(CANARY.email);
+    expect(findCanaries(new DataView(bytes.buffer.slice(0) as ArrayBuffer))).toEqual(["email"]);
+    expect(findCanaries(bytes.buffer.slice(0))).toEqual(["email"]);
+    const u16 = new Uint16Array(new TextEncoder().encode(CANARY.host + "\0\0").buffer.slice(0) as ArrayBuffer);
+    expect(findCanaries(u16)).toEqual(["host"]);
+  });
+  test("symbol keys, symbol descriptions and class getters", () => {
+    expect(findCanaries({ [Symbol(CANARY.mcp)]: 1 })).toEqual(["mcp"]);
+    expect(findCanaries({ [Symbol("k")]: CANARY.code })).toEqual(["code"]);
+    class G { get secretThing() { return CANARY.token; } }
+    expect(findCanaries(new G())).toEqual(["token"]);
+  });
 });
