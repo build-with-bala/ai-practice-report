@@ -103,4 +103,64 @@ describe("scan", () => {
   });
 });
 
+describe("scan hygiene", () => {
+  test("throwing onProgress/onLog does not fail the scan", async () => {
+    const a = plugin("codex", "a", (c) => { c.log("info", "x"); c.emit(session("codex", "a")); });
+    const b = plugin("cursor", "b", (c) => { c.emit(session("cursor", "b")); });
+    const r = await scan({ env, plugins: [a, b], onProgress: () => { throw new Error("ui"); }, onLog: () => { throw new Error("ui"); } });
+    expect(r.store.all("session")).toHaveLength(2);
+    expect(r.tempClean).toBe(true);
+  });
+
+  test("throwing plugin that made a temp dir leaves nothing; base removed", async () => {
+    let dir = "";
+    let base = "";
+    const p = plugin("codex", "a", (c) => { dir = c.temp.dir(); base = path.dirname(dir); throw new RangeError("x"); });
+    const r = await scan({ env, plugins: [p] });
+    expect(r.tempClean).toBe(true);
+    expect(existsSync(dir)).toBe(false);
+    expect(existsSync(base)).toBe(false);
+  });
+
+  test("locate() throwing yields error coverage", async () => {
+    const p = plugin("codex", "a", () => {});
+    p.locate = () => { throw new SyntaxError("x"); };
+    const r = await scan({ env, plugins: [p] });
+    expect(r.coverage[0]).toMatchObject({ status: "error", note: "SyntaxError" });
+  });
+
+  test("failed disposeAll -> tempClean false + cleanup-failed warning", async () => {
+    const p = plugin("codex", "a", () => {});
+    const r = await scan({ env, plugins: [p], tempFactory: () => ({ dir: () => "", active: 0, disposeAll: () => { throw new Error("EPERM /secret"); } }) });
+    expect(r.tempClean).toBe(false);
+    const w = r.warnings.find((x) => x.code === "temp-leftover")!;
+    expect(w).toMatchObject({ tool: "scan", detail: "cleanup-failed" });
+    expect(JSON.stringify(r.warnings)).not.toContain("secret");
+  });
+
+  test("abort after first job marks unrun plugins aborted", async () => {
+    const ac = new AbortController();
+    const a = plugin("codex", "a", () => { ac.abort(); });
+    const b = plugin("cursor", "b", () => {});
+    const c = plugin("copilot", "c", () => {});
+    const r = await scan({ env, plugins: [a, b, c], concurrency: 1, signal: ac.signal });
+    const abortedCov = r.coverage.filter((x) => x.note === "aborted");
+    expect(abortedCov.map((x) => x.source).sort()).toEqual(["b", "c"]);
+    expect(abortedCov[0]).toMatchObject({ status: "error", files: 0, window: "detail" });
+    expect(r.warnings.filter((w) => w.tool === "scan" && w.detail === "aborted")).toHaveLength(1);
+  });
+
+  test("already-aborted signal skips locate and marks all plugins", async () => {
+    const ac = new AbortController();
+    ac.abort();
+    let located = false;
+    const p = plugin("codex", "a", () => {});
+    p.locate = () => { located = true; return []; };
+    const r = await scan({ env, plugins: [p], signal: ac.signal });
+    expect(located).toBe(false);
+    expect(r.coverage[0]).toMatchObject({ status: "error", note: "aborted", source: "a" });
+    expect(r.warnings.some((w) => w.tool === "scan")).toBe(true);
+  });
+});
+
 process.on("exit", () => rmSync(home, { recursive: true, force: true }));

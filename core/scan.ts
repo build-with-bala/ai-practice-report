@@ -8,13 +8,15 @@ import type { CoverageEv, Ev } from "./model/events";
 import type { ToolId } from "./model/ids";
 import { EventStore } from "./model/store";
 import { registry } from "./sources/registry";
-import type { Candidate, ScanCtx, SourcePlugin } from "./sources/types";
+import type { Candidate, ScanCtx, SourcePlugin, TempDirs } from "./sources/types";
 import { keyedHash, normalizePath } from "./text/hash";
 
 export interface ScanOptions { env?: Env; plugins?: SourcePlugin[]; tools?: ToolId[]; since?: number; wsl?: boolean; salt?: Uint8Array;
   concurrency?: number; onProgress?: (p: { plugin: string; done: number; total: number }) => void; signal?: AbortSignal;
-  onLog?: (level: "debug" | "info" | "warn", code: string, n?: number) => void }
-export interface Warning { code: "drift" | "error" | "too-large" | "temp-leftover" | "beta"; tool: ToolId; source: string; detail: string }
+  onLog?: (level: "debug" | "info" | "warn", code: string, n?: number) => void;
+  /** @internal test hook: replace the per-scan temp registry. */
+  tempFactory?: (base: string) => TempDirs }
+export interface Warning { code: "drift" | "error" | "too-large" | "temp-leftover" | "beta"; tool: ToolId | "scan"; source: string; detail: string }
 export interface ScanResult { store: EventStore; coverage: CoverageEv[]; warnings: Warning[]; cwds: Map<string, string>;
   salt: Uint8Array; startedAt: number; finishedAt: number; tempClean: boolean }
 
@@ -39,19 +41,22 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
   const signal = opts.signal ?? new AbortController().signal;
 
   const base = mkdtempSync(path.join(env.tmp, "aipr-scan-"));
-  const temp = new TempRegistry(base);
+  const temp = opts.tempFactory?.(base) ?? new TempRegistry(base);
   const uninstall = installSignalCleanup(temp);
   let tempClean = false;
 
   try {
+    const aborted = new Set<SourcePlugin>();
     const jobs: { plugin: SourcePlugin; cand: Candidate }[] = [];
     for (const plugin of plugins) {
+      if (signal.aborted) { aborted.add(plugin); continue; }
       let cands: Candidate[] = [];
       try {
         cands = plugin.locate(env, homes);
       } catch (e) {
-        store.add(emptyCoverage(plugin, "error", (e as Error)?.constructor?.name ?? "Error"));
-        warnings.push({ code: "error", tool: plugin.tool, source: plugin.id, detail: (e as Error)?.constructor?.name ?? "Error" });
+        const name = (e as Error)?.constructor?.name ?? "Error";
+        store.add(emptyCoverage(plugin, "error", name));
+        warnings.push({ code: "error", tool: plugin.tool, source: plugin.id, detail: name });
         continue;
       }
       if (cands.length === 0) store.add(emptyCoverage(plugin, "absent"));
@@ -61,6 +66,8 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
     const total = jobs.length;
     let done = 0;
     let next = 0;
+    const started = new Set<number>();
+    const safe = (f: () => void) => { try { f(); } catch { /* caller callbacks never fail a scan */ } };
     const runJob = async ({ plugin, cand }: { plugin: SourcePlugin; cand: Candidate }): Promise<void> => {
       const ctx: ScanCtx = {
         env, now, since: opts.since, salt, temp, signal,
@@ -71,7 +78,7 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
           if (!cwds.has(key)) cwds.set(key, cwd);
           return key;
         },
-        log: (level, code, n) => opts.onLog?.(level, code, n),
+        log: (level, code, n) => safe(() => opts.onLog?.(level, code, n)),
       };
       try {
         await plugin.scan(cand, ctx);
@@ -81,26 +88,34 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
         warnings.push({ code: "error", tool: plugin.tool, source: plugin.id, detail: name });
       }
       done++;
-      opts.onProgress?.({ plugin: plugin.id, done, total });
+      safe(() => opts.onProgress?.({ plugin: plugin.id, done, total }));
     };
     const worker = async () => {
-      while (!signal.aborted && next < jobs.length) await runJob(jobs[next++]!);
+      while (!signal.aborted && next < jobs.length) {
+        const i = next++;
+        started.add(i);
+        try { await runJob(jobs[i]!); } catch { /* runJob should not throw; never reject a worker */ }
+      }
     };
     const n = Math.max(1, Math.min(opts.concurrency ?? 4, jobs.length));
-    await Promise.all(Array.from({ length: n }, worker));
+    await Promise.allSettled(Array.from({ length: n }, worker));
+
+    jobs.forEach((j, i) => { if (!started.has(i)) aborted.add(j.plugin); });
+    for (const plugin of aborted) store.add(emptyCoverage(plugin, "error", "aborted"));
+    if (aborted.size > 0) warnings.push({ code: "error", tool: "scan", source: "scan", detail: "aborted" });
 
     for (const [plugin, count] of nonCoverage) {
       if (plugin.beta && count > 0) warnings.push({ code: "beta", tool: plugin.tool, source: plugin.id, detail: "beta reader" });
     }
   } finally {
-    temp.disposeAll();
-    uninstall();
+    let failed = false;
+    try { temp.disposeAll(); } catch { failed = true; }
+    try { uninstall(); } catch { failed = true; }
     try {
-      tempClean = existsSync(base) ? readdirSync(base).length === 0 : true;
-    } catch {
-      tempClean = false;
-    }
-    rmSync(base, { recursive: true, force: true });
+      if (existsSync(base) && readdirSync(base).length > 0) failed = true;
+    } catch { failed = true; }
+    try { rmSync(base, { recursive: true, force: true }); } catch { failed = true; }
+    tempClean = !failed;
   }
 
   const coverage = [...store.all("coverage")];
@@ -109,6 +124,6 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
     if (c.status === "drift" || unknown > 0) warnings.push({ code: "drift", tool: c.tool, source: c.source, detail: `${unknown} unknown types` });
     if (c.note === "too-large") warnings.push({ code: "too-large", tool: c.tool, source: c.source, detail: "too-large" });
   }
-  if (!tempClean) warnings.push({ code: "temp-leftover", tool: "claude-code", source: "scan", detail: "temp dirs remained" });
+  if (!tempClean) warnings.push({ code: "temp-leftover", tool: "scan", source: "scan", detail: "cleanup-failed" });
   return { store, coverage, warnings, cwds, salt, startedAt, finishedAt: Date.now(), tempClean };
 }
