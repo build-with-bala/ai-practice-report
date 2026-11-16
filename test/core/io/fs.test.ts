@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { readJsonSmall, safeList, safeStat, walk } from "../../../core/io/fs";
+import { readJsonSmall, readJsonSmallResult, safeList, safeStat, walk } from "../../../core/io/fs";
 
 let root: string;
 beforeAll(() => {
@@ -63,5 +63,32 @@ describe("readJsonSmall", () => {
     writeFileSync(big, Buffer.alloc(9 * 1024 * 1024, 0x20));
     expect(readJsonSmall(big)).toBeUndefined();
     expect(readJsonSmall(path.join(root, "missing.json"))).toBeUndefined();
+  });
+});
+
+describe("readJsonSmallResult", () => {
+  test("says why a file could not be used", () => {
+    const ok = path.join(root, "r-ok.json");
+    writeFileSync(ok, '{"a":1}');
+    expect(readJsonSmallResult(ok)).toEqual({ ok: true, value: { a: 1 } });
+    const bad = path.join(root, "r-bad.json");
+    writeFileSync(bad, "{nope");
+    expect(readJsonSmallResult(bad)).toEqual({ ok: false, reason: "parse" });
+    const big = path.join(root, "r-big.json");
+    writeFileSync(big, Buffer.alloc(9 * 1024 * 1024, 0x20));
+    expect(readJsonSmallResult(big)).toEqual({ ok: false, reason: "too-large" });
+    expect(readJsonSmallResult(path.join(root, "r-missing.json"))).toEqual({ ok: false, reason: "missing" });
+    expect(readJsonSmallResult(root)).toEqual({ ok: false, reason: "not-file" });
+  });
+  test.skipIf(process.platform === "win32" || process.getuid?.() === 0)("an unreadable file is an io-error", () => {
+    const p = path.join(root, "r-locked.json");
+    writeFileSync(p, "{}");
+    chmodSync(p, 0o000);
+    try {
+      expect(readJsonSmallResult(p)).toEqual({ ok: false, reason: "io-error" });
+      expect(readJsonSmall(p)).toBeUndefined();
+    } finally {
+      chmodSync(p, 0o600);
+    }
   });
 });

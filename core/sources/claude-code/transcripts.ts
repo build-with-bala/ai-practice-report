@@ -1,6 +1,6 @@
 import { readdirSync, type Stats } from "node:fs";
 import path from "node:path";
-import { readJsonSmall, safeStat } from "../../io/fs";
+import { readJsonSmall, readJsonSmallResult, safeStat } from "../../io/fs";
 import { readJsonl } from "../../io/jsonl";
 import { toEpochMs } from "../../io/time";
 import type { CoverageEv, Ev, FileFactEv, MarkerEv, SessionEv, ToolEv, TotalsEv, TurnEv } from "../../model/events";
@@ -8,7 +8,7 @@ import { sid, type MarkerKind } from "../../model/ids";
 import { classifyIntent } from "../../text/intent";
 import { promptFeatures } from "../../text/structure";
 import type { Candidate, ScanCtx } from "../types";
-import { ccPromptOrigin, isInterrupt, typedText, userText } from "./origin";
+import { ccPromptOrigin, isInterrupt, typedText, unknownProvenance, userText } from "./origin";
 import { ccToolCategory, mcpServerOf, patchLines } from "./tools";
 
 export const TRANSCRIPTS_SOURCE = "claude-code.transcripts";
@@ -52,11 +52,20 @@ const TYPE_NAME = /^[a-z][a-z0-9_-]{0,47}$/;
 const VERSION = /^\d{1,4}\.\d{1,4}\.\d{1,6}(?:[-+][0-9A-Za-z.-]{1,32})?$/;
 const SURFACE = /^[a-z][a-z0-9-]{0,31}$/;
 const TOOL_NAME = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+const MODEL = /^[A-Za-z0-9][A-Za-z0-9.:_[\]-]{0,63}$/;
+const EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
+/** Names the CLI gives its files and folders; any other name is hashed before it becomes part of a session id. */
+const SESSION_STEM = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+const AGENT_STEM = /^agent-[A-Za-z0-9]+$/;
+const WORKFLOW_DIR = /^wf_[A-Za-z0-9_-]+$/;
 
 type Obj = Record<string, unknown>;
 const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
 const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
 const str = (v: unknown): string | undefined => (typeof v === "string" && v !== "" ? v : undefined);
+const safeModel = (m: string): string => (MODEL.test(m) ? m : "other");
+const safeEffort = (e: string | undefined): string | undefined => (e === undefined || EFFORTS.has(e) ? e : "other");
+const idPart = (name: string, shape: RegExp, ctx: ScanCtx): string => (shape.test(name) ? name : ctx.hash(name));
 
 /** Coverage counters for one candidate. */
 class Tally {
@@ -78,7 +87,11 @@ class Tally {
 
   /** Unknown record types keep their name only when it looks like a schema token. */
   unknown(type: unknown): void {
-    const key = typeof type !== "string" ? "(none)" : TYPE_NAME.test(type) ? type : "(other)";
+    this.unknownKey(typeof type !== "string" ? "(none)" : TYPE_NAME.test(type) ? type : "(other)");
+  }
+
+  /** A pre-shaped drift key (e.g. `turnOrigin:<value>` from `unknownProvenance`). */
+  unknownKey(key: string): void {
     this.unknownTypes[key] = (this.unknownTypes[key] ?? 0) + 1;
   }
 
@@ -104,7 +117,8 @@ class Tally {
 /** The allowlisted part of `agent-*.meta.json`. */
 interface Meta { agentType?: string; isBuiltIn?: boolean; spawnDepth?: number; model?: string; toolUseId?: string; background?: boolean; stoppedByUser: boolean }
 
-interface FileSpec { file: string; sessionId: string; sub: boolean; parentId?: string; meta?: Meta; workflowId?: string }
+/** `stem`: the raw file stem of a top-level transcript, compared with its records' `sessionId` (diagnostic only). */
+interface FileSpec { file: string; sessionId: string; sub: boolean; stem?: string; parentId?: string; meta?: Meta; workflowId?: string }
 
 interface PendingUsage { ts: number; model: string; inTok: number; outTok: number; cacheR: number; cacheW: number; seen: boolean }
 
@@ -118,22 +132,20 @@ function listDir(dir: string, tally: Tally): string[] {
   }
 }
 
-/** A small JSON side file (meta, workflow summary) counted toward coverage when it parses. */
+/** A small JSON side file (meta, workflow summary), counted toward coverage when it parses; failures by kind. */
 function readSidecar(file: string, tally: Tally): Obj | undefined {
-  const st = safeStat(file);
-  if (!st?.isFile()) return undefined;
-  if (st.size > SIDECAR_MAX) {
-    tally.skip("too-large");
+  const r = readJsonSmallResult(file, SIDECAR_MAX);
+  if (!r.ok) {
+    if (r.reason !== "missing" && r.reason !== "not-file") tally.skip(r.reason);
     return undefined;
   }
-  const v = readJsonSmall(file, SIDECAR_MAX);
-  if (!isObj(v)) {
+  if (!isObj(r.value)) {
     tally.skip("parse");
     return undefined;
   }
   tally.files++;
-  tally.bytes += st.size;
-  return v;
+  tally.bytes += safeStat(file)?.size ?? 0;
+  return r.value;
 }
 
 function readMeta(file: string, tally: Tally): Meta | undefined {
@@ -217,7 +229,7 @@ class TranscriptReader {
       this.tally.heavyParsed++;
       return;
     }
-    if (!this.spec.sub && typeof v.sessionId === "string" && sid(TOOL, v.sessionId) !== this.spec.sessionId) this.foreignSession = true;
+    if (this.spec.stem !== undefined && typeof v.sessionId === "string" && v.sessionId !== this.spec.stem) this.foreignSession = true;
     const ts = toEpochMs(v.timestamp, this.ctx.now);
     if (ts !== undefined) this.tick(ts);
     const version = str(v.version);
@@ -254,6 +266,7 @@ class TranscriptReader {
   private prompt(v: Obj, ts: number | undefined): void {
     const origin = ccPromptOrigin(v);
     if (origin === "not-a-prompt") return;
+    for (const key of unknownProvenance(v)) this.tally.unknownKey(key); // a new CLI value is drift, never a silent human
     const text = typedText(userText(v) ?? "");
     const human = origin === "human";
     const first = this.humanPrompts === 0;
@@ -276,11 +289,12 @@ class TranscriptReader {
   private assistant(v: Obj, ts: number | undefined): void {
     const msg = isObj(v.message) ? v.message : undefined;
     if (!msg) return;
-    const model = str(msg.model);
-    if (model !== undefined && model !== SYNTHETIC_MODEL) {
+    const raw = str(msg.model);
+    if (raw !== undefined && raw !== SYNTHETIC_MODEL) {
+      const model = safeModel(raw);
       if (!this.models.includes(model)) this.models.push(model);
       this.lastModel = model;
-      this.lastEffort = str(v.effort);
+      this.lastEffort = safeEffort(str(v.effort));
       if (ts !== undefined) this.noteMessage(msg, v, model, ts);
     }
     if (Array.isArray(msg.content)) for (const b of msg.content) if (isObj(b) && b.type === "tool_use") this.toolUse(b, ts ?? this.clock);
@@ -478,7 +492,7 @@ class TranscriptReader {
       if (m.spawnDepth !== undefined) s.spawnDepth = m.spawnDepth;
       if (m.agentType !== undefined) s.agentType = (m.isBuiltIn ?? BUILTIN_AGENTS.has(m.agentType)) ? m.agentType : this.ctx.hash(m.agentType);
       if (m.background !== undefined) s.background = m.background;
-      if (s.models.length === 0 && m.model !== undefined && m.model !== "inherit") s.models = [m.model];
+      if (s.models.length === 0 && m.model !== undefined && m.model !== "inherit") s.models = [safeModel(m.model)];
     }
     if (spec.workflowId !== undefined) s.workflowId = spec.workflowId;
     return s;
@@ -519,32 +533,38 @@ async function scanFile(spec: FileSpec, ctx: ScanCtx, tally: Tally, delegations:
 const agentFiles = (dir: string, tally: Tally): string[] =>
   listDir(dir, tally).filter((f) => /^agent-[^\\/]+\.jsonl$/.test(f) && safeStat(path.join(dir, f))?.isFile());
 
-/** One session: its top-level transcript, every subagent and workflow-agent transcript, and its workflow summaries. */
-async function scanSession(projDir: string, sessionId: string, ctx: ScanCtx, tally: Tally): Promise<void> {
-  const parentId = sid(TOOL, sessionId);
-  const dir = path.join(projDir, sessionId);
+/**
+ * One session: its top-level transcript, every subagent and workflow-agent transcript, and its workflow summaries.
+ * Ids: `claude-code:<session>`, `…/<agent>` and `…/<wf_run>/<agent>`, each part verbatim only when CLI-shaped, else hashed.
+ */
+async function scanSession(projDir: string, stem: string, ctx: ScanCtx, tally: Tally): Promise<void> {
+  const session = idPart(stem, SESSION_STEM, ctx);
+  const parentId = sid(TOOL, session);
+  const dir = path.join(projDir, stem);
   const subDir = path.join(dir, "subagents");
   const wfRoot = path.join(subDir, "workflows");
-  const subs: { file: string; stem: string; workflowId?: string }[] = agentFiles(subDir, tally).map((f) => ({ file: path.join(subDir, f), stem: f.slice(0, -6) }));
+  const agent = (f: string) => idPart(f.slice(0, -6), AGENT_STEM, ctx);
+  const subs: { file: string; id: string; workflowId?: string }[] = agentFiles(subDir, tally)
+    .map((f) => ({ file: path.join(subDir, f), id: sid(TOOL, `${session}/${agent(f)}`) }));
   for (const wf of listDir(wfRoot, tally)) {
     if (!wf.startsWith("wf_") || !safeStat(path.join(wfRoot, wf))?.isDirectory()) continue;
+    const run = idPart(wf, WORKFLOW_DIR, ctx);
     const workflowId = ctx.hash(wf);
-    for (const f of agentFiles(path.join(wfRoot, wf), tally)) subs.push({ file: path.join(wfRoot, wf, f), stem: f.slice(0, -6), workflowId });
+    for (const f of agentFiles(path.join(wfRoot, wf), tally)) subs.push({ file: path.join(wfRoot, wf, f), id: sid(TOOL, `${session}/${run}/${agent(f)}`), workflowId });
   }
 
   // meta files first: the parent's Agent/Task tool events need the delegation links when they are emitted
   const delegations = new Map<string, string>();
   const specs: FileSpec[] = subs.map((s) => {
-    const id = sid(TOOL, `${sessionId}/${s.stem}`);
-    const meta = readMeta(path.join(path.dirname(s.file), `${s.stem}.meta.json`), tally);
-    if (meta?.toolUseId !== undefined) delegations.set(meta.toolUseId, id);
-    const spec: FileSpec = { file: s.file, sessionId: id, sub: true, parentId };
+    const meta = readMeta(s.file.replace(/\.jsonl$/, ".meta.json"), tally);
+    if (meta?.toolUseId !== undefined) delegations.set(meta.toolUseId, s.id);
+    const spec: FileSpec = { file: s.file, sessionId: s.id, sub: true, parentId };
     if (meta) spec.meta = meta;
     if (s.workflowId !== undefined) spec.workflowId = s.workflowId;
     return spec;
   });
 
-  await scanFile({ file: path.join(projDir, `${sessionId}.jsonl`), sessionId: parentId, sub: false }, ctx, tally, delegations);
+  await scanFile({ file: path.join(projDir, `${stem}.jsonl`), sessionId: parentId, sub: false, stem }, ctx, tally, delegations);
   for (const spec of specs) {
     if (ctx.signal.aborted) return;
     await scanFile(spec, ctx, tally, delegations);
@@ -587,12 +607,14 @@ export async function scanTranscripts(c: Candidate, ctx: ScanCtx): Promise<void>
       if (st?.isFile() && entry.endsWith(".jsonl")) sessions.add(entry.slice(0, -6));
       else if (st?.isDirectory()) sessions.add(entry);
     }
-    for (const sessionId of [...sessions].sort()) {
+    for (const stem of [...sessions].sort()) {
       if (ctx.signal.aborted) break;
-      await scanSession(projDir, sessionId, ctx, tally);
+      await scanSession(projDir, stem, ctx, tally);
     }
   }
   if (tally.heavyParsed > 0) ctx.log("debug", "cc.heavy-parsed", tally.heavyParsed);
   if (tally.foreignSessionFiles > 0) ctx.log("debug", "cc.foreign-session-files", tally.foreignSessionFiles);
+  const bad = tally.skipped["bad-record"] ?? 0;
+  if (bad > 0) ctx.log("warn", "cc.bad-record", bad); // a mapping bug must not look like a healthy source
   ctx.emit(tally.coverage(retentionDays(c.root)));
 }

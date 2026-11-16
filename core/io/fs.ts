@@ -17,15 +17,38 @@ export function safeStat(p: string): Stats | null {
   }
 }
 
-/** Parse a small JSON file; undefined when missing, too large, unreadable or invalid. */
-export function readJsonSmall(p: string, maxBytes: number = 8 * 1024 * 1024): unknown | undefined {
+export type JsonSmallResult =
+  | { ok: true; value: unknown }
+  | { ok: false; reason: "missing" | "not-file" | "too-large" | "io-error" | "parse" };
+
+/** Parse a small JSON file, saying why it could not be used (missing, not a regular file, too large, unreadable, invalid). */
+export function readJsonSmallResult(p: string, maxBytes: number = 8 * 1024 * 1024): JsonSmallResult {
+  let size: number;
   try {
     const st = lstatSync(p);
-    if (!st.isFile() || st.size > maxBytes) return undefined;
-    return JSON.parse(readFileSync(p, "utf8"));
-  } catch {
-    return undefined;
+    if (!st.isFile()) return { ok: false, reason: "not-file" };
+    size = st.size;
+  } catch (e) {
+    return { ok: false, reason: (e as { code?: string }).code === "ENOENT" ? "missing" : "io-error" };
   }
+  if (size > maxBytes) return { ok: false, reason: "too-large" };
+  let text: string;
+  try {
+    text = readFileSync(p, "utf8");
+  } catch {
+    return { ok: false, reason: "io-error" };
+  }
+  try {
+    return { ok: true, value: JSON.parse(text) };
+  } catch {
+    return { ok: false, reason: "parse" };
+  }
+}
+
+/** Parse a small JSON file; undefined when missing, too large, unreadable or invalid. */
+export function readJsonSmall(p: string, maxBytes: number = 8 * 1024 * 1024): unknown | undefined {
+  const r = readJsonSmallResult(p, maxBytes);
+  return r.ok ? r.value : undefined;
 }
 
 /**
