@@ -1,0 +1,17 @@
+{
+  "name": "ai-practice-report",
+  "version": "1.0.0-dev",
+  "type": "module",
+  "exports": {
+    "./core": "./core/index.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "probe": "bun scripts/probe.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5"
+  }
+}

@@ -1,0 +1,48 @@
+name: Security Guard
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-guard-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  malware-gate:
+    name: Block fake-font / loader re-introduction
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Malware gate (self-contained)
+        run: |
+          set -u
+          fail=0
+          while IFS= read -r f; do
+            m=$(head -c4 "$f" 2>/dev/null | tr -d '\0')
+            if [ "$m" != "wOF2" ]; then echo "::error file=$f::woff2 is not a real font (payload carrier) magic='$m'"; fail=1; fi
+          done < <(find . -path ./.git -prune -o -iname '*.woff2' -type f -print)
+          m1=$'global[\x27!\x27]'
+          m2=$'_\x24_1e42'
+          m3=$'global.i\x3d'
+          m4=$'_\x24jsoToArr'
+          m5=$'x\x2dpayload\x2db64'
+          m6=$'block\x73cout'
+          m7=$'api.trongrid\x2eio'
+          m8=$'aptos\x6cabs'
+          hits=$(grep -rIl -F -e "$m1" -e "$m2" -e "$m3" -e "$m4" -e "$m5" -e "$m6" -e "$m7" -e "$m8" \
+                  --include='*.js' --include='*.mjs' --include='*.cjs' --include='*.ts' --include='*.json' --include='*.woff2' \
+                  . 2>/dev/null || true)
+          if [ -n "$hits" ]; then echo "::error::loader marker found in:"; echo "$hits"; fail=1; fi
+          while IFS= read -r t; do
+            if grep -q 'runOn' "$t" && grep -q 'folderOpen' "$t"; then echo "::error file=$t::auto-run folderOpen task"; fail=1; fi
+          done < <(find . -path ./.git -prune -o -path '*/.vscode/tasks.json' -type f -print)
+          if [ "$fail" = 0 ]; then echo "OK: no fake fonts, no loader markers, no auto-run tasks"; fi
+          exit $fail

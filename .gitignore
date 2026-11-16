@@ -1,0 +1,7 @@
+node_modules/
+dist/
+*.aiprof
+report*.html
+.DS_Store
+coverage/
+.tmp/
