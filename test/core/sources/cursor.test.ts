@@ -9,7 +9,7 @@ import { scan } from "../../../core/scan";
 import { cuAgentCli, cuIde, cuTracking, cursorUserRoot } from "../../../core/sources/cursor";
 import { LEGACY_KEYS } from "../../../core/sources/cursor/itemtable";
 import { registry } from "../../../core/sources/registry";
-import type { ScanCtx, SourcePlugin } from "../../../core/sources/types";
+import type { ScanCtx, SourcePlugin, PluginCoverage } from "../../../core/sources/types";
 import { keyedHash } from "../../../core/text/hash";
 import { classifyIntent } from "../../../core/text/intent";
 import { CANARY, expectNoCanaries, findCanaries } from "../../kit/canary";
@@ -199,7 +199,7 @@ describe("cursor: Task 14 scenario", () => {
     const fx = buildCursor(h);
     const r = await run([cuIde]);
     expect(covOf(r, "cursor.ide")).toMatchObject({
-      tool: "cursor", window: "detail", status: "ok", beta: false, files: 1, bytes: statSync(fx.globalFile).size, records: 6,
+      tool: "cursor", window: "detail", status: "ok", beta: true, files: 1, bytes: statSync(fx.globalFile).size, records: 6,
       skipped: {}, unknownTypes: {}, versions: [], from: fx.t0, to: fx.t0 + 21 * MIN,
     });
     expect(composersCov(r)).toMatchObject({
@@ -526,7 +526,7 @@ describe("cursor ide: bubbles and tools", () => {
       composerRow(C3, { created: at, updated: at + MIN }),
       userRow(C3, "d", at, "The third composer"),
     ]);
-    const events: Ev[] = [];
+    const events: (Ev | PluginCoverage)[] = [];
     const logs: [string, string, number | undefined][] = [];
     const salt = new Uint8Array(32);
     const ctx: ScanCtx = {
@@ -1078,7 +1078,7 @@ describe("cursor agent CLI (beta: presence only)", () => {
 describe("cursor plugins", () => {
   test("ids, tiers and beta flags; registered", () => {
     expect(ALL.map((p) => [p.tool, p.id, p.tier, p.beta])).toEqual([
-      ["cursor", "cursor.ide", "P0", false], ["cursor", "cursor.tracking", "P0", false], ["cursor", "cursor.agent-cli", "P0", true],
+      ["cursor", "cursor.ide", "P0", true], ["cursor", "cursor.tracking", "P0", true], ["cursor", "cursor.agent-cli", "P0", true], // all from public docs: beta
     ]);
     for (const p of ALL) expect(registry).toContain(p);
     const never = ALL.flatMap((p) => p.describe.neverReads).join("\n");

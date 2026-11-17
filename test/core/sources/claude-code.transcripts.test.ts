@@ -6,7 +6,7 @@ import { scan } from "../../../core/scan";
 import { ccTranscripts } from "../../../core/sources/claude-code";
 import { ccPromptOrigin, unknownProvenance } from "../../../core/sources/claude-code/origin";
 import { ccToolCategory } from "../../../core/sources/claude-code/tools";
-import type { ScanCtx } from "../../../core/sources/types";
+import type { ScanCtx, PluginCoverage } from "../../../core/sources/types";
 import { keyedHash } from "../../../core/text/hash";
 import { classifyIntent } from "../../../core/text/intent";
 import { CANARY, expectNoCanaries, findCanaries } from "../../kit/canary";
@@ -444,7 +444,7 @@ describe("claude-code transcripts: record mapping", () => {
   test("a record the mapper cannot handle is counted, logged once per root, and the file goes on", async () => {
     top("P16").prompt("boom").prompt("fine").write(h, topFile("P16"));
     top("P22").prompt("boom").write(h, topFile("P22"));
-    const events: Ev[] = [];
+    const events: (Ev | PluginCoverage)[] = [];
     const logs: [string, string, number | undefined][] = [];
     const salt = new Uint8Array(32);
     const ctx: ScanCtx = {

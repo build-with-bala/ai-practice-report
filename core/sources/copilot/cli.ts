@@ -6,14 +6,14 @@ import { safeStat } from "../../io/fs";
 import { readJsonl } from "../../io/jsonl";
 import { isBusyError, openRo, type RoDb } from "../../io/sqlite";
 import { toEpochMs } from "../../io/time";
-import type { CoverageEv, Ev, MarkerEv, PromptEv, SessionEv, ToolEv, TurnEv } from "../../model/events";
+import type { Ev, MarkerEv, PromptEv, SessionEv, ToolEv, TurnEv } from "../../model/events";
 import type { Origin, ToolCategory } from "../../model/ids";
 import { classifyCommand } from "../../text/commands";
 import { classifyIntent } from "../../text/intent";
 import { promptFeatures } from "../../text/structure";
 import { listDir, Tally } from "../common/coverage";
 import { extOfPath, isObj, str, TOKEN, VERSION, type Obj } from "../common/guards";
-import type { Candidate, ScanCtx } from "../types";
+import type { Candidate, PluginCoverage, ScanCtx } from "../types";
 import { cpModel, cpSessionId, TASK_GAP_MS, TOOL } from "./map";
 
 export const CLI_SOURCE = "copilot.cli";
@@ -460,7 +460,7 @@ export async function scanCli(c: Candidate, ctx: ScanCtx): Promise<void> {
 }
 
 /** A window's coverage: `absent` when its store is not there, `error` (note `unreadable`) when it is but could not be read. */
-export function windowCoverage(t: Tally, has: boolean, readable: boolean): CoverageEv {
+export function windowCoverage(t: Tally, has: boolean, readable: boolean): PluginCoverage {
   const cov = t.coverage();
   if (!has) cov.status = "absent";
   else if (!readable) {

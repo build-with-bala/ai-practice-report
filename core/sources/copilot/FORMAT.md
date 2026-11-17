@@ -1,7 +1,8 @@
 # GitHub Copilot — VS Code chat sessions, Copilot CLI, JetBrains presence
 
 Readers: `copilot.vscode` (`index.ts`, `journal.ts`, `map.ts`, `install.ts`; the session store reader in `cli.ts`),
-`copilot.cli` (`cli.ts`), `copilot.jetbrains` (`index.ts`, beta).
+`copilot.cli` (`cli.ts`, beta: built from the CLI's documentation, no CLI store verified), `copilot.jetbrains`
+(`index.ts`, beta).
 
 Evidence: **(verified locally)** = confirmed on this machine with the structure probe (`scripts/probe.ts`) or with
 count-only checks run by the reader's author. **(VS Code program)** = read from VS Code 1.138's own workbench code (its

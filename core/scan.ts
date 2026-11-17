@@ -5,6 +5,7 @@ import { reraise, trapSignals, type TermSignal } from "./io/signals";
 import { ScanTemp } from "./io/temp";
 import { maybeYield } from "./io/yield";
 import type { CoverageEv, Ev } from "./model/events";
+import type { PluginCoverage } from "./sources/types";
 import type { ToolId } from "./model/ids";
 import { EventStore } from "./model/store";
 import { withCheckCategory } from "./sources/common/tools";
@@ -97,12 +98,18 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
     const runJob = async ({ plugin, cand }: { plugin: SourcePlugin; cand: Candidate }): Promise<void> => {
       const ctx: ScanCtx = {
         env, now, since: opts.since, salt, temp, signal,
-        emit: (e: Ev) => {
-          if (e.k === "tool") withCheckCategory(e);
-          if (e.k !== "coverage") nonCoverage.set(plugin, (nonCoverage.get(plugin) ?? 0) + 1);
-          // a coverage written after the abort may describe a source read only in part: it never looks complete
-          else if (signal.aborted) e = { ...e, status: "error", note: "aborted" };
-          store.add(e);
+        emit: (e: Ev | PluginCoverage) => {
+          if (e.k !== "coverage") {
+            if (e.k === "tool") withCheckCategory(e);
+            nonCoverage.set(plugin, (nonCoverage.get(plugin) ?? 0) + 1);
+            store.add(e);
+            return;
+          }
+          // the plugin's own flag decides beta; a coverage written after the abort may describe a source read only in
+          // part, so it never looks complete
+          const cov: CoverageEv = { ...e, beta: plugin.beta };
+          if (signal.aborted) Object.assign(cov, { status: "error", note: "aborted" });
+          store.add(cov);
         },
         hash: (v) => keyedHash(salt, v),
         registerCwd: (cwd) => {

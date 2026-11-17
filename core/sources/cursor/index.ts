@@ -103,7 +103,7 @@ export const cuIde: SourcePlugin = {
   tool: "cursor",
   id: IDE_SOURCE,
   tier: "P0",
-  beta: false,
+  beta: true, // built from public descriptions of Cursor's stores: not verified on a real store yet
   windows: ["detail", "lifetime"],
   describe: {
     reads: [
@@ -126,7 +126,7 @@ export const cuTracking: SourcePlugin = {
   tool: "cursor",
   id: TRACKING_SOURCE,
   tier: "P0",
-  beta: false,
+  beta: true, // built from public descriptions of Cursor's stores: not verified on a real store yet
   windows: ["lifetime"],
   describe: {
     reads: ["<home>/.cursor/ai-tracking/ai-code-tracking.db, table scored_commits — commit and scoring time, tab, composer and human lines added; the commit hash only to count a commit once"],

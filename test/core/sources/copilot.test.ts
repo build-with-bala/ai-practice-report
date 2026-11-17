@@ -799,7 +799,7 @@ describe("copilot cli (session events and store, from the CLI's schema)", () => 
 describe("copilot plugins", () => {
   test("ids, tiers and beta flags; registered", () => {
     expect([cpVscode, cpCli, cpJetbrains].map((p) => [p.tool, p.id, p.tier, p.beta])).toEqual([
-      ["copilot", "copilot.vscode", "P0", false], ["copilot", "copilot.cli", "P0", false], ["copilot", "copilot.jetbrains", "P0", true],
+      ["copilot", "copilot.vscode", "P0", false], ["copilot", "copilot.cli", "P0", true], ["copilot", "copilot.jetbrains", "P0", true],
     ]);
     for (const p of [cpVscode, cpCli, cpJetbrains]) expect(registry).toContain(p);
     const never = [cpVscode, cpCli, cpJetbrains].flatMap((p) => p.describe.neverReads).join("\n");

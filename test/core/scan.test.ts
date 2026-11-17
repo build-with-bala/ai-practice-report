@@ -54,6 +54,13 @@ describe("scan", () => {
     expect(d.find((w) => w.source === "a")!.detail).toBe("3 unknown types");
   });
 
+  test("every coverage a plugin writes carries the plugin's own beta flag, whatever the coverage said", async () => {
+    const a = plugin("codex", "a", (c) => { c.emit(cov("codex", "a", { beta: false })); }, true);
+    const b = plugin("cursor", "b", (c) => { c.emit(cov("cursor", "b", { beta: true })); c.emit(cov("cursor", "b", { window: "lifetime" })); }, false);
+    const r = await scan({ env, plugins: [a, b] });
+    expect(r.coverage.map((c) => [c.source, c.window, c.beta])).toEqual([["a", "detail", true], ["b", "detail", false], ["b", "lifetime", false]]);
+  });
+
   test("too-large and beta warnings", async () => {
     const a = plugin("codex", "a", (c) => c.emit(cov("codex", "a", { note: "too-large" })));
     const b = plugin("cursor", "b", (c) => { c.emit(session("cursor", "b")); c.emit(cov("cursor", "b", { beta: true })); }, true);

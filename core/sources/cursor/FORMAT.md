@@ -1,7 +1,7 @@
 # Cursor — IDE store (cursorDiskKV, legacy ItemTable keys), AI code tracking, cursor-agent CLI presence
 
-Readers: `cursor.ide` (`index.ts`, `diskkv.ts`, `itemtable.ts`), `cursor.tracking` (`tracking.ts`), `cursor.agent-cli`
-(`agentcli.ts`, beta).
+Readers (all three beta — built from public descriptions, not verified on a real store): `cursor.ide` (`index.ts`,
+`diskkv.ts`, `itemtable.ts`), `cursor.tracking` (`tracking.ts`), `cursor.agent-cli` (`agentcli.ts`).
 
 Evidence: Cursor is **not installed** on the machine these readers were written on, so nothing below was seen locally.
 Every table, key, field and value type is **(from docs, unverified locally)**: public reverse-engineering notes of

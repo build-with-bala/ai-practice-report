@@ -8,7 +8,7 @@ import { scan } from "../../../core/scan";
 import { cxConfig, cxHistory, cxRollouts, cxThreads } from "../../../core/sources/codex";
 import { TomlHeaders } from "../../../core/sources/codex/config";
 import { registry } from "../../../core/sources/registry";
-import type { ScanCtx, SourcePlugin } from "../../../core/sources/types";
+import type { ScanCtx, SourcePlugin, PluginCoverage } from "../../../core/sources/types";
 import { keyedHash } from "../../../core/text/hash";
 import { CANARY, expectNoCanaries } from "../../kit/canary";
 import { fakeHome, type FakeHome } from "../../kit/home";
@@ -395,7 +395,7 @@ describe("codex threads: thread index and turn history", () => {
   test("a row the mapper cannot handle is counted as bad-record and logged once; the other rows are read", async () => {
     const at = fixtureStart();
     writeStateDb(h, ".codex/state_5.sqlite", [threadRow("boom", at), threadRow(uuidV7(at - 1000, 0xf6), at + MIN)]);
-    const events: Ev[] = [];
+    const events: (Ev | PluginCoverage)[] = [];
     const logs: [string, string, number | undefined][] = [];
     const salt = new Uint8Array(32);
     const ctx: ScanCtx = {

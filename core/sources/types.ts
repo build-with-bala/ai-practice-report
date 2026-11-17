@@ -1,11 +1,13 @@
 import type { Env } from "../env/env";
-import type { Ev } from "../model/events";
+import type { CoverageEv, Ev } from "../model/events";
 import type { Tier, ToolId, Window } from "../model/ids";
 
 export interface TempDirs { dir(): string; disposeAll(): void; readonly active: number }
 export interface Candidate { root: string; home: string; wsl: boolean }
+/** A coverage as a plugin writes it: the orchestrator stamps `beta` from the plugin's own flag. */
+export type PluginCoverage = Omit<CoverageEv, "beta"> & { beta?: boolean };
 export interface ScanCtx { env: Env; now: number; since?: number; salt: Uint8Array; temp: TempDirs; signal: AbortSignal;
-  emit(e: Ev): void; hash(v: string): string; registerCwd(cwd: string): string;
+  emit(e: Ev | PluginCoverage): void; hash(v: string): string; registerCwd(cwd: string): string;
   log(level: "debug" | "info" | "warn", code: string, n?: number): void }
 export interface SourcePlugin { tool: ToolId; id: string; tier: Tier; beta: boolean;
   /**

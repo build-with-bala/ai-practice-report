@@ -1,7 +1,7 @@
 import { readdirSync } from "node:fs";
 import { readJsonSmallResult, safeStat } from "../../io/fs";
-import type { CoverageEv } from "../../model/events";
 import type { ToolId, Window } from "../../model/ids";
+import type { PluginCoverage } from "../types";
 import { isObj, type Obj } from "./guards";
 
 const TYPE_NAME = /^[a-z][a-z0-9_-]{0,47}$/;
@@ -46,11 +46,12 @@ export class Tally {
     if (this.to === undefined || ts > this.to) this.to = ts;
   }
 
-  coverage(retentionDays?: number): CoverageEv {
+  /** The coverage of what was counted; `beta` is the plugin's, stamped by the orchestrator. */
+  coverage(retentionDays?: number): PluginCoverage {
     const drift = Object.keys(this.unknownTypes).length > 0;
-    const ev: CoverageEv = {
+    const ev: PluginCoverage = {
       k: "coverage", tool: this.tool, source: this.source, window: this.window,
-      status: drift ? "drift" : this.records === 0 ? "empty" : "ok", beta: false,
+      status: drift ? "drift" : this.records === 0 ? "empty" : "ok",
       files: this.files, bytes: this.bytes, records: this.records, skipped: this.skipped, unknownTypes: this.unknownTypes,
       versions: [...this.versions].sort((a, b) => a.localeCompare(b, "en", { numeric: true })),
     };

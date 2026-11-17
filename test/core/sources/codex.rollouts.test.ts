@@ -6,7 +6,7 @@ import { scan } from "../../../core/scan";
 import { cxRollouts } from "../../../core/sources/codex";
 import { cxToolCalls, patchFiles } from "../../../core/sources/codex/tools";
 import { uuidV7Ms } from "../../../core/sources/codex/uuid";
-import type { ScanCtx } from "../../../core/sources/types";
+import type { ScanCtx, PluginCoverage } from "../../../core/sources/types";
 import { keyedHash } from "../../../core/text/hash";
 import { CANARY, expectNoCanaries, findCanaries } from "../../kit/canary";
 import { fakeHome, type FakeHome } from "../../kit/home";
@@ -652,7 +652,7 @@ describe("codex rollouts: drift, ids, locate, errors", () => {
 
   test("a record the mapper cannot handle is counted, logged once, and the file goes on", async () => {
     rollout((r) => r.user("boom").user("fine")).write(h);
-    const events: Ev[] = [];
+    const events: (Ev | PluginCoverage)[] = [];
     const logs: [string, string, number | undefined][] = [];
     const salt = new Uint8Array(32);
     const ctx: ScanCtx = {

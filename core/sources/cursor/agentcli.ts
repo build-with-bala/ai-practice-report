@@ -94,6 +94,5 @@ export async function scanAgentCli(c: Candidate, ctx: ScanCtx): Promise<void> {
   }
   const cov = tally.coverage();
   cov.status = "present-undecodable";
-  cov.beta = true;
   ctx.emit(cov);
 }
