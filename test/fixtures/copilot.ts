@@ -198,3 +198,18 @@ export class CliEvents {
     return this;
   }
 }
+
+/** The session store's tables (the extension's copy and the CLI's share the schema), as the structure probe showed them. */
+export const STORE_DDL = [
+  "CREATE TABLE sessions (id TEXT PRIMARY KEY, cwd TEXT, repository TEXT, host_type TEXT, branch TEXT, summary TEXT, agent_name TEXT, agent_description TEXT, created_at TEXT, updated_at TEXT)",
+  "CREATE TABLE turns (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, turn_index INTEGER NOT NULL, user_message TEXT, assistant_response TEXT, timestamp TEXT)",
+];
+
+/** A session store with one session (`host`) and one turn; every text column the reader never selects holds a canary. */
+export function writeSessionStore(h: FakeHome, rel: string, o: { id: string; host: string; at: number }): string {
+  const iso = (ms: number) => new Date(ms).toISOString();
+  return h.sqlite(rel, STORE_DDL, {
+    sessions: [[o.id, CANARY.path, CANARY.project, o.host, "main", CANARY.prompt, CANARY.project, CANARY.prompt, iso(o.at), iso(o.at + 9 * 60_000)]],
+    turns: [[1, o.id, 0, CANARY.prompt, CANARY.code, iso(o.at + 60_000)]],
+  });
+}

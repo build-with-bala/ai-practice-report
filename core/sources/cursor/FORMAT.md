@@ -203,14 +203,21 @@ conversations live in `cursorDiskKV`.
   skipped `draft`; inline messages counted `inline-message`). `chatdata` → a SessionEv (`mode: "chat"`) per tab with messages at
   its `lastSendTime` (tabs without messages `empty-session`; their messages `inline-message`). A value of another shape
   is drift `<key>:shape`; one that is not JSON `parse`.
-- **Coverage**: `files`/`bytes` = stores whose tables were listed (main file size); `records` = composer and bubble
-  rows read, plus legacy values; `from`/`to` = first/last event time; no versions (the stores name none). The source
-  is an error when every store present fails to open or read, unless a store was too large to copy. Skipped:
-  `parse`, `orphan`, `duplicate`, `unlisted`, `missing-bubbles`, `no-ts`, `empty`, `empty-session`, `outside-window`,
-  `inline-message`, `draft`, `bad-record` (a row, prompt or session the mapping failed on; also warn log `cu.bad-record`
-  with the count), `io-error`, `too-large`. Drift: `missing-column:<name>`, `no-key-index:cursorDiskKV`,
-  `table-unreadable:cursorDiskKV`, `missing-bubbles:cursorDiskKV`, `missing-field:text`, `bubble-type:<n>`,
-  `<legacy key>:shape`.
+- **Coverage**, one per window; no versions (the stores name none). The source is an error when every store present
+  fails to open or read, unless a store was too large to copy.
+  - `lifetime` — the composer index, every conversation: `files`/`bytes` = the global store; `records` = composer rows
+    read; `from`/`to` = the span of every composer's session, both windows'. Skipped: `parse`, `duplicate`,
+    `empty-session`, `no-ts`, `bad-record` (a session the mapping failed on), `io-error`, `too-large`. `absent` without
+    a global store.
+  - `detail` — the bubbles of the composers inside the window, and the legacy keys: `files`/`bytes` = stores whose tables
+    were listed (main file size); `records` = bubble rows read, plus legacy values; `from`/`to` = first/last time of its
+    events and detail sessions. Skipped: `parse`, `orphan`, `duplicate`, `unlisted`, `missing-bubbles`, `no-ts`,
+    `empty`, `empty-session`, `outside-window` (a composer whose bubbles are not read), `inline-message`, `draft`,
+    `bad-record` (a row or prompt the mapping failed on; the warn log `cu.bad-record` counts both windows'), `io-error`,
+    `too-large`. `absent` when there is no store at all.
+  - Drift of the store itself (`missing-column:<name>`, `missing-table:<name>`, `no-key-index:cursorDiskKV`,
+    `table-unreadable:cursorDiskKV`) is in both windows; `missing-bubbles:cursorDiskKV`, `missing-field:text`,
+    `bubble-type:<n>` and `<legacy key>:shape` in the detail window.
 
 ## ai-code-tracking.db (`cursor.tracking`)
 

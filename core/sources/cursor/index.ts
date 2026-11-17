@@ -36,13 +36,25 @@ function workspaceStores(user: string, tally: Tally): string[] {
   return listDir(root, tally).map((ws) => path.join(root, ws, "state.vscdb")).filter((f) => safeStat(f)?.isFile());
 }
 
+/** Drift of the store itself — a missing table or column, no key index, a table that cannot be read — holds for both windows. */
+const STORE_DRIFT = /^(?:missing-table|missing-column|no-key-index|table-unreadable):/;
+
+/** Copies the store-level drift each window's tally found into the other's: both windows read that one store. */
+function shareStoreDrift(a: Tally, b: Tally): void {
+  for (const [from, to] of [[a, b], [b, a]] as const) {
+    for (const [key, n] of Object.entries(from.unknownTypes)) if (STORE_DRIFT.test(key)) to.unknownTypes[key] = Math.max(to.unknownTypes[key] ?? 0, n);
+  }
+}
+
 /**
  * Scan one Cursor user folder: the global store's `cursorDiskKV` (composers and bubbles). Only when that table is
  * absent or holds no composer does the reader turn to the legacy `ItemTable` keys, by exact key — of the global store
- * and of every workspace store. One CoverageEv, last.
+ * and of every workspace store. Two CoverageEvs, last: the detail window (bubbles of the recent composers, and the legacy
+ * keys) and the lifetime window (the composer index: every composer).
  */
 async function scanIde(c: Candidate, ctx: ScanCtx): Promise<void> {
   const tally = new Tally(TOOL, IDE_SOURCE);
+  const life = new Tally(TOOL, IDE_SOURCE, "lifetime");
   const legacy = new LegacyKeys(ctx, tally);
   const globalStore = path.join(c.root, "globalStorage", "state.vscdb");
   let present = 0;
@@ -52,12 +64,19 @@ async function scanIde(c: Candidate, ctx: ScanCtx): Promise<void> {
     present++;
     fallback = false;
     const ok = readStore(globalStore, ctx, tally, (db, tables) => {
-      const kv = tables.has("cursorDiskKV") ? new DiskKv(db, ctx, tally).read(tables) : { readable: true, composers: 0 };
+      const kv = tables.has("cursorDiskKV") ? new DiskKv(db, ctx, tally, life).read(tables) : { readable: true, composers: 0 };
       if (!kv.readable || kv.composers > 0 || ctx.signal.aborted) return;
       fallback = true;
       legacy.read(db, tables);
     });
-    if (ok) read++;
+    if (ok) {
+      read++;
+      life.files++;
+      life.bytes += safeStat(globalStore)?.size ?? 0;
+    } else {
+      for (const k of ["io-error", "too-large"]) if (tally.skipped[k]) life.skipped[k] = tally.skipped[k]!;
+      if (tally.note !== undefined) life.note = tally.note;
+    }
   }
   if (fallback) {
     for (const file of workspaceStores(c.root, tally)) {
@@ -67,9 +86,15 @@ async function scanIde(c: Candidate, ctx: ScanCtx): Promise<void> {
     }
   }
   if (present > 0 && read === 0 && tally.note !== "too-large") throw new StoresUnreadable("no Cursor store could be read");
-  const bad = tally.skipped["bad-record"] ?? 0;
+  const bad = (tally.skipped["bad-record"] ?? 0) + (life.skipped["bad-record"] ?? 0);
   if (bad > 0) ctx.log("warn", "cu.bad-record", bad); // a mapping bug must not look like a healthy source
-  ctx.emit(tally.coverage());
+  shareStoreDrift(tally, life);
+  const cov = tally.coverage();
+  if (present === 0) cov.status = "absent"; // no store at all
+  const lcov = life.coverage();
+  if (!safeStat(globalStore)?.isFile()) lcov.status = "absent"; // no global store: no composer index
+  ctx.emit(cov);
+  ctx.emit(lcov);
 }
 
 const AUTH_NEVER = "ItemTable: no key but the four legacy ones, each by exact key and only when cursorDiskKV holds no composer — never by pattern, so the account's tokens (cursorAuth/*) and every other setting are never selected";
@@ -79,6 +104,7 @@ export const cuIde: SourcePlugin = {
   id: IDE_SOURCE,
   tier: "P0",
   beta: false,
+  windows: ["detail", "lifetime"],
   describe: {
     reads: [
       "<Cursor user>/globalStorage/state.vscdb, table cursorDiskKV, keys composerData:* (by key range) — created and updated times, agent flag and mode, model setting, subagent marker and launch id, sub-composer ids, message counts, and the bubble ids it lists (its header list)",
@@ -101,7 +127,7 @@ export const cuTracking: SourcePlugin = {
   id: TRACKING_SOURCE,
   tier: "P0",
   beta: false,
-  window: "lifetime",
+  windows: ["lifetime"],
   describe: {
     reads: ["<home>/.cursor/ai-tracking/ai-code-tracking.db, table scored_commits — commit and scoring time, tab, composer and human lines added; the commit hash only to count a commit once"],
     neverReads: [

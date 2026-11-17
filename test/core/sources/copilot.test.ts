@@ -33,7 +33,7 @@ const run = (plugins: SourcePlugin[] = ALL) => scan({ env: h.env, plugins });
 type Result = Awaited<ReturnType<typeof run>>;
 const KINDS = ["session", "prompt", "tool", "turn", "marker", "usage", "totals", "file", "daily"] as const;
 const allEvents = (r: Result) => KINDS.flatMap((k) => [...r.store.all(k)] as Ev[]);
-const covOf = (r: Result, source: string) => r.coverage.find((c) => c.source === source)!;
+const covOf = (r: Result, source: string, window: "detail" | "lifetime" = "detail") => r.coverage.find((c) => c.source === source && c.window === window)!;
 const sidOf = (raw: string) => `copilot:${raw}`;
 const user = () => userRel(h);
 const chatDir = (ws: string) => path.join(user(), "workspaceStorage", ws, "chatSessions");
@@ -722,7 +722,8 @@ describe("copilot cli (session events and store, from the CLI's schema)", () => 
     const selects = sql.filter((s) => /^\s*SELECT/i.test(s) && !/sqlite_master|pragma_table_info/.test(s));
     expect(selects.length).toBeGreaterThan(0);
     for (const s of selects) expect(s).not.toMatch(/user_message|assistant_response|summary|repository|branch|agent_name|agent_description|file_path|\*/);
-    expect(covOf(r, "copilot.cli")).toMatchObject({ status: "ok", files: 1, records: 4 });
+    expect(covOf(r, "copilot.cli", "lifetime")).toMatchObject({ status: "ok", files: 1, records: 4 }); // the store: the lifetime window
+    expect(covOf(r, "copilot.cli")).toMatchObject({ status: "absent", files: 0, records: 0 }); // no session-state: no detail window
     expectNoCanaries([...allEvents(r), r.coverage, r.warnings]);
   });
 
@@ -826,7 +827,7 @@ describe("copilot vscode: the extension's session store", () => {
     expect(r.store.all("session")).toHaveLength(2);
     expect(r.store.session(sidOf(S_J))).toMatchObject({ window: "detail", surface: "vscode", mode: "agent", start: at - MIN, end: at + 30 * MIN });
     expect(r.store.forSession(sidOf(S_J), "turn").filter((t) => t.window === "lifetime")).toHaveLength(1);
-    expect(covOf(r, "copilot.vscode").records).toBe(4 + 2);
+    expect([covOf(r, "copilot.vscode").records, covOf(r, "copilot.vscode", "lifetime").records]).toEqual([4, 2]); // chat files; store rows
     expectNoCanaries([...allEvents(r), r.coverage, r.warnings]);
   });
 });

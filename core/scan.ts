@@ -9,7 +9,7 @@ import type { ToolId } from "./model/ids";
 import { EventStore } from "./model/store";
 import { withCheckCategory } from "./sources/common/tools";
 import { registry } from "./sources/registry";
-import type { Candidate, ScanCtx, SourcePlugin, TempDirs } from "./sources/types";
+import { windowsOf, type Candidate, type ScanCtx, type SourcePlugin, type TempDirs } from "./sources/types";
 import { keyedHash, normalizePath } from "./text/hash";
 
 export interface ScanOptions { env?: Env; plugins?: SourcePlugin[]; tools?: ToolId[]; since?: number; wsl?: boolean; salt?: Uint8Array;
@@ -40,12 +40,14 @@ export interface ScanResult { store: EventStore; coverage: CoverageEv[]; warning
 
 const DEFAULT_CONCURRENCY = 4;
 
-/** Coverage the orchestrator writes for a plugin (absent, error, aborted), in the window the plugin reports. */
-function emptyCoverage(p: SourcePlugin, status: CoverageEv["status"], note?: string): CoverageEv {
-  const ev: CoverageEv = { k: "coverage", tool: p.tool, source: p.id, window: p.window ?? "detail", status, beta: p.beta,
-    files: 0, bytes: 0, records: 0, skipped: {}, unknownTypes: {}, versions: [] };
-  if (note !== undefined) ev.note = note;
-  return ev;
+/** Coverage the orchestrator writes for a plugin (absent, error, aborted): one per window the plugin reports. */
+function emptyCoverage(p: SourcePlugin, status: CoverageEv["status"], note?: string): CoverageEv[] {
+  return windowsOf(p).map((window) => {
+    const ev: CoverageEv = { k: "coverage", tool: p.tool, source: p.id, window, status, beta: p.beta,
+      files: 0, bytes: 0, records: 0, skipped: {}, unknownTypes: {}, versions: [] };
+    if (note !== undefined) ev.note = note;
+    return ev;
+  });
 }
 
 export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
@@ -79,11 +81,11 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
         cands = plugin.locate(env, homes);
       } catch (e) {
         const name = (e as Error)?.constructor?.name ?? "Error";
-        store.add(emptyCoverage(plugin, "error", name));
+        for (const c of emptyCoverage(plugin, "error", name)) store.add(c);
         warnings.push({ code: "error", tool: plugin.tool, source: plugin.id, detail: name });
         continue;
       }
-      if (cands.length === 0) store.add(emptyCoverage(plugin, "absent"));
+      if (cands.length === 0) for (const c of emptyCoverage(plugin, "absent")) store.add(c);
       for (const cand of cands) jobs.push({ plugin, cand });
     }
 
@@ -114,7 +116,7 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
         await plugin.scan(cand, ctx);
       } catch (e) {
         const name = signal.aborted ? "aborted" : (e as Error)?.constructor?.name ?? "Error";
-        store.add(emptyCoverage(plugin, "error", name));
+        for (const c of emptyCoverage(plugin, "error", name)) store.add(c);
         warnings.push({ code: "error", tool: plugin.tool, source: plugin.id, detail: name });
       }
       done++;
@@ -136,7 +138,7 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
     await Promise.allSettled(Array.from({ length: n }, worker));
 
     jobs.forEach((j, i) => { if (!started.has(i)) aborted.add(j.plugin); });
-    for (const plugin of aborted) store.add(emptyCoverage(plugin, "error", "aborted"));
+    for (const plugin of aborted) for (const c of emptyCoverage(plugin, "error", "aborted")) store.add(c);
     if (aborted.size > 0) warnings.push({ code: "error", tool: "scan", source: "scan", detail: "aborted" });
 
     for (const [plugin, count] of nonCoverage) {
@@ -147,12 +149,23 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
     release?.();
   }
 
+  // one drift and one too-large warning per source, whatever the number of its windows; drift a store's two windows
+  // share (the same key in both) counts once
   const coverage = [...store.all("coverage")];
+  const drift = new Map<string, { tool: ToolId; keys: Map<string, number>; flagged: boolean }>();
+  const tooLarge = new Map<string, ToolId>();
   for (const c of coverage) {
-    const unknown = Object.values(c.unknownTypes).reduce((a, b) => a + b, 0);
-    if (c.status === "drift" || unknown > 0) warnings.push({ code: "drift", tool: c.tool, source: c.source, detail: `${unknown} unknown types` });
-    if (c.note === "too-large") warnings.push({ code: "too-large", tool: c.tool, source: c.source, detail: "too-large" });
+    const d = drift.get(c.source) ?? { tool: c.tool, keys: new Map<string, number>(), flagged: false };
+    for (const [key, n] of Object.entries(c.unknownTypes)) d.keys.set(key, Math.max(d.keys.get(key) ?? 0, n));
+    d.flagged ||= c.status === "drift";
+    drift.set(c.source, d);
+    if (c.note === "too-large") tooLarge.set(c.source, c.tool);
   }
+  for (const [source, d] of drift) {
+    const unknown = [...d.keys.values()].reduce((a, b) => a + b, 0);
+    if (d.flagged || unknown > 0) warnings.push({ code: "drift", tool: d.tool, source, detail: `${unknown} unknown types` });
+  }
+  for (const [source, tool] of tooLarge) warnings.push({ code: "too-large", tool, source, detail: "too-large" });
   if (!tempClean) warnings.push({ code: "temp-leftover", tool: "scan", source: "scan", detail: "cleanup-failed" });
   // cleaned up: a trapped SIGINT/SIGTERM now takes its default action, ending the process before anything after scan()
   if (caught !== undefined) reraise(caught);

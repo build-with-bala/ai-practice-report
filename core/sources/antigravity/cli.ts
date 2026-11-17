@@ -6,22 +6,20 @@ import { safeStat } from "../../io/fs";
 import { readJsonl } from "../../io/jsonl";
 import { pbTryNested, type PbField } from "../../io/protobuf";
 import { isBusyError, openRo, type RoDb } from "../../io/sqlite";
-import { localDay, toEpochMs } from "../../io/time";
+import { toEpochMs } from "../../io/time";
 import type { Ev, MarkerEv, PromptEv, SessionEv, ToolEv, UsageEv } from "../../model/events";
 import { sid, type MarkerKind, type Origin, type ToolCategory } from "../../model/ids";
 import { classifyCommand } from "../../text/commands";
 import { classifyIntent } from "../../text/intent";
 import { promptFeatures } from "../../text/structure";
-import { listDir, Tally, typeKey } from "../common/coverage";
+import { listDir, Tally } from "../common/coverage";
 import { idPart, isObj, num, safeModel, str, UUID, type Obj } from "../common/guards";
 import { uriToPath } from "../copilot/map";
 import type { Candidate, ScanCtx } from "../types";
 
 export const TOOL = "antigravity";
 export const CLI_SOURCE = "antigravity.cli";
-/** Events of the CLI's prompt log carry their own source, so they are never mistaken for (or summed with) the transcripts'. */
-export const HISTORY_SOURCE = "antigravity.history";
-const TASK_GAP_MS = 30 * 60_000;
+export const TASK_GAP_MS = 30 * 60_000;
 /** Summary rows per query. */
 const SUMMARY_PAGE = 1_000;
 /**
@@ -32,8 +30,6 @@ const BLOB_CAP = 1_048_576;
 const HEAD_BYTES = 64;
 /** Step rows per query: with both blobs at the cap, a page stays near 64 MiB. */
 const STEP_PAGE = 32;
-/** Per-session state of the prompt log (last prompt time and text) is kept for the most recent sessions only. */
-const SESSION_WINDOW = 256;
 const WITHOUT_ROWID = /\bWITHOUT\s+ROWID\b/i;
 /** An enum value name as the transcript writes them (`USER_INPUT`, `MODEL`): kept verbatim in drift keys, anything else `(other)`. */
 const ENUM_NAME = /^[A-Z][A-Z0-9_]{0,47}$/;
@@ -296,7 +292,7 @@ function* pages(db: RoDb, table: string, select: string[], page: number, tally: 
 }
 
 /** Maps one row or record; one the mapping fails on is a bad-record and the others go on. */
-function each(map: () => void, tally: Tally): void {
+export function each(map: () => void, tally: Tally): void {
   try {
     map();
   } catch {
@@ -650,7 +646,7 @@ const tokens = (v: unknown): number | undefined => {
 };
 
 /** Streams a JSONL file into `line`; counted as read (files, bytes) only when read to its end. True when it was. */
-async function readLines(file: string, ctx: ScanCtx, tally: Tally, line: (v: unknown) => void): Promise<boolean> {
+export async function readLines(file: string, ctx: ScanCtx, tally: Tally, line: (v: unknown) => void): Promise<boolean> {
   const st = safeStat(file);
   if (!st?.isFile()) return false;
   try {
@@ -673,68 +669,31 @@ async function readLines(file: string, ctx: ScanCtx, tally: Tally, line: (v: unk
   return true;
 }
 
-// ---- history.jsonl ----
-
-/** Lines of the CLI's prompt log: a prompt (no `type`) or a slash command (`type: slash_command`), typed at the CLI prompt. */
-class HistoryReader {
-  private readonly days = new Map<string, number>();
-  private readonly sessions = new Map<string, { lastTs: number; text: string }>();
-
-  constructor(private readonly ctx: ScanCtx, private readonly tally: Tally) {}
-
-  line(v: unknown): void {
-    if (!isObj(v)) return this.tally.unknownKey("history:not-object");
-    if (v.type !== undefined && v.type !== "slash_command") return this.tally.unknownKey(`history.type:${typeKey(v.type)}`);
-    const text = v.display;
-    if (typeof text !== "string") return this.tally.unknownKey("history.display:missing");
-    if (v.timestamp === undefined || v.timestamp === null) return this.tally.unknownKey("history.timestamp:missing");
-    const ts = toEpochMs(v.timestamp, this.ctx.now);
-    if (ts === undefined) return this.tally.skip("bad-ts");
-    if (text.trim() === "") return this.tally.skip("empty");
-    const raw = str(v.conversationId);
-    const sessionId = raw === undefined ? undefined : agSessionId(raw, this.ctx);
-    const key = sessionId ?? "";
-    const prev = this.sessions.get(key);
-    const ev: PromptEv = {
-      k: "prompt", tool: TOOL, source: HISTORY_SOURCE, ts, window: "lifetime", origin: "human", intent: classifyIntent(text),
-      features: promptFeatures(text, { isTaskStart: prev === undefined || ts - prev.lastTs >= TASK_GAP_MS, prevText: prev?.text }),
-      textHash: this.ctx.hash(text.trim()),
-    };
-    if (sessionId !== undefined) ev.sessionId = sessionId;
-    this.tally.span(ts);
-    this.ctx.emit(ev);
-    this.sessions.delete(key);
-    this.sessions.set(key, { lastTs: ts, text });
-    if (this.sessions.size > SESSION_WINDOW) this.sessions.delete(this.sessions.keys().next().value!);
-    const day = localDay(ts);
-    this.days.set(day, (this.days.get(day) ?? 0) + 1);
-  }
-
-  /** One DailyEv per local day (process time zone) with that day's count of typed prompts and commands. */
-  finish(): void {
-    for (const [day, count] of [...this.days].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
-      this.ctx.emit({ k: "daily", tool: TOOL, source: HISTORY_SOURCE, day, zone: "local", unit: "prompts", count });
-    }
-  }
-}
-
 // ---- the CLI store ----
 
 /**
- * Scan one `antigravity-cli` folder: the conversation summaries (lifetime sessions, kills), then per conversation its step
- * store and transcript (tools, errors, prompts, usage, its detail session), then the prompt log; one CoverageEv, last. Each
- * store is read on its own; only when every store present fails is the source an error.
+ * Scan one `antigravity-cli` folder: the conversation summaries (the lifetime window: every conversation's session, kills),
+ * then per conversation its step store and transcript (the detail window: tools, errors, prompts, usage, its detail
+ * session). One CoverageEv per window, last — `absent` for a window with no store, `error` (note `unreadable`) for one
+ * whose stores are all unreadable. Each store is read on its own; only when every store present fails is the source an
+ * error. (The CLI's prompt log is `antigravity.history`.)
  */
 export async function scanCli(c: Candidate, ctx: ScanCtx): Promise<void> {
   const tally = new Tally(TOOL, CLI_SOURCE);
+  const life = new Tally(TOOL, CLI_SOURCE, "lifetime");
   const convs = new Map<string, Conv>();
   let present = 0;
   let read = 0;
   const summaries = path.join(c.root, "conversation_summaries.db");
-  if (isFile(summaries)) {
+  const hasSummaries = isFile(summaries);
+  let summariesRead = false;
+  if (hasSummaries) {
     present++;
-    if (readStore(summaries, ctx, tally, (db, tables) => readSummaries(db, tables, convs, ctx, tally))) read++;
+    summariesRead = readStore(summaries, ctx, life, (db, tables) => readSummaries(db, tables, convs, ctx, life));
+    if (summariesRead) read++;
   }
+  let conversations = 0;
+  let conversationsRead = 0;
   const dbDir = path.join(c.root, "conversations");
   const brainDir = path.join(c.root, "brain");
   const ids = new Set(listDir(dbDir, tally).filter((n) => n.endsWith(".db") && n.length > 3).map((n) => n.slice(0, -3)));
@@ -745,24 +704,28 @@ export async function scanCli(c: Candidate, ctx: ScanCtx): Promise<void> {
     const db = path.join(dbDir, `${raw}.db`);
     if (isFile(db)) {
       present++;
-      if (readStore(db, ctx, tally, (d, tables) => conv.readSteps(d, tables))) read++;
+      conversations++;
+      if (readStore(db, ctx, tally, (d, tables) => conv.readSteps(d, tables))) conversationsRead++;
     }
     const transcript = path.join(brainDir, raw, ".system_generated", "logs", "transcript.jsonl");
     if (isFile(transcript)) {
       present++;
-      if (await readLines(transcript, ctx, tally, (v) => conv.record(v))) read++;
+      conversations++;
+      if (await readLines(transcript, ctx, tally, (v) => conv.record(v))) conversationsRead++;
     }
     each(() => conv.finish(), tally);
   }
-  const history = path.join(c.root, "history.jsonl");
-  if (!ctx.signal.aborted && isFile(history)) {
-    present++;
-    const reader = new HistoryReader(ctx, tally);
-    if (await readLines(history, ctx, tally, (v) => reader.line(v))) read++;
-    reader.finish();
-  }
+  read += conversationsRead;
   if (present > 0 && read === 0) throw new CliStoresUnreadable("no Antigravity CLI store could be read");
-  const bad = tally.skipped["bad-record"] ?? 0;
+  const bad = (tally.skipped["bad-record"] ?? 0) + (life.skipped["bad-record"] ?? 0);
   if (bad > 0) ctx.log("warn", "ag.bad-record", bad); // a mapping bug must not look like a healthy source
-  ctx.emit(tally.coverage());
+  for (const [t, has, readable] of [[tally, conversations > 0, conversationsRead > 0], [life, hasSummaries, summariesRead]] as const) {
+    const cov = t.coverage();
+    if (!has) cov.status = "absent";
+    else if (!readable) {
+      cov.status = "error";
+      cov.note = "unreadable";
+    }
+    ctx.emit(cov);
+  }
 }

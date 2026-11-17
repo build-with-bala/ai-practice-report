@@ -8,8 +8,16 @@ export interface ScanCtx { env: Env; now: number; since?: number; salt: Uint8Arr
   emit(e: Ev): void; hash(v: string): string; registerCwd(cwd: string): string;
   log(level: "debug" | "info" | "warn", code: string, n?: number): void }
 export interface SourcePlugin { tool: ToolId; id: string; tier: Tier; beta: boolean;
-  window?: Window;                                                // the window of the coverage it reports (default detail); the
-                                                                  // orchestrator's own absent/error/aborted coverage uses it too
+  /**
+   * The windows it reports coverage for (default `["detail"]`): a reader of a detail store and of its index (chat
+   * sessions and their store, a conversation index and its step stores) reports both. The orchestrator's own absent,
+   * error and aborted coverage is written for each of them too.
+   */
+  windows?: readonly Window[];
   describe: { reads: string[]; neverReads: string[] };           // human-readable patterns for --explain and the privacy statement
   locate(env: Env, homes: string[]): Candidate[];
-  scan(c: Candidate, ctx: ScanCtx): Promise<void> }               // emits all events incl. exactly one CoverageEv per candidate
+  /** Emits all its events, and exactly one CoverageEv per candidate and window it reports, last. */
+  scan(c: Candidate, ctx: ScanCtx): Promise<void> }
+
+/** The windows a plugin reports coverage for. */
+export const windowsOf = (p: SourcePlugin): readonly Window[] => p.windows ?? ["detail"];

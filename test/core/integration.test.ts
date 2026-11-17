@@ -2,31 +2,34 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import path from "node:path";
-import { registry, scan, type ToolId } from "../../core/index";
+import { registry, scan, type ToolId, type Window } from "../../core/index";
 import { safeList } from "../../core/io/fs";
 import { TempRegistry } from "../../core/io/temp";
 import type { TempDirs } from "../../core/sources/types";
 import { agId, buildAntigravity, STEP, writeSteps } from "../fixtures/antigravity";
 import { buildCcLifetime, buildCcTranscripts } from "../fixtures/claude-code";
 import { buildCodexIndex, buildCodexRollouts } from "../fixtures/codex";
-import { buildCopilot, CliEvents, cpSid } from "../fixtures/copilot";
+import { vscodeUser } from "../../core/env/paths";
+import { buildCopilot, CliEvents, cpSid, writeSessionStore } from "../fixtures/copilot";
 import { buildAgentCli, buildCursor, trackingRel } from "../fixtures/cursor";
 import { CANARY, expectNoCanaries } from "../kit/canary";
 import { fakeHome, type FakeHome } from "../kit/home";
 
-/** The P0 plugins in registry order: Claude Code ×4, Codex ×4, Copilot ×3, Cursor ×3, Antigravity ×3. */
+/** The P0 plugins in registry order: Claude Code ×4, Codex ×4, Copilot ×3, Cursor ×3, Antigravity ×4. */
 const P0 = [
   "claude-code.transcripts", "claude-code.history", "claude-code.stats", "claude-code.config",
   "codex.rollouts", "codex.threads", "codex.history", "codex.config",
   "copilot.vscode", "copilot.cli", "copilot.jetbrains",
   "cursor.ide", "cursor.tracking", "cursor.agent-cli",
-  "antigravity.cli", "antigravity.ide", "antigravity.brain",
+  "antigravity.cli", "antigravity.history", "antigravity.ide", "antigravity.brain",
 ];
-/** The plugins whose coverage is a lifetime window (every other one reports the detail window). */
+/** The windows each plugin reports coverage for: lifetime only, or both (a detail store and its index); the rest detail only. */
 const LIFETIME = [
   "claude-code.history", "claude-code.stats", "claude-code.config", "codex.threads", "codex.history", "codex.config",
-  "cursor.tracking", "antigravity.ide", "antigravity.brain",
+  "cursor.tracking", "antigravity.history", "antigravity.ide", "antigravity.brain",
 ];
+const BOTH = ["copilot.vscode", "copilot.cli", "cursor.ide", "antigravity.cli"];
+const windowsOf = (id: string): Window[] => (LIFETIME.includes(id) ? ["lifetime"] : BOTH.includes(id) ? ["detail", "lifetime"] : ["detail"]);
 const TOOLS: ToolId[] = ["antigravity", "claude-code", "codex", "copilot", "cursor"];
 
 let h: FakeHome;
@@ -49,6 +52,10 @@ function buildAll(): void {
     .ev("tool.execution_complete", { toolCallId: "t1", success: true, result: { content: CANARY.secret } })
     .ev("assistant.turn_end", { turnId: "0" });
   h.writeJsonl(path.join(".copilot", "session-state", id, "events.jsonl"), cli.records);
+  // the session stores: the lifetime window of both Copilot readers
+  writeSessionStore(h, path.join(path.relative(h.env.home, vscodeUser(h.env, "Code")), "globalStorage", "github.copilot-chat", "session-store.db"),
+    { id: cpSid("vstore"), host: "vscode", at: Date.now() - 3 * 86_400_000 });
+  writeSessionStore(h, path.join(".copilot", "session-store.db"), { id, host: "cli", at: Date.now() - 3 * 86_400_000 });
   buildCursor(h);
   buildAgentCli(h);
   const ag = buildAntigravity(h);
@@ -78,23 +85,23 @@ function watched(base: string, dirs: { dir: string; files: number }[]): TempDirs
 }
 
 describe("integration: every P0 source in one home", () => {
-  test("the registry holds the 17 P0 plugins once each, by tool, and declares which report a lifetime window", () => {
+  test("the registry holds the 18 P0 plugins once each, by tool, and declares the windows each reports", () => {
     expect(registry.map((p) => p.id)).toEqual(P0);
     expect(new Set(registry).size).toBe(registry.length);
     expect(registry.every((p) => p.tier === "P0")).toBe(true);
-    expect(registry.filter((p) => p.window === "lifetime").map((p) => p.id)).toEqual(LIFETIME);
+    expect(registry.map((p) => [p.id, p.windows ?? ["detail"]])).toEqual(P0.map((id) => [id, windowsOf(id)]));
   });
 
-  test("scan(): one coverage per candidate in the plugin's window, events for all five tools, temp clean, no canaries", async () => {
+  test("scan(): one coverage per candidate and window, events for all five tools, temp clean, no canaries", async () => {
     buildAll();
     const r = await scan({ env: h.env });
 
     for (const p of registry) {
       const covs = r.coverage.filter((c) => c.source === p.id);
-      const want = p.locate(h.env, [h.env.home]).length;
-      expect([p.id, covs.length]).toEqual([p.id, want]);
-      expect(want).toBeGreaterThan(0);
-      for (const c of covs) expect([p.id, c.window, ["absent", "error"].includes(c.status)]).toEqual([p.id, p.window ?? "detail", false]);
+      const cands = p.locate(h.env, [h.env.home]).length;
+      expect(cands).toBeGreaterThan(0);
+      expect([p.id, covs.map((c) => c.window).sort()]).toEqual([p.id, Array.from({ length: cands }, () => windowsOf(p.id)).flat().sort()]);
+      for (const c of covs) expect([p.id, c.window, c.status === "absent" || c.status === "error"]).toEqual([p.id, c.window, false]);
     }
     for (const kind of ["session", "prompt", "tool"] as const) {
       expect([kind, [...new Set(r.store.all(kind).map((e) => e.tool))].sort()]).toEqual([kind, TOOLS]);

@@ -6,7 +6,7 @@ import { safeStat } from "../../io/fs";
 import { readJsonl } from "../../io/jsonl";
 import { isBusyError, openRo, type RoDb } from "../../io/sqlite";
 import { toEpochMs } from "../../io/time";
-import type { Ev, MarkerEv, PromptEv, SessionEv, ToolEv, TurnEv } from "../../model/events";
+import type { CoverageEv, Ev, MarkerEv, PromptEv, SessionEv, ToolEv, TurnEv } from "../../model/events";
 import type { Origin, ToolCategory } from "../../model/ids";
 import { classifyCommand } from "../../text/commands";
 import { classifyIntent } from "../../text/intent";
@@ -397,17 +397,20 @@ function storeTurn(r: Obj, source: string, ctx: ScanCtx, tally: Tally): void {
 
 /**
  * The session store (`session-store.db`): a lifetime SessionEv per `sessions` row and a lifetime TurnEv per `turns` row,
- * from the allowlisted columns only. A store that cannot be opened or read is an io-error; it is always closed.
+ * from the allowlisted columns only. A store that cannot be opened or read is an io-error; it is always closed. True when
+ * its tables could be listed.
  */
-export function readSessionStore(file: string, source: string, ctx: ScanCtx, tally: Tally): void {
+export function readSessionStore(file: string, source: string, ctx: ScanCtx, tally: Tally): boolean {
   const db = openRo(file, ctx.temp);
   if (!db) {
     tally.skip("io-error");
     ctx.log("warn", "cp.db-unopenable");
-    return;
+    return false;
   }
+  let listed = false;
   try {
     const tables = new Set(db.tables());
+    listed = true;
     tally.files++;
     tally.bytes += safeStat(file)?.size ?? 0;
     const sCols = storeColumns(db, tables, "sessions", STORE_SESSION_COLUMNS, tally);
@@ -424,6 +427,7 @@ export function readSessionStore(file: string, source: string, ctx: ScanCtx, tal
   } finally {
     db.close();
   }
+  return listed;
 }
 
 function eachRow(map: () => void, tally: Tally): void {
@@ -434,17 +438,34 @@ function eachRow(map: () => void, tally: Tally): void {
   }
 }
 
-/** Scan one `.copilot` root: every `session-state/<id>/events.jsonl`, then `session-store.db`; one CoverageEv, last. */
+/**
+ * Scan one `.copilot` root: every `session-state/<id>/events.jsonl` (the detail window), then `session-store.db` (the
+ * lifetime window); one CoverageEv per window, last — `absent` for a window whose store is not there.
+ */
 export async function scanCli(c: Candidate, ctx: ScanCtx): Promise<void> {
   const tally = new Tally(TOOL, CLI_SOURCE);
+  const life = new Tally(TOOL, CLI_SOURCE, "lifetime");
   const stateDir = path.join(c.root, "session-state");
+  const hasState = isDir(stateDir);
   for (const name of listDir(stateDir, tally)) {
     if (ctx.signal.aborted) break;
     await scanEvents(path.join(stateDir, name, "events.jsonl"), cpSessionId(name, ctx), ctx, tally);
   }
   const store = path.join(c.root, "session-store.db");
-  if (!ctx.signal.aborted && safeStat(store)?.isFile()) readSessionStore(store, CLI_SOURCE, ctx, tally);
-  const bad = tally.skipped["bad-record"] ?? 0;
+  const hasStore = safeStat(store)?.isFile() ?? false;
+  const storeRead = !ctx.signal.aborted && hasStore && readSessionStore(store, CLI_SOURCE, ctx, life);
+  const bad = (tally.skipped["bad-record"] ?? 0) + (life.skipped["bad-record"] ?? 0);
   if (bad > 0) ctx.log("warn", "cp.bad-record", bad);
-  ctx.emit(tally.coverage());
+  for (const [t, has, readable] of [[tally, hasState, true], [life, hasStore, storeRead]] as const) ctx.emit(windowCoverage(t, has, readable));
+}
+
+/** A window's coverage: `absent` when its store is not there, `error` (note `unreadable`) when it is but could not be read. */
+export function windowCoverage(t: Tally, has: boolean, readable: boolean): CoverageEv {
+  const cov = t.coverage();
+  if (!has) cov.status = "absent";
+  else if (!readable) {
+    cov.status = "error";
+    cov.note = "unreadable";
+  }
+  return cov;
 }

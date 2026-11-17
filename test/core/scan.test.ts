@@ -262,7 +262,7 @@ describe("signal policy", () => {
 });
 
 describe("coverage the orchestrator writes", () => {
-  const lifetime = (id: string, run: (ctx: ScanCtx) => Promise<void> | void, n = 1): SourcePlugin => ({ ...plugin("codex", id, run, false, n), window: "lifetime" });
+  const lifetime = (id: string, run: (ctx: ScanCtx) => Promise<void> | void, n = 1): SourcePlugin => ({ ...plugin("codex", id, run, false, n), windows: ["lifetime"] });
 
   test("absent and error coverage take the plugin's window", async () => {
     const absent = lifetime("absent", () => {}, 0);
@@ -272,6 +272,16 @@ describe("coverage the orchestrator writes", () => {
     const r = await scan({ env, plugins: [absent, failing, unlocatable] });
     expect(r.coverage.map((c) => [c.source, c.status, c.window]).sort()).toEqual([
       ["absent", "absent", "lifetime"], ["failing", "error", "lifetime"], ["unlocatable", "error", "lifetime"],
+    ]);
+  });
+
+  test("a plugin that reports two windows gets the orchestrator's coverage in each", async () => {
+    const both = (id: string, run: (ctx: ScanCtx) => Promise<void> | void, n = 1): SourcePlugin => ({ ...plugin("cursor", id, run, false, n), windows: ["detail", "lifetime"] });
+    const absent = both("absent", () => {}, 0);
+    const failing = both("failing", () => { throw new TypeError("x"); });
+    const r = await scan({ env, plugins: [absent, failing] });
+    expect(r.coverage.map((c) => [c.source, c.status, c.window]).sort()).toEqual([
+      ["absent", "absent", "detail"], ["absent", "absent", "lifetime"], ["failing", "error", "detail"], ["failing", "error", "lifetime"],
     ]);
   });
 

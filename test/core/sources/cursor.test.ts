@@ -32,7 +32,10 @@ const run = (plugins: SourcePlugin[] = ALL) => scan({ env: h.env, plugins });
 type Result = Awaited<ReturnType<typeof run>>;
 const KINDS = ["session", "prompt", "tool", "turn", "marker", "usage", "totals", "commit", "file", "daily", "edge"] as const;
 const allEvents = (r: Result) => KINDS.flatMap((k) => [...r.store.all(k)] as Ev[]);
-const covOf = (r: Result, source: string) => r.coverage.find((c) => c.source === source)!;
+const covOf = (r: Result, source: string, window: "detail" | "lifetime" = source === "cursor.tracking" ? "lifetime" : "detail") =>
+  r.coverage.find((c) => c.source === source && c.window === window)!;
+/** The composer index: cursor.ide's lifetime window (its composer rows, their skips, every session's span). */
+const composersCov = (r: Result) => covOf(r, "cursor.ide", "lifetime");
 const sidOf = (raw: string) => `cursor:${raw}`;
 const toolsOf = (r: Result, raw: string): readonly ToolEv[] => r.store.forSession(sidOf(raw), "tool");
 const byTime = <T extends { ts: number }>(xs: readonly T[]): T[] => [...xs].sort((a, b) => a.ts - b.ts);
@@ -192,11 +195,15 @@ describe("cursor: Task 14 scenario", () => {
     expect(r.store.all("turn")).toEqual([]);
   });
 
-  test("coverage: the store, its composer and bubble rows, the event span", async () => {
+  test("coverage: the store in both windows — its bubble rows and their events (detail), its composer rows and every session (lifetime)", async () => {
     const fx = buildCursor(h);
     const r = await run([cuIde]);
     expect(covOf(r, "cursor.ide")).toMatchObject({
-      tool: "cursor", window: "detail", status: "ok", beta: false, files: 1, bytes: statSync(fx.globalFile).size, records: 8,
+      tool: "cursor", window: "detail", status: "ok", beta: false, files: 1, bytes: statSync(fx.globalFile).size, records: 6,
+      skipped: {}, unknownTypes: {}, versions: [], from: fx.t0, to: fx.t0 + 21 * MIN,
+    });
+    expect(composersCov(r)).toMatchObject({
+      tool: "cursor", window: "lifetime", status: "ok", files: 1, bytes: statSync(fx.globalFile).size, records: 2,
       skipped: {}, unknownTypes: {}, versions: [], from: fx.t0, to: fx.t0 + 21 * MIN,
     });
   });
@@ -299,7 +306,7 @@ describe("cursor ide: bubbles and tools", () => {
     expect(cov.skipped).toEqual({ "no-ts": 1, empty: 1, parse: 1 }); // the orphan and the bad key are not in c's range
     expect(cov.unknownTypes).toEqual({ "bubble-type:3": 1, "bubble-type:(other)": 1 });
     expect(cov.status).toBe("drift");
-    expect(cov.records).toBe(1 + 8);
+    expect([cov.records, composersCov(r).records]).toEqual([8, 1]); // c's bubble rows; its composer row
     expectNoCanaries([...allEvents(r), r.coverage, r.warnings]);
   });
 
@@ -326,7 +333,8 @@ describe("cursor ide: bubbles and tools", () => {
     expect(r.store.session(sidOf(cuSid("notime")))).toBeUndefined();
     expect(r.store.session(sidOf(cuSid("old")))).toMatchObject({ start: at, end: at + MIN });
     expect(r.store.session(sidOf(cuSid("bare")))).toMatchObject({ start: at + 3 * MIN, end: at + 3 * MIN });
-    expect(covOf(r, "cursor.ide").skipped).toEqual({ "empty-session": 1, "no-ts": 1, "inline-message": 3 });
+    expect(covOf(r, "cursor.ide").skipped).toEqual({ "inline-message": 3 }); // messages held inline have no time
+    expect(composersCov(r).skipped).toEqual({ "empty-session": 1, "no-ts": 1 }); // composers that are no session
     expectNoCanaries([...allEvents(r), r.coverage]);
   });
 
@@ -353,7 +361,7 @@ describe("cursor ide: bubbles and tools", () => {
     ]);
     expect(r.store.all("prompt").map((p) => p.sessionId)).toEqual([sidOf(parent)]);
     expect(byTime(r.store.all("tool")).map((t) => [t.sessionId, t.category])).toEqual([[sidOf(parent), "delegate"], [sidOf(child), "read"]]);
-    expect(covOf(r, "cursor.ide").skipped).toEqual({ duplicate: 1 }); // the copy; its bubbles are never queried
+    expect(composersCov(r).skipped).toEqual({ duplicate: 1 }); // the copy; its bubbles are never queried
     expectNoCanaries([...allEvents(r), r.coverage]);
   });
 
@@ -540,8 +548,8 @@ describe("cursor ide: bubbles and tools", () => {
     const prompts = events.filter((e): e is PromptEv => e.k === "prompt");
     expect(prompts.map((p) => p.textHash)).toEqual(["Then carry on", "The second composer", "The third composer"].map((t) => keyedHash(salt, t)));
     expect(events.filter((e): e is SessionEv => e.k === "session").map((e) => e.id)).toEqual([sidOf(C1), sidOf(C3)]);
-    const cov = events.find((e): e is CoverageEv => e.k === "coverage")!;
-    expect([cov.status, cov.skipped]).toEqual(["ok", { "bad-record": 2 }]);
+    const covs = events.filter((e): e is CoverageEv => e.k === "coverage");
+    expect(covs.map((c) => [c.window, c.status, c.skipped])).toEqual([["detail", "ok", { "bad-record": 1 }], ["lifetime", "ok", { "bad-record": 1 }]]); // a prompt; a session
     expect(logs).toEqual([["warn", "cu.bad-record", 2]]);
   });
 
@@ -622,8 +630,8 @@ describe("cursor ide: bubbles and tools", () => {
     expect(sql.filter(isComposerQuery)).toHaveLength(2);
     expect(sql.filter(isBubbleQuery)).toHaveLength(ids.length + 3);
     const cov = covOf(r, "cursor.ide");
-    expect(cov.records).toBe(ids.length + 1 + ids.length + 4_500);
-    expect([cov.skipped, cov.unknownTypes]).toEqual([{}, {}]);
+    expect([cov.records, composersCov(r).records]).toEqual([ids.length + 4_500, ids.length + 1]); // bubble rows; composer rows
+    expect([cov.skipped, cov.unknownTypes, composersCov(r).skipped]).toEqual([{}, {}, {}]);
   });
 
   test("a WAL store whose writer is gone is read in place, nothing written beside it", async () => {
@@ -672,8 +680,10 @@ describe("cursor ide: the detail window (bubbles of composers updated in the las
     expect(r.store.session(sidOf(EMPTY))).toBeUndefined();
     expect(sql.filter(isBubbleQuery)).toHaveLength(1); // the recent composer's range only
     const cov = covOf(r, "cursor.ide");
-    expect(cov.skipped).toEqual({ "outside-window": 1, "empty-session": 1 });
-    expect(cov.records).toBe(3 + 2);
+    expect([cov.skipped, composersCov(r).skipped]).toEqual([{ "outside-window": 1 }, { "empty-session": 1 }]);
+    expect([cov.records, composersCov(r).records]).toEqual([2, 3]); // the recent composer's bubbles; all three composers
+    // every composer is in the index: the lifetime span reaches the old one, the detail span only the recent one's events
+    expect([composersCov(r).from, cov.from]).toEqual([old - MIN, recent]);
     expectNoCanaries([...allEvents(r), r.coverage]);
   });
 
@@ -683,11 +693,11 @@ describe("cursor ide: the detail window (bubbles of composers updated in the las
     expect([r.store.session(sidOf(OLD))!.window, r.store.session(sidOf(NEW))!.window]).toEqual(["detail", "detail"]);
     expect(r.store.forSession(sidOf(OLD), "prompt")).toHaveLength(1);
     expect(toolsOf(r, OLD)).toHaveLength(1);
-    expect(covOf(r, "cursor.ide").skipped).toEqual({ "empty-session": 1 });
+    expect([covOf(r, "cursor.ide").skipped, composersCov(r).skipped]).toEqual([{}, { "empty-session": 1 }]);
     r = await scan({ env: h.env, plugins: [cuIde], since: Date.now() - DAY });
     expect([r.store.session(sidOf(OLD))!.window, r.store.session(sidOf(NEW))!.window]).toEqual(["lifetime", "lifetime"]);
     expect(allEvents(r).filter((e) => e.k !== "session")).toEqual([]);
-    expect(covOf(r, "cursor.ide").skipped).toEqual({ "outside-window": 2, "empty-session": 1 });
+    expect([covOf(r, "cursor.ide").skipped, composersCov(r).skipped]).toEqual([{ "outside-window": 2 }, { "empty-session": 1 }]);
   });
 
   test("a composer of unknown age is read as if inside the window", async () => {
@@ -896,6 +906,7 @@ describe("cursor ide: stores that cannot be read", () => {
     __observeQueries(undefined);
     let cov = covOf(r, "cursor.ide");
     expect([cov.status, cov.skipped, cov.unknownTypes]).toEqual(["drift", {}, { "table-unreadable:cursorDiskKV": 1 }]);
+    expect([composersCov(r).status, composersCov(r).unknownTypes]).toEqual(["drift", { "table-unreadable:cursorDiskKV": 1 }]); // one store, both windows
     expect(allEvents(r)).toEqual([]);
 
     const sql: string[] = [];
@@ -906,7 +917,8 @@ describe("cursor ide: stores that cannot be read", () => {
     r = await run([cuIde]);
     __observeQueries(undefined);
     cov = covOf(r, "cursor.ide");
-    expect([cov.status, cov.skipped, cov.unknownTypes]).toEqual(["ok", { "io-error": 1 }, {}]);
+    expect([cov.status, cov.skipped, cov.unknownTypes]).toEqual(["empty", { "io-error": 1 }, {}]); // no bubble was read
+    expect([composersCov(r).status, composersCov(r).records]).toEqual(["ok", 1]);
     expect(r.store.all("session").map((s) => s.id)).toEqual([sidOf(A)]);
     expect(sql.some((s) => /ItemTable/.test(s))).toBe(false);
   });
@@ -922,7 +934,7 @@ describe("cursor ide: stores that cannot be read", () => {
   test("a store that is not a database is an error of the source; a store beside it still counts", async () => {
     h.write(globalRel(h), "not a database");
     let r = await run([cuIde]);
-    expect(r.coverage).toEqual([expect.objectContaining({ source: "cursor.ide", status: "error" })]);
+    expect(r.coverage.map((c) => [c.source, c.window, c.status])).toEqual([["cursor.ide", "detail", "error"], ["cursor.ide", "lifetime", "error"]]);
     expect(r.warnings).toEqual([expect.objectContaining({ code: "error", source: "cursor.ide" })]);
     h.cleanup();
     h = fakeHome();
@@ -930,6 +942,7 @@ describe("cursor ide: stores that cannot be read", () => {
     h.write(workspaceRel(h, "w2"), "not a database either");
     r = await run([cuIde]);
     expect(covOf(r, "cursor.ide")).toMatchObject({ status: "ok", files: 1, skipped: { "io-error": 1 } });
+    expect(composersCov(r).status).toBe("absent"); // no global store: no composer index
   });
 
   test.skipIf(process.platform === "win32")("a locked store above MAX_COPY_BYTES is never copied: too-large note and warning", async () => {
@@ -947,17 +960,18 @@ describe("cursor ide: stores that cannot be read", () => {
     }
     const cov = covOf(r, "cursor.ide");
     expect(cov).toMatchObject({ status: "empty", note: "too-large", files: 0, skipped: { "too-large": 1 } });
-    expect(r.warnings).toEqual([expect.objectContaining({ code: "too-large", source: "cursor.ide" })]);
+    expect(composersCov(r)).toMatchObject({ status: "empty", note: "too-large", files: 0, skipped: { "too-large": 1 } });
+    expect(r.warnings).toEqual([expect.objectContaining({ code: "too-large", source: "cursor.ide" })]); // one per source
     expect(r.tempClean).toBe(true);
     expect(allEvents(r)).toEqual([]);
   });
 
-  test("no Cursor user folder: absent; a user folder without stores: empty", async () => {
+  test("no Cursor user folder: absent; a user folder without stores: absent in both windows", async () => {
     let r = await run([cuIde]);
     expect(covOf(r, "cursor.ide").status).toBe("absent");
     mkdirSync(path.join(h.env.home, path.dirname(globalRel(h))), { recursive: true });
     r = await run([cuIde]);
-    expect(covOf(r, "cursor.ide")).toMatchObject({ status: "empty", files: 0, records: 0 });
+    expect(r.coverage.map((c) => [c.window, c.status, c.files, c.records])).toEqual([["detail", "absent", 0, 0], ["lifetime", "absent", 0, 0]]);
   });
 });
 

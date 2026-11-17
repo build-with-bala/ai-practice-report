@@ -407,6 +407,8 @@ export interface KvRead { readable: boolean; composers: number }
  * bubbles of the composers inside the detail window (events emitted as they are read, prompts per composer in time
  * order), then one SessionEv per composer. With the key index each key family is a key range read in key order, and
  * each composer's bubbles their own range; without one, each family is one rowid scan with a prefix filter.
+ * Two windows: the composers are Cursor's index of every conversation (the lifetime tally: their rows, their skips, the
+ * span of every session), the bubbles the detail of the recent ones (the detail tally: bubble rows and their events).
  */
 export class DiskKv {
   private readonly composers = new Map<string, Composer>();
@@ -417,7 +419,7 @@ export class DiskKv {
   /** Composers last updated before this time are outside the detail window. */
   private readonly windowStart: number;
 
-  constructor(private readonly db: RoDb, private readonly ctx: ScanCtx, private readonly tally: Tally) {
+  constructor(private readonly db: RoDb, private readonly ctx: ScanCtx, private readonly tally: Tally, private readonly life: Tally) {
     this.windowStart = ctx.since ?? ctx.now - DETAIL_MS;
   }
 
@@ -435,8 +437,8 @@ export class DiskKv {
       this.tally.skip("io-error");
       return { readable: false, composers: 0 };
     }
-    const pass = new Pass(this.db, KV, this.tally, this.ctx);
-    const rows = (list: Obj[]) => { for (const r of list) eachRow(() => this.composer(r), this.tally); };
+    const pass = new Pass(this.db, KV, this.life, this.ctx);
+    const rows = (list: Obj[]) => { for (const r of list) eachRow(() => this.composer(r), this.life); };
     const done = mode === "key" ? pass.byKey(SQL.key.composers, "composerData:", "composerData;", rows) : pass.byRowid(SQL.rowid.composers, rows);
     if (pass.unreadable) return { readable: false, composers: 0 };
     if (this.composers.size === 0) return { readable: done, composers: 0 };
@@ -448,13 +450,13 @@ export class DiskKv {
 
   private composer(r: Obj): void {
     const raw = after(r.key, "composerData:");
-    if (raw === undefined) return this.tally.skip("bad-record");
-    if (r.ok !== 1) this.tally.skip("parse"); // the composer exists; its bubbles still map
+    if (raw === undefined) return this.life.skip("bad-record");
+    if (r.ok !== 1) this.life.skip("parse"); // the composer exists; its bubbles still map
     const sub = r.sub === "object";
     const launch = sub ? str(r.launch) : undefined;
     const dup = launch !== undefined && this.launches.has(launch);
     if (launch !== undefined) this.launches.add(launch);
-    if (dup) this.tally.skip("duplicate");
+    if (dup) this.life.skip("duplicate");
     const id = cuSessionId(raw, this.ctx);
     const rawModel = str(r.model);
     const model = rawModel === undefined ? undefined : safeModel(rawModel);
@@ -660,7 +662,7 @@ export class DiskKv {
           this.tally.skip("missing-bubbles");
         }
       }
-      eachRow(() => this.session(c), this.tally);
+      eachRow(() => this.session(c), this.life);
     }
     // every composer that lists messages has none of them: the bubbles' key family has moved or been renamed
     if (missing > 0 && !found) this.tally.unknownKey(`missing-bubbles:${KV}`);
@@ -668,9 +670,9 @@ export class DiskKv {
 
   private session(c: Composer): void {
     const empty = c.listed + c.inline === 0 && (c.detail ? c.bubblesRead && c.bubbles === 0 : true);
-    if (empty) return this.tally.skip("empty-session");
-    if (!c.detail) this.tally.skip("outside-window");
-    if (c.start === undefined || c.end === undefined) return this.tally.skip("no-ts");
+    if (empty) return this.life.skip("empty-session");
+    if (!c.detail) this.tally.skip("outside-window"); // its bubbles, the detail, were not read
+    if (c.start === undefined || c.end === undefined) return this.life.skip("no-ts");
     const s: SessionEv = {
       k: "session", tool: TOOL, source: IDE_SOURCE, id: c.id, window: c.detail ? "detail" : "lifetime", origin: c.origin, start: c.start,
       end: c.end, models: [...c.models], surface: "ide", mode: c.agent ? "agent" : "chat",
@@ -678,7 +680,9 @@ export class DiskKv {
     const parent = this.parents.get(c.raw);
     if (parent !== undefined && parent !== c.id) s.parentId = parent;
     this.ctx.emit(s);
-    this.tally.span(c.start);
-    this.tally.span(c.end);
+    for (const t of c.detail ? [this.life, this.tally] : [this.life]) {
+      t.span(c.start);
+      t.span(c.end);
+    }
   }
 }

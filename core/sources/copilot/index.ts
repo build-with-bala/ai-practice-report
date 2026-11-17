@@ -8,7 +8,7 @@ import type { CoverageEv } from "../../model/events";
 import { listDir, readSidecar, Tally } from "../common/coverage";
 import { isObj, str } from "../common/guards";
 import type { Candidate, ScanCtx, SourcePlugin } from "../types";
-import { CLI_SOURCE, cliRoots, readSessionStore, scanCli } from "./cli";
+import { CLI_SOURCE, cliRoots, readSessionStore, scanCli, windowCoverage } from "./cli";
 import { copilotInstalled, installDirs, VS_APPS, type VsApp } from "./install";
 import { Journal } from "./journal";
 import { mapSession, rawSessionId, TOOL, uriToPath, VSCODE_SOURCE } from "./map";
@@ -142,8 +142,9 @@ function workspaceFolder(workspace: string, cache: Map<string, string | undefine
 }
 
 /**
- * Scan one VS Code user folder: the chat sessions of every workspace and of empty windows, then the Copilot extension's
- * session store. One CoverageEv, last, saying whether Copilot is installed.
+ * Scan one VS Code user folder: the chat sessions of every workspace and of empty windows (the detail window), then the
+ * Copilot extension's session store (the lifetime window: an index of sessions and turns). One CoverageEv per window,
+ * last, each saying whether Copilot is installed; the lifetime one is `absent` without a store.
  *
  * Each session is mapped from one copy, chosen in read order (journals first, then the most recently written): the first
  * complete copy that has requests is mapped at once, and only then is its id seen, so any other copy is skipped
@@ -152,6 +153,7 @@ function workspaceFolder(workspace: string, cache: Map<string, string | undefine
  */
 async function scanVscode(c: Candidate, ctx: ScanCtx): Promise<void> {
   const tally = new Tally(TOOL, VSCODE_SOURCE);
+  const life = new Tally(TOOL, VSCODE_SOURCE, "lifetime");
   const seen = new Set<string>();
   const waiting = new Map<string, { f: SessionFile; requests: number }>();
   const folders = new Map<string, string | undefined>();
@@ -201,12 +203,16 @@ async function scanVscode(c: Candidate, ctx: ScanCtx): Promise<void> {
     map(f, got.root);
   }
   const store = path.join(c.root, "globalStorage", "github.copilot-chat", "session-store.db");
-  if (!ctx.signal.aborted && safeStat(store)?.isFile()) readSessionStore(store, VSCODE_SOURCE, ctx, tally);
-  const bad = tally.skipped["bad-record"] ?? 0;
+  const hasStore = safeStat(store)?.isFile() ?? false;
+  const storeRead = !ctx.signal.aborted && hasStore && readSessionStore(store, VSCODE_SOURCE, ctx, life);
+  const bad = (tally.skipped["bad-record"] ?? 0) + (life.skipped["bad-record"] ?? 0);
   if (bad > 0) ctx.log("warn", "cp.bad-record", bad); // a mapping bug must not look like a healthy source
-  const cov = tally.coverage();
-  cov.installed = copilotInstalled(installDirs(ctx.env, appOf(ctx.env, c.root)));
-  ctx.emit(cov);
+  const installed = copilotInstalled(installDirs(ctx.env, appOf(ctx.env, c.root)));
+  for (const [t, has, readable] of [[tally, true, true], [life, hasStore, storeRead]] as const) {
+    const cov = windowCoverage(t, has, readable);
+    cov.installed = installed;
+    ctx.emit(cov);
+  }
 }
 
 // ---- JetBrains ----
@@ -262,6 +268,7 @@ export const cpVscode: SourcePlugin = {
   id: VSCODE_SOURCE,
   tier: "P0",
   beta: false,
+  windows: ["detail", "lifetime"],
   describe: {
     reads: [
       "<VS Code user>/workspaceStorage/*/chatSessions/*.jsonl — chat session journals (VS Code 1.109+), replayed in memory (Code, Code - Insiders, VSCodium)",
@@ -288,6 +295,7 @@ export const cpCli: SourcePlugin = {
   id: CLI_SOURCE,
   tier: "P0",
   beta: false,
+  windows: ["detail", "lifetime"],
   describe: {
     reads: [
       "<home>/.copilot/session-state/*/events.jsonl — Copilot CLI session events: session start, user messages, turns, tool executions, aborts, models",

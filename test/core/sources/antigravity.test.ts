@@ -7,7 +7,7 @@ import { __observeQueries } from "../../../core/io/sqlite";
 import { localDay } from "../../../core/io/time";
 import type { Ev, MarkerEv, ToolEv } from "../../../core/model/events";
 import { scan } from "../../../core/scan";
-import { agBrain, agCli, agIde } from "../../../core/sources/antigravity";
+import { agBrain, agCli, agHistory, agIde } from "../../../core/sources/antigravity";
 import { TRAJ_FIELDS } from "../../../core/sources/antigravity/ide";
 import { registry } from "../../../core/sources/registry";
 import type { SourcePlugin } from "../../../core/sources/types";
@@ -35,7 +35,10 @@ const run = (plugins: SourcePlugin[] = ALL) => scan({ env: h.env, plugins });
 type Result = Awaited<ReturnType<typeof run>>;
 const KINDS = ["session", "prompt", "tool", "turn", "marker", "usage", "totals", "daily", "edge", "file"] as const;
 const allEvents = (r: Result) => KINDS.flatMap((k) => [...r.store.all(k)] as Ev[]);
-const covOf = (r: Result, source: string) => r.coverage.find((c) => c.source === source)!;
+const covOf = (r: Result, source: string, window: "detail" | "lifetime" = source === "antigravity.cli" ? "detail" : "lifetime") =>
+  r.coverage.find((c) => c.source === source && c.window === window)!;
+/** The conversation index (`conversation_summaries.db`): antigravity.cli's lifetime window. */
+const summariesCov = (r: Result) => covOf(r, "antigravity.cli", "lifetime");
 const sidOf = (raw: string) => `antigravity:${raw}`;
 const byTime = <T extends { ts: number }>(xs: readonly T[]): T[] => [...xs].sort((a, b) => a.ts - b.ts);
 const markers = (r: Result, kind: MarkerEv["kind"]) => r.store.all("marker").filter((m) => m.kind === kind);
@@ -169,9 +172,14 @@ describe("antigravity: Task 15 scenario", () => {
     expect(markers(r, "plan-artifact").map((m) => Math.floor(m.ts)).sort()).toEqual(mtimes.sort());
 
     const transcript = path.join(h.env.home, transcriptRel(P));
+    // the step store and transcript: the detail window; the conversation index: the lifetime window
     expect(covOf(r, "antigravity.cli")).toMatchObject({
-      tool: "antigravity", window: "detail", status: "ok", beta: false, files: 3, records: 3 + 5 + 5, from: fx.t0 + MIN, to: fx.t0 + 31 * MIN,
-      bytes: statSync(fx.summariesFile).size + statSync(fx.stepsFile).size + statSync(transcript).size, skipped: {}, unknownTypes: {}, versions: [],
+      tool: "antigravity", window: "detail", status: "ok", beta: false, files: 2, records: 5 + 5, from: fx.t0 + MIN, to: fx.t0 + 11 * MIN,
+      bytes: statSync(fx.stepsFile).size + statSync(transcript).size, skipped: {}, unknownTypes: {}, versions: [],
+    });
+    expect(summariesCov(r)).toMatchObject({
+      tool: "antigravity", window: "lifetime", status: "ok", files: 1, records: 3, from: fx.t0 + 6 * MIN, to: fx.t0 + 31 * MIN,
+      bytes: statSync(fx.summariesFile).size, skipped: {}, unknownTypes: {}, versions: [],
     });
     expect(covOf(r, "antigravity.ide")).toMatchObject({
       window: "lifetime", status: "ok", files: 1, bytes: statSync(fx.ideFile).size, records: 2, from: fx.t0 + 40 * MIN, to: fx.t0 + 61 * MIN, skipped: {}, unknownTypes: {},
@@ -264,7 +272,7 @@ describe("antigravity cli: conversation_summaries.db", () => {
     expect(r.store.all("prompt").map((p) => [byLabel.get(p.sessionId!), p.origin]).sort()).toEqual([
       ["s17", "peer"], ["s19", "system"], ["s2", "human"], ["s8", "scripted"],
     ]);
-    expect(covOf(r, "antigravity.cli").unknownTypes).toEqual({ "conversation_summaries.source:(other)": 2 });
+    expect(summariesCov(r).unknownTypes).toEqual({ "conversation_summaries.source:(other)": 2 });
     // the value never leaves SQLite: only a fixed code does
     const page = sql.find((s) => sourceOf(s) === "conversation_summaries")!;
     for (const row of rowsOf(file, page)) expect(["none", "human", "scripted", "peer", "subagent", "other"]).toContain(row.src as string);
@@ -287,7 +295,7 @@ describe("antigravity cli: conversation_summaries.db", () => {
     expect(r.store.session(sidOf(T2))).toMatchObject({ start: at, end: at });
     expect(r.store.session(sidOf(keyedHash(r.salt, "plain-id")))).toMatchObject({ start: at });
     expect(r.store.all("session")).toHaveLength(3);
-    expect(covOf(r, "antigravity.cli")).toMatchObject({ status: "ok", records: 6, skipped: { "empty-session": 1, "no-ts": 1, "bad-row": 1 } });
+    expect(summariesCov(r)).toMatchObject({ status: "ok", records: 6, skipped: { "empty-session": 1, "no-ts": 1, "bad-row": 1 } });
   });
 
   test("workspace_uris: a JSON array of file URIs — the first folder is the project; null or empty is none; another shape is drift", async () => {
@@ -303,7 +311,7 @@ describe("antigravity cli: conversation_summaries.db", () => {
     const key = r.store.session(sidOf(W1))!.projectKey!;
     expect(normalizePath(r.cwds.get(key)!)).toBe("/work/first folder");
     expect([W2, W3, W4].map((id) => r.store.session(sidOf(id))!.projectKey)).toEqual([undefined, undefined, undefined]);
-    expect(covOf(r, "antigravity.cli").unknownTypes).toEqual({ "conversation_summaries.workspace_uris:shape": 1 });
+    expect(summariesCov(r).unknownTypes).toEqual({ "conversation_summaries.workspace_uris:shape": 1 });
     expectNoCanaries([...allEvents(r), r.coverage]);
   });
 
@@ -317,19 +325,19 @@ describe("antigravity cli: conversation_summaries.db", () => {
     w.close();
     let r = await run([agCli]);
     expect(r.store.session(sidOf(P))).toMatchObject({ start: at, origin: "human" });
-    expect(covOf(r, "antigravity.cli")).toMatchObject({ status: "drift", unknownTypes: { "missing-column:nesting_depth": 1, "missing-column:killed": 1 } });
+    expect(summariesCov(r)).toMatchObject({ status: "drift", unknownTypes: { "missing-column:nesting_depth": 1, "missing-column:killed": 1 } });
 
     h.cleanup();
     h = fakeHome();
     h.sqlite(summariesRel, ["CREATE TABLE other (x TEXT)"]);
     r = await run([agCli]);
-    expect(covOf(r, "antigravity.cli")).toMatchObject({ status: "drift", unknownTypes: { "missing-table:conversation_summaries": 1 }, files: 1 });
+    expect(summariesCov(r)).toMatchObject({ status: "drift", unknownTypes: { "missing-table:conversation_summaries": 1 }, files: 1 });
 
     h.cleanup();
     h = fakeHome();
     h.sqlite(summariesRel, [SUMMARIES_DDL.replace(/\)$/, ") WITHOUT ROWID").replace("conversation_id TEXT,", "conversation_id TEXT NOT NULL,")]);
     r = await run([agCli]);
-    expect(covOf(r, "antigravity.cli")).toMatchObject({ status: "drift", unknownTypes: { "table-unreadable:conversation_summaries": 1 } });
+    expect(summariesCov(r)).toMatchObject({ status: "drift", unknownTypes: { "table-unreadable:conversation_summaries": 1 } });
     expect(r.warnings.some((x) => x.code === "drift" && x.source === "antigravity.cli")).toBe(true);
   });
 
@@ -342,7 +350,7 @@ describe("antigravity cli: conversation_summaries.db", () => {
     __observeQueries(undefined);
     expect(r.store.all("session").map((s) => s.id).sort()).toEqual(ids.map(sidOf).sort());
     expect(sql.filter((s) => sourceOf(s) === "conversation_summaries")).toHaveLength(2);
-    expect(covOf(r, "antigravity.cli").records).toBe(ids.length);
+    expect(summariesCov(r).records).toBe(ids.length);
   });
 });
 
@@ -620,7 +628,7 @@ describe("antigravity cli: transcript.jsonl", () => {
   });
 });
 
-describe("antigravity cli: history.jsonl", () => {
+describe("antigravity history: history.jsonl (its own lifetime source)", () => {
   test("lifetime prompts and days (source antigravity.history), sessions from conversationId; slash commands are prompts; drift and skips", async () => {
     const noon = new Date(fixtureStart(5));
     noon.setHours(12, 0, 0, 0); // local noon: the minutes after it stay on the same local day
@@ -638,7 +646,7 @@ describe("antigravity cli: history.jsonl", () => {
       historyLine({ display: CANARY.prompt }),
       "not an object",
     ]);
-    const r = await run([agCli]);
+    const r = await run([agHistory]);
     const prompts = byTime(r.store.all("prompt"));
     expect(prompts.map((p) => [p.source, p.window, p.origin, p.sessionId, p.intent, p.features.isTaskStart])).toEqual([
       ["antigravity.history", "lifetime", "human", sidOf(P), classifyIntent("Refactor the importer"), true],
@@ -652,8 +660,8 @@ describe("antigravity cli: history.jsonl", () => {
       { k: "daily", tool: "antigravity", source: "antigravity.history", day: localDay(day2), zone: "local", unit: "prompts", count: 1 },
     ]);
     expect(r.store.all("session")).toEqual([]);
-    const cov = covOf(r, "antigravity.cli");
-    expect(cov).toMatchObject({ status: "drift", files: 1, records: 10, skipped: { empty: 1, "bad-ts": 1 } });
+    const cov = covOf(r, "antigravity.history");
+    expect(cov).toMatchObject({ window: "lifetime", status: "drift", files: 1, records: 10, skipped: { empty: 1, "bad-ts": 1 } });
     expect(cov.unknownTypes).toEqual({ "history.type:voice_note": 1, "history.display:missing": 1, "history.timestamp:missing": 1, "history:not-object": 1 });
     expectNoCanaries([...allEvents(r), r.coverage]);
   });
@@ -664,18 +672,24 @@ describe("antigravity cli: stores", () => {
     h.write(summariesRel, "not a database");
     h.write(stepsRel(P), "not a database either");
     let r = await run([agCli]);
-    expect(r.coverage).toEqual([expect.objectContaining({ source: "antigravity.cli", status: "error" })]);
-    h.writeJsonl(historyRel, [historyLine({ display: "Hello", timestamp: fixtureStart() })]);
+    expect(r.coverage.map((c) => [c.source, c.window, c.status])).toEqual([["antigravity.cli", "detail", "error"], ["antigravity.cli", "lifetime", "error"]]);
+    h.writeJsonl(transcriptRel(P), [userInput(0, fixtureStart(), "Hello")]);
     r = await run([agCli]);
-    expect(covOf(r, "antigravity.cli")).toMatchObject({ status: "ok", files: 1, skipped: { "io-error": 2 } });
+    // the readable transcript is enough for the source; each window says how its own stores fared
+    expect(covOf(r, "antigravity.cli")).toMatchObject({ status: "ok", files: 1, skipped: { "io-error": 1 } });
+    expect(summariesCov(r)).toMatchObject({ status: "error", note: "unreadable", files: 0, skipped: { "io-error": 1 } });
   });
 
-  test("no CLI folder: absent; an empty one: empty", async () => {
-    let r = await run([agCli]);
-    expect(covOf(r, "antigravity.cli").status).toBe("absent");
+  test("no CLI folder: absent; a folder without stores: absent in both windows, history empty", async () => {
+    let r = await run([agCli, agHistory]);
+    expect(r.coverage.map((c) => [c.source, c.window, c.status])).toEqual([
+      ["antigravity.cli", "detail", "absent"], ["antigravity.cli", "lifetime", "absent"], ["antigravity.history", "lifetime", "absent"],
+    ]);
     mkdirSync(path.join(h.env.home, CLI_REL), { recursive: true });
-    r = await run([agCli]);
-    expect(covOf(r, "antigravity.cli")).toMatchObject({ status: "empty", files: 0, records: 0 });
+    r = await run([agCli, agHistory]);
+    expect(r.coverage.map((c) => [c.source, c.window, c.status, c.files, c.records])).toEqual([
+      ["antigravity.cli", "detail", "absent", 0, 0], ["antigravity.cli", "lifetime", "absent", 0, 0], ["antigravity.history", "lifetime", "empty", 0, 0],
+    ]);
   });
 });
 

@@ -1,6 +1,7 @@
 # Antigravity — CLI store, IDE trajectory summaries, brain artifacts
 
-Readers: `antigravity.cli` (`cli.ts`), `antigravity.ide` (`ide.ts`), `antigravity.brain` (`brain.ts`); plugins in `index.ts`.
+Readers: `antigravity.cli` (`cli.ts`), `antigravity.history` (`history.ts`), `antigravity.ide` (`ide.ts`),
+`antigravity.brain` (`brain.ts`); plugins in `index.ts`.
 
 Evidence: **(verified locally)** = seen on the machine these readers were written on with the structure probe
 (`scripts/probe.ts`: table and column names, declared types, JSON field names and value classes, protobuf field numbers and
@@ -15,7 +16,7 @@ server — not seen in data. This file records names and value types only, never
   conversation_summaries.db                                          one row per conversation
   conversations/<conversation id>.db                                 its steps
   brain/<conversation id>/.system_generated/logs/transcript.jsonl    one record per step
-  history.jsonl                                                      what was typed at the CLI prompt
+  history.jsonl                                                      antigravity.history: what was typed at the CLI prompt
   brain/<conversation id>/{task,implementation_plan,walkthrough}.md  antigravity.brain (existence only)
 <home>/.gemini/antigravity/brain/<conversation id>/<artifact>.md     antigravity.brain (the IDE's; not present locally)
 vscodeUser(env, "Antigravity")/globalStorage/state.vscdb             antigravity.ide
@@ -167,8 +168,9 @@ JSONL, one object per step: `step_index` (number), `type` (string: a `CortexStep
   upper-case enum-shaped, else `(other)`; missing `(none)`), `transcript:not-object`. Every other known record is counted and
   dropped; model replies, thinking, tool calls, errors and media are never kept.
 
-## history.jsonl (verified locally)
+## history.jsonl (`antigravity.history`; verified locally)
 
+The CLI's prompt log is its own lifetime source, so its prompts are never mistaken for, or added to, the transcripts'.
 JSONL, one line per entry typed at the CLI prompt: `display` (string), `timestamp` (number), `conversationId` (string; not
 on every line), `workspace` (string), `type` (`slash_command` on slash commands, absent otherwise).
 
@@ -179,17 +181,24 @@ on every line), `workspace` (string), `type` (`slash_command` on slash commands,
 - **DailyEv** (source `antigravity.history`, `zone: "local"`, `unit: "prompts"`) per local day, `count` = its
   prompts and slash commands.
 - Drift: `history:not-object`, `history.type:<type>`, `history.display:missing`, `history.timestamp:missing`. Skipped:
-  `bad-ts` (implausible time), `empty`.
+  `bad-ts` (implausible time), `empty`, `parse`, `oversize`, `io-error`, `bad-record`.
+- **Coverage** (window `lifetime`): `files`/`bytes` = the file read to its end, `records` = its lines, `from`/`to` =
+  first/last prompt time; `empty` without the file.
 
 ## CLI coverage
 
-`antigravity.cli`, window `detail`: `files`/`bytes` = stores whose tables were listed and JSONL files read to their end;
-`records` = summary and step rows, transcript records and history lines; `from`/`to` = first/last event time; no versions.
-Skipped: `empty-session`, `no-ts`, `bad-row`, `empty`, `bad-ts`, `battle-copy`, `parse`, `oversize` (a JSONL line above
-32 MiB, or a step blob above 1 MiB), `io-error` (a store that cannot be
-opened — warn `ag.db-unopenable` — or read, a busy or failing later page, a JSONL read error), `bad-record` (a row or record
-the mapping failed on; warn `ag.bad-record` with the count). Each store is read on its own; only when every store present
-fails is the source an error.
+`antigravity.cli` reports one coverage per window; no versions. Each store is read on its own; only when every store
+present fails is the source an error; a window whose stores are all unreadable is `error` with `note: "unreadable"`,
+one without any store `absent`.
+
+- `lifetime` — the conversation index (`conversation_summaries.db`): `files`/`bytes` = the store, `records` = summary
+  rows, `from`/`to` = the span of its sessions. Skipped: `empty-session`, `no-ts`, `bad-row`, `io-error`, `bad-record`.
+- `detail` — the step stores and transcripts: `files`/`bytes` = stores whose tables were listed and JSONL files read to
+  their end; `records` = step rows and transcript records; `from`/`to` = first/last time of its events and detail
+  sessions. Skipped: `no-ts`, `empty`, `battle-copy`, `parse`, `oversize` (a JSONL line above 32 MiB, or a step blob
+  above 1 MiB), `io-error` (a store that cannot be opened — warn `ag.db-unopenable` — or read, a busy or failing later
+  page, a JSONL read error), `bad-record` (a row or record the mapping failed on; warn `ag.bad-record` with the count,
+  both windows').
 
 ## state.vscdb (`antigravity.ide`)
 

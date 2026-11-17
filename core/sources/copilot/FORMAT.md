@@ -178,12 +178,15 @@ Built-in tool ids (VS Code program and extension program): see `VSCODE_TOOLS` in
   per denied tool, at the request's time.
 - **Session store** (`globalStorage/github.copilot-chat/session-store.db`): lifetime sessions and turns, as below; they
   share the chat sessions' ids and merge with them.
-- **Coverage**: `files`/`bytes` = session files fully read, `workspace.json` files and the store; `records` = journal lines,
-  legacy documents and store rows; `versions` = extension versions; `installed` = Copilot is installed (below);
-  `from`/`to` = first/last event time. Drift: `journal-kind:<n>`, `part:<kind>`, `version:newer` (a session `version`
-  above 3), `requests:missing`, `request:not-object`, `session:not-object`, `modelState:<value>`, `store.missing-table:<t>`,
-  `store.missing-column:<c>`. Skipped: `duplicate`, `empty-session`, `bad-record`, `parse`, `oversize`, `too-large`,
-  `io-error`, `bad-row`, `no-ts`.
+- **Coverage**, one per window, each with `installed` = Copilot is installed (below):
+  - `detail` (the chat sessions): `files`/`bytes` = session files fully read and `workspace.json` files; `records` =
+    journal lines and legacy documents; `versions` = extension versions; `from`/`to` = first/last event time. Drift:
+    `journal-kind:<n>`, `part:<kind>`, `version:newer` (a session `version` above 3), `requests:missing`,
+    `request:not-object`, `session:not-object`, `modelState:<value>`. Skipped: `duplicate`, `empty-session`,
+    `bad-record`, `parse`, `oversize`, `too-large`, `io-error`.
+  - `lifetime` (the session store): `files`/`bytes` = the store; `records` = its rows; `from`/`to` = its sessions and
+    turns. Drift: `store.missing-table:<t>`, `store.missing-column:<c>`. Skipped: `bad-row`, `no-ts`, `io-error`,
+    `bad-record`. `absent` without a store; `error` (`note: "unreadable"`) when the store is there but cannot be read.
 
 **Install detection** (`install.ts`, names only): a bundled `copilot*` extension — macOS `/Applications/<app>.app/Contents/
 Resources/app/extensions` and `~/Applications/…`, Windows `%LOCALAPPDATA%\Programs\Microsoft VS Code[ Insiders]\resources\
@@ -244,6 +247,8 @@ other type is drift `event:<type>` (dotted lower-case tokens kept, else `(other)
   documentation), so no denial is read from it.
 - SessionEv (`detail`, origin `human`, `surface: "cli"`); session id = the `session-state` folder name (UUID verbatim,
   else hashed). The session store is read as above.
+- **Coverage**, one per window: `detail` = `session-state/*/events.jsonl` (`absent` without `session-state/`),
+  `lifetime` = `session-store.db` (`absent` without it; `error`, `note: "unreadable"`, when it cannot be read).
 
 ## JetBrains (`copilot.jetbrains`, beta)
 
