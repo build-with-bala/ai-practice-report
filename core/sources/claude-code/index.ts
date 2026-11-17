@@ -1,32 +1,14 @@
-import { statSync } from "node:fs";
 import type { Env } from "../../env/env";
-import { joinFor } from "../../env/paths";
+import { configRoots } from "../common/roots";
 import type { Candidate, SourcePlugin } from "../types";
 import { CONFIG_SOURCE, scanConfig } from "./config";
 import { HISTORY_SOURCE, scanHistory } from "./history";
 import { scanStats, STATS_SOURCE } from "./stats";
 import { scanTranscripts, TRANSCRIPTS_SOURCE } from "./transcripts";
 
-function isDir(p: string): boolean {
-  try {
-    return statSync(p).isDirectory(); // follows a symlinked config dir
-  } catch {
-    return false;
-  }
-}
-
 /** Claude Code config roots: `$CLAUDE_CONFIG_DIR` for the scanning user's home, else `<home>/.claude` (also per WSL home). */
 export function claudeRoots(env: Env, homes: string[]): Candidate[] {
-  const out: Candidate[] = [];
-  const seen = new Set<string>();
-  for (const home of homes) {
-    const primary = home === env.home;
-    const root = primary && env.vars.CLAUDE_CONFIG_DIR ? env.vars.CLAUDE_CONFIG_DIR : joinFor(env, home, ".claude");
-    if (seen.has(root) || !isDir(root)) continue;
-    seen.add(root);
-    out.push({ root, home, wsl: !primary });
-  }
-  return out;
+  return configRoots(env, homes, "CLAUDE_CONFIG_DIR", ".claude");
 }
 
 export const ccTranscripts: SourcePlugin = {

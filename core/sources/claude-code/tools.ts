@@ -1,5 +1,6 @@
 import type { CheckKind, ToolCategory } from "../../model/ids";
 import { classifyCommand } from "../../text/commands";
+import { extOfPath, isObj } from "../common/guards";
 
 /** Built-in Claude Code tools with a fixed category (shell tools and MCP tools are classified separately). */
 const FIXED = new Map<string, ToolCategory>([
@@ -20,9 +21,6 @@ const FIXED = new Map<string, ToolCategory>([
 const SHELL = new Set(["Bash", "PowerShell"]);
 const MCP = /^mcp__(.+?)__(.+)$/;
 
-type Obj = Record<string, unknown>;
-const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
-
 /** Server part of an `mcp__<server>__<tool>` name; undefined for any other tool. */
 export function mcpServerOf(name: string): string | undefined {
   return MCP.exec(name)?.[1];
@@ -32,12 +30,7 @@ export function mcpServerOf(name: string): string | undefined {
 function extOf(input: unknown): string | undefined {
   if (!isObj(input)) return undefined;
   const p = typeof input.file_path === "string" ? input.file_path : typeof input.notebook_path === "string" ? input.notebook_path : undefined;
-  if (p === undefined) return undefined;
-  const base = p.split(/[\\/]/).pop() ?? "";
-  const dot = base.lastIndexOf(".");
-  if (dot <= 0) return undefined;
-  const ext = base.slice(dot + 1).toLowerCase();
-  return /^[a-z0-9]{1,12}$/.test(ext) ? ext : undefined;
+  return p === undefined ? undefined : extOfPath(p);
 }
 
 export function ccToolCategory(name: string, input: unknown): { category: ToolCategory; checks: CheckKind[]; editExt?: string } {

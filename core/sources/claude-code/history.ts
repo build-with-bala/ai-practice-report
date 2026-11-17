@@ -6,8 +6,9 @@ import type { MarkerEv, PromptEv } from "../../model/events";
 import { sid, type MarkerKind } from "../../model/ids";
 import { classifyIntent } from "../../text/intent";
 import { promptFeatures } from "../../text/structure";
+import { Tally } from "../common/coverage";
+import { idPart, isObj, UUID } from "../common/guards";
 import type { Candidate, ScanCtx } from "../types";
-import { idPart, isObj, SESSION_STEM, Tally } from "./transcripts";
 
 export const HISTORY_SOURCE = "claude-code.history";
 const TOOL = "claude-code";
@@ -68,7 +69,7 @@ class HistoryReader {
     const ts = toEpochMs(v.timestamp, this.ctx.now);
     if (ts === undefined) return this.tally.skip("bad-ts");
     if (text.trim() === "") return this.tally.skip("empty");
-    const sessionId = typeof v.sessionId === "string" && v.sessionId !== "" ? sid(TOOL, idPart(v.sessionId, SESSION_STEM, this.ctx)) : undefined;
+    const sessionId = typeof v.sessionId === "string" && v.sessionId !== "" ? sid(TOOL, idPart(v.sessionId, UUID, this.ctx)) : undefined;
     const hasPaste = isObj(v.pastedContents) && Object.keys(v.pastedContents).length > 0;
 
     const key = sessionId ?? "";
@@ -108,7 +109,7 @@ class HistoryReader {
 
 /** Scan `<root>/history.jsonl` (every prompt typed at the CLI prompt, kept for months); emits one CoverageEv, last. */
 export async function scanHistory(c: Candidate, ctx: ScanCtx): Promise<void> {
-  const tally = new Tally(HISTORY_SOURCE, "lifetime");
+  const tally = new Tally(TOOL, HISTORY_SOURCE, "lifetime");
   const reader = new HistoryReader(ctx, tally);
   const file = path.join(c.root, "history.jsonl");
   const st = safeStat(file);

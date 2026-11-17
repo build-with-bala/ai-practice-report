@@ -1,7 +1,5 @@
 import type { Origin } from "../../model/ids";
-
-type Obj = Record<string, unknown>;
-const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
+import { isObj, type Obj } from "../common/guards";
 
 const INTERRUPT = "[Request interrupted";
 /** Wrappers the CLI puts around command output it records as user messages: output, never input. */

@@ -1,12 +1,14 @@
 import { readdirSync, type Stats } from "node:fs";
 import path from "node:path";
-import { readJsonSmall, readJsonSmallResult, safeStat } from "../../io/fs";
+import { readJsonSmall, safeStat } from "../../io/fs";
 import { readJsonl } from "../../io/jsonl";
 import { toEpochMs } from "../../io/time";
-import type { CoverageEv, Ev, FileFactEv, MarkerEv, SessionEv, ToolEv, TotalsEv, TurnEv } from "../../model/events";
-import { sid, type MarkerKind, type Window } from "../../model/ids";
+import type { Ev, FileFactEv, MarkerEv, SessionEv, ToolEv, TotalsEv, TurnEv } from "../../model/events";
+import { sid, type MarkerKind } from "../../model/ids";
 import { classifyIntent } from "../../text/intent";
 import { promptFeatures } from "../../text/structure";
+import { listDir, readSidecar, Tally } from "../common/coverage";
+import { idPart, isObj, num, safeModel, str, UUID, VERSION, type Obj } from "../common/guards";
 import type { Candidate, ScanCtx } from "../types";
 import { ccPromptOrigin, isInterrupt, typedText, unknownProvenance, userText } from "./origin";
 import { ccToolCategory, mcpServerOf, patchLines } from "./tools";
@@ -37,7 +39,6 @@ export const sniffHeavy = (head: string): boolean => HEAVY.some((s) => head.incl
 const SYNTHETIC_MODEL = "<synthetic>";
 const TASK_GAP_MS = 30 * 60_000;
 const DEFAULT_RETENTION_DAYS = 30;
-const SIDECAR_MAX = 8 * 1024 * 1024;
 /** Bounded per-file state: API messages awaiting more block records, tool uses awaiting results, finished tool ids. */
 const MESSAGE_WINDOW = 256;
 const PENDING_TOOLS = 4096;
@@ -48,74 +49,23 @@ const BUILTIN_AGENTS = new Set([
   "general-purpose", "Explore", "Plan", "claude", "fork", "statusline-setup", "output-style-setup", "claude-code-guide",
   "comment-thread-analyst", "workflow-subagent",
 ]);
-const TYPE_NAME = /^[a-z][a-z0-9_-]{0,47}$/;
-const VERSION = /^\d{1,4}\.\d{1,4}\.\d{1,6}(?:[-+][0-9A-Za-z.-]{1,32})?$/;
 const SURFACE = /^[a-z][a-z0-9-]{0,31}$/;
 const TOOL_NAME = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
-const MODEL = /^[A-Za-z0-9][A-Za-z0-9.:_[\]-]{0,63}$/;
 const EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
-/** Names the CLI gives its files and folders; any other name is hashed before it becomes part of a session id. */
-export const SESSION_STEM = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+/** Names the CLI gives its files and folders (sessions are UUID-named); any other name is hashed before it becomes part of an id. */
 const AGENT_STEM = /^agent-[A-Za-z0-9]+$/;
 const WORKFLOW_DIR = /^wf_[A-Za-z0-9_-]+$/;
 
-export type Obj = Record<string, unknown>;
-export const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
-export const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
-const str = (v: unknown): string | undefined => (typeof v === "string" && v !== "" ? v : undefined);
-export const safeModel = (m: string): string => (MODEL.test(m) ? m : "other");
 const safeEffort = (e: string | undefined): string | undefined => (e === undefined || EFFORTS.has(e) ? e : "other");
-export const idPart = (name: string, shape: RegExp, ctx: ScanCtx): string => (shape.test(name) ? name : ctx.hash(name));
 
-/** Coverage counters for one candidate of one Claude Code source (the transcripts reader's by default). */
-export class Tally {
-  files = 0;
-  bytes = 0;
-  records = 0;
-  /** Diagnostics, reported through ctx.log: heavy lines the sniff missed; top-level files holding another session's records. */
+/** Coverage counters of the transcripts reader, with its two diagnostics. */
+export class CcTally extends Tally {
+  /** Reported through ctx.log: heavy lines the sniff missed; top-level files holding another session's records. */
   heavyParsed = 0;
   foreignSessionFiles = 0;
-  readonly skipped: Record<string, number> = {};
-  readonly unknownTypes: Record<string, number> = {};
-  readonly versions = new Set<string>();
-  from?: number;
-  to?: number;
-  note?: string;
 
-  constructor(readonly source: string = TRANSCRIPTS_SOURCE, readonly window: Window = "detail") {}
-
-  skip(reason: string): void {
-    this.skipped[reason] = (this.skipped[reason] ?? 0) + 1;
-  }
-
-  /** Unknown record types keep their name only when it looks like a schema token. */
-  unknown(type: unknown): void {
-    this.unknownKey(typeof type !== "string" ? "(none)" : TYPE_NAME.test(type) ? type : "(other)");
-  }
-
-  /** A pre-shaped drift key (e.g. `turnOrigin:<value>` from `unknownProvenance`). */
-  unknownKey(key: string): void {
-    this.unknownTypes[key] = (this.unknownTypes[key] ?? 0) + 1;
-  }
-
-  span(ts: number): void {
-    if (this.from === undefined || ts < this.from) this.from = ts;
-    if (this.to === undefined || ts > this.to) this.to = ts;
-  }
-
-  coverage(retentionDays?: number): CoverageEv {
-    const drift = Object.keys(this.unknownTypes).length > 0;
-    const ev: CoverageEv = {
-      k: "coverage", tool: TOOL, source: this.source, window: this.window,
-      status: drift ? "drift" : this.records === 0 ? "empty" : "ok", beta: false,
-      files: this.files, bytes: this.bytes, records: this.records, skipped: this.skipped, unknownTypes: this.unknownTypes,
-      versions: [...this.versions].sort((a, b) => a.localeCompare(b, "en", { numeric: true })),
-    };
-    if (retentionDays !== undefined) ev.retentionDays = retentionDays;
-    if (this.from !== undefined) ev.from = this.from;
-    if (this.to !== undefined) ev.to = this.to;
-    if (this.note !== undefined) ev.note = this.note;
-    return ev;
+  constructor() {
+    super(TOOL, TRANSCRIPTS_SOURCE, "detail");
   }
 }
 
@@ -126,36 +76,6 @@ interface Meta { agentType?: string; isBuiltIn?: boolean; spawnDepth?: number; m
 interface FileSpec { file: string; sessionId: string; sub: boolean; stem?: string; parentId?: string; meta?: Meta; workflowId?: string }
 
 interface PendingUsage { ts: number; model: string; inTok: number; outTok: number; cacheR: number; cacheW: number; seen: boolean }
-
-/** Sorted entry names of a folder; a missing folder is empty, any other failure counts as io-error. */
-export function listDir(dir: string, tally: Tally): string[] {
-  try {
-    return readdirSync(dir).sort();
-  } catch (e) {
-    const code = (e as { code?: string }).code;
-    if (code !== "ENOENT" && code !== "ENOTDIR") tally.skip("io-error");
-    return [];
-  }
-}
-
-/**
- * A small JSON object file (agent meta, workflow summary, settings, caches), counted toward coverage when it parses;
- * failures are counted by kind, while a missing path or a non-regular file is simply absent.
- */
-export function readSidecar(file: string, tally: Tally): Obj | undefined {
-  const r = readJsonSmallResult(file, SIDECAR_MAX);
-  if (!r.ok) {
-    if (r.reason !== "missing" && r.reason !== "not-file") tally.skip(r.reason);
-    return undefined;
-  }
-  if (!isObj(r.value)) {
-    tally.skip("parse");
-    return undefined;
-  }
-  tally.files++;
-  tally.bytes += safeStat(file)?.size ?? 0;
-  return r.value;
-}
 
 function readMeta(file: string, tally: Tally): Meta | undefined {
   const v = readSidecar(file, tally);
@@ -199,7 +119,7 @@ class TranscriptReader {
   constructor(
     private readonly spec: FileSpec,
     private readonly ctx: ScanCtx,
-    private readonly tally: Tally,
+    private readonly tally: CcTally,
     private readonly delegations: ReadonlyMap<string, string>,
   ) {}
 
@@ -508,7 +428,7 @@ class TranscriptReader {
   }
 }
 
-async function scanFile(spec: FileSpec, ctx: ScanCtx, tally: Tally, delegations: ReadonlyMap<string, string>): Promise<void> {
+async function scanFile(spec: FileSpec, ctx: ScanCtx, tally: CcTally, delegations: ReadonlyMap<string, string>): Promise<void> {
   const st = safeStat(spec.file);
   if (!st?.isFile()) return;
   const reader = new TranscriptReader(spec, ctx, tally, delegations);
@@ -546,8 +466,8 @@ const agentFiles = (dir: string, tally: Tally): string[] =>
  * One session: its top-level transcript, every subagent and workflow-agent transcript, and its workflow summaries.
  * Ids: `claude-code:<session>`, `…/<agent>` and `…/<wf_run>/<agent>`, each part verbatim only when CLI-shaped, else hashed.
  */
-async function scanSession(projDir: string, stem: string, ctx: ScanCtx, tally: Tally): Promise<void> {
-  const session = idPart(stem, SESSION_STEM, ctx);
+async function scanSession(projDir: string, stem: string, ctx: ScanCtx, tally: CcTally): Promise<void> {
+  const session = idPart(stem, UUID, ctx);
   const parentId = sid(TOOL, session);
   const dir = path.join(projDir, stem);
   const subDir = path.join(dir, "subagents");
@@ -597,7 +517,7 @@ function retentionDays(root: string): number {
 
 /** Scan one Claude Code root (`$CLAUDE_CONFIG_DIR` or `~/.claude`); emits exactly one CoverageEv, last. */
 export async function scanTranscripts(c: Candidate, ctx: ScanCtx): Promise<void> {
-  const tally = new Tally();
+  const tally = new CcTally();
   const projects = path.join(c.root, "projects");
   let names: string[] = [];
   try {

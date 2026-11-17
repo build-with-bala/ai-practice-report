@@ -1,7 +1,8 @@
 import path from "node:path";
 import type { DailyEv } from "../../model/events";
+import { readSidecar, Tally } from "../common/coverage";
+import { isObj, num, safeModel, type Obj } from "../common/guards";
 import type { Candidate, ScanCtx } from "../types";
-import { isObj, num, readSidecar, safeModel, Tally, type Obj } from "./transcripts";
 
 export const STATS_SOURCE = "claude-code.stats";
 const TOOL = "claude-code";
@@ -46,7 +47,7 @@ function tokensByDay(v: Obj, tally: Tally): Map<string, Map<string, number>> {
 
 /** Scan `<root>/stats-cache.json` (the CLI's per-day aggregates behind /stats); emits one CoverageEv, last. */
 export async function scanStats(c: Candidate, ctx: ScanCtx): Promise<void> {
-  const tally = new Tally(STATS_SOURCE, "lifetime");
+  const tally = new Tally(TOOL, STATS_SOURCE, "lifetime");
   const v = readSidecar(path.join(c.root, "stats-cache.json"), tally);
   if (v) {
     if (typeof v.version !== "number") tally.unknownKey("version:missing");

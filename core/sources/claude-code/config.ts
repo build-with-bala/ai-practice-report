@@ -5,8 +5,9 @@ import { readJsonSmallResult, safeStat } from "../../io/fs";
 import { toEpochMs } from "../../io/time";
 import type { ConfigEv, IdentityEv, MarkerEv } from "../../model/events";
 import { classifyCommand } from "../../text/commands";
+import { listDir, readSidecar, Tally } from "../common/coverage";
+import { isObj, num, type Obj } from "../common/guards";
 import type { Candidate, ScanCtx } from "../types";
-import { isObj, listDir, num, readSidecar, Tally, type Obj } from "./transcripts";
 
 export const CONFIG_SOURCE = "claude-code.config";
 const TOOL = "claude-code";
@@ -212,7 +213,7 @@ function memoryFiles(root: string, tally: Tally, out: Out): void {
 
 /** Configuration measured by use: global config usage tables, hooks, skills, commands, agents, plugins, MCP servers, memory. */
 export async function scanConfig(c: Candidate, ctx: ScanCtx): Promise<void> {
-  const tally = new Tally(CONFIG_SOURCE, "lifetime");
+  const tally = new Tally(TOOL, CONFIG_SOURCE, "lifetime");
   const out: Out = (ev) => {
     tally.records++;
     if (ev.k === "marker") tally.span(ev.ts);
