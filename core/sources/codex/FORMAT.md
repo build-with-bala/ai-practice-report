@@ -383,8 +383,9 @@ The SQL names only the columns below, validated against `pragma_table_info` firs
 - **Ids**: `codex:<thread id>`, the id verbatim when UUID-shaped, else its keyed hash — the same form as the rollouts'
   session ids and `RolloutFactEv.threadId`, so index rows and rollouts join and their sessions merge in the store:
   start = earliest, end = latest, models = the sorted union, a non-human origin wins (subagent > peer > scripted >
-  scheduled > system > human), window `detail` when the rollout's session is one; other fields keep the first value
-  that arrived.
+  scheduled > system > human), window `detail` when the rollout's session is one; every other field (`source`,
+  `version`, `surface`, `projectKey`, `inRepo`, `parentId`, …) takes the rollout's value when it has one, else the index
+  row's (`approval`, `sandbox`, `effort`) — whichever arrives first.
 - **ThreadRowEv** per `threads` row: `threadId`, `createdAt` = `created_at_ms`, else `created_at`.
 - **TotalsEv** per `threads` row with a `tokens_used` count (≥ 0, zero included): `sessionId`, `tokens` = the CLI's
   running token total for the thread — the only token figure for threads whose rollout is gone. Where a rollout
@@ -472,7 +473,7 @@ such as `.env`, `.tools.<tool>`), `[model_providers.<id>]`, and more.
   each turn's).
   Older rows have no `originator`: a rollout of the same thread driven by Claude Code says `peer` where the index says
   `human`; the merged session is `peer` (a non-human origin wins), but an index-only thread of that kind stays `human`.
-  Merged fields other than origin, window, times and models keep the first value that arrived.
+  Merged fields other than origin, window, times and models take the rollout's value when it has one, else the index row's.
 - Turns exist only for paginated threads; unfinished turns (`inProgress`) are not counted.
 - Profiles, MCP servers or plugins defined without a header (dotted keys such as `profiles.x.model = …`, inline tables
   under `[profiles]`) are not counted.

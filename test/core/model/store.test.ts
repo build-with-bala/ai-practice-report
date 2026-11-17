@@ -89,9 +89,57 @@ describe("EventStore", () => {
     const ab = merged(rollout, indexRow);
     const ba = merged(indexRow, rollout);
     expect(ab).toMatchObject({ origin: "peer", window: "detail", start: 50, end: 300, models: ["m"], surface: "cli", inRepo: true, projectKey: "p", approval: "never", sandbox: "managed", version: "0.169.0" });
-    // every other field keeps the first defined value: here only `source` (the reader that arrived first) differs
-    expect([ab.source, ba.source]).toEqual(["codex.rollouts", "codex.threads"]);
-    expect({ ...ba, source: ab.source }).toEqual(ab);
+    expect(ab.source).toBe("codex.rollouts"); // the detail-window reader's, whichever arrived first
+    expect(ba).toEqual(ab);
+  });
+
+  const FIELDS = ["source", "version", "surface", "mode", "inRepo", "projectKey", "parentId", "approval", "effort", "sandbox", "agentType", "spawnDepth"] as const;
+  const detailRow = sess({ source: "x.detail", window: "detail", version: "2.0.0", surface: "cli", mode: "agent", inRepo: true, projectKey: "pd", parentId: "codex:pd", approval: "never", effort: "high", sandbox: "read-only", agentType: "explorer", spawnDepth: 2 });
+  const lifetimeRow = sess({ source: "a.lifetime", window: "lifetime", version: "1.0.0", surface: "vscode", mode: "chat", inRepo: false, projectKey: "pl", parentId: "codex:pl", approval: "on-request", effort: "low", sandbox: "workspace-write", agentType: "default", spawnDepth: 1 });
+
+  test("the detail-window report decides every other field, in either order, though its source sorts later", () => {
+    for (const m of [merged(detailRow, lifetimeRow), merged(lifetimeRow, detailRow)]) {
+      for (const f of FIELDS) expect([f, m[f]]).toEqual([f, detailRow[f]]);
+    }
+  });
+
+  test("a field the detail report lacks comes from the lifetime report", () => {
+    const bare = sess({ source: "x.detail", window: "detail" });
+    for (const m of [merged(bare, lifetimeRow), merged(lifetimeRow, bare)]) {
+      for (const f of FIELDS.filter((x) => x !== "source")) expect([f, m[f]]).toEqual([f, lifetimeRow[f]]);
+      expect(m.source).toBe("x.detail");
+    }
+  });
+
+  test("two reports of one window: the source that sorts first decides; two of one source: the smaller value, whatever the order", () => {
+    const a = sess({ source: "a.src", window: "lifetime", surface: "zeta", version: "2.0.0" });
+    const b = sess({ source: "b.src", window: "lifetime", surface: "alpha", version: "1.0.0", effort: "max" });
+    for (const m of [merged(a, b), merged(b, a)]) expect(m).toMatchObject({ source: "a.src", surface: "zeta", version: "2.0.0", effort: "max" });
+    const c = sess({ source: "s", surface: "zeta", inRepo: true, spawnDepth: 3 });
+    const d = sess({ source: "s", surface: "alpha", inRepo: false, spawnDepth: 1 });
+    for (const m of [merged(c, d), merged(d, c)]) expect(m).toMatchObject({ surface: "alpha", inRepo: false, spawnDepth: 1 });
+  });
+
+  test("three reports merge to the same session in every arrival order", () => {
+    const x = sess({ source: "c.rollouts", window: "detail", origin: "human", start: 20, end: 30, models: ["b"], surface: "cli" });
+    const y = sess({ source: "c.threads", window: "lifetime", origin: "scripted", start: 10, end: 40, models: ["a"], approval: "never", surface: "exec" });
+    const z = sess({ source: "c.other", window: "lifetime", origin: "human", start: 15, end: 25, models: [], version: "1.2.3", surface: "vscode" });
+    const orders = [[x, y, z], [x, z, y], [y, x, z], [y, z, x], [z, x, y], [z, y, x]];
+    const results = orders.map((o) => merged(...o));
+    for (const m of results) expect(m).toEqual(results[0]!);
+    expect(results[0]).toMatchObject({ source: "c.rollouts", window: "detail", origin: "scripted", start: 10, end: 40, models: ["a", "b"], surface: "cli", approval: "never", version: "1.2.3" });
+  });
+
+  test("a merge replaces the session in place: the session list keeps one entry per id, in first-arrival order", () => {
+    const s = new EventStore();
+    s.add(sess({ id: "a" }));
+    s.add(sess({ id: "b" }));
+    s.add(sess({ id: "a", source: "z", window: "lifetime", version: "1" }));
+    s.add(sess({ id: "c" }));
+    s.add(sess({ id: "b", start: 1 }));
+    expect(s.all("session").map((x) => x.id)).toEqual(["a", "b", "c"]);
+    expect(s.all("session")[0]).toBe(s.session("a")!);
+    expect(s.all("session")[1]!.start).toBe(1);
   });
 
   test("count only lists non-empty kinds", () => {

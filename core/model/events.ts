@@ -8,7 +8,8 @@ interface Base { tool: ToolId; source: string }   // source = plugin id
 export interface SessionEv extends Base { k: "session"; id: string; window: Window; origin: Origin; start: number; end: number; models: string[];
   parentId?: string; projectKey?: string; surface?: string; version?: string; spawnDepth?: number; agentType?: string;
   background?: boolean; workflowId?: string; inRepo?: boolean; approval?: string; sandbox?: string;
-  effort?: string }   // the session's reasoning effort level, when the tool records one per session (shape-guarded)
+  effort?: string;    // the session's reasoning effort level, when the tool records one per session (shape-guarded)
+  mode?: "agent" | "chat" }   // the interaction mode, for tools whose sessions are either an agent run or a chat
 export interface PromptEv extends Base { k: "prompt"; ts: number; sessionId?: string; window: Window; origin: Origin; intent: Intent;
   features: PromptFeatures; textHash: string; hasPaste?: boolean }
 export interface ToolEv extends Base { k: "tool"; ts: number; sessionId: string; callId?: string; name: string; category: ToolCategory;
