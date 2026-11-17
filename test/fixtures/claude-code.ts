@@ -284,3 +284,136 @@ export function buildCcTranscripts(h: FakeHome): CcFixture {
     ],
   };
 }
+
+// ---- Task 10: lifetime layer (history.jsonl, stats-cache.json) and configuration ----
+
+/** Epoch ms of a wall-clock time in Pacific/Auckland while New Zealand daylight time (UTC+13) is in force. */
+export const nzdt = (day: string, hhmm: string): number => Date.parse(`${day}T${hhmm}:00+13:00`);
+
+export const CC_H1 = ccSid("H1");
+export const CC_H2 = ccSid("H2");
+
+/** One history.jsonl line as the CLI writes it (`project` is the working directory; `sessionId` is absent on older lines). */
+export function ccHistoryLine(display: string, timestamp: unknown, sessionId?: string, pastedContents: Record<string, unknown> = {}): Record<string, unknown> {
+  return { display, pastedContents, timestamp, project: CANARY.path, ...(sessionId !== undefined && { sessionId }) };
+}
+
+export interface CcLifetimeFixture {
+  /** Timestamps of the history lines, in file order. */
+  historyTs: number[];
+  /** Prompts per day as Pacific/Auckland counts them, and as UTC would (the two must differ for the test to mean anything). */
+  aucklandDays: [string, number][];
+  utcDays: [string, number][];
+  statsDays: string[];
+  firstStart: number;
+  lastPlanModeUse: number;
+  skillLastUsed: number;
+  /** Home-relative path of the global config file. */
+  configFile: string;
+}
+
+/**
+ * Task 10 scenario. history.jsonl: 8 prompts over two Auckland days (one session per day plus one line without a
+ * sessionId), including `/model opus`, `/effort high`, `/clear` and one prompt with pasted content (CANARY.code).
+ * stats-cache.json: 3 dailyActivity days, tokens for two of them. ~/.claude.json: account (CANARY.email), a global MCP
+ * server whose definition holds CANARY.secret, a project MCP server (CANARY.host, CANARY.token) under a project keyed
+ * by CANARY.path, skill and plugin usage. settings.json: a `bun test` PostToolUse hook and a Stop hook whose command
+ * holds canaries. Two skill folders (one in ~/.agents/.skill-lock.json), a command, an agent, an installed plugin and
+ * two memory files whose contents are canaries.
+ */
+export function buildCcLifetime(h: FakeHome): CcLifetimeFixture {
+  const history = [
+    ccHistoryLine(`Refactor the importer to stream its input. ${CANARY.prompt}`, nzdt("2026-01-14", "09:00"), CC_H1),
+    ccHistoryLine("/model opus", nzdt("2026-01-14", "09:05"), CC_H1),
+    ccHistoryLine("/effort high", nzdt("2026-01-14", "09:10"), CC_H1),
+    ccHistoryLine("Fix the failing test, trace below [Pasted text #1 +3 lines]", nzdt("2026-01-14", "09:20"), CC_H1,
+      { 1: { id: 1, type: "text", content: CANARY.code } }),
+    ccHistoryLine("/clear", nzdt("2026-01-14", "23:30"), CC_H1),
+    ccHistoryLine("Add pagination to the list endpoint", nzdt("2026-01-15", "00:30"), CC_H2),
+    ccHistoryLine("Why does the last page repeat?", nzdt("2026-01-15", "00:40"), CC_H2),
+    ccHistoryLine("ok ship it", nzdt("2026-01-15", "01:00")),
+  ];
+  h.writeJsonl(".claude/history.jsonl", history);
+
+  h.writeJson(".claude/stats-cache.json", {
+    version: 5, lastComputedDate: "2026-01-16",
+    dailyActivity: [
+      { date: "2026-01-13", messageCount: 120, sessionCount: 2, toolCallCount: 40 },
+      { date: "2026-01-14", messageCount: 80, sessionCount: 1, toolCallCount: 25 },
+      { date: "2026-01-16", messageCount: 10, sessionCount: 1, toolCallCount: 0 },
+    ],
+    dailyModelTokens: [
+      { date: "2026-01-13", tokensByModel: { [CC_OPUS]: 50_000, [CC_HAIKU]: 4_000 } },
+      { date: "2026-01-14", tokensByModel: { [CC_OPUS]: 20_000 } },
+    ],
+    dailyModelTokensVersion: 5,
+    modelUsage: { [CC_OPUS]: { inputTokens: 1, outputTokens: 1, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, webSearchRequests: 0, costUSD: 1.2, contextWindow: 200_000, maxOutputTokens: 32_000 } },
+    totalSessions: 4, totalMessages: 210,
+    longestSession: { sessionId: CANARY.project, duration: 3_600_000, messageCount: 90, timestamp: "2026-01-13T20:00:00.000Z" },
+    firstSessionDate: "2025-12-01T08:00:00.000Z",
+    hourCounts: { 9: 2, 23: 1 },
+  });
+
+  const firstStart = Date.parse("2025-12-01T08:00:00.000Z");
+  const lastPlanModeUse = nzdt("2026-01-14", "10:00");
+  const skillLastUsed = nzdt("2026-01-14", "09:30");
+  const configFile = ".claude.json";
+  h.writeJson(configFile, {
+    numStartups: 42, installMethod: "native", autoUpdates: true, userID: "f".repeat(64),
+    firstStartTime: new Date(firstStart).toISOString(),
+    promptQueueUseCount: 7,
+    lastPlanModeUse,
+    oauthAccount: { accountUuid: "uuid-1", emailAddress: CANARY.email, organizationUuid: "org-1", displayName: CANARY.project },
+    mcpServers: { [CANARY.mcp]: { type: "stdio", command: "x", args: [CANARY.path], env: { API_KEY: CANARY.secret } } },
+    skillUsage: {
+      "demo:skill": { usageCount: 3, lastUsedAt: skillLastUsed },
+      "my-skill": { usageCount: 2, lastUsedAt: skillLastUsed - 60_000 },
+    },
+    pluginUsage: { "demo@market": { usageCount: 5, lastUsedAt: skillLastUsed, lastUsedNumStartups: 40 } },
+    projects: {
+      [CANARY.path]: { allowedTools: [], mcpServers: {}, history: [{ display: CANARY.prompt, pastedContents: {} }], lastSessionId: CC_H1 },
+      "/work/projB": { mcpServers: { "docs-mcp": { type: "http", url: `https://${CANARY.host}/mcp`, headers: { Authorization: `Bearer ${CANARY.token}` } } } },
+    },
+  });
+
+  h.writeJson(".claude/settings.json", {
+    cleanupPeriodDays: 30,
+    env: { API_TOKEN: CANARY.token },
+    permissions: { allow: [`Bash(cat ${CANARY.path}/*)`] },
+    hooks: {
+      PostToolUse: [{ matcher: "Edit|Write", hooks: [{ type: "command", command: "bun test", timeout: 60 }] }],
+      Stop: [{ hooks: [{ type: "command", command: `curl -s https://${CANARY.host}/notify -H "x-key: ${CANARY.secret}"` }] }],
+    },
+  });
+
+  h.write(".claude/skills/lock-skill/SKILL.md", `---\nname: lock-skill\ndescription: ${CANARY.prompt}\n---\n`);
+  h.write(".claude/skills/my-skill/SKILL.md", `---\nname: my-skill\n---\n${CANARY.code}\n`);
+  h.writeJson(".agents/.skill-lock.json", {
+    version: 3,
+    skills: {
+      "lock-skill": {
+        source: "acme/skills", sourceType: "github", sourceUrl: `https://${CANARY.host}/skills.git`, skillPath: "skills/lock-skill/SKILL.md",
+        skillFolderHash: "0a1b2c", installedAt: iso(firstStart), updatedAt: iso(firstStart), pluginName: "skills",
+      },
+    },
+    dismissed: { findSkillsPrompt: true },
+    lastSelectedAgents: ["claude-code"],
+  });
+  h.write(".claude/commands/review-pr.md", `Review the pull request. ${CANARY.prompt}`);
+  h.write(".claude/agents/reviewer.md", `---\nname: reviewer\n---\n${CANARY.prompt}`);
+  h.writeJson(".claude/plugins/installed_plugins.json", {
+    version: 2,
+    plugins: { "demo@market": [{ scope: "user", installPath: `${CANARY.path}/plugins/demo`, version: "1.0.0", installedAt: iso(firstStart), lastUpdated: iso(firstStart), gitCommitSha: "abc123" }] },
+  });
+  const memory = `.claude/projects/${slug(CANARY.path)}/memory`;
+  h.write(`${memory}/MEMORY.md`, `- [Role](user_role.md) — ${CANARY.prompt}`);
+  h.write(`${memory}/user_role.md`, `${CANARY.email} ${CANARY.prompt}`);
+
+  return {
+    historyTs: history.map((l) => l.timestamp as number),
+    aucklandDays: [["2026-01-14", 5], ["2026-01-15", 3]],
+    utcDays: [["2026-01-13", 4], ["2026-01-14", 4]],
+    statsDays: ["2026-01-13", "2026-01-14", "2026-01-16"],
+    firstStart, lastPlanModeUse, skillLastUsed, configFile,
+  };
+}

@@ -4,7 +4,7 @@ import { readJsonSmall, readJsonSmallResult, safeStat } from "../../io/fs";
 import { readJsonl } from "../../io/jsonl";
 import { toEpochMs } from "../../io/time";
 import type { CoverageEv, Ev, FileFactEv, MarkerEv, SessionEv, ToolEv, TotalsEv, TurnEv } from "../../model/events";
-import { sid, type MarkerKind } from "../../model/ids";
+import { sid, type MarkerKind, type Window } from "../../model/ids";
 import { classifyIntent } from "../../text/intent";
 import { promptFeatures } from "../../text/structure";
 import type { Candidate, ScanCtx } from "../types";
@@ -55,20 +55,20 @@ const TOOL_NAME = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
 const MODEL = /^[A-Za-z0-9][A-Za-z0-9.:_[\]-]{0,63}$/;
 const EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
 /** Names the CLI gives its files and folders; any other name is hashed before it becomes part of a session id. */
-const SESSION_STEM = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+export const SESSION_STEM = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 const AGENT_STEM = /^agent-[A-Za-z0-9]+$/;
 const WORKFLOW_DIR = /^wf_[A-Za-z0-9_-]+$/;
 
-type Obj = Record<string, unknown>;
-const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
-const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
+export type Obj = Record<string, unknown>;
+export const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
+export const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
 const str = (v: unknown): string | undefined => (typeof v === "string" && v !== "" ? v : undefined);
-const safeModel = (m: string): string => (MODEL.test(m) ? m : "other");
+export const safeModel = (m: string): string => (MODEL.test(m) ? m : "other");
 const safeEffort = (e: string | undefined): string | undefined => (e === undefined || EFFORTS.has(e) ? e : "other");
-const idPart = (name: string, shape: RegExp, ctx: ScanCtx): string => (shape.test(name) ? name : ctx.hash(name));
+export const idPart = (name: string, shape: RegExp, ctx: ScanCtx): string => (shape.test(name) ? name : ctx.hash(name));
 
-/** Coverage counters for one candidate. */
-class Tally {
+/** Coverage counters for one candidate of one Claude Code source (the transcripts reader's by default). */
+export class Tally {
   files = 0;
   bytes = 0;
   records = 0;
@@ -80,6 +80,9 @@ class Tally {
   readonly versions = new Set<string>();
   from?: number;
   to?: number;
+  note?: string;
+
+  constructor(readonly source: string = TRANSCRIPTS_SOURCE, readonly window: Window = "detail") {}
 
   skip(reason: string): void {
     this.skipped[reason] = (this.skipped[reason] ?? 0) + 1;
@@ -100,16 +103,18 @@ class Tally {
     if (this.to === undefined || ts > this.to) this.to = ts;
   }
 
-  coverage(retentionDays: number): CoverageEv {
+  coverage(retentionDays?: number): CoverageEv {
     const drift = Object.keys(this.unknownTypes).length > 0;
     const ev: CoverageEv = {
-      k: "coverage", tool: TOOL, source: TRANSCRIPTS_SOURCE, window: "detail",
+      k: "coverage", tool: TOOL, source: this.source, window: this.window,
       status: drift ? "drift" : this.records === 0 ? "empty" : "ok", beta: false,
       files: this.files, bytes: this.bytes, records: this.records, skipped: this.skipped, unknownTypes: this.unknownTypes,
-      versions: [...this.versions].sort((a, b) => a.localeCompare(b, "en", { numeric: true })), retentionDays,
+      versions: [...this.versions].sort((a, b) => a.localeCompare(b, "en", { numeric: true })),
     };
+    if (retentionDays !== undefined) ev.retentionDays = retentionDays;
     if (this.from !== undefined) ev.from = this.from;
     if (this.to !== undefined) ev.to = this.to;
+    if (this.note !== undefined) ev.note = this.note;
     return ev;
   }
 }
@@ -122,7 +127,8 @@ interface FileSpec { file: string; sessionId: string; sub: boolean; stem?: strin
 
 interface PendingUsage { ts: number; model: string; inTok: number; outTok: number; cacheR: number; cacheW: number; seen: boolean }
 
-function listDir(dir: string, tally: Tally): string[] {
+/** Sorted entry names of a folder; a missing folder is empty, any other failure counts as io-error. */
+export function listDir(dir: string, tally: Tally): string[] {
   try {
     return readdirSync(dir).sort();
   } catch (e) {
@@ -132,8 +138,11 @@ function listDir(dir: string, tally: Tally): string[] {
   }
 }
 
-/** A small JSON side file (meta, workflow summary), counted toward coverage when it parses; failures by kind. */
-function readSidecar(file: string, tally: Tally): Obj | undefined {
+/**
+ * A small JSON object file (agent meta, workflow summary, settings, caches), counted toward coverage when it parses;
+ * failures are counted by kind, while a missing path or a non-regular file is simply absent.
+ */
+export function readSidecar(file: string, tally: Tally): Obj | undefined {
   const r = readJsonSmallResult(file, SIDECAR_MAX);
   if (!r.ok) {
     if (r.reason !== "missing" && r.reason !== "not-file") tally.skip(r.reason);
