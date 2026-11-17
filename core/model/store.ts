@@ -7,17 +7,16 @@ type Kind = Ev["k"];
 const ORIGIN_PRECEDENCE: readonly Origin[] = ["subagent", "peer", "scripted", "scheduled", "system", "human"];
 
 /**
- * One session reported by several readers (a rollout and its index row): start = earliest, end = latest, models =
- * union; origin by ORIGIN_PRECEDENCE and window `detail` when either is, so neither depends on arrival order; every
- * other field keeps the first defined value.
+ * One session reported by several readers (a rollout and its index row): start = earliest, end = latest, models = the
+ * sorted union, origin by ORIGIN_PRECEDENCE and window `detail` when either is — none of them depends on arrival
+ * order; every other field keeps the first defined value.
  */
 function mergeSession(a: SessionEv, b: SessionEv): SessionEv {
   const out: Record<string, unknown> = { ...a };
   for (const [key, val] of Object.entries(b)) {
     if (out[key] === undefined) out[key] = val;
   }
-  const models = [...a.models];
-  for (const m of b.models) if (!models.includes(m)) models.push(m);
+  const models = [...new Set([...a.models, ...b.models])].sort();
   const origin = ORIGIN_PRECEDENCE.indexOf(a.origin) <= ORIGIN_PRECEDENCE.indexOf(b.origin) ? a.origin : b.origin;
   const window = a.window === "detail" || b.window === "detail" ? "detail" : a.window;
   return { ...(out as unknown as SessionEv), start: Math.min(a.start, b.start), end: Math.max(a.end, b.end), models, origin, window };

@@ -70,6 +70,14 @@ describe("EventStore", () => {
     expect(merged(sess({ origin: "human" }), sess({ origin: "scripted" }), sess({ origin: "peer" })).origin).toBe("peer");
   });
 
+  test("merged models: the sorted union, whatever the arrival order", () => {
+    const a = sess({ models: ["m2", "m1"] });
+    const b = sess({ models: ["m3", "m1", "m0"] });
+    expect(merged(a, b).models).toEqual(["m0", "m1", "m2", "m3"]);
+    expect(merged(b, a).models).toEqual(["m0", "m1", "m2", "m3"]);
+    expect(merged(sess({ models: [] }), sess({ models: ["z", "a"] })).models).toEqual(["a", "z"]);
+  });
+
   test("merged window: detail when either side is detail", () => {
     const cases: [Window, Window, Window][] = [["detail", "lifetime", "detail"], ["lifetime", "detail", "detail"], ["lifetime", "lifetime", "lifetime"], ["detail", "detail", "detail"]];
     for (const [a, b, want] of cases) expect(merged(sess({ window: a }), sess({ window: b })).window).toBe(want);

@@ -373,7 +373,7 @@ The SQL names only the columns below, validated against `pragma_table_info` firs
   skipped. Tables are read in rowid pages of 5,000 rows (`WHERE rowid > ? ORDER BY rowid LIMIT ?`).
 - **Ids**: `codex:<thread id>`, the id verbatim when UUID-shaped, else its keyed hash — the same form as the rollouts'
   session ids and `RolloutFactEv.threadId`, so index rows and rollouts join and their sessions merge in the store:
-  start = earliest, end = latest, models = union, a non-human origin wins (subagent > peer > scripted > scheduled >
+  start = earliest, end = latest, models = the sorted union, a non-human origin wins (subagent > peer > scripted > scheduled >
   system > human), window `detail` when the rollout's session is one; other fields keep the first value that arrived.
 - **ThreadRowEv** per `threads` row: `threadId`, `createdAt` = `created_at_ms`, else `created_at`.
 - **TotalsEv** per `threads` row with a `tokens_used` count (≥ 0, zero included): `sessionId`, `tokens` = the CLI's
