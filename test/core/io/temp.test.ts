@@ -17,7 +17,7 @@ describe("TempRegistry", () => {
     expect(a).not.toBe(b);
     expect(path.dirname(a)).toBe(base);
     expect(path.basename(a).startsWith("aipr-")).toBe(true);
-    expect(statSync(a).mode & 0o777).toBe(0o700);
+    if (process.platform !== "win32") expect(statSync(a).mode & 0o777).toBe(0o700); // Windows has no POSIX modes
     writeFileSync(path.join(a, "f"), "y");
     expect(reg.active).toBe(2);
     reg.disposeAll();

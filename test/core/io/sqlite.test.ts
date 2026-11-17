@@ -3,20 +3,33 @@ import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { __observeQueries, MAX_COPY_BYTES, openRo, sqliteUri } from "../../../core/io/sqlite";
+import { __observeQueries, MAX_COPY_BYTES, openRo, openUriReadOnly, sqliteUri } from "../../../core/io/sqlite";
 import { TempRegistry } from "../../../core/io/temp";
 
 const root = mkdtempSync(path.join(os.tmpdir(), "sqlite-test-"));
 const uris: string[] = [];
+/** Every handle a test opens, closed after it even when it failed midway: Windows cannot remove a file that is open. */
+const handles: { close(): void }[] = [];
+const kept = <T extends { close(): void } | null>(x: T): T => {
+  if (x) handles.push(x);
+  return x;
+};
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 afterEach(() => {
   __observeQueries(undefined);
   uris.length = 0;
+  for (const x of handles.splice(0)) {
+    try {
+      x.close();
+    } catch {
+      /* already closed */
+    }
+  }
 });
 
 function mk(file: string, wal = true): Database {
   mkdirSync(path.dirname(file), { recursive: true });
-  const w = new Database(file);
+  const w = kept(new Database(file));
   if (wal) w.exec("PRAGMA journal_mode=WAL");
   w.exec("CREATE TABLE t (id INTEGER, name TEXT)");
   w.exec("INSERT INTO t VALUES (1, 'a')");
@@ -41,12 +54,15 @@ function closedWal(...segments: string[]): string {
 /** The default opener, recording each URI it is given. */
 const recording = (into: string[]) => (uri: string) => {
   into.push(uri);
-  return new Database(uri, { readonly: true });
+  return openUriReadOnly(uri);
 };
 
 describe("sqliteUri", () => {
   test("windows drive path", () => {
     expect(sqliteUri("C:\\a b\\x.db")).toBe("file:///C:/a%20b/x.db");
+  });
+  test("windows temp path with a short name: `~` is unreserved and stays, backslashes become slashes", () => {
+    expect(sqliteUri("C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\sqlite-test-x\\a b.db")).toBe("file:///C:/Users/RUNNER~1/AppData/Local/Temp/sqlite-test-x/a%20b.db");
   });
   test("posix escapes", () => {
     expect(sqliteUri("/tmp/a b/ü#?%.db")).toBe("file:/tmp/a%20b/%C3%BC%23%3F%25.db");
@@ -63,7 +79,7 @@ describe("openRo", () => {
     const seen: string[] = [];
     __observeQueries((s) => seen.push(s));
     const t = new TempRegistry(root);
-    const db = openRo(f, t)!;
+    const db = kept(openRo(f, t))!;
     expect(db).not.toBeNull();
     const sql = "select count(*) n from t";
     expect(db.get<{ n: number }>(sql)!.n).toBe(1);
@@ -77,7 +93,7 @@ describe("openRo", () => {
   test("closed WAL store (no -wal): chosen from the header, opened immutable, nothing written beside it, on any build", () => {
     const f = closedWal("closed", "c.db");
     const t = new TempRegistry(root);
-    const db = openRo(f, t, recording(uris))!;
+    const db = kept(openRo(f, t, recording(uris)))!;
     expect(uris).toEqual([`${sqliteUri(f)}?mode=ro&immutable=1`]);
     expect([db.immutable, db.copied]).toEqual([true, false]);
     expect(db.get<{ n: number }>("select count(*) n from t")!.n).toBe(2);
@@ -88,11 +104,11 @@ describe("openRo", () => {
   test("a -wal appearing between the header check and the open: reopened mode=ro", () => {
     const f = closedWal("race", "r.db");
     const ro = `${sqliteUri(f)}?mode=ro`;
-    const db = openRo(f, new TempRegistry(root), (uri) => {
+    const db = kept(openRo(f, new TempRegistry(root), (uri) => {
       uris.push(uri);
       if (uri.endsWith("immutable=1")) writeFileSync(f + "-wal", ""); // a writer starts as the store is opened
-      return new Database(uri, { readonly: true });
-    })!;
+      return openUriReadOnly(uri);
+    }))!;
     expect(uris).toEqual([`${ro}&immutable=1`, ro]);
     expect([db.immutable, db.copied]).toEqual([false, false]);
     expect(db.get<{ n: number }>("select count(*) n from t")!.n).toBe(2);
@@ -101,14 +117,14 @@ describe("openRo", () => {
   test("a WAL store with a live writer, and a rollback-journal store: mode=ro, never immutable", () => {
     const live = path.join(root, "live2", "l.db");
     const w = mk(live);
-    let db = openRo(live, new TempRegistry(root), recording(uris))!;
+    let db = kept(openRo(live, new TempRegistry(root), recording(uris)))!;
     expect([uris, db.immutable]).toEqual([[`${sqliteUri(live)}?mode=ro`], false]);
     db.close();
     w.close();
     const rollback = path.join(root, "rollback", "r.db");
     mk(rollback, false).close();
     uris.length = 0;
-    db = openRo(rollback, new TempRegistry(root), recording(uris))!;
+    db = kept(openRo(rollback, new TempRegistry(root), recording(uris)))!;
     expect([uris, db.immutable]).toEqual([[`${sqliteUri(rollback)}?mode=ro`], false]);
     db.close();
   });
@@ -130,7 +146,7 @@ describe("openRo", () => {
     const empty = path.join(root, "short", "empty.db");
     mkdirSync(path.dirname(empty), { recursive: true });
     writeFileSync(empty, "");
-    const db = openRo(empty, new TempRegistry(root), recording(uris))!;
+    const db = kept(openRo(empty, new TempRegistry(root), recording(uris)))!;
     expect([uris, db.immutable, db.tables()]).toEqual([[`${sqliteUri(empty)}?mode=ro`], false, []]);
     db.close();
     // only bytes 18 and 19 both 2 mean WAL; such a file that is no database fails its immutable open, with no retry
@@ -145,10 +161,10 @@ describe("openRo", () => {
     expect(openRo(half, new TempRegistry(root), recording(uris))).toBeNull();
     expect(uris).toEqual([`${sqliteUri(half)}?mode=ro`]);
   });
-  test("path with spaces, unicode, # and ?", () => {
-    const f = path.join(root, "dir with space", "ünï#?.db");
+  test("path with spaces, unicode, #, % and ? (Windows forbids ? in names)", () => {
+    const f = path.join(root, "dir with space", process.platform === "win32" ? "ünï#%.db" : "ünï#?%.db");
     mk(f).close();
-    const db = openRo(f, new TempRegistry(root))!;
+    const db = kept(openRo(f, new TempRegistry(root)))!;
     expect(db.get<{ n: number }>("select count(*) n from t")!.n).toBe(1);
     db.close();
   });
@@ -157,10 +173,10 @@ describe("openRo", () => {
     const w = mk(f);
     const t = new TempRegistry(root);
     let calls = 0;
-    const db = openRo(f, t, (uri) => {
+    const db = kept(openRo(f, t, (uri) => {
       if (calls++ === 0) throw new Error("SQLITE_BUSY: database is locked");
-      return new Database(uri, { readonly: true });
-    })!;
+      return openUriReadOnly(uri);
+    }))!;
     expect(db.copied).toBe(true);
     expect(db.immutable).toBe(false);
     expect(t.active).toBe(1);
@@ -174,14 +190,14 @@ describe("openRo", () => {
     const f = path.join(root, "busy2", "b.db");
     mk(f, false).close(); // rollback journal: the mode=ro path on every SQLite build
     const t = new TempRegistry(root);
-    const other = openRo(f, t, () => {
+    const other = kept(openRo(f, t, () => {
       throw new Error("file is not a database");
-    });
+    }));
     expect(other).toBeNull();
     expect(t.active).toBe(0);
     let calls = 0;
-    const db = openRo(f, t, (uri) => {
-      const d = new Database(uri, { readonly: true });
+    const db = kept(openRo(f, t, (uri) => {
+      const d = openUriReadOnly(uri);
       if (calls++ === 0) {
         const orig = d.query.bind(d);
         (d as any).query = () => {
@@ -190,7 +206,7 @@ describe("openRo", () => {
         void orig;
       }
       return d;
-    })!;
+    }))!;
     expect(db.copied).toBe(true);
     db.close();
     t.disposeAll();
@@ -198,7 +214,7 @@ describe("openRo", () => {
   test("tables / columns", () => {
     const f = path.join(root, "meta", "m.db");
     mk(f).close();
-    const db = openRo(f, new TempRegistry(root))!;
+    const db = kept(openRo(f, new TempRegistry(root)))!;
     expect(db.tables()).toEqual(["t"]);
     expect(db.columns("t")).toEqual(["id", "name"]);
     db.close();

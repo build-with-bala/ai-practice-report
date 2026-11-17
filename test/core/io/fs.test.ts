@@ -18,14 +18,24 @@ describe("walk", () => {
     writeFileSync(path.join(d, "a", "mid.json"), "{}");
     writeFileSync(path.join(d, "a", "b", "deep.json"), "{}");
     writeFileSync(path.join(d, "a", "b", "c", "deeper.json"), "{}");
-    symlinkSync(d, path.join(d, "a", "loop"));
-    const all = walk(d, { maxDepth: 2, match: (n, isDir) => !isDir && n.endsWith(".json") }).map((p) => path.relative(d, p)).sort();
+    // a link back to the top: a junction on Windows (no privilege needed); where no link can be made, the loop part is skipped
+    let looped = true;
+    try {
+      symlinkSync(d, path.join(d, "a", "loop"), process.platform === "win32" ? "junction" : undefined);
+    } catch (e) {
+      if (process.platform !== "win32") throw e;
+      looped = false;
+    }
+    const rel = (p: string) => path.relative(d, p).split(path.sep).join("/");
+    const all = walk(d, { maxDepth: 2, match: (n, isDir) => !isDir && n.endsWith(".json") }).map(rel).sort();
     expect(all).toEqual(["a/b/deep.json", "a/mid.json", "top.json"]);
-    const d0 = walk(d, { maxDepth: 0, match: () => true }).map((p) => path.relative(d, p)).sort();
+    const d0 = walk(d, { maxDepth: 0, match: () => true }).map(rel).sort();
     expect(d0).toEqual(["a", "top.json"]);
-    const noLoop = walk(d, { maxDepth: 10, match: (n, isDir) => !isDir }).map((p) => path.relative(d, p));
-    expect(noLoop.some((p) => p.includes("loop"))).toBe(true); // the symlink itself is an entry (not a dir), never followed
-    expect(noLoop.length).toBeLessThan(10);
+    if (looped) {
+      const noLoop = walk(d, { maxDepth: 10, match: (n, isDir) => !isDir }).map(rel);
+      expect(noLoop.some((p) => p.includes("loop"))).toBe(true); // the link itself is an entry (not a dir), never followed
+      expect(noLoop.length).toBeLessThan(10);
+    }
   });
   test("missing dir returns []", () => {
     expect(walk(path.join(root, "nope"), { maxDepth: 3, match: () => true })).toEqual([]);

@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { constants, Database } from "bun:sqlite";
 import { closeSync, copyFileSync, existsSync, openSync, readSync, statSync } from "node:fs";
 import path from "node:path";
 import type { TempDirs } from "../sources/types";
@@ -67,7 +67,13 @@ class Handle implements RoDb {
   }
 }
 
-const defaultOpener = (uri: string) => new Database(uri, { readonly: true });
+/**
+ * Opens a `file:` URI read-only. SQLITE_OPEN_URI makes SQLite parse the URI (its `mode`, `immutable` and escapes):
+ * Apple's build (Bun on macOS) does so by default, the build Bun bundles on Linux and Windows only with this flag —
+ * without it the URI is taken for a file name and nothing opens.
+ */
+export const openUriReadOnly = (uri: string): Database => new Database(uri, constants.SQLITE_OPEN_READONLY | constants.SQLITE_OPEN_URI);
+const defaultOpener = openUriReadOnly;
 
 function closeQuietly(db: Database): void {
   try {

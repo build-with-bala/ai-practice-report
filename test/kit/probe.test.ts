@@ -99,9 +99,12 @@ test("fakeHome paths and sqlite wal", () => {
     expect(h.env.appData!.startsWith(h.root)).toBe(true);
     expect(h.env.tmp.startsWith(h.root)).toBe(true);
     const p = h.sqlite("a/b/x.db", ["CREATE TABLE t (a INTEGER, b TEXT)"], { t: [[1, "x"], [2, "y"]] }, true);
-    const d = new Database(p, { readonly: true });
-    expect((d.query("SELECT COUNT(*) AS n FROM t").get() as { n: number }).n).toBe(2);
-    d.close();
+    const d = new Database(p, { readonly: true }); // a plain path, not a URI
+    try {
+      expect((d.query("SELECT COUNT(*) AS n FROM t").get() as { n: number }).n).toBe(2);
+    } finally {
+      d.close(); // before cleanup: Windows cannot remove an open file
+    }
   } finally {
     h.cleanup();
   }
