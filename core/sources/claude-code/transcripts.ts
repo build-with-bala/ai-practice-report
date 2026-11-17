@@ -11,7 +11,7 @@ import { listDir, readSidecar, Tally } from "../common/coverage";
 import { idPart, isObj, num, safeModel, str, UUID, VERSION, type Obj } from "../common/guards";
 import type { Candidate, ScanCtx } from "../types";
 import { ccPromptOrigin, isInterrupt, typedText, unknownProvenance, userText } from "./origin";
-import { ccToolCategory, mcpServerOf, patchLines } from "./tools";
+import { ccToolCategory, mcpServerOf, patchLines, SHELL } from "./tools";
 
 export const TRANSCRIPTS_SOURCE = "claude-code.transcripts";
 const TOOL = "claude-code";
@@ -57,6 +57,27 @@ const AGENT_STEM = /^agent-[A-Za-z0-9]+$/;
 const WORKFLOW_DIR = /^wf_[A-Za-z0-9_-]+$/;
 
 const safeEffort = (e: string | undefined): string | undefined => (e === undefined || EFFORTS.has(e) ? e : "other");
+
+/**
+ * `toolDenialKind` of a tool reply (CLI program): the call did not run to an end of its own. Refusals are denials,
+ * with who refused (`user`, a permission `rule`, the `auto` mode's check); an interrupted or cancelled call is no denial.
+ */
+const DENIALS: ReadonlyMap<string, { outcome: NonNullable<ToolEv["outcome"]>; by?: "user" | "rule" | "auto" }> = new Map([
+  ["user-rejected", { outcome: "denied", by: "user" }], ["permission-rule", { outcome: "denied", by: "rule" }],
+  ["automode-blocked", { outcome: "denied", by: "auto" }], ["automode-unavailable", { outcome: "denied", by: "auto" }],
+  ["automode-parsing-error", { outcome: "denied", by: "auto" }],
+  ["interrupted", { outcome: "interrupted" }], ["cancelled", { outcome: "cancelled" }],
+]);
+/** A failing shell command's reply: `is_error` with content that starts `Exit code <n>`. */
+const EXIT_CODE = /^Exit code (-?\d{1,3})\b/;
+
+/** The text of a tool_result's content: a string, or its first text block. */
+function resultText(content: unknown): string | undefined {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return undefined;
+  const block = content.find((b) => isObj(b) && b.type === "text" && typeof b.text === "string") as Obj | undefined;
+  return block?.text as string | undefined;
+}
 
 /** Coverage counters of the transcripts reader, with its two diagnostics. */
 export class CcTally extends Tally {
@@ -158,7 +179,13 @@ class TranscriptReader {
       this.tally.heavyParsed++;
       return;
     }
-    if (this.spec.stem !== undefined && typeof v.sessionId === "string" && v.sessionId !== this.spec.stem) this.foreignSession = true;
+    // a forked session's transcript starts with copies of the original session's records, which keep its sessionId:
+    // they belong to that session (read from its own file), so here they are skipped
+    if (this.spec.stem !== undefined && typeof v.sessionId === "string" && v.sessionId !== this.spec.stem) {
+      this.foreignSession = true;
+      this.tally.skip("copied");
+      return;
+    }
     const ts = toEpochMs(v.timestamp, this.ctx.now);
     if (ts !== undefined) this.tick(ts);
     const version = str(v.version);
@@ -185,9 +212,8 @@ class TranscriptReader {
     const blocks = Array.isArray(content) ? content.filter(isObj) : [];
     const results = blocks.filter((b) => b.type === "tool_result");
     for (const b of results) this.result(b, v, ts, results.length === 1);
-    if (v.toolDenialKind === "user-rejected") this.marker("denial", ts);
     const texts = typeof content === "string" ? [content] : blocks.flatMap((b) => (b.type === "text" && typeof b.text === "string" ? [b.text] : []));
-    if (texts.some(isInterrupt)) this.marker("interrupt", ts);
+    if (texts.some(isInterrupt)) this.marker("interrupt", ts, "user");
     else if (!this.spec.sub) this.prompt(v, ts);
     if (ts !== undefined) this.lastActivity = ts;
   }
@@ -296,18 +322,35 @@ class TranscriptReader {
     if (this.doneTools.size > DONE_TOOLS) this.doneTools.delete(this.doneTools.values().next().value!);
   }
 
-  /** A tool_result closes its tool use: ok, and — when the record holds exactly one result — exit, duration, patch size. */
+  /**
+   * A tool_result closes its tool use. A call that did not run to an end of its own (`toolDenialKind`, or a shell
+   * command `interrupted`) gets an outcome and no ok or exit; a refusal is also a denial marker. Else ok = not
+   * `is_error`, and a failing shell command's exit code comes from `toolUseResult.exitCode`, else from its reply's
+   * `Exit code <n>`. When the record holds exactly one result: duration, patch size, commit.
+   */
   private result(b: Obj, rec: Obj, ts: number | undefined, single: boolean): void {
     const id = str(b.tool_use_id);
     const ev = id === undefined ? undefined : this.tools.get(id);
     if (id === undefined || !ev) return;
     this.tools.delete(id);
     this.done(id);
-    ev.ok = b.is_error !== true;
     const r = single && isObj(rec.toolUseResult) ? rec.toolUseResult : undefined;
-    if (r) {
-      const exit = num(r.exitCode);
+    const denial = rec.toolDenialKind;
+    if (denial !== undefined && denial !== null) {
+      const d = typeof denial === "string" ? DENIALS.get(denial) : undefined;
+      if (d === undefined) this.tally.unknownKey("toolDenialKind:(other)"); // a new kind: still a call that did not run
+      ev.outcome = d?.outcome ?? "denied";
+      if (ev.outcome === "denied") this.marker("denial", ts, d?.by ?? "other");
+    } else if (r?.interrupted === true) {
+      ev.outcome = "interrupted";
+    } else {
+      ev.ok = b.is_error !== true;
+      const exit = r === undefined ? undefined : num(r.exitCode);
+      const shown = b.is_error === true && SHELL.has(ev.name) ? EXIT_CODE.exec(resultText(b.content)?.trimStart() ?? "")?.[1] : undefined;
       if (exit !== undefined) ev.exit = exit;
+      else if (shown !== undefined) ev.exit = Number(shown);
+    }
+    if (r) {
       const ms = num(r.durationMs) ?? num(r.totalDurationMs);
       if (ms !== undefined && ms >= 0) ev.ms = ms;
       const lines = patchLines(r.structuredPatch);

@@ -149,23 +149,31 @@ manual), preTokens, postTokens, durationMs, preservedSegment, …}`, `logicalPar
   consulted only when both fields are absent. Slash-command and bash-mode markup is turned back into `/name args` /
   `!command` before intent, features and the text hash.
 - `ToolEv` per `tool_use` (deduplicated by id), closed by its `tool_result`; MCP tools get `name:"mcp"` and the server in
-  `mcpServer`; Agent/Task tools get `delegateTo` via meta `toolUseId`.
+  `mcpServer`; Agent/Task tools get `delegateTo` via meta `toolUseId`; `AskUserQuestion` and `ToolSearch` are `meta`.
+  A reply with `toolDenialKind` did not run to an end of its own: `outcome` `denied` (`user-rejected`,
+  `permission-rule`, `automode-blocked`, `automode-unavailable`, `automode-parsing-error`, and any other value — that
+  one also drift `toolDenialKind:(other)`), `interrupted` or `cancelled`, as is a shell command whose `toolUseResult`
+  says `interrupted: true`; such a call has no `ok` and no `exit`. Else `ok` = not `is_error`, and `exit` =
+  `toolUseResult.exitCode`, else — for a failing Bash/PowerShell call — the `<n>` of its reply's leading `Exit code <n>`.
 - `UsageEv` and `AnchorEv` (`cc-msg`, `cc-req`) once per `message.id`, usage fields taking the maximum over the
   message's block records.
 - `TurnEv` per `turn_duration` (`effort` outside `low|medium|high|xhigh|max` becomes `other`); `TotalsEv` from the
   last `cost-state` and from each workflow summary (`claude-code:wf:<workflowId>`); `IdentityEv` per distinct
   `session-owner.accountUuid`; `FileFactEv` per fully read transcript.
-- `MarkerEv`: `interrupt` (interrupt text; meta `stoppedByUser`), `compact-auto`/`compact-manual`, `permission-mode`
-  (changes only), `pr-link` (one per PR, `detail` = keyed hash of the URL), `queue` (a human prompt with
-  `promptSource:"queued"`), `denial` (`toolDenialKind:"user-rejected"`), `plan-enter`/`plan-exit` (tools),
-  `commit` (`toolUseResult.gitOperation.commit`, `detail` = keyed hash of the sha).
-- `CoverageEv.skipped` reasons: `sniffed`, `oversize`, `parse`, `io-error`, `too-large`, `bad-record` (a record the
-  mapper could not handle; also logged once per root as `warn cc.bad-record`).
+- `MarkerEv`: `interrupt` (`detail` `user` for the interrupt text, `stopped-by-user` for meta `stoppedByUser`),
+  `compact-auto`/`compact-manual`, `permission-mode` (changes only), `pr-link` (one per PR, `detail` = keyed hash of the
+  URL), `queue` (a human prompt with `promptSource:"queued"`), `denial` per refused call (`detail` = who refused:
+  `user` for `user-rejected`, `rule` for `permission-rule`, `auto` for the `automode-*` kinds, `other`),
+  `plan-enter`/`plan-exit` (tools), `commit` (`toolUseResult.gitOperation.commit`, `detail` = keyed hash of the sha).
+- `CoverageEv.skipped` reasons: `sniffed`, `oversize`, `parse`, `io-error`, `too-large`, `copied` (below),
+  `bad-record` (a record the mapper could not handle; also logged once per root as `warn cc.bad-record`).
 
 ## Limits
 
-- `--fork-session` copies history into a new transcript; both files would be counted. Debug log
-  `cc.foreign-session-files` reports top-level files holding records of another session.
+- `--fork-session` starts the new transcript with copies of the original session's records, which keep that session's
+  `sessionId`: in a top-level transcript, a record whose `sessionId` is not the file's own is skipped `copied` (it is
+  read from its own session's file), so forked history is never counted twice. Debug log `cc.foreign-session-files`
+  counts the top-level files that held such copies.
 - Usage/anchor deduplication keeps a window of 256 messages per file; a message id recurring later counts again.
 - Records whose `type` is a known heavy type but whose `type` key lies past the first 512 bytes are parsed and then
   dropped (debug log `cc.heavy-parsed`).

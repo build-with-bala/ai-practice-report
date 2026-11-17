@@ -8,6 +8,7 @@ import { ccPromptOrigin, unknownProvenance } from "../../../core/sources/claude-
 import { ccToolCategory } from "../../../core/sources/claude-code/tools";
 import type { ScanCtx } from "../../../core/sources/types";
 import { keyedHash } from "../../../core/text/hash";
+import { classifyIntent } from "../../../core/text/intent";
 import { CANARY, expectNoCanaries, findCanaries } from "../../kit/canary";
 import { fakeHome, type FakeHome } from "../../kit/home";
 import { buildCcTranscripts, CC_HAIKU, CC_OPUS, CC_S1, CC_S2, ccSid, CcTranscript, iso, slug, type CcOpts } from "../../fixtures/claude-code";
@@ -298,11 +299,72 @@ describe("claude-code transcripts: record mapping", () => {
       });
     t.write(h, topFile("P6"));
     const r = await run();
-    expect(r.store.all("marker").map(m => m.kind)).toEqual(["plan-enter", "plan-exit", "denial", "commit"]);
-    expect(r.store.all("tool").map(x => [x.name, x.category, x.ok])).toEqual([
-      ["EnterPlanMode", "plan", true], ["ExitPlanMode", "plan", true], ["Edit", "edit", false], ["Edit", "edit", false], ["Bash", "git", true],
+    expect(r.store.all("marker").map(m => [m.kind, m.detail])).toEqual([
+      ["plan-enter", undefined], ["plan-exit", undefined], ["denial", "user"], ["commit", keyedHash(r.salt, "abc1234")],
+    ]);
+    expect(r.store.all("tool").map(x => [x.name, x.category, x.ok, x.outcome])).toEqual([
+      ["EnterPlanMode", "plan", true, undefined], ["ExitPlanMode", "plan", true, undefined], ["Edit", "edit", undefined, "denied"],
+      ["Edit", "edit", undefined, "interrupted"], ["Bash", "git", true, undefined],
     ]);
     expectNoCanaries(allEvents(r));
+  });
+
+  test("every toolDenialKind: refusals are denied with who refused; interrupted and cancelled calls are no denial", async () => {
+    const t = top("P14").prompt("run it");
+    const kinds = ["user-rejected", "permission-rule", "automode-blocked", "automode-unavailable", "automode-parsing-error", "interrupted", "cancelled", "voice-veto"];
+    kinds.forEach((kind, i) => t.tool(`toolu_d${i}`, "Bash", { command: "npm test" }, { isError: true, content: "Exit code 1", extra: { toolDenialKind: kind } }));
+    t.tool("toolu_i1", "Bash", { command: "npm test" }, { isError: true, content: "Exit code 130", toolUseResult: { stdout: "", stderr: "", interrupted: true } });
+    t.write(h, topFile("P14"));
+    const r = await run();
+    expect(r.store.all("tool").map(x => [x.outcome, x.ok, x.exit, x.checks])).toEqual([
+      ...Array(5).fill(["denied", undefined, undefined, ["test"]]), ["interrupted", undefined, undefined, ["test"]], ["cancelled", undefined, undefined, ["test"]],
+      ["denied", undefined, undefined, ["test"]], ["interrupted", undefined, undefined, ["test"]],
+    ]);
+    expect(r.store.all("marker").filter(m => m.kind === "denial").map(m => m.detail)).toEqual(["user", "rule", "auto", "auto", "auto", "other"]);
+    expect(r.coverage[0]!.unknownTypes).toEqual({ "toolDenialKind:(other)": 1 }); // a new kind: never mistaken for a run
+  });
+
+  test("a failing shell command's exit code comes from its reply when toolUseResult has none", async () => {
+    const t = top("P15").prompt("test it");
+    t.tool("toolu_x2", "Bash", { command: "bun test" }, { isError: true, content: "Exit code 1\n2 fail" })
+      .tool("toolu_x3", "PowerShell", { command: "npm test" }, { isError: true, content: [{ type: "text", text: "Exit code 3\nfailed" }] })
+      .tool("toolu_x4", "Bash", { command: "bun test" }, { isError: true, content: "Command timed out after 2m" })
+      .tool("toolu_x5", "Bash", { command: "bun test" }, { content: "12 pass" })
+      .tool("toolu_x6", "Read", { file_path: "a.md" }, { isError: true, content: "Exit code 9" });
+    t.write(h, topFile("P15"));
+    const r = await run();
+    expect(r.store.all("tool").map(x => [x.name, x.ok, x.exit])).toEqual([
+      ["Bash", false, 1], ["PowerShell", false, 3], ["Bash", false, undefined], ["Bash", true, undefined], ["Read", false, undefined],
+    ]);
+  });
+
+  test("bookkeeping calls are meta; an interrupt typed by the person says user", async () => {
+    const t = top("P16").prompt("ask me first");
+    t.tool("toolu_q1", "AskUserQuestion", { questions: [{ question: CANARY.prompt }] }, { content: CANARY.prompt })
+      .tool("toolu_q2", "ToolSearch", { query: "select:Read" }, { content: "ok" })
+      .user({ message: { role: "user", content: [{ type: "text", text: "[Request interrupted by user]" }] } });
+    t.write(h, topFile("P16"));
+    const r = await run();
+    expect(r.store.all("tool").map(x => [x.name, x.category])).toEqual([["AskUserQuestion", "meta"], ["ToolSearch", "meta"]]);
+    expect(r.store.all("marker").map(m => [m.kind, m.detail])).toEqual([["interrupt", "user"]]);
+    expectNoCanaries(allEvents(r));
+  });
+
+  test("a forked transcript's copies of another session's records are skipped as copied", async () => {
+    const other = ccSid("ORIG");
+    const t = top("P17");
+    t.user({ sessionId: other, promptSource: "typed", turnOrigin: "human", message: { role: "user", content: "the original session's prompt" } }, 0)
+      .assistant([{ type: "tool_use", id: "toolu_c1", name: "Read", input: { file_path: "a.ts" } }], { sessionId: other })
+      .prompt("my own follow-up", {}, 60_000)
+      .tool("toolu_c2", "Grep", { pattern: "x" }, { content: "a.ts" });
+    t.write(h, topFile("P17"));
+    const r = await run();
+    expect(r.store.all("prompt").map(p => p.intent)).toEqual([classifyIntent("my own follow-up")]);
+    expect(r.store.all("tool").map(x => x.name)).toEqual(["Grep"]);
+    expect(r.store.all("usage")).toHaveLength(1); // the copied assistant message is no usage of this session
+    const own = t.records.filter((x) => x.sessionId === t.sessionId && typeof x.timestamp === "string").map((x) => Date.parse(x.timestamp as string));
+    expect(r.store.session(sidOf("P17"))).toMatchObject({ start: Math.min(...own), end: Math.max(...own) });
+    expect(r.coverage[0]!.skipped.copied).toBe(2);
   });
 
   test("MCP tools keep the server name only in mcpServer", async () => {
@@ -375,7 +437,8 @@ describe("claude-code transcripts: record mapping", () => {
     const r = await scan({ env: h.env, plugins: [ccTranscripts], onLog: (level, code, n) => logs.push([level, code, n]) });
     expect(logs).toEqual([["debug", "cc.heavy-parsed", 1], ["debug", "cc.foreign-session-files", 1]]);
     expect(r.coverage[0]).toMatchObject({ status: "ok", unknownTypes: {} });
-    expect(r.coverage[0]!.skipped.sniffed).toBeUndefined();
+    expect(r.coverage[0]!.skipped).toEqual({ copied: 1 });
+    expect(r.store.all("prompt")).toHaveLength(1); // the copied prompt is not this session's
   });
 
   test("a record the mapper cannot handle is counted, logged once per root, and the file goes on", async () => {
@@ -627,7 +690,9 @@ describe("ccToolCategory", () => {
     ["CronCreate", {}, { category: "schedule", checks: [] }],
     ["ScheduleWakeup", {}, { category: "schedule", checks: [] }],
     ["mcp__srv__do_thing", {}, { category: "mcp", checks: [] }],
-    ["AskUserQuestion", {}, { category: "other", checks: [] }],
+    ["AskUserQuestion", {}, { category: "meta", checks: [] }],
+    ["ToolSearch", {}, { category: "meta", checks: [] }],
+    ["BrandNewTool", {}, { category: "other", checks: [] }],
     ["Read", null, { category: "read", checks: [] }],
   ];
   for (const [name, input, want] of cases) test(`${name} ${JSON.stringify(input)}`, () => expect(ccToolCategory(name, input)).toEqual(want as never));

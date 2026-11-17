@@ -16,9 +16,11 @@ const FIXED = new Map<string, ToolCategory>([
   ["Skill", "skill"],
   ["Monitor", "monitor"],
   ["CronCreate", "schedule"], ["ScheduleWakeup", "schedule"],
+  // bookkeeping and talk with the person: asking the person, looking up the deferred tools
+  ["AskUserQuestion", "meta"], ["ToolSearch", "meta"],
 ]);
 /** Tools whose `input.command` is a shell command line (PowerShell is the Windows counterpart of Bash). */
-const SHELL = new Set(["Bash", "PowerShell"]);
+export const SHELL = new Set(["Bash", "PowerShell"]);
 const MCP = /^mcp__(.+?)__(.+)$/;
 
 /** Server part of an `mcp__<server>__<tool>` name; undefined for any other tool. */
