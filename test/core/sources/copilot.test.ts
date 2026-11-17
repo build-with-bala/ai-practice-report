@@ -142,8 +142,8 @@ describe("copilot vscode: Task 13 scenario", () => {
     const sessions = r.store.all("session");
     expect(sessions.map((s) => s.id).sort()).toEqual([sidOf(S_J), sidOf(S_L)].sort());
     expect(r.store.all("prompt")).toHaveLength(5);
-    expect(r.store.session(sidOf(S_J))!.surface).toBe("agent");
-    expect(r.store.session(sidOf(S_L))!.surface).toBe("chat");
+    expect(r.store.session(sidOf(S_J))).toMatchObject({ surface: "vscode", mode: "agent" });
+    expect(r.store.session(sidOf(S_L))).toMatchObject({ surface: "vscode", mode: "chat" });
     const tests = r.store.all("tool").filter((t) => t.checks?.includes("test"));
     expect(tests).toHaveLength(1);
     expect(tests[0]!.checks).toEqual(["test"]);
@@ -198,11 +198,11 @@ describe("copilot vscode: Task 13 scenario", () => {
     const fx = buildCopilot(h);
     const r = await run([cpVscode]);
     expect(r.store.session(sidOf(S_J))).toMatchObject({
-      tool: "copilot", source: "copilot.vscode", window: "detail", origin: "human", surface: "agent", version: CP_EXT_VERSION,
+      tool: "copilot", source: "copilot.vscode", window: "detail", origin: "human", surface: "vscode", mode: "agent", version: CP_EXT_VERSION,
       models: ["gpt-5.1", "claude-sonnet-5"], projectKey: keyedHash(r.salt, normalizePath(CANARY.path)), start: fx.t0, end: fx.t0 + 9 * MIN,
     });
     expect(r.cwds.get(keyedHash(r.salt, normalizePath(CANARY.path)))).toBeDefined();
-    expect(r.store.session(sidOf(S_L))).toMatchObject({ surface: "chat", models: ["gpt-5.1"], projectKey: keyedHash(r.salt, normalizePath("/work/projB")) });
+    expect(r.store.session(sidOf(S_L))).toMatchObject({ surface: "vscode", mode: "chat", models: ["gpt-5.1"], projectKey: keyedHash(r.salt, normalizePath("/work/projB")) });
   });
 
   test("prompts: one per request, human, detail window, intent, keyed text hash, task start", async () => {
@@ -269,8 +269,8 @@ describe("copilot vscode: mapping rules", () => {
     writeLegacy("w", s("ask", { agentId: "github.copilot.workspace", modes: ["ask", "edit", "agent"] }));
     writeLegacy("w", s("edit", { agentId: "github.copilot.editingSession", modes: ["edit"], extra: { modeInfo: { kind: "edit" } } }));
     const r = await run([cpVscode]);
-    const surface = (label: string) => r.store.session(sidOf(cpSid(label)))!.surface;
-    expect([surface("bare"), surface("full"), surface("modes"), surface("info"), surface("ask"), surface("edit")]).toEqual(["agent", "agent", "agent", "agent", "chat", "chat"]);
+    const mode = (label: string) => r.store.session(sidOf(cpSid(label)))!.mode;
+    expect([mode("bare"), mode("full"), mode("modes"), mode("info"), mode("ask"), mode("edit")]).toEqual(["agent", "agent", "agent", "agent", "chat", "chat"]);
   });
 
   test("an edit tool claims the edit group that follows it: one edit event, extension from the group", async () => {
@@ -324,7 +324,7 @@ describe("copilot vscode: mapping rules", () => {
     expectNoCanaries([...allEvents(r), r.coverage], { allow: ["mcp"] });
   });
 
-  test("terminal commands: the edited command line runs; legacy `command`; failures, denials and skipped tools are not ok", async () => {
+  test("terminal commands: the edited command line runs; legacy `command`; failures are not ok; denied and skipped tools did not run", async () => {
     const id = cpSid("term");
     writeLegacy("w", sessionRoot(id, [request({
       ts: t0(), parts: [
@@ -336,12 +336,36 @@ describe("copilot vscode: mapping rules", () => {
       ],
     })]));
     const r = await run([cpVscode]);
-    expect(toolsOf(r, id).map((t) => [t.name, t.category, t.checks, t.ok, t.exit, t.ms])).toEqual([
-      ["run_in_terminal", "typecheck", ["typecheck"], false, 1, 100], ["run_in_terminal", "build", ["build"], undefined, undefined, undefined],
-      ["run_in_terminal", "test", ["test"], undefined, undefined, undefined],
-      ["copilot_readFile", "read", undefined, false, undefined, undefined], ["copilot_readFile", "read", undefined, false, undefined, undefined],
-      ["copilot_readFile", "read", undefined, false, undefined, undefined], ["copilot_readFile", "read", undefined, undefined, undefined, undefined],
-      ["copilot_getErrors", "read", undefined, false, undefined, undefined],
+    expect(toolsOf(r, id).map((t) => [t.name, t.category, t.checks, t.ok, t.outcome, t.exit, t.ms])).toEqual([
+      ["run_in_terminal", "typecheck", ["typecheck"], false, undefined, 1, 100], ["run_in_terminal", "build", ["build"], undefined, undefined, undefined, undefined],
+      ["run_in_terminal", "test", ["test"], undefined, undefined, undefined, undefined],
+      ["copilot_readFile", "read", undefined, undefined, "denied", undefined, undefined], ["copilot_readFile", "read", undefined, undefined, "denied", undefined, undefined],
+      ["copilot_readFile", "read", undefined, undefined, "cancelled", undefined, undefined], ["copilot_readFile", "read", undefined, undefined, undefined, undefined, undefined],
+      ["copilot_getErrors", "read", undefined, false, undefined, undefined, undefined],
+    ]);
+    expect(r.store.forSession(sidOf(id), "marker").map((m) => [m.kind, m.detail])).toEqual([["denial", "user"], ["denial", "user"]]);
+  });
+
+  test("a tool left waiting for confirmation in a cancelled request was dropped, not denied; a denied test is no failing check", async () => {
+    const id = cpSid("cancel");
+    const at = t0();
+    writeLegacy("w", sessionRoot(id, [
+      request({ ts: at, parts: [tool("runTests", { confirmed: { type: 0 } }), terminal("npm test", 1)], modelState: { value: 2, completedAt: at + 1_000 } }),
+      request({ ts: at + MIN, parts: [tool("runTests", { confirmed: { type: 0 } })], modelState: { value: 1, completedAt: at + MIN + 1_000 } }),
+    ]));
+    const r = await run([cpVscode]);
+    expect(toolsOf(r, id).map((t) => [t.name, t.checks, t.ok, t.outcome, t.exit])).toEqual([
+      ["runTests", ["test"], undefined, "cancelled", undefined], ["run_in_terminal", ["test"], false, undefined, 1], ["runTests", ["test"], undefined, "denied", undefined],
+    ]);
+    expect(r.store.forSession(sidOf(id), "marker").map((m) => [m.kind, m.detail])).toEqual([["interrupt", "user"], ["denial", "user"]]);
+  });
+
+  test("bookkeeping tools are meta", async () => {
+    const id = cpSid("meta");
+    writeLegacy("w", sessionRoot(id, [request({ ts: t0(), parts: [tool("copilot_think"), tool("vscode_askQuestions"), tool("copilot_switchAgent"), tool("copilot_memory")] })]));
+    const r = await run([cpVscode]);
+    expect(toolsOf(r, id).map((t) => [t.name, t.category])).toEqual([
+      ["copilot_think", "meta"], ["vscode_askQuestions", "meta"], ["copilot_switchAgent", "meta"], ["copilot_memory", "other"],
     ]);
   });
 
@@ -662,10 +686,12 @@ describe("copilot cli (session events and store, from the CLI's schema)", () => 
     expect(toolsOf(r, cliSid).map((t) => [t.name, t.category, t.checks, t.ok, t.exit, t.ms, t.editExt, t.mcpServer])).toEqual([
       ["bash", "test", ["test"], false, 1, 3_000, undefined, undefined],
       ["edit", "edit", undefined, true, undefined, 1_000, "ts", undefined],
+      ["report_intent", "meta", undefined, true, undefined, 1_000, undefined, undefined], // bookkeeping: counted apart, never dropped
       ["mcp", "mcp", undefined, false, undefined, 1_000, undefined, CANARY.mcp],
     ]);
-    expect(r.store.forSession(sidOf(cliSid), "turn").map((t) => [t.status, t.ms])).toEqual([["completed", 13_000], ["interrupted", 1_000]]);
-    expect(r.store.forSession(sidOf(cliSid), "marker").map((m) => m.kind)).toEqual(["interrupt"]);
+    // one TurnEv per exchange: a user message over its model calls (a turn_start/turn_end pair is one model call)
+    expect(r.store.forSession(sidOf(cliSid), "turn").map((t) => [t.status, t.ms])).toEqual([["completed", 14_000], ["interrupted", 2_000]]);
+    expect(r.store.forSession(sidOf(cliSid), "marker").map((m) => [m.kind, m.detail])).toEqual([["interrupt", "user"]]);
     const c = covOf(r, "copilot.cli");
     expect(c).toMatchObject({ status: "drift", unknownTypes: { "event:session.wormhole": 1 }, versions: ["1.0.4"], files: 1, records: e.records.length });
     expectNoCanaries([...allEvents(r), r.coverage, r.warnings], { allow: ["mcp"] });
@@ -723,7 +749,7 @@ describe("copilot cli (session events and store, from the CLI's schema)", () => 
     expectNoCanaries([...allEvents(r), r.coverage]);
   });
 
-  test("a turn_end after an abort does not end the turn again; a turn_end for a turn never started ends nothing", async () => {
+  test("a turn_end after an abort does not end the exchange again; a turn_end for a model call never started ends nothing", async () => {
     const at = t0();
     const id = cpSid("cli3");
     const e = new CliEvents(at)
@@ -736,8 +762,29 @@ describe("copilot cli (session events and store, from the CLI's schema)", () => 
       .ev("assistant.turn_end", {});
     h.writeJsonl(path.join(".copilot", "session-state", id, "events.jsonl"), e.records);
     const r = await run([cpCli]);
-    expect(r.store.forSession(sidOf(id), "turn").map((t) => [t.status, t.ms])).toEqual([["interrupted", 1_000]]);
+    expect(r.store.forSession(sidOf(id), "turn").map((t) => [t.status, t.ms])).toEqual([["interrupted", 2_000]]);
     expect(r.store.forSession(sidOf(id), "marker").map((m) => m.kind)).toEqual(["interrupt"]);
+  });
+
+  test("an exchange spans its model calls; calls still running at an abort were interrupted; a call cut off by the file's end has no turn", async () => {
+    const at = t0();
+    const id = cpSid("cli4");
+    const e = new CliEvents(at)
+      .ev("session.start", { sessionId: id }, 0)
+      .ev("user.message", { content: "Fix the importer" })                 // +1 s
+      .ev("assistant.turn_start", { turnId: "0" }).ev("assistant.turn_end", { turnId: "0" })   // first model call, +2 s .. +3 s
+      .ev("assistant.turn_start", { turnId: "1" }).ev("assistant.turn_end", { turnId: "1" })   // second model call, +4 s .. +5 s
+      .ev("user.message", { content: "Now run the tests" })                // +6 s: the first exchange ended at +5 s
+      .ev("assistant.turn_start", { turnId: "2" })
+      .ev("tool.execution_start", { toolCallId: "t9", toolName: "bash", arguments: { command: "npm test" } })
+      .ev("abort", { reason: "user initiated" })                           // +9 s
+      .ev("tool.execution_complete", { toolCallId: "t9", success: false })
+      .ev("user.message", { content: "Try again" })
+      .ev("assistant.turn_start", { turnId: "3" });                        // the file stops mid-call
+    h.writeJsonl(path.join(".copilot", "session-state", id, "events.jsonl"), e.records);
+    const r = await run([cpCli]);
+    expect(r.store.forSession(sidOf(id), "turn").map((t) => [t.status, t.ms, t.ts - at])).toEqual([["completed", 4_000, 5_000], ["interrupted", 3_000, 9_000]]);
+    expect(toolsOf(r, id).map((t) => [t.name, t.checks, t.ok, t.outcome])).toEqual([["bash", ["test"], undefined, "interrupted"]]);
   });
 
   test("no session-state and no store under ~/.copilot: absent", async () => {
@@ -777,7 +824,7 @@ describe("copilot vscode: the extension's session store", () => {
     });
     const r = await run([cpVscode]);
     expect(r.store.all("session")).toHaveLength(2);
-    expect(r.store.session(sidOf(S_J))).toMatchObject({ window: "detail", surface: "agent", start: at - MIN, end: at + 30 * MIN });
+    expect(r.store.session(sidOf(S_J))).toMatchObject({ window: "detail", surface: "vscode", mode: "agent", start: at - MIN, end: at + 30 * MIN });
     expect(r.store.forSession(sidOf(S_J), "turn").filter((t) => t.window === "lifetime")).toHaveLength(1);
     expect(covOf(r, "copilot.vscode").records).toBe(4 + 2);
     expectNoCanaries([...allEvents(r), r.coverage, r.warnings]);

@@ -74,10 +74,12 @@ const VSCODE_TOOLS: ReadonlyMap<string, ToolCategory> = new Map<string, ToolCate
   ["skill", "skill"],
   ...(["click_element", "drag_element", "handle_dialog", "hover_element", "navigate_page", "read_page", "run_playwright_code", "screenshot_page",
     "type_in_page", "copilot_openSimpleBrowser"] as const).map((n) => [n, "browser"] as const),
+  // bookkeeping and talk with the person: thinking aloud, questions and confirmations, switching agents
+  ...(["copilot_think", "vscode_askQuestions", "copilot_askQuestions", "vscode_get_confirmation", "vscode_get_terminal_confirmation",
+    "copilot_switchAgent"] as const).map((n) => [n, "meta"] as const),
   ...(["copilot_getVSCodeAPI", "copilot_runVscodeCommand", "copilot_createNewWorkspace", "copilot_createDirectory", "copilot_installExtension",
-    "vscode_searchExtensions_internal", "copilot_memory", "copilot_resolveMemoryFileUri", "copilot_sessionStoreSql", "copilot_switchAgent",
-    "vscode_askQuestions", "copilot_askQuestions", "copilot_think", "copilot_getProjectSetupInfo", "copilot_getDocInfo", "copilot_getSearchResults",
-    "copilot_updateUserPreferences", "vscode_get_confirmation", "vscode_get_terminal_confirmation"] as const).map((n) => [n, "other"] as const),
+    "vscode_searchExtensions_internal", "copilot_memory", "copilot_resolveMemoryFileUri", "copilot_sessionStoreSql", "copilot_getProjectSetupInfo",
+    "copilot_getDocInfo", "copilot_getSearchResults", "copilot_updateUserPreferences"] as const).map((n) => [n, "other"] as const),
 ]);
 /** Tools that run a command line in a terminal (`toolSpecificData.kind: "terminal"`). */
 const TERMINAL_TOOLS = new Set(["run_in_terminal", "copilot_runInTerminal", "send_to_terminal"]);
@@ -103,8 +105,19 @@ function terminalCommand(tsd: Obj): string | undefined {
   return (cl ? str(cl.userEdited) ?? str(cl.toolEdited) ?? str(cl.original) : undefined) ?? str(tsd.command);
 }
 
-/** A tool the person denied or VS Code skipped (`isConfirmed` false, or kind 0 / 5): it did not run. */
-const notRun = (c: unknown): boolean => c === false || (isObj(c) && (c.type === 0 || c.type === 5));
+/**
+ * A tool that did not run, from its confirmation (`isConfirmed`): kind 0 (older files: `false`) is VS Code's Denied —
+ * the person refused it, or, in a request that was cancelled, it was left waiting and dropped (`cancelled`); kind 5 is
+ * Skipped (`cancelled`). Undefined for a tool that ran.
+ */
+function notRun(c: unknown, cancelled: boolean): ToolEv["outcome"] {
+  const kind = isObj(c) ? c.type : c === false ? 0 : undefined;
+  if (kind === 0) return cancelled ? "cancelled" : "denied";
+  return kind === 5 ? "cancelled" : undefined;
+}
+
+/** A request whose response was cancelled: `modelState.value` 2 (current format), else `isCanceled`. */
+const cancelledRequest = (r: Obj): boolean => (isObj(r.modelState) ? r.modelState.value === 2 : r.isCanceled === true);
 
 /** The path of a serialized URI (`UriComponents`, or a URI string). */
 function uriPath(u: unknown): string | undefined {
@@ -188,7 +201,7 @@ class SessionMapper {
     if (ts !== undefined) {
       this.span(ts);
       this.prompt(r, ts);
-      this.tools(r, ts);
+      this.tools(r, ts, cancelledRequest(r));
     }
     const ended = this.turn(r, ts, model);
     const last = ended ?? ts;
@@ -219,7 +232,7 @@ class SessionMapper {
    * when the tool names one, else the oldest edit tool still waiting) and takes its file extension; a group no edit tool
    * claims is an edit of its own, unless an edit tool ran earlier in the response (the extra files of a multi-file edit).
    */
-  private tools(r: Obj, ts: number): void {
+  private tools(r: Obj, ts: number, cancelled: boolean): void {
     const parts = Array.isArray(r.response) ? r.response : [];
     const evs: ToolEv[] = [];
     const pending: PendingEdit[] = [];
@@ -232,7 +245,7 @@ class SessionMapper {
         continue;
       }
       if (TOOL_PARTS.has(kind)) {
-        const { ev, path } = this.toolEv(p, ts);
+        const { ev, path } = this.toolEv(p, ts, cancelled);
         evs.push(ev);
         if (ev.category === "edit" || ev.category === "write") {
           sawEditTool = true;
@@ -253,10 +266,13 @@ class SessionMapper {
         }
       }
     }
-    for (const ev of evs) this.out(ev);
+    for (const ev of evs) {
+      this.out(ev);
+      if (ev.outcome === "denied") this.out({ k: "marker", tool: TOOL, source: VSCODE_SOURCE, ts, sessionId: this.id, kind: "denial", detail: "user" });
+    }
   }
 
-  private toolEv(p: Obj, ts: number): { ev: ToolEv; path?: string } {
+  private toolEv(p: Obj, ts: number, cancelled: boolean): { ev: ToolEv; path?: string } {
     const id = str(p.toolId) ?? str(p.toolName);
     const ev: ToolEv = { k: "tool", tool: TOOL, source: VSCODE_SOURCE, ts, sessionId: this.id, name: "other", category: "other" };
     const callId = str(p.toolCallId);
@@ -287,8 +303,11 @@ class SessionMapper {
       const ms = num(state?.duration);
       if (ms !== undefined && ms >= 0) ev.ms = ms;
     }
-    if (notRun(p.isConfirmed)) ev.ok = false;
-    else if (ev.exit !== undefined) ev.ok = ev.exit === 0;
+    const outcome = notRun(p.isConfirmed, cancelled);
+    if (outcome !== undefined) {
+      ev.outcome = outcome;
+      delete ev.exit; // a tool that did not run has no exit code of its own
+    } else if (ev.exit !== undefined) ev.ok = ev.exit === 0;
     else if (isObj(p.resultDetails) && typeof p.resultDetails.isError === "boolean") ev.ok = !p.resultDetails.isError;
     if (ev.category !== "edit" && ev.category !== "write") return { ev };
     const path = messagePath(p);
@@ -324,7 +343,7 @@ class SessionMapper {
     const at = completedAt ?? (ts !== undefined && ms !== undefined ? ts + ms : ts);
     if (at === undefined) return undefined;
     if (status === "interrupted") {
-      const m: MarkerEv = { k: "marker", tool: TOOL, source: VSCODE_SOURCE, ts: completedAt ?? ts ?? at, sessionId: this.id, kind: "interrupt" };
+      const m: MarkerEv = { k: "marker", tool: TOOL, source: VSCODE_SOURCE, ts: completedAt ?? ts ?? at, sessionId: this.id, kind: "interrupt", detail: "user" };
       this.out(m);
     }
     const ev: TurnEv = { k: "turn", tool: TOOL, source: VSCODE_SOURCE, ts: at, sessionId: this.id, window: "detail", status };
@@ -338,7 +357,7 @@ class SessionMapper {
     if (this.start === undefined || this.end === undefined) return;
     const s: SessionEv = {
       k: "session", tool: TOOL, source: VSCODE_SOURCE, id: this.id, window: "detail", origin: "human", start: this.start, end: this.end,
-      models: [...this.models], surface: this.agent ? "agent" : "chat",
+      models: [...this.models], surface: "vscode", mode: this.agent ? "agent" : "chat",
     };
     if (this.version !== undefined) s.version = this.version;
     const own = str(this.root.workingDirectory);

@@ -49,16 +49,15 @@ const CLI_TOOLS: ReadonlyMap<string, ToolCategory> = new Map<string, ToolCategor
   ...(["web_fetch", "web_search", "fetch_copilot_cli_documentation"] as const).map((n) => [n, "web"] as const),
   ...(["task", "list_agents", "read_agent", "write_agent"] as const).map((n) => [n, "delegate"] as const),
   ["update_todo", "todo"], ["exit_plan_mode", "plan"], ["skill", "skill"], ["create_pull_request", "git"],
-  ...(["think", "report_progress", "reply_to_comment", "code_review", "task_complete", "ask_user", "sql", "lsp", "gh-advisory-database",
-    "store_memory", "parallel_validation", "propose_work", "mcp_reload", "mcp_validate", "tool_search_tool_regex", "codeql_checker"] as const)
-    .map((n) => [n, "other"] as const),
+  // bookkeeping and talk with the person: thinking aloud, its intent (reported on every turn), progress, the end, questions
+  ...(["think", "report_intent", "report_progress", "task_complete", "ask_user", "tool_search_tool_regex"] as const).map((n) => [n, "meta"] as const),
+  ...(["reply_to_comment", "code_review", "sql", "lsp", "gh-advisory-database", "store_memory", "parallel_validation", "propose_work",
+    "mcp_reload", "mcp_validate", "codeql_checker"] as const).map((n) => [n, "other"] as const),
 ]);
 /** Tools whose `arguments.command` is a command line. */
 const SHELL_TOOLS = new Set(["bash", "powershell"]);
 /** Tools whose `arguments.path` is the file they edit or create. */
 const PATH_TOOLS = new Set(["edit", "str_replace", "insert", "create", "str_replace_editor"]);
-/** The CLI reports its intent through a tool call on every turn: bookkeeping, not a tool use. */
-const META_TOOLS = new Set(["report_intent"]);
 /** A shell tool's result ends with the command's exit code. */
 const EXIT_TAIL = /<exited with exit code (\d{1,3})>\s*$/;
 const PATCH_FILE = /^\*\*\* (?:Add|Update|Delete) File: (.+)$/m;
@@ -67,9 +66,8 @@ const INJECTED = [/<reminder>[\s\S]*?<\/reminder>\s*/g, /<attachments>[\s\S]*?<\
   /<user_query>[\s\S]*?<\/user_query>\s*/g, /<context>[\s\S]*?<\/context>\s*/g, /<current_datetime>[\s\S]*?<\/current_datetime>\s*/g,
   /<pr_metadata[^>]*\/?>\s*/g];
 const userText = (content: string): string => INJECTED.reduce((t, re) => t.replace(re, ""), content).trim();
-/** Bounded per-file state: tool calls awaiting their completion, turns awaiting their end. */
+/** Bounded per-file state: tool calls awaiting their completion. */
 const PENDING_TOOLS = 4096;
-const OPEN_TURNS = 256;
 
 const isDir = (p: string): boolean => {
   try {
@@ -90,6 +88,12 @@ export function cliRoots(env: Env, homes: string[]): Candidate[] {
 }
 
 interface Pending { ev: ToolEv; shell: boolean }
+/**
+ * The exchange in progress: from a user message (or a model call without one before it) over its model calls. The
+ * CLI's `assistant.turn_start`/`turn_end` pair is one model call — its documented meaning of a turn — so an exchange
+ * ends at the last model call before the next user message, or at an abort.
+ */
+interface Exchange { start: number; lastEnd?: number; calls: number; running?: string }
 
 /** Streams one CLI session's events into events of the session, keeping small per-file state. */
 class CliReader {
@@ -102,8 +106,7 @@ class CliReader {
   private humanPrompts = 0;
   private prevHuman?: string;
   private lastActivity?: number;
-  private readonly turns = new Map<string, number>();
-  private openTurn?: string;
+  private exchange?: Exchange;
   private readonly pending = new Map<string, Pending>();
 
   constructor(private readonly sessionId: string, private readonly ctx: ScanCtx, private readonly tally: Tally) {}
@@ -137,8 +140,8 @@ class CliReader {
       case "session.model_change": this.addModel(str(d.newModel)); break;
       case "assistant.usage": this.addModel(str(d.model)); break;
       case "user.message": if (ts !== undefined) this.userMessage(d, ts); break;
-      case "assistant.turn_start": this.turnStart(d, ts); break;
-      case "assistant.turn_end": if (ts !== undefined) this.turnEnd(str(d.turnId) ?? this.openTurn, ts, "completed"); break;
+      case "assistant.turn_start": this.callStart(d, ts); break;
+      case "assistant.turn_end": if (ts !== undefined) this.callEnd(str(d.turnId), ts); break;
       case "abort": if (ts !== undefined) this.abort(ts); break;
       case "tool.execution_start": if (ts !== undefined) this.toolStart(d, ts); break;
       case "tool.execution_complete": this.toolComplete(d, ts); break;
@@ -159,8 +162,10 @@ class CliReader {
     if (started !== undefined) this.tick(started);
   }
 
-  /** The person's message (`source` absent or `user`; any other source is system input), in memory only. */
+  /** The person's message (`source` absent or `user`; any other source is system input), in memory only. It starts an exchange. */
   private userMessage(d: Obj, ts: number): void {
+    this.endExchange("completed");
+    this.exchange = { start: ts, calls: 0 };
     const raw = str(d.content);
     const text = raw === undefined ? "" : userText(raw);
     if (text === "") return;
@@ -180,37 +185,53 @@ class CliReader {
     }
   }
 
-  private turnStart(d: Obj, ts: number | undefined): void {
-    const id = str(d.turnId) ?? "";
-    this.openTurn = id;
+  /** A model call starts; without an exchange open (a resumed session, a run with no user message) it opens one. */
+  private callStart(d: Obj, ts: number | undefined): void {
     if (ts === undefined) return;
-    this.turns.set(id, ts);
-    if (this.turns.size > OPEN_TURNS) this.turns.delete(this.turns.keys().next().value!);
+    this.exchange ??= { start: ts, calls: 0 };
+    this.exchange.running = str(d.turnId) ?? "";
   }
 
-  /** Ends a turn that is still open; a turn already ended (e.g. by an abort) or never started ends nothing. */
-  private turnEnd(id: string | undefined, ts: number, status: "completed" | "interrupted"): void {
-    if (id === undefined || !(this.turns.has(id) || this.openTurn === id)) return;
-    const started = this.turns.get(id);
-    this.turns.delete(id);
-    if (this.openTurn === id) this.openTurn = undefined;
+  /** A model call ends: only the one running (`turnId`, or the running one when the record names none). */
+  private callEnd(id: string | undefined, ts: number): void {
+    const x = this.exchange;
+    if (x?.running === undefined || (id !== undefined && id !== x.running)) return;
+    x.running = undefined;
+    x.calls++;
+    x.lastEnd = ts;
+  }
+
+  /**
+   * The open exchange as a TurnEv: `completed` at its last model call's end, once at least one ended; `interrupted` at
+   * `at` (an abort). `ms` from its start. An exchange whose model call never ended (the file stops mid-call) has no end.
+   */
+  private endExchange(status: "completed" | "interrupted", at?: number): void {
+    const x = this.exchange;
+    this.exchange = undefined;
+    const ts = status === "interrupted" ? at : x?.running === undefined ? x?.lastEnd : undefined;
+    if (!x || ts === undefined) return;
     const ev: TurnEv = { k: "turn", tool: TOOL, source: CLI_SOURCE, ts, sessionId: this.sessionId, window: "detail", status };
     if (this.model !== undefined) ev.model = this.model;
-    if (started !== undefined && ts >= started) ev.ms = ts - started;
+    if (ts >= x.start) ev.ms = ts - x.start;
     this.out(ev);
   }
 
-  /** An abort is an interrupt; it ends the open turn as interrupted. */
+  /** An abort is the person's interrupt: it ends the open exchange as interrupted, and the calls still running were interrupted. */
   private abort(ts: number): void {
-    const m: MarkerEv = { k: "marker", tool: TOOL, source: CLI_SOURCE, ts, sessionId: this.sessionId, kind: "interrupt" };
+    const m: MarkerEv = { k: "marker", tool: TOOL, source: CLI_SOURCE, ts, sessionId: this.sessionId, kind: "interrupt", detail: "user" };
     this.out(m);
-    if (this.openTurn !== undefined) this.turnEnd(this.openTurn, ts, "interrupted");
+    for (const p of this.pending.values()) {
+      p.ev.outcome = "interrupted";
+      this.out(p.ev);
+    }
+    this.pending.clear();
+    this.endExchange("interrupted", ts);
   }
 
   private toolStart(d: Obj, ts: number): void {
     const callId = str(d.toolCallId);
     const name = str(d.toolName);
-    if (callId === undefined || name === undefined || META_TOOLS.has(name) || this.pending.has(callId)) return;
+    if (callId === undefined || name === undefined || this.pending.has(callId)) return;
     const args = isObj(d.arguments) ? d.arguments : {};
     const ev: ToolEv = { k: "tool", tool: TOOL, source: CLI_SOURCE, ts, sessionId: this.sessionId, callId: this.ctx.hash(callId), name: "other", category: "other" };
     const server = str(d.mcpServerName);
@@ -262,6 +283,7 @@ class CliReader {
   finish(): void {
     for (const p of this.pending.values()) this.out(p.ev);
     this.pending.clear();
+    this.endExchange("completed");
     if (this.start === undefined || this.end === undefined) return;
     const s: SessionEv = {
       k: "session", tool: TOOL, source: CLI_SOURCE, id: this.sessionId, window: "detail", origin: "human", start: this.start, end: this.end,

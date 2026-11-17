@@ -139,8 +139,8 @@ Built-in tool ids (VS Code program and extension program): see `VSCODE_TOOLS` in
   is mapped and dropped before the next file.
 - **SessionEv** per session with requests (`detail`, origin `human`): id `copilot:<sessionId>` (verbatim when UUID-shaped,
   else its keyed hash; the file name when the object has no `sessionId`); `start`/`end` = earliest/latest of
-  `creationDate`, `lastMessageDate` and every event time; `surface: "agent"` when any request is in agent mode, else
-  `"chat"`; `models` = the requests' `modelId`s in order of first use, the `<vendor>/` prefix dropped, then the shared
+  `creationDate`, `lastMessageDate` and every event time; `surface: "vscode"` (the client); `mode: "agent"` when any
+  request is in agent mode, else `"chat"`; `models` = the requests' `modelId`s in order of first use, the `<vendor>/` prefix dropped, then the shared
   model-id guard (`other` when not id-shaped); `version` = the last `agent.extensionVersion` (the Copilot Chat extension's
   version, version-shaped); `projectKey` from the session's `workingDirectory` URI, else its workspace's `workspace.json`
   `folder` URI (`file:` and `vscode-remote:` paths; multi-root workspaces and empty windows have none). Sessions without
@@ -157,8 +157,13 @@ Built-in tool ids (VS Code program and extension program): see `VSCODE_TOOLS` in
   - Category from the tool table; terminal tools (`run_in_terminal`, `copilot_runInTerminal`, `send_to_terminal`) take
     `classifyCommand` of the command that ran (category and checks), `exit` from `terminalCommandState.exitCode` and `ms`
     from its `duration`; `runTests` checks `test`.
-  - `ok`: false when the tool did not run (`isConfirmed` false, kind 0 or 5); else `exit === 0` when an exit code is
-    recorded; else `!resultDetails.isError` when recorded; else absent.
+  - A tool that did not run (its `isConfirmed`) has an `outcome` and no `ok` or `exit`: kind 0 (VS Code's Denied;
+    older files `false`) → `denied`, and a `denial` marker (`detail: "user"`) — but in a request that was cancelled
+    (`modelState.value` 2, or `isCanceled`) a tool left waiting for its confirmation was dropped: `cancelled`, no
+    marker; kind 5 (Skipped) → `cancelled`. Else `ok` = `exit === 0` when an exit code is recorded; else
+    `!resultDetails.isError` when recorded; else absent.
+  - Bookkeeping and talk with the person (`copilot_think`, `vscode_askQuestions`, `copilot_askQuestions`,
+    `vscode_get_confirmation`, `vscode_get_terminal_confirmation`, `copilot_switchAgent`) are `meta`.
   - Edits: an edit or write tool claims the next edit group of its response (the group of the same file when the tool's
     message links one, else the oldest edit tool still waiting) and takes `editExt` from it (from its message's first
     linked file when it names one). A group no edit tool claims is an `edit` of its own (`name: "textEditGroup"` or
@@ -169,7 +174,8 @@ Built-in tool ids (VS Code program and extension program): see `VSCODE_TOOLS` in
   completed (a request with neither response nor result has no turn). `ms` = `elapsedMs`, else
   `result.timings.totalElapsed`, else `modelState.completedAt` − (`responseTimestamp` or `timestamp`); never
   `timeSpentWaiting`. `ts` = `completedAt`, else request time + `ms`, else the request time. `model` = the request's model.
-- **MarkerEv** `interrupt` per cancelled request, at `completedAt` (else the request time).
+- **MarkerEv** `interrupt` per cancelled request (`detail: "user"`), at `completedAt` (else the request time); `denial`
+  per denied tool, at the request's time.
 - **Session store** (`globalStorage/github.copilot-chat/session-store.db`): lifetime sessions and turns, as below; they
   share the chat sessions' ids and merge with them.
 - **Coverage**: `files`/`bytes` = session files fully read, `workspace.json` files and the store; `records` = journal lines,
@@ -220,15 +226,22 @@ other type is drift `event:<type>` (dotted lower-case tokens kept, else `(other)
 - `user.message` {`content`, `attachments`, `source`?} → PromptEv: origin `human` when `source` is absent or `user`,
   else `system`; the CLI's context blocks (`<reminder>`, `<attachments>`, `<context>`, `<current_datetime>`, …) are
   stripped first, as the extension does.
-- `assistant.turn_start` / `assistant.turn_end` {`turnId`} → TurnEv completed, `ms` between them; `abort` → MarkerEv
-  `interrupt`, ending the open turn as interrupted. A `turn_end` ends only a turn that is still open: one an abort
-  already ended, or one never started, ends nothing.
+- `assistant.turn_start` / `assistant.turn_end` {`turnId`}: one model call — the CLI's documented meaning of a turn is
+  a single LLM call and the tools it requests (its SDK's agent-loop guide); `session.idle`, which ends the loop, is not
+  written to `events.jsonl`. So a **TurnEv** is one exchange: it starts at a `user.message` (or at a model call with
+  none before it), spans its model calls, and ends `completed` at the last call's `turn_end` before the next
+  `user.message` (or the end of the file), `ms` = from its start; an `abort` ends it `interrupted` at the abort, and is
+  a MarkerEv `interrupt` (`detail: "user"`). A `turn_end` ends only the model call still running: one an abort already
+  ended, or one never started, ends nothing; an exchange whose call never ended (the file stops mid-call) has no turn.
 - `tool.execution_start` {`toolCallId`, `toolName`, `arguments`, `mcpServerName`?, `mcpToolName`?, `parentToolCallId`?}
   and `tool.execution_complete` {`toolCallId`, `success`, `result` {`content`}, `error` {`code`, `message`}} → ToolEv
   (`CLI_TOOLS`): `bash`/`powershell` → `classifyCommand(arguments.command)`, `exit` from the result's trailing
   `<exited with exit code N>`; `edit`, `str_replace`, `insert`, `create`, `str_replace_editor` → edit/write with `editExt`
-  from `arguments.path`; MCP tools → `mcp` with `mcpServer`; `report_intent` is bookkeeping, not a tool use. `ok` = exit
-  code 0 when known, else `success`; `ms` = completion − start.
+  from `arguments.path`; MCP tools → `mcp` with `mcpServer`; `think`, `report_intent` (written on every turn),
+  `report_progress`, `task_complete`, `ask_user` and `tool_search_tool_regex` are `meta`. `ok` = exit code 0 when known,
+  else `success`; `ms` = completion − start. A call still running at an `abort` was interrupted: `outcome:
+  "interrupted"`, no `ok`. The CLI's permission results are not mapped yet (their names differ between versions of its
+  documentation), so no denial is read from it.
 - SessionEv (`detail`, origin `human`, `surface: "cli"`); session id = the `session-state` folder name (UUID verbatim,
   else hashed). The session store is read as above.
 
