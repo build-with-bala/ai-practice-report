@@ -127,11 +127,16 @@ Built-in tool ids (VS Code program and extension program): see `VSCODE_TOOLS` in
 ## What the VS Code reader emits (`copilot.vscode`)
 
 - **Files and dedupe.** Journals are read first, then legacy files; within each form the most recently written file
-  first. A session is read once: a file whose name or `sessionId` was already read counts as skipped `duplicate`, unread
-  when its name matches. So a session kept as journal and legacy file is read from its journal, and a session copied to
-  another workspace from the copy written last. A journal is streamed line by line into its session object; a legacy file
-  is parsed whole (up to 64 MiB — larger is skipped `too-large`, coverage `note: "too-large"`). The session object is
-  mapped and dropped before the next file.
+  first. Each session is mapped from one copy: the first **complete** copy that has requests is mapped at once and its
+  name and `sessionId` become seen, so every other copy counts as skipped `duplicate` (unread when its name matches). A
+  journal read is complete when the file was read to its end and every line applied (a write cut off mid-line, an I/O
+  error or a corrupt record leave a partial session); a legacy file is read whole or not at all. A partial copy, or one
+  without requests, never hides another copy: it waits, and a session with no complete copy is mapped at the end from
+  its copy with the most requests (read again; its first read is what coverage counts). So a session kept as journal
+  and legacy file is read from its journal, a session copied to another workspace from the copy written last, and a
+  cut-off journal gives way to a complete copy. A journal is streamed line by line into its session object; a legacy
+  file is parsed whole (up to 64 MiB — larger is skipped `too-large`, coverage `note: "too-large"`). The session object
+  is mapped and dropped before the next file.
 - **SessionEv** per session with requests (`detail`, origin `human`): id `copilot:<sessionId>` (verbatim when UUID-shaped,
   else its keyed hash; the file name when the object has no `sessionId`); `start`/`end` = earliest/latest of
   `creationDate`, `lastMessageDate` and every event time; `surface: "agent"` when any request is in agent mode, else

@@ -484,6 +484,38 @@ describe("copilot vscode: mapping rules", () => {
     expect(covOf(r, "copilot.vscode").skipped.duplicate).toBe(1);
   });
 
+  test("a truncated journal copy does not hide a complete copy: the complete legacy copy is read", async () => {
+    const id = cpSid("trunc");
+    const at = t0();
+    const reqs = [0, 1, 2].map((n) => request({ ts: at + n * MIN, text: `part ${n} of the plan` }));
+    const lines = [{ kind: 0, v: sessionRoot(id, reqs.slice(0, 1), { created: at }) }, { kind: 2, k: ["requests"], v: reqs.slice(1) }].map((x) => JSON.stringify(x));
+    h.write(path.join(chatDir("w1"), `${id}.jsonl`), `${lines[0]}\n${lines[1]!.slice(0, 200)}`); // the write stopped mid-line
+    writeLegacy("w2", sessionRoot(id, reqs, { created: at }));
+    const r = await run([cpVscode]);
+    expect(r.store.forSession(sidOf(id), "prompt")).toHaveLength(3);
+    expect(covOf(r, "copilot.vscode").skipped).toEqual({ parse: 1, duplicate: 1 });
+  });
+
+  test("a copy without requests does not hide one with requests; with only partial copies, the fullest is read", async () => {
+    const at = t0();
+    const reqs = [0, 1, 2].map((n) => request({ ts: at + n * MIN, text: `step ${n}` }));
+    const a = cpSid("emptyc");
+    const newer = writeLegacy("n", sessionRoot(a, [], { created: at }));
+    const older = writeLegacy("o", sessionRoot(a, reqs.slice(0, 2), { created: at }));
+    utimesSync(newer, new Date(at + 9 * MIN), new Date(at + 9 * MIN));
+    utimesSync(older, new Date(at + MIN), new Date(at + MIN));
+    const b = cpSid("parts");
+    const cut = (n: number) => `${JSON.stringify({ kind: 0, v: sessionRoot(b, reqs.slice(0, n), { created: at }) })}\n{ "kind": 2, "k": ["requ`;
+    const fewer = h.write(path.join(chatDir("p"), `${b}.jsonl`), cut(1));
+    const fuller = h.write(path.join(chatDir("q"), `${b}.jsonl`), cut(2));
+    utimesSync(fewer, new Date(at + 9 * MIN), new Date(at + 9 * MIN)); // read first, yet the fuller copy wins
+    utimesSync(fuller, new Date(at + MIN), new Date(at + MIN));
+    const r = await run([cpVscode]);
+    expect(r.store.forSession(sidOf(a), "prompt")).toHaveLength(2);
+    expect(r.store.forSession(sidOf(b), "prompt")).toHaveLength(2);
+    expect(covOf(r, "copilot.vscode").skipped).toEqual({ parse: 2, duplicate: 2 });
+  });
+
   test("a journal that yields no session falls back to the legacy file of the same session", async () => {
     const id = cpSid("fallbk");
     h.write(path.join(chatDir("w1"), `${id}.jsonl`), "{ not json\n");

@@ -69,15 +69,28 @@ function sessionFiles(userDir: string, tally: Tally): SessionFile[] {
   return files.sort((a, b) => Number(b.journal) - Number(a.journal) || b.mtime - a.mtime); // stable: name order on ties
 }
 
-/** Replays a journal line by line into its session object (nothing else of the file is kept). */
-async function readJournal(file: string, ctx: ScanCtx, tally: Tally): Promise<unknown> {
+/** A session object read from one file; `complete` = the whole file was read and every line of it applied. */
+interface SessionRead { root: unknown; complete: boolean }
+
+/**
+ * Replays a journal line by line into its session object (nothing else of the file is kept). The read is complete only
+ * when the file was read to its end and no line was skipped or failed to apply: a write cut off mid-line, an I/O error
+ * or a corrupt record leave a partial session.
+ */
+async function readJournal(file: string, ctx: ScanCtx, tally: Tally): Promise<SessionRead | undefined> {
   const st = safeStat(file);
   if (!st?.isFile()) return undefined;
-  const journal = new Journal((key) => (key === "bad-record" ? tally.skip(key) : tally.unknownKey(key)));
+  let lost = 0;
+  const journal = new Journal((key) => {
+    lost++;
+    if (key === "bad-record") tally.skip(key);
+    else tally.unknownKey(key);
+  });
   let complete = true;
   try {
     for await (const item of readJsonl(file, { signal: ctx.signal })) {
       if ("skip" in item) {
+        lost++;
         tally.skip(item.skip);
         continue;
       }
@@ -85,6 +98,7 @@ async function readJournal(file: string, ctx: ScanCtx, tally: Tally): Promise<un
       try {
         journal.apply(item.value);
       } catch {
+        lost++;
         tally.skip("bad-record");
       }
     }
@@ -98,11 +112,11 @@ async function readJournal(file: string, ctx: ScanCtx, tally: Tally): Promise<un
     tally.files++;
     tally.bytes += st.size;
   }
-  return journal.root;
+  return journal.root === undefined ? undefined : { root: journal.root, complete: complete && lost === 0 };
 }
 
-/** A legacy session file (one JSON document); too large, unreadable or invalid files are counted and skipped. */
-function readLegacy(file: string, tally: Tally): unknown {
+/** A legacy session file (one JSON document, so read whole or not at all); too large, unreadable or invalid files are counted and skipped. */
+function readLegacy(file: string, tally: Tally): SessionRead | undefined {
   const r = readJsonSmallResult(file, LEGACY_MAX_BYTES);
   if (!r.ok) {
     if (r.reason === "too-large") tally.note = "too-large";
@@ -112,8 +126,10 @@ function readLegacy(file: string, tally: Tally): unknown {
   tally.files++;
   tally.bytes += safeStat(file)?.size ?? 0;
   tally.records++;
-  return r.value;
+  return { root: r.value, complete: true };
 }
+
+const requestCount = (root: unknown): number => (isObj(root) && Array.isArray(root.requests) ? root.requests.length : 0);
 
 /** The folder a workspace was opened on (`workspace.json` `folder`), as a path; multi-root workspaces have none. */
 function workspaceFolder(workspace: string, cache: Map<string, string | undefined>, ctx: ScanCtx, tally: Tally): string | undefined {
@@ -126,35 +142,63 @@ function workspaceFolder(workspace: string, cache: Map<string, string | undefine
 }
 
 /**
- * Scan one VS Code user folder: the chat sessions of every workspace and of empty windows (journals replayed, legacy
- * files parsed; each session id once, its journal preferred — any other copy is skipped `duplicate`), then the Copilot
- * extension's session store. One CoverageEv, last, saying whether Copilot is installed.
+ * Scan one VS Code user folder: the chat sessions of every workspace and of empty windows, then the Copilot extension's
+ * session store. One CoverageEv, last, saying whether Copilot is installed.
+ *
+ * Each session is mapped from one copy, chosen in read order (journals first, then the most recently written): the first
+ * complete copy that has requests is mapped at once, and only then is its id seen, so any other copy is skipped
+ * `duplicate`. A copy read partially (a cut-off write, an I/O error, a corrupt line) or without requests waits; a session
+ * with no complete copy is mapped at the end from the copy with the most requests, read again (its first read was counted).
  */
 async function scanVscode(c: Candidate, ctx: ScanCtx): Promise<void> {
   const tally = new Tally(TOOL, VSCODE_SOURCE);
   const seen = new Set<string>();
+  const waiting = new Map<string, { f: SessionFile; requests: number }>();
   const folders = new Map<string, string | undefined>();
-  for (const f of sessionFiles(c.root, tally)) {
-    if (ctx.signal.aborted) break;
-    if (seen.has(f.stem)) {
-      tally.skip("duplicate");
-      continue;
-    }
-    const root = f.journal ? await readJournal(f.file, ctx, tally) : readLegacy(f.file, tally);
-    if (root === undefined) continue;
-    const id = isObj(root) ? rawSessionId(root, f.stem) : f.stem;
-    if (seen.has(id)) {
-      tally.skip("duplicate");
-      continue;
-    }
-    seen.add(id);
-    seen.add(f.stem);
+  const read = (f: SessionFile, t: Tally) => (f.journal ? readJournal(f.file, ctx, t) : Promise.resolve(readLegacy(f.file, t)));
+  const map = (f: SessionFile, root: unknown) => {
     const cwd = f.workspace === undefined ? undefined : workspaceFolder(f.workspace, folders, ctx, tally);
     try {
       mapSession(root, cwd === undefined ? { stem: f.stem } : { stem: f.stem, cwd }, ctx, tally);
     } catch {
       tally.skip("bad-record"); // one session the mapping cannot handle; the others go on
     }
+  };
+  for (const f of sessionFiles(c.root, tally)) {
+    if (ctx.signal.aborted) break;
+    if (seen.has(f.stem)) {
+      tally.skip("duplicate");
+      continue;
+    }
+    const got = await read(f, tally);
+    if (got === undefined) continue;
+    const id = isObj(got.root) ? rawSessionId(got.root, f.stem) : f.stem;
+    if (seen.has(id)) {
+      tally.skip("duplicate");
+      continue;
+    }
+    const requests = requestCount(got.root);
+    if (got.complete && requests > 0) {
+      if (waiting.delete(id)) tally.skip("duplicate");
+      seen.add(id);
+      seen.add(f.stem);
+      map(f, got.root);
+      continue;
+    }
+    const best = waiting.get(id);
+    if (best !== undefined && best.requests >= requests) {
+      tally.skip("duplicate");
+      continue;
+    }
+    if (best !== undefined) tally.skip("duplicate");
+    waiting.set(id, { f, requests });
+  }
+  for (const [id, { f }] of waiting) {
+    if (ctx.signal.aborted) break;
+    const got = await read(f, new Tally(TOOL, VSCODE_SOURCE)); // counted on its first read
+    if (got === undefined) continue;
+    seen.add(id);
+    map(f, got.root);
   }
   const store = path.join(c.root, "globalStorage", "github.copilot-chat", "session-store.db");
   if (!ctx.signal.aborted && safeStat(store)?.isFile()) readSessionStore(store, VSCODE_SOURCE, ctx, tally);
