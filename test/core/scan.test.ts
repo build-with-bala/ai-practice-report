@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { detectEnv } from "../../core/env/env";
+import { readJsonlStream } from "../../core/io/jsonl";
+import { TERM_SIGNALS } from "../../core/io/signals";
 import type { CoverageEv, Ev } from "../../core/model/events";
 import type { ToolId } from "../../core/model/ids";
 import { scan } from "../../core/scan";
@@ -130,7 +132,7 @@ describe("scan hygiene", () => {
   });
 
   test("failed disposeAll -> tempClean false + cleanup-failed warning", async () => {
-    const p = plugin("codex", "a", () => {});
+    const p = plugin("codex", "a", (c) => { c.temp.dir(); });
     const r = await scan({ env, plugins: [p], tempFactory: () => ({ dir: () => "", active: 0, disposeAll: () => { throw new Error("EPERM /secret"); } }) });
     expect(r.tempClean).toBe(false);
     const w = r.warnings.find((x) => x.code === "temp-leftover")!;
@@ -160,6 +162,102 @@ describe("scan hygiene", () => {
     expect(located).toBe(false);
     expect(r.coverage[0]).toMatchObject({ status: "error", note: "aborted", source: "a" });
     expect(r.warnings.some((w) => w.tool === "scan")).toBe(true);
+  });
+});
+
+describe("scan temp folder and concurrency", () => {
+  test("a scan that makes no private copy never touches the temp folder: a missing one does not fail it", async () => {
+    const missing = detectEnv({ home, tmp: path.join(home, "no-such-tmp"), platform: "linux", wslHomes: [] });
+    const p = plugin("codex", "a", (c) => { c.emit(session("codex", "a")); c.emit(cov("codex", "a")); });
+    const r = await scan({ env: missing, plugins: [p] });
+    expect(r.tempClean).toBe(true);
+    expect(r.store.all("session")).toHaveLength(1);
+    expect(existsSync(path.join(home, "no-such-tmp"))).toBe(false);
+  });
+
+  test("the aipr-scan-* folder exists only while a private copy needs it, and is gone after the scan", async () => {
+    const tmp = mkdtempSync(path.join(home, "tmp-"));
+    const seen: string[][] = [];
+    const quiet = plugin("codex", "quiet", () => { seen.push(readdirSync(tmp)); });
+    const copier = plugin("cursor", "copier", (c) => { c.temp.dir(); seen.push(readdirSync(tmp)); });
+    const r = await scan({ env: detectEnv({ home, tmp, platform: "linux", wslHomes: [] }), plugins: [quiet, copier], concurrency: 1 });
+    expect(seen[0]).toEqual([]);
+    expect(seen[1]!.map((n) => n.startsWith("aipr-scan-"))).toEqual([true]);
+    expect(readdirSync(tmp)).toEqual([]);
+    expect(r.tempClean).toBe(true);
+  });
+
+  test("a concurrency that is not a positive integer means the default: every plugin runs, none is aborted", async () => {
+    for (const concurrency of [Number.NaN, 0, -2, 2.5, Number.POSITIVE_INFINITY]) {
+      const ran: string[] = [];
+      const ps = ["a", "b", "c", "d", "e"].map((id) => plugin("codex", id, () => { ran.push(id); }));
+      const r = await scan({ env, plugins: ps, concurrency });
+      expect([concurrency, ran.sort()]).toEqual([concurrency, ["a", "b", "c", "d", "e"]]);
+      expect(r.coverage.filter((c) => c.note === "aborted")).toEqual([]);
+    }
+  });
+});
+
+describe("aborting a running scan", () => {
+  const enc = new TextEncoder();
+  const LINES = enc.encode(`${JSON.stringify({ type: "x", v: 1 })}\n`.repeat(512));
+  /** A plugin that reads an endless JSONL stream until the scan is aborted, then emits its coverage as readers do. */
+  const reader = (id: string): SourcePlugin => plugin("codex", id, async (c) => {
+    let records = 0;
+    for await (const _ of readJsonlStream(new ReadableStream<Uint8Array>({ pull: (ctl) => ctl.enqueue(LINES) }), { signal: c.signal })) {
+      records++;
+      if (records === 1) c.emit(session("codex", id));
+    }
+    c.emit(cov("codex", id, { records }));
+  });
+
+  test("an abort mid-read resolves promptly; the coverage of the source read in part is error/aborted, its counts kept", async () => {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 80);
+    const after = plugin("cursor", "after", () => {});
+    const t0 = performance.now();
+    const r = await scan({ env, plugins: [reader("endless"), after], concurrency: 1, signal: ac.signal });
+    clearTimeout(timer);
+    expect(performance.now() - t0).toBeLessThan(2_000);
+    const own = r.coverage.find((c) => c.source === "endless")!;
+    expect(own).toMatchObject({ status: "error", note: "aborted", files: 1 });
+    expect(own.records).toBeGreaterThan(0);
+    expect(r.store.all("session")).toHaveLength(1); // what was read before the abort stays
+    expect(r.coverage.find((c) => c.source === "after")).toMatchObject({ status: "error", note: "aborted", records: 0 });
+    expect(r.tempClean).toBe(true);
+  });
+
+  test("a coverage written before the abort stays as it was", async () => {
+    const ac = new AbortController();
+    const first = plugin("codex", "first", (c) => { c.emit(cov("codex", "first")); ac.abort(); });
+    const r = await scan({ env, plugins: [first], signal: ac.signal });
+    expect(r.coverage.find((c) => c.source === "first")).toMatchObject({ status: "ok" });
+  });
+
+  test("a plugin that throws once the scan is aborted gets error coverage noted aborted", async () => {
+    const ac = new AbortController();
+    const p = plugin("codex", "a", () => { ac.abort(); throw new DOMException("stop", "AbortError"); });
+    const r = await scan({ env, plugins: [p], signal: ac.signal });
+    expect(r.coverage[0]).toMatchObject({ status: "error", note: "aborted" });
+  });
+});
+
+describe("signal policy", () => {
+  const counts = () => TERM_SIGNALS.map((s) => process.listenerCount(s));
+
+  test("SIGINT and SIGTERM are trapped while scan() runs, and only then", async () => {
+    const before = counts();
+    let during: number[] = [];
+    await scan({ env, plugins: [plugin("codex", "a", () => { during = counts(); })] });
+    expect(during).toEqual(before.map((n) => n + 1));
+    expect(counts()).toEqual(before);
+  });
+
+  test("handleSignals false installs no handler: the application owns the signals", async () => {
+    const before = counts();
+    let during: number[] = [];
+    await scan({ env, handleSignals: false, plugins: [plugin("codex", "a", () => { during = counts(); })] });
+    expect(during).toEqual(before);
   });
 });
 

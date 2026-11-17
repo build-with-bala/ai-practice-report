@@ -1,9 +1,8 @@
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
-import path from "node:path";
 import { detectEnv, type Env } from "./env/env";
 import { homesToScan } from "./env/paths";
-import { installSignalCleanup, TempRegistry } from "./io/temp";
+import { reraise, trapSignals, type TermSignal } from "./io/signals";
+import { ScanTemp } from "./io/temp";
 import { maybeYield } from "./io/yield";
 import type { CoverageEv, Ev } from "./model/events";
 import type { ToolId } from "./model/ids";
@@ -13,13 +12,32 @@ import type { Candidate, ScanCtx, SourcePlugin, TempDirs } from "./sources/types
 import { keyedHash, normalizePath } from "./text/hash";
 
 export interface ScanOptions { env?: Env; plugins?: SourcePlugin[]; tools?: ToolId[]; since?: number; wsl?: boolean; salt?: Uint8Array;
-  concurrency?: number; onProgress?: (p: { plugin: string; done: number; total: number }) => void; signal?: AbortSignal;
+  /** Plugin candidates read at once: a finite integer of at least 1; anything else means the default, 4. */
+  concurrency?: number;
+  onProgress?: (p: { plugin: string; done: number; total: number }) => void;
+  /**
+   * Aborts the scan. Plugins stop at their next check (JSONL readers within about 25 ms; a synchronous SQLite pass at
+   * its next page); the scan cleans up its temp files and resolves with what was read: every coverage a plugin emits
+   * after the abort says `status: "error", note: "aborted"` (its counts and the events before it are kept, but the
+   * source was not read to its end), and plugins that never started get the same coverage, empty.
+   */
+  signal?: AbortSignal;
+  /**
+   * Signal policy, default true: while scan() runs it traps SIGINT and SIGTERM. The first one aborts the scan (as
+   * `signal` does), which unwinds through its cleanup — private copies and the `aipr-scan-*` folder are removed — and
+   * then raises the same signal again with the trap released: by its default action the process ends, by that signal
+   * (a non-zero exit status), and nothing after scan() runs. Pass false when the application owns these signals:
+   * scan() installs no handler, and the application aborts it through `signal` to get the partial result.
+   */
+  handleSignals?: boolean;
   onLog?: (level: "debug" | "info" | "warn", code: string, n?: number) => void;
-  /** @internal test hook: replace the per-scan temp registry. */
+  /** @internal test hook: builds the temp registry inside the scan's temp folder, when a private copy first needs one. */
   tempFactory?: (base: string) => TempDirs }
 export interface Warning { code: "drift" | "error" | "too-large" | "temp-leftover" | "beta"; tool: ToolId | "scan"; source: string; detail: string }
 export interface ScanResult { store: EventStore; coverage: CoverageEv[]; warnings: Warning[]; cwds: Map<string, string>;
   salt: Uint8Array; startedAt: number; finishedAt: number; tempClean: boolean }
+
+const DEFAULT_CONCURRENCY = 4;
 
 /** Coverage the orchestrator writes for a plugin (absent, error, aborted), in the window the plugin reports. */
 function emptyCoverage(p: SourcePlugin, status: CoverageEv["status"], note?: string): CoverageEv {
@@ -40,11 +58,14 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
   const cwds = new Map<string, string>();
   const nonCoverage = new Map<SourcePlugin, number>();
   const now = Date.now();
-  const signal = opts.signal ?? new AbortController().signal;
-
-  const base = mkdtempSync(path.join(env.tmp, "aipr-scan-"));
-  const temp = opts.tempFactory?.(base) ?? new TempRegistry(base);
-  const uninstall = installSignalCleanup(temp);
+  const stop = new AbortController();
+  const signal = opts.signal ? AbortSignal.any([opts.signal, stop.signal]) : stop.signal;
+  let caught: TermSignal | undefined;
+  const release = opts.handleSignals === false ? undefined : trapSignals((sig) => {
+    caught ??= sig;
+    stop.abort();
+  });
+  const temp = new ScanTemp(env.tmp, opts.tempFactory);
   let tempClean = false;
 
   try {
@@ -73,7 +94,12 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
     const runJob = async ({ plugin, cand }: { plugin: SourcePlugin; cand: Candidate }): Promise<void> => {
       const ctx: ScanCtx = {
         env, now, since: opts.since, salt, temp, signal,
-        emit: (e: Ev) => { if (e.k !== "coverage") nonCoverage.set(plugin, (nonCoverage.get(plugin) ?? 0) + 1); store.add(e); },
+        emit: (e: Ev) => {
+          if (e.k !== "coverage") nonCoverage.set(plugin, (nonCoverage.get(plugin) ?? 0) + 1);
+          // a coverage written after the abort may describe a source read only in part: it never looks complete
+          else if (signal.aborted) e = { ...e, status: "error", note: "aborted" };
+          store.add(e);
+        },
         hash: (v) => keyedHash(salt, v),
         registerCwd: (cwd) => {
           const key = keyedHash(salt, normalizePath(cwd));
@@ -85,7 +111,7 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
       try {
         await plugin.scan(cand, ctx);
       } catch (e) {
-        const name = (e as Error)?.constructor?.name ?? "Error";
+        const name = signal.aborted ? "aborted" : (e as Error)?.constructor?.name ?? "Error";
         store.add(emptyCoverage(plugin, "error", name));
         warnings.push({ code: "error", tool: plugin.tool, source: plugin.id, detail: name });
       }
@@ -102,7 +128,9 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
         try { await runJob(jobs[i]!); } catch { /* runJob should not throw; never reject a worker */ }
       }
     };
-    const n = Math.max(1, Math.min(opts.concurrency ?? 4, jobs.length));
+    const want = opts.concurrency;
+    const width = typeof want === "number" && Number.isInteger(want) && want >= 1 ? want : DEFAULT_CONCURRENCY;
+    const n = Math.max(1, Math.min(width, jobs.length));
     await Promise.allSettled(Array.from({ length: n }, worker));
 
     jobs.forEach((j, i) => { if (!started.has(i)) aborted.add(j.plugin); });
@@ -113,14 +141,8 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
       if (plugin.beta && count > 0) warnings.push({ code: "beta", tool: plugin.tool, source: plugin.id, detail: "beta reader" });
     }
   } finally {
-    let failed = false;
-    try { temp.disposeAll(); } catch { failed = true; }
-    try { uninstall(); } catch { failed = true; }
-    try {
-      if (existsSync(base) && readdirSync(base).length > 0) failed = true;
-    } catch { failed = true; }
-    try { rmSync(base, { recursive: true, force: true }); } catch { failed = true; }
-    tempClean = !failed;
+    tempClean = temp.close();
+    release?.();
   }
 
   const coverage = [...store.all("coverage")];
@@ -130,5 +152,7 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
     if (c.note === "too-large") warnings.push({ code: "too-large", tool: c.tool, source: c.source, detail: "too-large" });
   }
   if (!tempClean) warnings.push({ code: "temp-leftover", tool: "scan", source: "scan", detail: "cleanup-failed" });
+  // cleaned up: a trapped SIGINT/SIGTERM now takes its default action, ending the process before anything after scan()
+  if (caught !== undefined) reraise(caught);
   return { store, coverage, warnings, cwds, salt, startedAt, finishedAt: Date.now(), tempClean };
 }

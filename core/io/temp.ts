@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import path from "node:path";
 import type { TempDirs } from "../sources/types";
 
@@ -30,25 +30,55 @@ export class TempRegistry implements TempDirs {
   }
 }
 
-/** On SIGINT/SIGTERM: dispose temp dirs, drop handlers, re-raise. Returns uninstall. */
-export function installSignalCleanup(reg: TempDirs): () => void {
-  const signals = ["SIGINT", "SIGTERM"] as const;
-  const handlers = new Map<NodeJS.Signals, () => void>();
-  const uninstall = () => {
-    for (const [sig, h] of handlers) process.removeListener(sig, h);
-    handlers.clear();
-  };
-  for (const sig of signals) {
-    const h = () => {
-      try {
-        reg.disposeAll();
-      } finally {
-        uninstall();
-        process.kill(process.pid, sig);
-      }
-    };
-    handlers.set(sig, h);
-    process.on(sig, h);
+/**
+ * A scan's temp dirs, under one base folder `<tmp>/aipr-scan-*` that is made on the first `dir()`: a scan that needs no
+ * private copy never touches the temp folder, so a missing or read-only one cannot fail it (a copy that needs it fails
+ * on its own, and its store counts as unreadable). `factory` builds the registry inside the base (a test seam).
+ */
+export class ScanTemp implements TempDirs {
+  private base?: string;
+  private reg?: TempDirs;
+
+  constructor(private readonly tmp: string, private readonly factory: (base: string) => TempDirs = (base) => new TempRegistry(base)) {}
+
+  dir(): string {
+    if (!this.reg) {
+      this.base ??= mkdtempSync(path.join(this.tmp, "aipr-scan-"));
+      this.reg = this.factory(this.base);
+    }
+    return this.reg.dir();
   }
-  return uninstall;
+
+  disposeAll(): void {
+    this.reg?.disposeAll();
+  }
+
+  get active(): number {
+    return this.reg?.active ?? 0;
+  }
+
+  /**
+   * Disposes of every dir, then removes the base folder (and whatever is left in it). True when nothing was left: the
+   * dirs were all disposed of and the base was empty when removed.
+   */
+  close(): boolean {
+    let clean = true;
+    try {
+      this.reg?.disposeAll();
+    } catch {
+      clean = false;
+    }
+    if (this.base === undefined) return clean;
+    try {
+      if (existsSync(this.base) && readdirSync(this.base).length > 0) clean = false;
+    } catch {
+      clean = false;
+    }
+    try {
+      rmSync(this.base, { recursive: true, force: true });
+    } catch {
+      clean = false;
+    }
+    return clean;
+  }
 }
