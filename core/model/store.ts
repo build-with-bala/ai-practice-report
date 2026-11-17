@@ -1,7 +1,16 @@
 import type { Ev, EvOf, SessionEv } from "./events";
+import type { Origin } from "./ids";
 
 type Kind = Ev["k"];
 
+/** When merged sessions disagree on origin, the earliest in this list wins: any non-human origin beats `human`. */
+const ORIGIN_PRECEDENCE: readonly Origin[] = ["subagent", "peer", "scripted", "scheduled", "system", "human"];
+
+/**
+ * One session reported by several readers (a rollout and its index row): start = earliest, end = latest, models =
+ * union; origin by ORIGIN_PRECEDENCE and window `detail` when either is, so neither depends on arrival order; every
+ * other field keeps the first defined value.
+ */
 function mergeSession(a: SessionEv, b: SessionEv): SessionEv {
   const out: Record<string, unknown> = { ...a };
   for (const [key, val] of Object.entries(b)) {
@@ -9,7 +18,9 @@ function mergeSession(a: SessionEv, b: SessionEv): SessionEv {
   }
   const models = [...a.models];
   for (const m of b.models) if (!models.includes(m)) models.push(m);
-  return { ...(out as unknown as SessionEv), start: Math.min(a.start, b.start), end: Math.max(a.end, b.end), models };
+  const origin = ORIGIN_PRECEDENCE.indexOf(a.origin) <= ORIGIN_PRECEDENCE.indexOf(b.origin) ? a.origin : b.origin;
+  const window = a.window === "detail" || b.window === "detail" ? "detail" : a.window;
+  return { ...(out as unknown as SessionEv), start: Math.min(a.start, b.start), end: Math.max(a.end, b.end), models, origin, window };
 }
 
 export class EventStore {

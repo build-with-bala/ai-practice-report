@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionEv, ToolEv } from "../../../core/model/events";
-import { sid } from "../../../core/model/ids";
+import { sid, type Origin, type Window } from "../../../core/model/ids";
 import { EventStore } from "../../../core/model/store";
 
 const sess = (over: Partial<SessionEv>): SessionEv => ({
@@ -51,6 +51,39 @@ describe("EventStore", () => {
     expect(m.projectKey).toBe("p");
     expect(s.all("session").length).toBe(1);
     expect(s.all("session")[0]).toBe(m);
+  });
+
+  const merged = (...xs: SessionEv[]): SessionEv => {
+    const s = new EventStore();
+    for (const x of xs) s.add(x);
+    return s.session("x")!;
+  };
+
+  test("merged origin: a non-human origin wins, subagent > peer > scripted > scheduled > system > human, in either order", () => {
+    const ranked: Origin[] = ["subagent", "peer", "scripted", "scheduled", "system", "human"];
+    ranked.forEach((winner, i) => {
+      for (const other of ranked.slice(i)) {
+        expect(merged(sess({ origin: winner }), sess({ origin: other })).origin).toBe(winner);
+        expect(merged(sess({ origin: other }), sess({ origin: winner })).origin).toBe(winner);
+      }
+    });
+    expect(merged(sess({ origin: "human" }), sess({ origin: "scripted" }), sess({ origin: "peer" })).origin).toBe("peer");
+  });
+
+  test("merged window: detail when either side is detail", () => {
+    const cases: [Window, Window, Window][] = [["detail", "lifetime", "detail"], ["lifetime", "detail", "detail"], ["lifetime", "lifetime", "lifetime"], ["detail", "detail", "detail"]];
+    for (const [a, b, want] of cases) expect(merged(sess({ window: a }), sess({ window: b })).window).toBe(want);
+  });
+
+  test("a rollout driven by another agent and its index row merge to the same session in either order", () => {
+    const rollout = sess({ source: "codex.rollouts", window: "detail", origin: "peer", start: 100, end: 200, models: ["m"], surface: "cli", inRepo: true, projectKey: "p" });
+    const indexRow = sess({ source: "codex.threads", window: "lifetime", origin: "human", start: 50, end: 300, models: ["m"], surface: "cli", approval: "never", sandbox: "managed", version: "0.169.0" });
+    const ab = merged(rollout, indexRow);
+    const ba = merged(indexRow, rollout);
+    expect(ab).toMatchObject({ origin: "peer", window: "detail", start: 50, end: 300, models: ["m"], surface: "cli", inRepo: true, projectKey: "p", approval: "never", sandbox: "managed", version: "0.169.0" });
+    // every other field keeps the first defined value: here only `source` (the reader that arrived first) differs
+    expect([ab.source, ba.source]).toEqual(["codex.rollouts", "codex.threads"]);
+    expect({ ...ba, source: ab.source }).toEqual(ab);
   });
 
   test("count only lists non-empty kinds", () => {
