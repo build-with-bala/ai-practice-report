@@ -1,5 +1,6 @@
 // Synthetic Cursor stores. Cursor is not installed on the fixture author's machine: table, key and field names follow the
 // public descriptions FORMAT.md summarises (from docs, unverified locally); every value is invented.
+import { Database } from "bun:sqlite";
 import path from "node:path";
 import { vscodeUser } from "../../core/env/paths";
 import { CANARY } from "../kit/canary";
@@ -79,12 +80,26 @@ export function bubble(id: string, o: BubbleOpts): Obj {
 export type Row = [string, unknown];
 const encode = (v: unknown): unknown => (typeof v === "string" || v instanceof Uint8Array || v === null ? v : JSON.stringify(v));
 
-/** A `state.vscdb` with `ItemTable` rows and, unless `kv` is false, `cursorDiskKV` rows. */
+/**
+ * A `state.vscdb` with `ItemTable` rows and, unless `kv` is false, `cursorDiskKV` rows — written in one transaction,
+ * so stores of thousands of rows are quick to build on every platform (one sync, not one per row).
+ */
 export function writeStateDb(h: FakeHome, rel: string, kvRows: Row[], items: Row[] = [], o: { kv?: boolean; kvDdl?: string; wal?: boolean } = {}): string {
-  const ddl = [ITEM_DDL, ...(o.kv === false ? [] : [o.kvDdl ?? KV_DDL])];
-  const rows: Record<string, unknown[][]> = { ItemTable: items.map(([k, v]) => [k, encode(v)]) };
-  if (o.kv !== false) rows.cursorDiskKV = kvRows.map(([k, v]) => [k, encode(v)]);
-  return h.sqlite(rel, ddl, rows, o.wal);
+  const file = h.sqlite(rel, [ITEM_DDL, ...(o.kv === false ? [] : [o.kvDdl ?? KV_DDL])], {}, o.wal);
+  const db = new Database(file);
+  try {
+    db.transaction(() => {
+      const insert = (table: string, rows: Row[]) => {
+        const st = db.query(`INSERT INTO ${table} VALUES (?, ?)`);
+        for (const [k, v] of rows) st.run(k, encode(v) as never);
+      };
+      insert("ItemTable", items);
+      if (o.kv !== false) insert("cursorDiskKV", kvRows);
+    })();
+  } finally {
+    db.close();
+  }
+  return file;
 }
 
 /** Rows of `ItemTable` that hold the account's credentials: never queried. */
