@@ -125,7 +125,7 @@ describe("codex rollouts: Task 11 scenario", () => {
     expect(r.store.all("ratelimit").filter((x) => x.ts >= s1.start && x.ts <= s1.end).map((x) => [x.window, x.usedPercent, x.windowMinutes])).toEqual([
       ["primary", 10, 300], ["secondary", 2, 10_080], ["primary", 11, 300],
     ]);
-    expect(r.store.forSession(r1, "marker").map((m) => [m.kind, m.detail])).toEqual([["interrupt", "interrupted"], ["compact-auto", undefined]]);
+    expect(r.store.forSession(r1, "marker").map((m) => [m.kind, m.detail])).toEqual([["interrupt", "user"], ["compact-auto", undefined]]);
   });
 
   test("tool events: one per nested command, per patched file and per call; Code Mode cells are not tool events", async () => {
@@ -456,6 +456,34 @@ describe("codex rollouts: turns, usage, rate limits, markers", () => {
     expectNoCanaries(allEvents(r));
   });
 
+  test("every turn_aborted reason is an interrupt with its own detail: the person's (user, replaced) apart from the tool's", async () => {
+    const r1 = rollout((r) => {
+      for (const [i, reason] of ["interrupted", "replaced", "review_ended", "budget_limited", "brand_new_reason"].entries()) r.turn(`t${i}`).aborted(`t${i}`, reason);
+      r.turn("t9").event("turn_aborted", { turn_id: "t9" }); // no reason at all
+    });
+    r1.write(h);
+    const r = await run();
+    expect(r.store.all("marker").map((m) => [m.kind, m.detail])).toEqual([
+      ["interrupt", "user"], ["interrupt", "replaced"], ["interrupt", "review-ended"], ["interrupt", "budget-limited"], ["interrupt", "other"], ["interrupt", "other"],
+    ]);
+    expect(r.store.all("turn").map((t) => t.status)).toEqual(Array(6).fill("interrupted"));
+  });
+
+  test("a command or patch the person declined never ran: outcome denied, no ok or exit, and a denial marker", async () => {
+    const r1 = rollout((r) => {
+      r.completed({ type: "CommandExecution", id: "exec-d", command: ["/bin/zsh", "-lc", "npm test"], source: "unified_exec_startup", status: "declined" });
+      r.fileChange({ [`${CANARY.path}/a.ts`]: { type: "update", unified_diff: "@@ -1 +1 @@\n-x\n+y\n" } }, { status: "declined" });
+      r.command("npm test", 1);
+    });
+    r1.write(h);
+    const r = await run();
+    expect(toolsByTs(r).map((t) => [t.category, t.outcome, t.ok, t.exit])).toEqual([
+      ["test", "denied", undefined, undefined], ["edit", "denied", undefined, undefined], ["test", undefined, false, 1],
+    ]);
+    expect(r.store.all("marker").map((m) => [m.kind, m.detail])).toEqual([["denial", "user"], ["denial", "user"]]);
+    expectNoCanaries(allEvents(r));
+  });
+
   test("usage: one per token_count with new totals; rate limits per window, deduplicated, with reset times", async () => {
     const at = fixtureStart();
     const r1 = rollout((r) => {
@@ -702,7 +730,10 @@ describe("cxToolCalls", () => {
     ["the CLI's web namespace", fc("run", { query: "x" }, { namespace: "web" }), one("web_search", "web")],
     ["sleep", fc("sleep", { seconds: 5 }, { namespace: "clock" }), one("sleep", "schedule")],
     ["imagegen", fc("imagegen", { prompt: "x" }, { namespace: "image_gen" }), one("imagegen", "other")],
-    ["request_user_input_async", fc("request_user_input_async", {}), one("request_user_input_async", "other")],
+    ["request_user_input_async", fc("request_user_input_async", {}), one("request_user_input_async", "meta")],
+    ["request_user_input", fc("request_user_input", {}), one("request_user_input", "meta")],
+    ["current_time", fc("current_time", {}, { namespace: "clock" }), one("current_time", "meta")],
+    ["js_repl is work, not bookkeeping", fc("js_repl", { code: "1" }), one("js_repl", "other")],
     ["read_mcp_resource", fc("read_mcp_resource", { server: "s", uri: "u" }), one("read_mcp_resource", "mcp")],
     ["mcp by name", fc("mcp__docs__search", {}), one("mcp", "mcp", { mcpServer: "docs" })],
     ["mcp by namespace", fc("search", {}, { namespace: "mcp__docs__" }), one("mcp", "mcp", { mcpServer: "docs" })],

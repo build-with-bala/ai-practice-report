@@ -8,8 +8,8 @@ import { extOfPath, isObj, num, str } from "../common/guards";
  */
 export interface CxToolCall { name: string; category: ToolCategory; checks: CheckKind[]; editExt?: string; added?: number; removed?: number; mcpServer?: string;
   commandLine?: boolean }
-/** How an action ended, from the item that completed it. */
-export interface CxOutcome { ok?: boolean; exit?: number; ms?: number }
+/** How an action ended, from the item that completed it: `denied` when the person declined it (it never ran). */
+export interface CxOutcome { ok?: boolean; exit?: number; ms?: number; outcome?: "denied" }
 
 /** Built-in tools with a fixed category (the CLI's tool handlers, 0.169). Shell, patch and MCP tools are classified apart. */
 const FIXED: ReadonlyMap<string, ToolCategory> = new Map<string, ToolCategory>([
@@ -23,11 +23,12 @@ const FIXED: ReadonlyMap<string, ToolCategory> = new Map<string, ToolCategory>([
   ["write_stdin", "shell"],
   ["sleep", "schedule"],
   ["list_mcp_resources", "mcp"], ["list_mcp_resource_templates", "mcp"], ["read_mcp_resource", "mcp"],
-  ["request_user_input", "other"], ["request_user_input_async", "other"], ["request_permissions", "other"],
-  ["request_plugin_install", "other"], ["list_available_plugins_to_install", "other"], ["tool_search", "other"],
-  ["imagegen", "other"], ["image_generation", "other"], ["current_time", "other"], ["get_context_remaining", "other"],
-  ["new_context_window", "other"], ["wait_for_environment", "other"], ["send_message_to_user_async", "other"],
-  ["js_repl", "other"], ["js_repl_reset", "other"],
+  // bookkeeping and talk with the person: questions and requests to the person, the clock, the context, waiting
+  ["request_user_input", "meta"], ["request_user_input_async", "meta"], ["request_permissions", "meta"],
+  ["request_plugin_install", "meta"], ["list_available_plugins_to_install", "meta"], ["tool_search", "meta"],
+  ["current_time", "meta"], ["get_context_remaining", "meta"], ["new_context_window", "meta"], ["wait_for_environment", "meta"],
+  ["send_message_to_user_async", "meta"],
+  ["imagegen", "other"], ["image_generation", "other"], ["js_repl", "other"], ["js_repl_reset", "other"],
 ]);
 /** Namespaces of the CLI's own tools; a tool in any other namespace is not a built-in, whatever its name. */
 const OWN_NAMESPACES = new Set(["collaboration", "clock", "image_gen", "web"]);
@@ -199,16 +200,20 @@ function durationMs(d: unknown): number | undefined {
   return s !== undefined && s >= 0 && ns >= 0 ? Math.round(s * 1000 + ns / 1e6) : undefined;
 }
 
-/** Outcome of a completed item: exit code (ok = exit 0), else ok from `status`; duration from `{secs, nanos}`. */
+/**
+ * Outcome of a completed item: `declined` (the person refused the approval: it never ran) → outcome `denied`, no ok or
+ * exit; else exit code (ok = exit 0), else ok from `status`; duration from `{secs, nanos}`.
+ */
 export function cxOutcome(item: unknown): CxOutcome {
   if (!isObj(item)) return {};
   const out: CxOutcome = {};
   const exit = num(item.exit_code);
-  if (exit !== undefined) {
+  if (item.status === "declined") out.outcome = "denied";
+  else if (exit !== undefined) {
     out.exit = exit;
     out.ok = exit === 0;
   } else if (item.status === "completed") out.ok = true;
-  else if (item.status === "failed" || item.status === "declined") out.ok = false;
+  else if (item.status === "failed") out.ok = false;
   const ms = durationMs(item.duration);
   if (ms !== undefined) out.ms = ms;
   return out;

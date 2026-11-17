@@ -103,7 +103,13 @@ const FILE_TS = /^rollout-(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})/;
 const FILE_ID = /-([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\.jsonl$/;
 /** A rate-limit bucket id (`rate_limits.limit_id`) is kept when it has this shape, else it becomes `other`. */
 const BUCKET = /^[a-z][a-z0-9_-]{0,31}$/;
-const ABORT_REASONS: ReadonlySet<string> = new Set(["interrupted", "replaced", "review_ended", "budget_limited"]);
+/**
+ * `turn_aborted.reason` (the CLI's TurnAbortReason) → the interrupt marker's detail: the person interrupted (`user`) or
+ * sent input that replaced the turn (`replaced`); the review it ran ended, or a budget ran out — not the person.
+ */
+const ABORT_REASONS: ReadonlyMap<string, string> = new Map([
+  ["interrupted", "user"], ["replaced", "replaced"], ["review_ended", "review-ended"], ["budget_limited", "budget-limited"],
+]);
 const MIN_RESET_MS = Date.UTC(2015, 0, 1);
 const MAX_RESET_AHEAD_MS = 400 * 86_400_000;
 
@@ -372,9 +378,16 @@ class RolloutReader {
   }
 
   private static apply(ev: ToolEv, o: CxOutcome): void {
+    if (o.outcome !== undefined) ev.outcome = o.outcome;
     if (o.ok !== undefined) ev.ok = o.ok;
     if (o.exit !== undefined) ev.exit = o.exit;
     if (o.ms !== undefined) ev.ms = o.ms;
+  }
+
+  /** Emits a completed call; one the person declined is also a denial marker. */
+  private emitCall(ev: ToolEv): void {
+    this.out(ev);
+    if (ev.outcome === "denied") this.marker("denial", ev.ts, "user");
   }
 
   private finished(id: string): void {
@@ -418,7 +431,7 @@ class RolloutReader {
       case "task_complete": return this.endTurn(p, ts, "completed");
       case "turn_aborted": {
         const reason = str(p.reason);
-        this.marker("interrupt", ts, reason === undefined ? undefined : ABORT_REASONS.has(reason) ? reason : "other");
+        this.marker("interrupt", ts, (reason === undefined ? undefined : ABORT_REASONS.get(reason)) ?? "other");
         return this.endTurn(p, ts, "interrupted");
       }
       default: return;
@@ -455,7 +468,7 @@ class RolloutReader {
         }
         if (ran?.commandLine && this.commandLineFound.has(ev)) this.commandLineFound.set(ev, true);
         RolloutReader.apply(ev, outcome);
-        this.out(ev);
+        this.emitCall(ev);
       }
       return;
     }
@@ -470,7 +483,7 @@ class RolloutReader {
     for (const c of calls) {
       const ev = this.toolEv(c, at, id);
       RolloutReader.apply(ev, outcome);
-      this.out(ev);
+      this.emitCall(ev);
     }
     if (id !== undefined) this.finished(id); // the same item again, or its call arriving after it, is not counted twice
   }

@@ -215,13 +215,17 @@ CLI's EventMsg tags (`exec_command_end`, `mcp_tool_call_end`, `collab_*`, `realt
   - `update_plan` → plan; `view_image`/`ImageView` → read; `web_search_call`, `web_search`, the `web` namespace and
     `Extension web.search` → web (`name:"web_search"`); the multi-agent tools (and v1 `wait` with agent ids) and
     `CollabAgentToolCall` → delegate; `sleep` → schedule; `write_stdin` → shell; MCP → `name:"mcp"`, `mcpServer` =
-    the server segment (raw, export-allowlisted later); MCP resource tools → mcp; other built-ins → other; any name
-    that is not a built-in, or a tool in a namespace that is not the CLI's own → `name:"other"`, category other.
+    the server segment (raw, export-allowlisted later); MCP resource tools → mcp; bookkeeping and requests to the
+    person (`request_user_input`, `request_user_input_async`, `request_permissions`, `request_plugin_install`,
+    `list_available_plugins_to_install`, `tool_search`, `current_time`, `get_context_remaining`, `new_context_window`,
+    `wait_for_environment`, `send_message_to_user_async`) → meta; other built-ins → other; any name that is not a
+    built-in, or a tool in a namespace that is not the CLI's own → `name:"other"`, category other.
   - Code Mode `exec` cells and their `wait` resumptions are not tool events: the nested calls are, from their items.
     Commands the person ran (`source: user_shell`) are not tool events.
   - A call waits for the item with its `call_id`: `ok` = exit code 0 (else from `status`), `exit`, `ms` from
-    `duration`; a linked shell call that classified as plain `shell` takes the category and checks of the command that
-    ran. Items without such a call are their own events, timed by `started_at_ms`; an item id is counted once, so the
+    `duration`; an item `declined` by the person never ran: `outcome: "denied"`, no `ok` or `exit`, and a `denial`
+    marker (`detail: "user"`). A linked shell call that classified as plain `shell` takes the category and checks of
+    the command that ran. Items without such a call are their own events, timed by `started_at_ms`; an item id is counted once, so the
     same item again, or its call arriving after it, adds nothing. Calls no item completes are emitted at the end of
     the file.
   - Input sent to a running command (`CommandExecution` with `source: unified_exec_interaction`) never makes a command
@@ -237,8 +241,10 @@ CLI's EventMsg tags (`exec_command_end`, `mcp_tool_call_end`, `collab_*`, `realt
   `resetsAt` (`resets_at` in s or ms, else line time + `resets_in_seconds`), `bucket` = `limit_id` when it matches
   `^[a-z][a-z0-9_-]{0,31}$`, else `other` (absent without one); a snapshot equal to the previous one of its bucket and
   window in the same rollout is not repeated. Rate limits belong to the account: the event has no session.
-- **MarkerEv**: `interrupt` per `turn_aborted` (`detail` = `interrupted`, `replaced`, `review_ended`,
-  `budget_limited`, else `other`); `compact-auto` per `compacted` line.
+- **MarkerEv**: `interrupt` per `turn_aborted`, `detail` by its `reason` — the person's: `interrupted` → `user`,
+  `replaced` → `replaced` (new input replaced the turn); the tool's own: `review_ended` → `review-ended`,
+  `budget_limited` → `budget-limited`; any other reason, or none → `other`. `denial` per declined item.
+  `compact-auto` per `compacted` line.
 - **RolloutFactEv** per fully read rollout: `threadId` = the session id, `uuidTs` = the thread id's UUIDv7 time,
   `fileTs` = the file name's local time; **FileFactEv** likewise.
 - **CoverageEv**: `files`/`bytes` of fully read rollouts, `records` = parsed lines; skipped `sniffed`, `oversize`,
