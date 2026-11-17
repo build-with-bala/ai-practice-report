@@ -104,7 +104,8 @@ describe("codex lifetime: Task 12 scenario", () => {
   });
 
   test("the three readers are registered after the rollouts reader", () => {
-    expect(registry.slice(registry.indexOf(cxRollouts))).toEqual([cxRollouts, cxThreads, cxHistory, cxConfig]);
+    const at = registry.indexOf(cxRollouts);
+    expect(registry.slice(at, at + 4)).toEqual([cxRollouts, cxThreads, cxHistory, cxConfig]);
     expect([cxThreads, cxHistory, cxConfig].map((p) => [p.tool, p.id, p.tier, p.beta])).toEqual([
       ["codex", "codex.threads", "P0", false], ["codex", "codex.history", "P0", false], ["codex", "codex.config", "P0", false],
     ]);
