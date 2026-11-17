@@ -2,6 +2,32 @@ import { existsSync } from "node:fs";
 
 export const MAX_LINE_BYTES = 33_554_432;
 
+/**
+ * Runs `collect` once per `step` bytes reported, while the process RSS is above `minRss` (a small scan pays nothing).
+ * Parsed lines leave garbage faster than the engine reclaims it on its own while the event store grows: measured on a
+ * full scan of several GiB of JSONL, peak RSS reached 0.9–1.1 GiB at any scan concurrency, and stayed at 0.6–0.7 GiB
+ * with a full collection per 64 MiB streamed, for 1–3 s more.
+ */
+export class GcPacer {
+  private bytes = 0;
+  constructor(
+    private readonly step: number,
+    private readonly minRss: number,
+    private readonly collect: () => void,
+    private readonly rss: () => number = () => process.memoryUsage().rss,
+  ) {}
+
+  add(n: number): void {
+    this.bytes += n;
+    if (this.bytes < this.step) return;
+    this.bytes = 0;
+    if (this.rss() > this.minRss) this.collect();
+  }
+}
+
+/** The pacer every JSONL stream reports to, process-wide (concurrent readers share one memory budget). */
+export const STREAM_GC = new GcPacer(64 * 1024 * 1024, 384 * 1024 * 1024, () => Bun.gc(true));
+
 export type JsonlItem =
   | { n: number; value: unknown }
   | { n: number; skip: "oversize" | "parse" | "sniffed"; bytes: number };
@@ -63,6 +89,7 @@ export async function* readJsonlStream(
       const r = await reader.read();
       if (r.done) break;
       const chunk = r.value;
+      STREAM_GC.add(chunk.length);
       let pos = 0;
       while (pos < chunk.length) {
         if (opts.signal?.aborted) return;

@@ -3,7 +3,7 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync, createWriteStream } from
 import os from "node:os";
 import path from "node:path";
 import { once } from "node:events";
-import { readJsonl, readJsonlStream, type JsonlItem } from "../../../core/io/jsonl";
+import { GcPacer, readJsonl, readJsonlStream, STREAM_GC, type JsonlItem } from "../../../core/io/jsonl";
 
 let dir: string;
 beforeAll(() => {
@@ -161,4 +161,39 @@ describe("readJsonl", () => {
     expect(max).toBeLessThan(128 * 1024 * 1024);
     rmSync(p, { force: true });
   }, 120_000);
+});
+
+describe("GcPacer", () => {
+  test("collects once per step of bytes, and only while RSS is above its floor", () => {
+    let rss = 60;
+    let collections = 0;
+    const pacer = new GcPacer(100, 50, () => collections++, () => rss);
+    pacer.add(99);
+    expect(collections).toBe(0);
+    pacer.add(1); // the step is reached
+    expect(collections).toBe(1);
+    pacer.add(250); // one collection however far past the step, and the count starts again
+    expect(collections).toBe(2);
+    pacer.add(99);
+    expect(collections).toBe(2);
+    rss = 40; // below the floor: the step passes without a collection
+    pacer.add(1);
+    expect(collections).toBe(2);
+    rss = 60;
+    pacer.add(100);
+    expect(collections).toBe(3);
+  });
+
+  test("readJsonl reports every byte it streams to the process-wide pacer", async () => {
+    const p = put("paced.jsonl", `${'{"a":1}\n'.repeat(5000)}{"tail":true}`);
+    let streamed = 0;
+    const add = STREAM_GC.add;
+    STREAM_GC.add = (n: number) => { streamed += n; };
+    try {
+      expect(await collect(p)).toHaveLength(5001);
+    } finally {
+      STREAM_GC.add = add;
+    }
+    expect(streamed).toBe(Bun.file(p).size);
+  });
 });
