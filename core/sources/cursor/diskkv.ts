@@ -418,6 +418,9 @@ export class DiskKv {
   private readonly launches = new Set<string>();
   /** Composers last updated before this time are outside the detail window. */
   private readonly windowStart: number;
+  /** Bubbles of a known type read, and how many of them had a time: none timed means the time field moved. */
+  private typed = 0;
+  private timed = 0;
 
   constructor(private readonly db: RoDb, private readonly ctx: ScanCtx, private readonly tally: Tally, private readonly life: Tally) {
     this.windowStart = ctx.since ?? ctx.now - DETAIL_MS;
@@ -533,8 +536,10 @@ export class DiskKv {
     const rawModel = str(r.model);
     const model = rawModel === undefined ? undefined : safeModel(rawModel);
     if (model !== undefined && !c.models.includes(model)) c.models.push(model);
+    this.typed++;
     const ts = toEpochMs(r.created, this.ctx.now);
     if (ts === undefined) return this.tally.skip("no-ts");
+    this.timed++;
     c.times.push(ts);
     this.span(c, ts);
     if (r.type === 1) this.prompt(c, r, ts);
@@ -666,6 +671,8 @@ export class DiskKv {
     }
     // every composer that lists messages has none of them: the bubbles' key family has moved or been renamed
     if (missing > 0 && !found) this.tally.unknownKey(`missing-bubbles:${KV}`);
+    // most bubbles carry createdAt: when none of those read has one, the field has moved or been renamed
+    if (this.typed > 0 && this.timed === 0) this.tally.unknownKey("missing-field:createdAt");
   }
 
   private session(c: Composer): void {

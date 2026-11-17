@@ -16,6 +16,13 @@ export interface SourcePlugin { tool: ToolId; id: string; tier: Tier; beta: bool
    * error and aborted coverage is written for each of them too.
    */
   windows?: readonly Window[];
+  /**
+   * The event kinds a window yields once it has read records: a coverage that read records but saw none of them becomes
+   * drift `zero-yield` (a format change must never pass for a quiet store). Session, prompt and turn events count in their
+   * own window, every other kind in any. Left out for a window that yields no events by design (presence-only readers),
+   * and for an index store read beside a detail store, whose column checks already flag a moved field.
+   */
+  primary?: Partial<Record<Window, readonly Ev["k"][]>>;
   describe: { reads: string[]; neverReads: string[] };           // human-readable patterns for --explain and the privacy statement
   locate(env: Env, homes: string[]): Candidate[];
   /** Emits all its events, and exactly one CoverageEv per candidate and window it reports, last. */

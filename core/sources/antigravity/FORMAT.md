@@ -9,6 +9,11 @@ wire types), or confirmed by count-only smoke runs of the readers. **(program)**
 programs' own type tables — the protobuf descriptors and database column tags built into the CLI and into the IDE's language
 server — not seen in data. This file records names and value types only, never values.
 
+**Zero-yield.** A coverage window that read records but yielded none of its reader's primary events is drift
+`zero-yield` (set by the scan), so a renamed field never passes as a quiet store. Primary events: `antigravity.cli` (`detail`) — a session,
+prompt or tool call (its `lifetime` window is checked by its columns); `antigravity.history` — a prompt;
+`antigravity.ide` — a session; `antigravity.brain` — a plan artifact's marker.
+
 ## Layout
 
 ```
@@ -180,8 +185,9 @@ on every line), `workspace` (string), `type` (`slash_command` on slash commands,
   `workspace` is never kept.
 - **DailyEv** (source `antigravity.history`, `zone: "local"`, `unit: "prompts"`) per local day, `count` = its
   prompts and slash commands.
-- Drift: `history:not-object`, `history.type:<type>`, `history.display:missing`, `history.timestamp:missing`. Skipped:
-  `bad-ts` (implausible time), `empty`, `parse`, `oversize`, `io-error`, `bad-record`.
+- Drift: `history:not-object`, `history.type:<type>`, `history.display:missing`, `history.timestamp:missing`,
+  `history.timestamp:shape` (a `timestamp` that is not a time). Skipped: `bad-ts` (a well-formed time outside the
+  plausible range), `empty`, `parse`, `oversize`, `io-error`, `bad-record`.
 - **Coverage** (window `lifetime`): `files`/`bytes` = the file read to its end, `records` = its lines, `from`/`to` =
   first/last prompt time; `empty` without the file.
 

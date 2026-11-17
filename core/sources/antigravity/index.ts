@@ -10,6 +10,7 @@ export const agCli: SourcePlugin = {
   tier: "P0",
   beta: false,
   windows: ["detail", "lifetime"],
+  primary: { detail: ["session", "prompt", "tool"] },
   describe: {
     reads: [
       "<home>/.gemini/antigravity-cli/conversation_summaries.db — per conversation: id, step count, last input and last change times, workspace folders (the first kept only as a keyed project hash), parent conversation id, nesting depth, whether it was killed; inside SQL only: whether a battle id is set, whether another fork won the battle, and the source mapped to an origin code",
@@ -34,6 +35,7 @@ export const agHistory: SourcePlugin = {
   tier: "P0",
   beta: false,
   windows: ["lifetime"],
+  primary: { lifetime: ["prompt"] },
   describe: {
     reads: ["<home>/.gemini/antigravity-cli/history.jsonl — one line per prompt or slash command typed in the CLI: display, timestamp, conversationId"],
     neverReads: ["display text is parsed in memory for intent, features and a keyed hash, and never kept; the workspace paths are never kept"],
@@ -48,6 +50,7 @@ export const agIde: SourcePlugin = {
   tier: "P0",
   beta: false,
   windows: ["lifetime"],
+  primary: { lifetime: ["session"] },
   describe: {
     reads: [
       "<Antigravity user>/globalStorage/state.vscdb and <Antigravity IDE user>/globalStorage/state.vscdb, table ItemTable — only the value of antigravityUnifiedStateSync.trajectorySummaries, by exact key: per conversation its id, step count, creation and last change times, and its first workspace folder (kept only as a keyed project hash)",
@@ -68,6 +71,7 @@ export const agBrain: SourcePlugin = {
   tier: "P0",
   beta: false,
   windows: ["lifetime"],
+  primary: { lifetime: ["marker"] },
   describe: {
     reads: [
       "<home>/.gemini/antigravity/brain/<conversation>/{task,implementation_plan,walkthrough}.md and <home>/.gemini/antigravity-cli/brain/<conversation>/… — existence and last modification time only",

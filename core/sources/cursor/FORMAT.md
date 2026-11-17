@@ -10,6 +10,11 @@ published by third parties. Where a name is backed by a single source it says **
 named by two or more independent sources. Where sources disagree, both shapes are read. This file records names and
 value types only, never values.
 
+**Zero-yield.** A coverage window that read records but yielded none of its reader's primary events is drift
+`zero-yield` (set by the scan), so a renamed field never passes as a quiet store. Primary events: `cursor.ide` (`detail`) — a
+session, prompt or tool call (its `lifetime` window is checked by its columns); `cursor.tracking` — a commit;
+`cursor.agent-cli` reads no records.
+
 ## Layout
 
 ```
@@ -164,7 +169,8 @@ conversations live in `cursorDiskKV`.
   key's last colon). In the rowid fallback, a bubble whose composer has no `composerData` row (a deleted chat) is skipped
   `orphan`, and one whose key is not `bubbleId:<composerId>:<bubbleId>` is a `bad-record`. A `type` other than 1 or 2 is
   drift `bubble-type:<n>` (`(other)`, `(none)`); one without a plausible `createdAt` is skipped `no-ts` (its model still
-  counts).
+  counts). When none of the typed bubbles read has a `createdAt`, the field has moved or been renamed: drift
+  `missing-field:createdAt`.
 - **Missing bubbles.** A composer inside the window whose header list names messages but none of them has a row
   (after its range was read in full) is skipped `missing-bubbles`; its session is still emitted, without events. When
   at least one composer is missing its bubbles and no composer that lists messages has any, the bubbles' key family has
@@ -270,8 +276,8 @@ strings are both accepted). One machine reported every line column of `scored_co
 ## Limits
 
 - Nothing here was verified against a real Cursor store; field names follow public descriptions and can be wrong or
-  out of date. Unknown bubble types and schema changes surface as drift; a renamed field would surface only as
-  missing data.
+  out of date. Unknown bubble types, schema changes and a renamed bubble `text` or `createdAt` surface as drift;
+  another renamed field surfaces only as missing data, unless nothing in the window is left to map (`zero-yield`).
 - The store is live while Cursor runs, and pages are read one query at a time. Read by key, a row is read at most
   once (a rewrite keeps its key), but a row written behind the read position during the scan — a new message in a
   conversation already read — is missed. In the rowid fallback, a rewritten row moves to a new rowid, so it can be read

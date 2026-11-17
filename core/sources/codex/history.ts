@@ -32,7 +32,7 @@ class HistoryReader {
     if (typeof text !== "string") return this.tally.unknownKey("text:missing");
     if (v.ts === undefined || v.ts === null) return this.tally.unknownKey("ts:missing");
     const ts = toEpochMs(v.ts, this.ctx.now);
-    if (ts === undefined) return this.tally.skip("bad-ts");
+    if (ts === undefined) return this.tally.badTime(v.ts, "ts"); // a reshaped time is drift; an implausible one bad-ts
     if (text.trim() === "") return this.tally.skip("empty");
     const raw = str(v.session_id);
     const sessionId = raw === undefined ? undefined : cxThreadId(raw, this.ctx);

@@ -9,6 +9,11 @@ Evidence: **(verified locally)** = the type or field was confirmed with the stru
 **(CLI program)** = read from the CLI program's code (2.1.326), not confirmed with the probe.
 This file records names and value types only, never values.
 
+**Zero-yield.** A coverage window that read records but yielded none of its reader's primary events is drift
+`zero-yield` (set by the scan), so a renamed field never passes as a quiet store. Primary events: `claude-code.transcripts` — a session,
+prompt or tool call; `claude-code.history` — a prompt; `claude-code.stats` — a day; `claude-code.config` — a
+setting, marker or identity.
+
 ## Layout
 
 ```
@@ -137,8 +142,10 @@ manual), preTokens, postTokens, durationMs, preservedSegment, …}`, `logicalPar
   `claude-code:<session>/<wf run>/<agent>` for a workflow agent. Each part is the file or folder name only when it has
   the CLI's shape (UUID session stem, `agent-<alphanumeric>` agent stem, `wf_<letters, digits, _ or ->` run folder);
   any other name is replaced by its keyed hash.
-- One `SessionEv` per transcript file with a timestamp: origin `human` when the top-level file has a human prompt, else
-  `scripted`; `subagent` for agent files, with `parentId` = the top-level session and, for workflow agents,
+- One `SessionEv` per transcript file with a timestamp: origin `human` when the top-level file has a human prompt;
+  without one, only positive evidence makes it non-human — the strongest other prompt origin seen (`peer`, `scripted`,
+  `scheduled`, `system`), else `scripted` for an `sdk*` entrypoint — so a file whose prompts could not be read (a
+  renamed field) stays `human`; `subagent` for agent files, with `parentId` = the top-level session and, for workflow agents,
   `workflowId` = keyed hash of `wf_<w>`. `start`/`end` = min/max record timestamp, `models` = distinct
   non-synthetic assistant models (subagent fallback: meta `model`), `version` = last `version` seen, `projectKey` from
   the first `cwd`, `surface` = first `entrypoint`, `agentType` raw for built-in agents (`isBuiltIn`, else the CLI's
@@ -166,7 +173,13 @@ manual), preTokens, postTokens, durationMs, preservedSegment, …}`, `logicalPar
   `user` for `user-rejected`, `rule` for `permission-rule`, `auto` for the `automode-*` kinds, `other`),
   `plan-enter`/`plan-exit` (tools), `commit` (`toolUseResult.gitOperation.commit`, `detail` = keyed hash of the sha).
 - `CoverageEv.skipped` reasons: `sniffed`, `oversize`, `parse`, `io-error`, `too-large`, `copied` (below),
-  `bad-record` (a record the mapper could not handle; also logged once per root as `warn cc.bad-record`).
+  `bad-record` (a record the mapper could not handle; also logged once per root as `warn cc.bad-record`), `bad-ts` (a
+  well-formed time outside the plausible range), `no-ts` (a prompt, reply, tool call or turn duration whose record has
+  no time; the markers of a file that never gives one).
+- Drift, beyond unknown record types: `timestamp:shape` (a `user`, `assistant` or `system` record whose `timestamp` is
+  absent or not a time), `user.content:shape` (`message.content` neither a string nor an array),
+  `assistant.message:shape`, `assistant.content:shape`, `tool_use:shape` (a call without `id` or `name`),
+  `turn_duration:shape`.
 
 ## Limits
 
@@ -229,8 +242,9 @@ Never read: the values inside `pastedContents`, `project`.
   `/clear` and its aliases `/reset`, `/new` (CLI program) → `clear`; `/compact [instructions]` → `compact-manual`.
 - `DailyEv{source:"claude-code.history", zone:"local", unit:"prompts"}` per local day (the process time zone),
   `count` = the day's prompts.
-- Drift (`unknownTypes`): `line:not-object`, `display:missing` (no string `display`), `timestamp:missing`.
-  Skipped: `parse`, `oversize`, `io-error`, `bad-ts` (a timestamp that is not a plausible time), `empty` (blank
+- Drift (`unknownTypes`): `line:not-object`, `display:missing` (no string `display`), `timestamp:missing`,
+  `timestamp:shape` (a `timestamp` that is not a time). Skipped: `parse`, `oversize`, `io-error`, `bad-ts` (a
+  well-formed time outside the plausible range), `empty` (blank
   `display`), `bad-record`. Coverage `from`/`to` = first/last prompt time.
 
 ## stats-cache.json (verified locally; semantics per CLI program)

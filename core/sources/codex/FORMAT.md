@@ -7,6 +7,10 @@ Evidence: **(verified locally)** = the type or field was confirmed on this machi
 (`scripts/probe.ts`) or with count-only checks run by the reader's author. **(CLI program)** = read from the installed
 CLI program's own type tables (0.169.0), not seen locally. This file records names and value types only, never values.
 
+**Zero-yield.** A coverage window that read records but yielded none of its reader's primary events is drift
+`zero-yield` (set by the scan), so a renamed field never passes as a quiet store. Primary events: `codex.rollouts` — a session, prompt or
+tool call; `codex.threads` — a session, turn or spawn edge; `codex.history` — a prompt; `codex.config` — a setting.
+
 ## Layout
 
 ```
@@ -249,7 +253,11 @@ CLI's EventMsg tags (`exec_command_end`, `mcp_tool_call_end`, `collab_*`, `realt
   `fileTs` = the file name's local time; **FileFactEv** likewise.
 - **CoverageEv**: `files`/`bytes` of fully read rollouts, `records` = parsed lines; skipped `sniffed`, `oversize`,
   `parse`, `io-error`, `duplicate`, `foreign-item`, `exec-interaction`, `bad-record` (also logged once per root as
-  `warn cx.bad-record`); `versions` = `cli_version`s; `from`/`to` = first/last event time. Once per root the
+  `warn cx.bad-record`), `bad-ts` (a well-formed time outside the plausible range), `no-ts` (an event whose line gives
+  no time; markers and command items take the latest earlier one when there is one); drift, beyond unknown types:
+  `timestamp:shape` (a line whose `timestamp` is absent or not a time), `<type>.payload:shape` (a `session_meta`,
+  `turn_context`, `response_item` or `event_msg` line whose `payload` is not an object), `user.content:shape` (a user
+  message whose `content` is neither a string nor a list holding an `input_*` part); `versions` = `cli_version`s; `from`/`to` = first/last event time. Once per root the
   shell-command events with and without a command line (from the call's arguments or the command item completing it)
   are logged as `debug codex.cmd-extracted` and `debug codex.cmd-missing` — a falling share means the command lines
   moved where the reader does not look.
@@ -434,8 +442,8 @@ the index no longer has; none to an `exec` or subagent thread.
   against that session's previous prompt (state for the 256 most recent sessions). No `hasPaste`: the line does not say.
 - **DailyEv{source:"codex.history", zone:"local", unit:"prompts"}** per local day (the process time zone), `count` =
   the day's prompts.
-- Drift: `line:not-object`, `text:missing`, `ts:missing`. Skipped: `parse`, `oversize`, `io-error`, `bad-ts` (not a
-  plausible time), `empty` (blank text), `bad-record`, `not-file` (history.jsonl is read only as a regular file).
+- Drift: `line:not-object`, `text:missing`, `ts:missing`, `ts:shape` (a `ts` that is not a time). Skipped: `parse`, `oversize`,
+  `io-error`, `bad-ts` (a well-formed time outside the plausible range), `empty` (blank text), `bad-record`, `not-file` (history.jsonl is read only as a regular file).
   Coverage `from`/`to` = first/last prompt time.
 
 ## config.toml (header shapes verified locally; schema per the CLI program)

@@ -67,7 +67,7 @@ class HistoryReader {
     if (typeof text !== "string") return this.tally.unknownKey("display:missing");
     if (v.timestamp === undefined) return this.tally.unknownKey("timestamp:missing");
     const ts = toEpochMs(v.timestamp, this.ctx.now);
-    if (ts === undefined) return this.tally.skip("bad-ts");
+    if (ts === undefined) return this.tally.badTime(v.timestamp); // a reshaped time is drift; an implausible one bad-ts
     if (text.trim() === "") return this.tally.skip("empty");
     const sessionId = typeof v.sessionId === "string" && v.sessionId !== "" ? sid(TOOL, idPart(v.sessionId, UUID, this.ctx)) : undefined;
     const hasPaste = isObj(v.pastedContents) && Object.keys(v.pastedContents).length > 0;

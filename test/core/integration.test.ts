@@ -6,7 +6,7 @@ import { registry, scan, type ToolId, type Window } from "../../core/index";
 import { safeList } from "../../core/io/fs";
 import { TempRegistry } from "../../core/io/temp";
 import type { TempDirs } from "../../core/sources/types";
-import { agId, buildAntigravity, STEP, writeSteps } from "../fixtures/antigravity";
+import { agId, buildAntigravity, CLI_BRAIN_REL, historyLine, historyRel, P as AG_P, STEP, writeBrain, writeSteps } from "../fixtures/antigravity";
 import { buildCcLifetime, buildCcTranscripts } from "../fixtures/claude-code";
 import { buildCodexIndex, buildCodexRollouts } from "../fixtures/codex";
 import { vscodeUser } from "../../core/env/paths";
@@ -30,6 +30,8 @@ const LIFETIME = [
 ];
 const BOTH = ["copilot.vscode", "copilot.cli", "cursor.ide", "antigravity.cli"];
 const windowsOf = (id: string): Window[] => (LIFETIME.includes(id) ? ["lifetime"] : BOTH.includes(id) ? ["detail", "lifetime"] : ["detail"]);
+/** The one reader that reads no record by design, and the status it reports instead (it only counts its stores). */
+const NO_RECORDS: ReadonlyMap<string, string> = new Map([["copilot.jetbrains", "present-undecodable"]]);
 const TOOLS: ToolId[] = ["antigravity", "claude-code", "codex", "copilot", "cursor"];
 
 let h: FakeHome;
@@ -63,6 +65,8 @@ function buildAll(): void {
   writeSteps(h, agId("T"), [
     { type: STEP.BLAZE_TEST_TARGETS, ts: ag.t0 + 70_000 }, { type: STEP.COMPILE, ts: ag.t0 + 80_000 }, { type: STEP.LINT_APPLET, ts: ag.t0 + 90_000 },
   ]);
+  writeBrain(h, CLI_BRAIN_REL, agId("T"), ["task.md"]); // a plan artifact in the CLI's brain folder too
+  h.writeJsonl(historyRel, [historyLine({ display: `Fix the build. ${CANARY.prompt}`, timestamp: ag.t0 + 100_000, conversationId: AG_P })]);
 }
 
 /** A temp registry that records the dirs it makes and how many files each held when the scan disposed of them. */
@@ -101,7 +105,13 @@ describe("integration: every P0 source in one home", () => {
       const cands = p.locate(h.env, [h.env.home]).length;
       expect(cands).toBeGreaterThan(0);
       expect([p.id, covs.map((c) => c.window).sort()]).toEqual([p.id, Array.from({ length: cands }, () => windowsOf(p.id)).flat().sort()]);
-      for (const c of covs) expect([p.id, c.window, c.status === "absent" || c.status === "error"]).toEqual([p.id, c.window, false]);
+      for (const c of covs) {
+        expect([p.id, c.window, c.status === "absent" || c.status === "error"]).toEqual([p.id, c.window, false]);
+        // every window read records — never a silent zero — but for the presence-only reader, which says so
+        if (NO_RECORDS.has(p.id)) expect(`${p.id} ${c.status}`).toBe(`${p.id} ${NO_RECORDS.get(p.id)!}`);
+        else expect(`${p.id} ${c.window} records>0:${c.records > 0}`).toBe(`${p.id} ${c.window} records>0:true`);
+        expect(`${p.id} ${c.window} zero-yield:${"zero-yield" in c.unknownTypes}`).toBe(`${p.id} ${c.window} zero-yield:false`);
+      }
     }
     for (const kind of ["session", "prompt", "tool"] as const) {
       expect([kind, [...new Set(r.store.all(kind).map((e) => e.tool))].sort()]).toEqual([kind, TOOLS]);

@@ -77,12 +77,20 @@ const isDir = (p: string): boolean => {
   }
 };
 
-/** `<home>/.copilot` per home, when it holds CLI sessions (`session-state/`) or the session store; else the CLI is absent. */
+/** The older CLIs' session folder (one JSON file per session): not read, but never a silent absence. */
+const OLD_STATE_DIR = "history-session-state";
+
+/**
+ * `<home>/.copilot` per home, when it holds CLI sessions (`session-state/`, or the older `history-session-state/`) or the
+ * session store; else the CLI is absent.
+ */
 export function cliRoots(env: Env, homes: string[]): Candidate[] {
   const out: Candidate[] = [];
   for (const home of homes) {
     const root = joinFor(env, home, ".copilot");
-    if (isDir(joinFor(env, root, "session-state")) || safeStat(joinFor(env, root, "session-store.db"))?.isFile()) out.push({ root, home, wsl: home !== env.home });
+    if (isDir(joinFor(env, root, "session-state")) || isDir(joinFor(env, root, OLD_STATE_DIR)) || safeStat(joinFor(env, root, "session-store.db"))?.isFile()) {
+      out.push({ root, home, wsl: home !== env.home });
+    }
   }
   return out;
 }
@@ -134,16 +142,18 @@ class CliReader {
     if (!isObj(v) || typeof type !== "string" || !KNOWN_EVENTS.has(type)) return this.tally.unknownKey(eventKey(type));
     const ts = toEpochMs(v.timestamp, this.ctx.now);
     if (ts !== undefined) this.tick(ts);
+    else this.tally.badTime(v.timestamp, "event.timestamp"); // every event carries its time: without one the field moved
     const d = isObj(v.data) ? v.data : {};
+    const timed = (f: (at: number) => void): void => (ts === undefined ? this.tally.skip("no-ts") : f(ts));
     switch (type) {
       case "session.start": this.sessionStart(d); break;
       case "session.model_change": this.addModel(str(d.newModel)); break;
       case "assistant.usage": this.addModel(str(d.model)); break;
-      case "user.message": if (ts !== undefined) this.userMessage(d, ts); break;
+      case "user.message": timed((at) => this.userMessage(d, at)); break;
       case "assistant.turn_start": this.callStart(d, ts); break;
       case "assistant.turn_end": if (ts !== undefined) this.callEnd(str(d.turnId), ts); break;
-      case "abort": if (ts !== undefined) this.abort(ts); break;
-      case "tool.execution_start": if (ts !== undefined) this.toolStart(d, ts); break;
+      case "abort": timed((at) => this.abort(at)); break;
+      case "tool.execution_start": timed((at) => this.toolStart(d, at)); break;
       case "tool.execution_complete": this.toolComplete(d, ts); break;
       default: break;
     }
@@ -166,8 +176,8 @@ class CliReader {
   private userMessage(d: Obj, ts: number): void {
     this.endExchange("completed");
     this.exchange = { start: ts, calls: 0 };
-    const raw = str(d.content);
-    const text = raw === undefined ? "" : userText(raw);
+    if (typeof d.content !== "string") return this.tally.unknownKey("user.message.content:shape");
+    const text = userText(d.content);
     if (text === "") return;
     const source = d.source;
     const origin: Origin = source === undefined || (typeof source === "string" && source.toLowerCase() === "user") ? "human" : "system";
@@ -231,7 +241,8 @@ class CliReader {
   private toolStart(d: Obj, ts: number): void {
     const callId = str(d.toolCallId);
     const name = str(d.toolName);
-    if (callId === undefined || name === undefined || this.pending.has(callId)) return;
+    if (callId === undefined || name === undefined) return this.tally.unknownKey("tool.execution_start:shape");
+    if (this.pending.has(callId)) return;
     const args = isObj(d.arguments) ? d.arguments : {};
     const ev: ToolEv = { k: "tool", tool: TOOL, source: CLI_SOURCE, ts, sessionId: this.sessionId, callId: this.ctx.hash(callId), name: "other", category: "other" };
     const server = str(d.mcpServerName);
@@ -449,14 +460,23 @@ export async function scanCli(c: Candidate, ctx: ScanCtx): Promise<void> {
   const hasState = isDir(stateDir);
   for (const name of listDir(stateDir, tally)) {
     if (ctx.signal.aborted) break;
-    await scanEvents(path.join(stateDir, name, "events.jsonl"), cpSessionId(name, ctx), ctx, tally);
+    if (name.startsWith(".")) continue;
+    const events = path.join(stateDir, name, "events.jsonl");
+    // a session is a folder holding events.jsonl; any other entry is a layout this reader does not know
+    if (!safeStat(events)?.isFile()) {
+      tally.unknownKey("session-state:layout");
+      continue;
+    }
+    await scanEvents(events, cpSessionId(name, ctx), ctx, tally);
   }
+  if (isDir(path.join(c.root, OLD_STATE_DIR))) tally.unknownKey(`layout:${OLD_STATE_DIR}`); // the older CLI layout, not read
   const store = path.join(c.root, "session-store.db");
   const hasStore = safeStat(store)?.isFile() ?? false;
   const storeRead = !ctx.signal.aborted && hasStore && readSessionStore(store, CLI_SOURCE, ctx, life);
   const bad = (tally.skipped["bad-record"] ?? 0) + (life.skipped["bad-record"] ?? 0);
   if (bad > 0) ctx.log("warn", "cp.bad-record", bad);
-  for (const [t, has, readable] of [[tally, hasState, true], [life, hasStore, storeRead]] as const) ctx.emit(windowCoverage(t, has, readable));
+  const hasOld = isDir(path.join(c.root, OLD_STATE_DIR));
+  for (const [t, has, readable] of [[tally, hasState || hasOld, true], [life, hasStore, storeRead]] as const) ctx.emit(windowCoverage(t, has, readable));
 }
 
 /** A window's coverage: `absent` when its store is not there, `error` (note `unreadable`) when it is but could not be read. */

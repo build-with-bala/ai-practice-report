@@ -202,6 +202,10 @@ class SessionMapper {
       this.span(ts);
       this.prompt(r, ts);
       this.tools(r, ts, cancelledRequest(r));
+    } else {
+      // every request carries its time: without one the field moved, and its prompt and tools are dropped (counted)
+      this.tally.badTime(r.timestamp, "request.timestamp");
+      this.tally.skip("no-ts");
     }
     const ended = this.turn(r, ts, model);
     const last = ended ?? ts;
@@ -211,7 +215,8 @@ class SessionMapper {
   /** The person's message: text in memory only, for intent, features and a keyed hash. System-initiated requests are not human. */
   private prompt(r: Obj, ts: number): void {
     const text = typeof r.message === "string" ? r.message : isObj(r.message) && typeof r.message.text === "string" ? r.message.text : undefined;
-    if (text === undefined || text.trim() === "") return;
+    if (text === undefined) return this.tally.unknownKey("request.message:shape"); // a string, or {text}: else the field changed
+    if (text.trim() === "") return;
     const origin: Origin = r.isSystemInitiated === true ? "system" : "human";
     const human = origin === "human";
     const isTaskStart = human && (this.humanPrompts === 0 || (this.lastActivity !== undefined && ts - this.lastActivity >= TASK_GAP_MS));
@@ -372,13 +377,23 @@ class SessionMapper {
 /**
  * Maps one chat session object — a legacy `.json` file's root or a replayed journal — to its session, prompts, tools,
  * turns and interrupts. A session without requests (VS Code creates one whenever the chat view opens) emits nothing and
- * is counted as skipped `empty-session`. A session `version` above 3 is drift `version:newer`.
+ * is counted as skipped `empty-session`. A session `version` above 3 is drift `version:newer`. True when it was mapped.
  */
-export function mapSession(root: unknown, spec: SessionSpec, ctx: ScanCtx, tally: Tally): void {
-  if (!isObj(root)) return tally.unknownKey("session:not-object");
+export function mapSession(root: unknown, spec: SessionSpec, ctx: ScanCtx, tally: Tally): boolean {
+  if (!isObj(root)) {
+    tally.unknownKey("session:not-object");
+    return false;
+  }
   const version = num(root.version);
   if (version !== undefined && version > 3) tally.unknownKey("version:newer");
-  if (!Array.isArray(root.requests)) return tally.unknownKey("requests:missing");
-  if (root.requests.length === 0) return tally.skip("empty-session");
+  if (!Array.isArray(root.requests)) {
+    tally.unknownKey("requests:missing");
+    return false;
+  }
+  if (root.requests.length === 0) {
+    tally.skip("empty-session");
+    return false;
+  }
   new SessionMapper(root, spec, ctx, tally).run(root.requests);
+  return true;
 }

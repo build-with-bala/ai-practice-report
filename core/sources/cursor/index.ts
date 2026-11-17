@@ -105,6 +105,7 @@ export const cuIde: SourcePlugin = {
   tier: "P0",
   beta: true, // built from public descriptions of Cursor's stores: not verified on a real store yet
   windows: ["detail", "lifetime"],
+  primary: { detail: ["session", "prompt", "tool"] },
   describe: {
     reads: [
       "<Cursor user>/globalStorage/state.vscdb, table cursorDiskKV, keys composerData:* (by key range) — created and updated times, agent flag and mode, model setting, subagent marker and launch id, sub-composer ids, message counts, and the bubble ids it lists (its header list)",
@@ -128,6 +129,7 @@ export const cuTracking: SourcePlugin = {
   tier: "P0",
   beta: true, // built from public descriptions of Cursor's stores: not verified on a real store yet
   windows: ["lifetime"],
+  primary: { lifetime: ["commit"] },
   describe: {
     reads: ["<home>/.cursor/ai-tracking/ai-code-tracking.db, table scored_commits — commit and scoring time, tab, composer and human lines added; the commit hash only to count a commit once"],
     neverReads: [

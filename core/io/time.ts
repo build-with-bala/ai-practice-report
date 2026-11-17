@@ -12,6 +12,17 @@ export function toEpochMs(v: unknown, now: number = Date.now()): number | undefi
   return plausible(Date.parse(s), now);
 }
 
+/**
+ * Why a value gave no time (`toEpochMs` undefined): `shape` — absent, or of no shape a time has, so the field moved or
+ * changed (format drift) — or `implausible`: a well-formed time outside the plausible range (bad data).
+ */
+export function timeIssue(v: unknown): "shape" | "implausible" {
+  if (typeof v === "number") return Number.isFinite(v) ? "implausible" : "shape";
+  if (typeof v !== "string") return "shape";
+  const s = v.trim();
+  return s !== "" && (/^-?\d+(\.\d+)?$/.test(s) || Number.isFinite(Date.parse(s))) ? "implausible" : "shape";
+}
+
 function scale(n: number): number {
   return Math.abs(n) < SECONDS_CUTOFF ? n * 1000 : n;
 }

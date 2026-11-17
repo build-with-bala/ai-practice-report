@@ -1,5 +1,6 @@
 import { readdirSync } from "node:fs";
 import { readJsonSmallResult, safeStat } from "../../io/fs";
+import { timeIssue } from "../../io/time";
 import type { ToolId, Window } from "../../model/ids";
 import type { PluginCoverage } from "../types";
 import { isObj, type Obj } from "./guards";
@@ -39,6 +40,15 @@ export class Tally {
   /** A pre-shaped drift key (e.g. `turnOrigin:<value>`, `event_msg:<type>`). */
   unknownKey(key: string): void {
     this.unknownTypes[key] = (this.unknownTypes[key] ?? 0) + 1;
+  }
+
+  /**
+   * A record that always carries a time and gave none: drift `<field>:shape` when the field is absent or holds no time
+   * (renamed or reshaped), else — a well-formed time outside the plausible range — skipped `bad-ts`.
+   */
+  badTime(v: unknown, field = "timestamp"): void {
+    if (timeIssue(v) === "implausible") this.skip("bad-ts");
+    else this.unknownKey(`${field}:shape`);
   }
 
   span(ts: number): void {

@@ -157,11 +157,12 @@ async function scanVscode(c: Candidate, ctx: ScanCtx): Promise<void> {
   const seen = new Set<string>();
   const waiting = new Map<string, { f: SessionFile; requests: number }>();
   const folders = new Map<string, string | undefined>();
+  let mapped = 0;
   const read = (f: SessionFile, t: Tally) => (f.journal ? readJournal(f.file, ctx, t) : Promise.resolve(readLegacy(f.file, t)));
   const map = (f: SessionFile, root: unknown) => {
     const cwd = f.workspace === undefined ? undefined : workspaceFolder(f.workspace, folders, ctx, tally);
     try {
-      mapSession(root, cwd === undefined ? { stem: f.stem } : { stem: f.stem, cwd }, ctx, tally);
+      if (mapSession(root, cwd === undefined ? { stem: f.stem } : { stem: f.stem, cwd }, ctx, tally)) mapped++;
     } catch {
       tally.skip("bad-record"); // one session the mapping cannot handle; the others go on
     }
@@ -211,6 +212,8 @@ async function scanVscode(c: Candidate, ctx: ScanCtx): Promise<void> {
   for (const [t, has, readable] of [[tally, true, true], [life, hasStore, storeRead]] as const) {
     const cov = windowCoverage(t, has, readable);
     cov.installed = installed;
+    // VS Code writes a session whenever the chat view opens: a folder of sessions without requests has nothing to use
+    if (t === tally && mapped === 0 && cov.status === "ok" && (tally.skipped["empty-session"] ?? 0) > 0) cov.status = "empty";
     ctx.emit(cov);
   }
 }
@@ -269,6 +272,7 @@ export const cpVscode: SourcePlugin = {
   tier: "P0",
   beta: false,
   windows: ["detail", "lifetime"],
+  primary: { detail: ["session", "prompt", "tool"] },
   describe: {
     reads: [
       "<VS Code user>/workspaceStorage/*/chatSessions/*.jsonl — chat session journals (VS Code 1.109+), replayed in memory (Code, Code - Insiders, VSCodium)",
@@ -296,6 +300,7 @@ export const cpCli: SourcePlugin = {
   tier: "P0",
   beta: true, // built from the CLI's documentation and the extension's code: no CLI store was there to verify it
   windows: ["detail", "lifetime"],
+  primary: { detail: ["session", "prompt", "tool"] },
   describe: {
     reads: [
       "<home>/.copilot/session-state/*/events.jsonl — Copilot CLI session events: session start, user messages, turns, tool executions, aborts, models",

@@ -10,6 +10,11 @@ chat session serializer, journal reader and response model). **(extension progra
 Copilot Chat extension 0.66 (its `package.json` and code). **(unverified)** = from the extension's code and the CLI's
 published event list only; no such store exists on this machine. This file records names and value types only, never values.
 
+**Zero-yield.** A coverage window that read records but yielded none of its reader's primary events is drift
+`zero-yield` (set by the scan), so a renamed field never passes as a quiet store. Primary events: `copilot.vscode` and
+`copilot.cli` (`detail`) — a session, prompt or tool call; their `lifetime` windows (the session stores) are checked
+by their columns instead, and `copilot.jetbrains` reads no records.
+
 ## Layout
 
 ```
@@ -183,7 +188,10 @@ Built-in tool ids (VS Code program and extension program): see `VSCODE_TOOLS` in
   - `detail` (the chat sessions): `files`/`bytes` = session files fully read and `workspace.json` files; `records` =
     journal lines and legacy documents; `versions` = extension versions; `from`/`to` = first/last event time. Drift:
     `journal-kind:<n>`, `part:<kind>`, `version:newer` (a session `version` above 3), `requests:missing`,
-    `request:not-object`, `session:not-object`, `modelState:<value>`. Skipped: `duplicate`, `empty-session`,
+    `request:not-object`, `session:not-object`, `modelState:<value>`, `request.message:shape` (a `message` that is neither a
+    string nor {`text`}), `request.timestamp:shape` (a request whose `timestamp` is absent or not a time; its prompt
+    and tools are skipped `no-ts`). A store whose session files are all empty (`empty-session`) is `empty`, not `ok`.
+    Skipped: `no-ts`, `bad-ts`, `duplicate`, `empty-session`,
     `bad-record`, `parse`, `oversize`, `too-large`, `io-error`.
   - `lifetime` (the session store): `files`/`bytes` = the store; `records` = its rows; `from`/`to` = its sessions and
     turns. Drift: `store.missing-table:<t>`, `store.missing-column:<c>`. Skipped: `bad-row`, `no-ts`, `io-error`,
@@ -212,7 +220,8 @@ keeps a store of the same name. Tables: `sessions` (`id` TEXT primary key, `cwd`
 
 ## Copilot CLI (`copilot.cli`) (unverified)
 
-`<home>/.copilot` is a candidate only when it holds `session-state/` or `session-store.db`; otherwise the CLI is `absent`.
+`<home>/.copilot` is a candidate only when it holds `session-state/`, `history-session-state/` (an older CLI's layout,
+not read) or `session-store.db`; otherwise the CLI is `absent`.
 `$COPILOT_HOME` (which moves this folder) is not followed.
 
 `events.jsonl`: one event per line {`type`, `data`, `id`, `timestamp` (ISO), `parentId`, `ephemeral`?} (extension
@@ -250,6 +259,11 @@ other type is drift `event:<type>` (dotted lower-case tokens kept, else `(other)
   else hashed). The session store is read as above.
 - **Coverage**, one per window: `detail` = `session-state/*/events.jsonl` (`absent` without `session-state/`),
   `lifetime` = `session-store.db` (`absent` without it; `error`, `note: "unreadable"`, when it cannot be read).
+  Drift in `detail`, beyond unknown event types: `event.timestamp:shape` (an event whose `timestamp` is absent or not a
+  time; a well-formed one outside the plausible range is skipped `bad-ts`, an event without one `no-ts`),
+  `user.message.content:shape` (no string `content`), `tool.execution_start:shape` (a call without its id or tool
+  name), `session-state:layout` (an entry of `session-state/` that is not a folder holding `events.jsonl`, such as a
+  bare `<id>.jsonl`), `layout:history-session-state` (the older layout's folder is there).
 
 ## JetBrains (`copilot.jetbrains`, beta)
 

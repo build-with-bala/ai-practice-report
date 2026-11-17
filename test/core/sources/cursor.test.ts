@@ -830,7 +830,8 @@ describe("cursor ide: legacy ItemTable fallback", () => {
     ], { kv: false });
     const r = await run([cuIde]);
     const cov = covOf(r, "cursor.ide");
-    expect(cov.unknownTypes).toEqual({ "aiService.generations:shape": 1, "workbench.panel.aichat.view.aichat.chatdata:shape": 1 });
+    // values read, nothing usable in them: the shapes are drift, and so is yielding nothing at all
+    expect(cov.unknownTypes).toEqual({ "aiService.generations:shape": 1, "workbench.panel.aichat.view.aichat.chatdata:shape": 1, "zero-yield": 1 });
     expect(cov.skipped).toEqual({ parse: 1 });
     expect(allEvents(r)).toEqual([]);
   });

@@ -4,7 +4,7 @@ import { readJsonSmall, safeStat } from "../../io/fs";
 import { readJsonl } from "../../io/jsonl";
 import { toEpochMs } from "../../io/time";
 import type { Ev, FileFactEv, MarkerEv, SessionEv, ToolEv, TotalsEv, TurnEv } from "../../model/events";
-import { sid, type MarkerKind } from "../../model/ids";
+import { sid, type MarkerKind, type Origin } from "../../model/ids";
 import { classifyIntent } from "../../text/intent";
 import { promptFeatures } from "../../text/structure";
 import { listDir, readSidecar, Tally } from "../common/coverage";
@@ -31,6 +31,11 @@ export const KNOWN_TYPES: ReadonlySet<string> = new Set([
   "api-request", "api-request-shape", "api-request-blob", "file-history-snapshot", "file-history-delta",
   "attribution-snapshot", "content-replacement", "fork-context-ref", "observer-ref", "continued-in", "resume-head-vouch",
 ]);
+
+/** Conversation records always carry a time; one without is a moved or reshaped field (drift), never a quiet drop. */
+const TIMED: ReadonlySet<string> = new Set(["user", "assistant", "system"]);
+/** Non-human origins a session's prompts can show, strongest first: positive evidence that no person typed in it. */
+const NON_HUMAN: readonly Origin[] = ["peer", "scripted", "scheduled", "system"];
 
 /** Heavy lines (request replays, file-history backups) are dropped from their first bytes, before JSON.parse. */
 const HEAVY = ['"type":"api-request-blob"', '"type":"api-request"', '"type":"file-history-'];
@@ -123,6 +128,9 @@ class TranscriptReader {
   private surface?: string;
   private readonly models: string[] = [];
   private humanPrompts = 0;
+  /** Non-human origins seen on prompt records, and whether a record came through an SDK entrypoint: the evidence for a session's origin. */
+  private readonly nonHuman = new Set<Origin>();
+  private sdk = false;
   private lastActivity?: number;
   private prevHuman?: string;
   private lastModel?: string;
@@ -188,6 +196,8 @@ class TranscriptReader {
     }
     const ts = toEpochMs(v.timestamp, this.ctx.now);
     if (ts !== undefined) this.tick(ts);
+    else if (TIMED.has(type)) this.tally.badTime(v.timestamp);
+    if (typeof v.entrypoint === "string" && v.entrypoint.startsWith("sdk")) this.sdk = true;
     const version = str(v.version);
     if (version !== undefined && VERSION.test(version)) {
       this.version = version;
@@ -209,6 +219,7 @@ class TranscriptReader {
 
   private user(v: Obj, ts: number | undefined): void {
     const content = isObj(v.message) ? v.message.content : undefined;
+    if (typeof content !== "string" && !Array.isArray(content)) this.tally.unknownKey("user.content:shape");
     const blocks = Array.isArray(content) ? content.filter(isObj) : [];
     const results = blocks.filter((b) => b.type === "tool_result");
     for (const b of results) this.result(b, v, ts, results.length === 1);
@@ -222,6 +233,7 @@ class TranscriptReader {
     const origin = ccPromptOrigin(v);
     if (origin === "not-a-prompt") return;
     for (const key of unknownProvenance(v)) this.tally.unknownKey(key); // a new CLI value is drift, never a silent human
+    if (origin !== "human") this.nonHuman.add(origin);
     const text = typedText(userText(v) ?? "");
     const human = origin === "human";
     const first = this.humanPrompts === 0;
@@ -237,13 +249,14 @@ class TranscriptReader {
         features: promptFeatures(text, { isTaskStart, prevText: human ? this.prevHuman : undefined }),
         textHash: this.ctx.hash(text.trim()),
       });
-    }
+    } else this.tally.skip("no-ts");
     if (human) this.prevHuman = text;
   }
 
   private assistant(v: Obj, ts: number | undefined): void {
     const msg = isObj(v.message) ? v.message : undefined;
-    if (!msg) return;
+    if (!msg) return this.tally.unknownKey("assistant.message:shape");
+    if (!Array.isArray(msg.content)) this.tally.unknownKey("assistant.content:shape");
     const raw = str(msg.model);
     if (raw !== undefined && raw !== SYNTHETIC_MODEL) {
       const model = safeModel(raw);
@@ -251,6 +264,7 @@ class TranscriptReader {
       this.lastModel = model;
       this.lastEffort = safeEffort(str(v.effort));
       if (ts !== undefined) this.noteMessage(msg, v, model, ts);
+      else this.tally.skip("no-ts");
     }
     if (Array.isArray(msg.content)) for (const b of msg.content) if (isObj(b) && b.type === "tool_use") this.toolUse(b, ts ?? this.clock);
     if (ts !== undefined) this.lastActivity = ts;
@@ -293,7 +307,9 @@ class TranscriptReader {
   private toolUse(b: Obj, ts: number | undefined): void {
     const id = str(b.id);
     const name = str(b.name);
-    if (id === undefined || name === undefined || ts === undefined || this.tools.has(id) || this.doneTools.has(id)) return;
+    if (id === undefined || name === undefined) return this.tally.unknownKey("tool_use:shape");
+    if (this.tools.has(id) || this.doneTools.has(id)) return; // the same call again
+    if (ts === undefined) return this.tally.skip("no-ts");
     const { category, checks, editExt } = ccToolCategory(name, b.input);
     const ev: ToolEv = {
       k: "tool", tool: TOOL, source: TRANSCRIPTS_SOURCE, ts, sessionId: this.spec.sessionId, callId: id,
@@ -370,7 +386,8 @@ class TranscriptReader {
   private system(v: Obj, ts: number | undefined): void {
     if (v.subtype === "turn_duration") {
       const ms = num(v.durationMs);
-      if (ts === undefined || ms === undefined || ms < 0) return;
+      if (ms === undefined || ms < 0) return this.tally.unknownKey("turn_duration:shape");
+      if (ts === undefined) return this.tally.skip("no-ts");
       const ev: TurnEv = { k: "turn", tool: TOOL, source: TRANSCRIPTS_SOURCE, ts, sessionId: this.spec.sessionId, window: "detail", status: "completed", ms };
       if (this.lastModel !== undefined) ev.model = this.lastModel;
       if (this.lastEffort !== undefined) ev.effort = this.lastEffort;
@@ -428,6 +445,7 @@ class TranscriptReader {
   /** Flush pending state; the session and file facts are emitted once the whole file was seen. */
   finish(stat: Stats | undefined): void {
     if (this.foreignSession) this.tally.foreignSessionFiles++;
+    for (const _ of this.undated.splice(0)) this.tally.skip("no-ts"); // markers of a file that never gave a time
     for (const ev of this.tools.values()) this.out(ev);
     this.tools.clear();
     for (const p of this.messages.values()) this.usage(p);
@@ -449,11 +467,22 @@ class TranscriptReader {
     }
   }
 
+  /**
+   * A subagent's file is a subagent session; a session with a human prompt is human. Without one, only positive evidence
+   * makes it non-human — a prompt of another origin (the strongest of them), or an SDK entrypoint; a session whose
+   * prompts could not be read (no evidence at all) stays human, so a format change never turns a person's work scripted.
+   */
+  private origin(): Origin {
+    if (this.spec.sub) return "subagent";
+    if (this.humanPrompts > 0) return "human";
+    return NON_HUMAN.find((o) => this.nonHuman.has(o)) ?? (this.sdk ? "scripted" : "human");
+  }
+
   private session(start: number, end: number): SessionEv {
     const { spec } = this;
     const s: SessionEv = {
-      k: "session", tool: TOOL, source: TRANSCRIPTS_SOURCE, id: spec.sessionId, window: "detail",
-      origin: spec.sub ? "subagent" : this.humanPrompts > 0 ? "human" : "scripted", start, end, models: [...this.models],
+      k: "session", tool: TOOL, source: TRANSCRIPTS_SOURCE, id: spec.sessionId, window: "detail", origin: this.origin(), start, end,
+      models: [...this.models],
     };
     if (spec.parentId !== undefined) s.parentId = spec.parentId;
     if (this.cwd !== undefined) s.projectKey = this.ctx.registerCwd(this.cwd);

@@ -16,6 +16,7 @@ export const ccTranscripts: SourcePlugin = {
   id: TRANSCRIPTS_SOURCE,
   tier: "P0",
   beta: false,
+  primary: { detail: ["session", "prompt", "tool"] },
   describe: {
     reads: [
       "<claude>/projects/*/*.jsonl — session transcripts",
@@ -41,6 +42,7 @@ export const ccHistory: SourcePlugin = {
   tier: "P0",
   beta: false,
   windows: ["lifetime"],
+  primary: { lifetime: ["prompt"] },
   describe: {
     reads: ["<claude>/history.jsonl — one line per prompt typed at the CLI prompt, kept for months: display, timestamp, sessionId"],
     neverReads: [
@@ -59,6 +61,7 @@ export const ccStats: SourcePlugin = {
   tier: "P0",
   beta: false,
   windows: ["lifetime"],
+  primary: { lifetime: ["daily"] },
   describe: {
     reads: ["<claude>/stats-cache.json — version, dailyActivity (messages, sessions, tool calls per day), dailyModelTokens (tokens per model per day)"],
     neverReads: ["longestSession, modelUsage, hourCounts, firstSessionDate and the totals are parsed with the file and dropped"],
@@ -73,6 +76,7 @@ export const ccConfig: SourcePlugin = {
   tier: "P0",
   beta: false,
   windows: ["lifetime"],
+  primary: { lifetime: ["config", "marker", "identity"] },
   describe: {
     reads: [
       "~/.claude.json ($CLAUDE_CONFIG_DIR/.claude.json when set) — promptQueueUseCount, firstStartTime, lastPlanModeUse, skillUsage and pluginUsage counts, MCP server names, oauthAccount.accountUuid (kept only as a keyed hash)",

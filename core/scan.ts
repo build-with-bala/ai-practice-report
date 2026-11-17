@@ -40,6 +40,9 @@ export interface ScanResult { store: EventStore; coverage: CoverageEv[]; warning
   salt: Uint8Array; startedAt: number; finishedAt: number; tempClean: boolean }
 
 const DEFAULT_CONCURRENCY = 4;
+/** Event kinds that say their window; every other kind counts toward any window of its plugin. */
+const WINDOWED: ReadonlySet<string> = new Set(["session", "prompt", "turn"]);
+const yieldKey = (k: string, window: string): string => (WINDOWED.has(k) ? `${k}@${window}` : k);
 
 /** Coverage the orchestrator writes for a plugin (absent, error, aborted): one per window the plugin reports. */
 function emptyCoverage(p: SourcePlugin, status: CoverageEv["status"], note?: string): CoverageEv[] {
@@ -96,18 +99,27 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
     const started = new Set<number>();
     const safe = (f: () => void) => { try { f(); } catch { /* caller callbacks never fail a scan */ } };
     const runJob = async ({ plugin, cand }: { plugin: SourcePlugin; cand: Candidate }): Promise<void> => {
+      const yielded = new Map<string, number>(); // this candidate's events by kind (and window, for windowed kinds)
       const ctx: ScanCtx = {
         env, now, since: opts.since, salt, temp, signal,
         emit: (e: Ev | PluginCoverage) => {
           if (e.k !== "coverage") {
             if (e.k === "tool") withCheckCategory(e);
             nonCoverage.set(plugin, (nonCoverage.get(plugin) ?? 0) + 1);
+            const key = yieldKey(e.k, (e as { window?: string }).window ?? "");
+            yielded.set(key, (yielded.get(key) ?? 0) + 1);
             store.add(e);
             return;
           }
-          // the plugin's own flag decides beta; a coverage written after the abort may describe a source read only in
-          // part, so it never looks complete
+          // the plugin's own flag decides beta
           const cov: CoverageEv = { ...e, beta: plugin.beta };
+          // records read but none of the window's primary kinds yielded: the format moved under the reader
+          const kinds = plugin.primary?.[cov.window];
+          if (kinds && (cov.status === "ok" || cov.status === "drift") && cov.records > 0 && !kinds.some((k) => (yielded.get(yieldKey(k, cov.window)) ?? 0) > 0)) {
+            cov.status = "drift";
+            cov.unknownTypes = { ...cov.unknownTypes, "zero-yield": 1 };
+          }
+          // a coverage written after the abort may describe a source read only in part, so it never looks complete
           if (signal.aborted) Object.assign(cov, { status: "error", note: "aborted" });
           store.add(cov);
         },

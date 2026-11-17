@@ -28,7 +28,7 @@ class HistoryReader {
     if (typeof text !== "string") return this.tally.unknownKey("history.display:missing");
     if (v.timestamp === undefined || v.timestamp === null) return this.tally.unknownKey("history.timestamp:missing");
     const ts = toEpochMs(v.timestamp, this.ctx.now);
-    if (ts === undefined) return this.tally.skip("bad-ts");
+    if (ts === undefined) return this.tally.badTime(v.timestamp, "history.timestamp"); // reshaped: drift; implausible: bad-ts
     if (text.trim() === "") return this.tally.skip("empty");
     const raw = str(v.conversationId);
     const sessionId = raw === undefined ? undefined : agSessionId(raw, this.ctx);

@@ -93,6 +93,10 @@ export function sniffHeavy(head: string): boolean {
 }
 
 const TASK_GAP_MS = 30 * 60_000;
+/** Line types whose payload the reader maps: one without an object payload has changed shape. */
+const MAPPED_RECORDS: ReadonlySet<string> = new Set(["session_meta", "turn_context", "response_item", "event_msg"]);
+/** Content part types of a user-role message (the CLI's ContentItem tags for input). */
+const INPUT_PARTS: ReadonlySet<string> = new Set(["input_text", "input_image", "input_file"]);
 /** Bounded per-file state: calls awaiting their completing item, finished call ids, per-turn model/effort/start. */
 const PENDING_CALLS = 4096;
 const DONE_CALLS = 4096;
@@ -264,13 +268,14 @@ class RolloutReader {
     }
     const ts = toEpochMs(v.timestamp, this.ctx.now);
     if (ts !== undefined) this.tick(ts);
+    else this.tally.badTime(v.timestamp); // every rollout line carries one: without it the field moved
     const p = isObj(v.payload) ? v.payload : undefined;
     if (p) {
       if (type === "turn_context") this.turnContext(p);
       else if (type === "response_item") this.responseItem(p, ts);
       else if (type === "event_msg") this.eventMsg(p, ts);
       else if (type === "compacted") this.marker("compact-auto", ts);
-    }
+    } else if (MAPPED_RECORDS.has(type)) this.tally.unknownKey(`${type}.payload:shape`);
     if (ts !== undefined) this.lastActivity = ts;
   }
 
@@ -346,8 +351,14 @@ class RolloutReader {
   }
 
   private userMessage(p: Obj, ts: number | undefined): void {
-    if (this.meta?.subagent || ts === undefined) return; // a subagent's user messages are its parent's briefs
-    const found = promptText(p.content);
+    if (this.meta?.subagent) return; // a subagent's user messages are its parent's briefs
+    const c = p.content;
+    // a user message is a string or a list of input parts; anything else, or a list with none it knows, changed shape
+    if (typeof c !== "string" && !(Array.isArray(c) && (c.length === 0 || c.some((x) => isObj(x) && typeof x.type === "string" && INPUT_PARTS.has(x.type))))) {
+      return this.tally.unknownKey("user.content:shape");
+    }
+    if (ts === undefined) return this.tally.skip("no-ts");
+    const found = promptText(c);
     if (!found) return;
     const { text, images } = found;
     const textHash = this.ctx.hash(text.trim());
@@ -398,7 +409,8 @@ class RolloutReader {
   /** A call waits for the item that completes it (same id); calls without one are flushed at the end of the file. */
   private call(p: Obj, ts: number | undefined): void {
     const id = str(p.call_id);
-    if (ts === undefined || (id !== undefined && (this.pending.has(id) || this.done.has(id)))) return;
+    if (id !== undefined && (this.pending.has(id) || this.done.has(id))) return; // the same call again
+    if (ts === undefined) return this.tally.skip("no-ts");
     const evs = cxToolCalls(p).map((c) => this.toolEv(c, ts, id));
     if (evs.length === 0) return;
     if (id === undefined) {
@@ -479,7 +491,8 @@ class RolloutReader {
     }
     const calls = cxToolCalls(item);
     const at = toEpochMs(p.started_at_ms, this.ctx.now) ?? ts ?? this.clock;
-    if (calls.length === 0 || at === undefined) return;
+    if (calls.length === 0) return;
+    if (at === undefined) return this.tally.skip("no-ts");
     for (const c of calls) {
       const ev = this.toolEv(c, at, id);
       RolloutReader.apply(ev, outcome);
@@ -498,7 +511,10 @@ class RolloutReader {
    * and window. With `emit` false (copied history) only the baselines move.
    */
   private tokenCount(p: Obj, ts: number | undefined, emit = true): void {
-    if (ts === undefined) return;
+    if (ts === undefined) {
+      if (emit) this.tally.skip("no-ts");
+      return;
+    }
     const info = isObj(p.info) ? p.info : undefined;
     const last = info && isObj(info.last_token_usage) ? info.last_token_usage : undefined;
     if (info && last) {
@@ -540,7 +556,7 @@ class RolloutReader {
   }
 
   private endTurn(p: Obj, ts: number | undefined, status: "completed" | "interrupted"): void {
-    if (ts === undefined) return;
+    if (ts === undefined) return this.tally.skip("no-ts");
     const id = str(p.turn_id);
     const t = id === undefined ? undefined : this.turns.get(id);
     const ev: TurnEv = { k: "turn", tool: TOOL, source: ROLLOUTS_SOURCE, ts, sessionId: this.sessionId, window: "detail", status };
@@ -555,7 +571,7 @@ class RolloutReader {
 
   private marker(kind: MarkerKind, ts: number | undefined, detail?: string): void {
     const at = ts ?? this.clock;
-    if (at === undefined) return;
+    if (at === undefined) return this.tally.skip("no-ts");
     const ev: MarkerEv = { k: "marker", tool: TOOL, source: ROLLOUTS_SOURCE, ts: at, sessionId: this.sessionId, kind };
     if (detail !== undefined) ev.detail = detail;
     this.out(ev);

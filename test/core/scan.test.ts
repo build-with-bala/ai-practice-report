@@ -268,6 +268,46 @@ describe("signal policy", () => {
   });
 });
 
+describe("zero-yield guard", () => {
+  const prompt = (window: "detail" | "lifetime"): Ev => ({ k: "prompt", tool: "codex", source: "z", ts: 1, window, origin: "human", intent: "spec",
+    features: { words: 1, lenBucket: 0, hasContext: false, fileRefs: 0, listLines: 0, constraintTerms: 0, isTaskStart: true, techCats: {} }, textHash: "h" });
+  const guarded = (run: (ctx: ScanCtx) => void, primary: SourcePlugin["primary"] = { detail: ["session", "prompt"], lifetime: ["prompt"] }): SourcePlugin =>
+    ({ ...plugin("codex", "z", run), windows: ["detail", "lifetime"], primary });
+
+  test("records read but none of the window's primary kinds yielded: drift zero-yield; any one of them is enough", async () => {
+    const r = await scan({ env, plugins: [guarded((c) => {
+      c.emit(prompt("detail"));
+      c.emit(cov("codex", "z", { records: 5 }));
+      c.emit(cov("codex", "z", { window: "lifetime", records: 5 }));
+    })] });
+    expect(r.coverage.map((c) => [c.window, c.status, c.unknownTypes])).toEqual([["detail", "ok", {}], ["lifetime", "drift", { "zero-yield": 1 }]]);
+    expect(r.warnings.filter((w) => w.code === "drift").map((w) => w.source)).toEqual(["z"]);
+  });
+
+  test("a session, prompt or turn counts only in its own window; other kinds count in any", async () => {
+    const r = await scan({ env, plugins: [guarded((c) => {
+      c.emit(prompt("lifetime"));
+      c.emit({ k: "marker", tool: "codex", source: "z", ts: 1, kind: "clear" });
+      c.emit(cov("codex", "z", { records: 2 }));
+      c.emit(cov("codex", "z", { window: "lifetime", records: 2 }));
+    }, { detail: ["prompt"], lifetime: ["marker"] })] });
+    expect(r.coverage.map((c) => [c.window, c.status])).toEqual([["detail", "drift"], ["lifetime", "ok"]]);
+  });
+
+  test("no records, an empty or present-undecodable status, or no primary kinds declared: no guard", async () => {
+    const r = await scan({ env, plugins: [
+      guarded((c) => { c.emit(cov("codex", "z", { records: 0, status: "empty" })); c.emit(cov("codex", "z", { window: "lifetime", records: 3, status: "present-undecodable" })); }),
+      { ...plugin("cursor", "free", (c) => { c.emit(cov("cursor", "free", { records: 9 })); }) },
+    ] });
+    expect(r.coverage.map((c) => [c.source, c.status])).toEqual([["z", "empty"], ["z", "present-undecodable"], ["free", "ok"]]);
+  });
+
+  test("drift that is already there keeps its keys and gains zero-yield", async () => {
+    const r = await scan({ env, plugins: [guarded((c) => { c.emit(cov("codex", "z", { records: 4, status: "drift", unknownTypes: { "timestamp:shape": 4 } })); c.emit(cov("codex", "z", { window: "lifetime", records: 0, status: "empty" })); })] });
+    expect(r.coverage[0]!.unknownTypes).toEqual({ "timestamp:shape": 4, "zero-yield": 1 });
+  });
+});
+
 describe("coverage the orchestrator writes", () => {
   const lifetime = (id: string, run: (ctx: ScanCtx) => Promise<void> | void, n = 1): SourcePlugin => ({ ...plugin("codex", id, run, false, n), windows: ["lifetime"] });
 

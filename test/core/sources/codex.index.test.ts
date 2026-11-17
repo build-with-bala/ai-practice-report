@@ -291,7 +291,8 @@ describe("codex threads: thread index and turn history", () => {
     expect(r.store.all("session")).toEqual([]);
     expect(r.store.all("codex-thread-row")).toEqual([{ k: "codex-thread-row", tool: "codex", source: "codex.threads", threadId: sidOf(id) }]);
     expect(r.store.all("totals")).toEqual([{ k: "totals", tool: "codex", source: "codex.threads", sessionId: sidOf(id), tokens: 123_456 }]);
-    expect(covOf(r, "codex.threads")).toMatchObject({ status: "ok", records: 1, skipped: { "no-ts": 1 } });
+    // the only row has no time, so the index yields no session at all: a silent zero is drift, never ok
+    expect(covOf(r, "codex.threads")).toMatchObject({ status: "drift", records: 1, skipped: { "no-ts": 1 }, unknownTypes: { "zero-yield": 1 } });
   });
 
   /** A thread index with `n` minimal threads, inserted in one statement. */
@@ -502,8 +503,9 @@ describe("codex history", () => {
       sidOf("0190f1b2-3c4d-7e5f-8a9b-0c1d2e3f4a5b"), sidOf(keyedHash(r.salt, CANARY.project)), undefined,
     ]);
     const cov = r.coverage[0]!;
-    expect([cov.status, cov.records, cov.skipped]).toEqual(["drift", 8, { "bad-ts": 1, empty: 1, parse: 1 }]);
-    expect(cov.unknownTypes).toEqual({ "line:not-object": 1, "text:missing": 1, "ts:missing": 1 });
+    expect([cov.status, cov.records, cov.skipped]).toEqual(["drift", 8, { empty: 1, parse: 1 }]);
+    // a time that is no time at all ("yesterday") is a reshaped field: drift, never a quiet skip
+    expect(cov.unknownTypes).toEqual({ "line:not-object": 1, "text:missing": 1, "ts:missing": 1, "ts:shape": 1 });
     expectNoCanaries([r.store, r.coverage, r.warnings]);
   });
 

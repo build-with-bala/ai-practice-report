@@ -16,6 +16,7 @@ export const cxRollouts: SourcePlugin = {
   id: ROLLOUTS_SOURCE,
   tier: "P0",
   beta: false,
+  primary: { detail: ["session", "prompt", "tool"] },
   describe: {
     reads: [
       "<codex>/sessions/**/rollout-*.jsonl — one rollout per thread (session metadata, turns, messages, tool calls, token counts)",
@@ -37,6 +38,7 @@ export const cxThreads: SourcePlugin = {
   tier: "P0",
   beta: false,
   windows: ["lifetime"],
+  primary: { lifetime: ["session", "turn", "edge"] },
   describe: {
     reads: [
       "<codex>/state_<N>.sqlite (highest N) — threads: id, source, originator, model, reasoning effort, approval mode, sandbox policy type, token total, created/updated times, CLI version, cwd, and whether the git columns are set; thread_spawn_edges: parent and child thread ids",
@@ -59,6 +61,7 @@ export const cxHistory: SourcePlugin = {
   tier: "P0",
   beta: false,
   windows: ["lifetime"],
+  primary: { lifetime: ["prompt"] },
   describe: {
     reads: ["<codex>/history.jsonl — one line per prompt typed in the CLI, kept after rollouts are pruned: session_id, ts, text"],
     neverReads: ["prompt text is parsed in memory for intent, features and a keyed hash, and never kept"],
@@ -73,6 +76,7 @@ export const cxConfig: SourcePlugin = {
   tier: "P0",
   beta: false,
   windows: ["lifetime"],
+  primary: { lifetime: ["config"] },
   describe: {
     reads: [
       "<codex>/config.toml — section headers only: [profiles.<name>], [mcp_servers.<name>], [plugins.<id>]",
