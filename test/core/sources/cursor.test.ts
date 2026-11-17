@@ -4,12 +4,12 @@ import { existsSync, mkdirSync, rmSync, statSync, truncateSync, writeFileSync } 
 import path from "node:path";
 import { detectEnv } from "../../../core/env/env";
 import { __observeQueries, MAX_COPY_BYTES } from "../../../core/io/sqlite";
-import type { Ev, ToolEv } from "../../../core/model/events";
+import type { CoverageEv, Ev, PromptEv, SessionEv, ToolEv } from "../../../core/model/events";
 import { scan } from "../../../core/scan";
 import { cuAgentCli, cuIde, cuTracking, cursorUserRoot } from "../../../core/sources/cursor";
 import { LEGACY_KEYS } from "../../../core/sources/cursor/itemtable";
 import { registry } from "../../../core/sources/registry";
-import type { SourcePlugin } from "../../../core/sources/types";
+import type { ScanCtx, SourcePlugin } from "../../../core/sources/types";
 import { keyedHash } from "../../../core/text/hash";
 import { classifyIntent } from "../../../core/text/intent";
 import { CANARY, expectNoCanaries, findCanaries } from "../../kit/canary";
@@ -37,6 +37,17 @@ const sidOf = (raw: string) => `cursor:${raw}`;
 const toolsOf = (r: Result, raw: string): readonly ToolEv[] => r.store.forSession(sidOf(raw), "tool");
 const byTime = <T extends { ts: number }>(xs: readonly T[]): T[] => [...xs].sort((a, b) => a.ts - b.ts);
 const DAY = 86_400_000;
+/** A cursorDiskKV without any index on key: the reader's rowid fallback. */
+const NO_INDEX = "CREATE TABLE cursorDiskKV (key TEXT, value BLOB)";
+/** Runs `body` once with the usual store (key index) and once with the fallback schema, each in a fresh home. */
+async function bothModes(rows: Row[], body: (r: Result, mode: "key" | "rowid") => void): Promise<void> {
+  for (const mode of ["key", "rowid"] as const) {
+    h.cleanup();
+    h = fakeHome();
+    writeStateDb(h, globalRel(h), rows, [], mode === "key" ? {} : { kvDdl: NO_INDEX });
+    body(await run([cuIde]), mode);
+  }
+}
 const observe = () => {
   const sql: string[] = [];
   __observeQueries((s) => sql.push(s));
@@ -49,7 +60,7 @@ const observe = () => {
  */
 const KV_PATHS = new Set([
   "$.createdAt", "$.lastUpdatedAt", "$.isAgentic", "$.unifiedMode", "$.modelConfig.modelName", "$.subagentInfo", "$.subagentInfo.toolCallId",
-  "$.subComposerIds", "$.subagentComposerIds", "$.fullConversationHeadersOnly", "$.conversation",
+  "$.subComposerIds", "$.subagentComposerIds", "$.fullConversationHeadersOnly", "$.conversation", "$.bubbleId",
   "$.type", "$.text", "$.modelInfo.modelName", "$.thinkingDurationMs", "$.errorDetails", "$.toolFormerData", "$.toolFormerData.name",
   "$.toolFormerData.tool", "$.toolFormerData.status", "$.toolFormerData.userDecision", "$.toolFormerData.toolCallId",
   "$.toolFormerData.params", "$.toolFormerData.rawArgs", "$.toolFormerData.result",
@@ -60,15 +71,17 @@ const KV_PATHS = new Set([
 const IN_MEMORY = new Set(["text", "tcall", "cmd", "target", "server"]);
 const kvQueries = (sql: string[]) => sql.filter((s) => /\bFROM cursorDiskKV\b/.test(s));
 
-/** The query reads composers (else bubbles): only composer queries extract `subagentInfo`. */
+/** The query reads composers: only composer queries extract `subagentInfo`. */
 const isComposerQuery = (s: string): boolean => s.includes("'$.subagentInfo'");
-const isBubbleQuery = (s: string): boolean => kvQueries([s]).length > 0 && !isComposerQuery(s);
+/** The query looks up one composer's listed bubble ids (its header list), just before its bubble range is read. */
+const isHeaderQuery = (s: string): boolean => kvQueries([s]).length > 0 && !isComposerQuery(s) && s.includes("json_group_array");
+const isBubbleQuery = (s: string): boolean => kvQueries([s]).length > 0 && !isComposerQuery(s) && !isHeaderQuery(s);
 
 /** Runs each captured cursorDiskKV page query against the store itself, over its whole key family, and returns every row it yields. */
 function rowsOf(file: string, sql: string[]): Record<string, unknown>[] {
   const db = new Database(file, { readonly: true });
   try {
-    return [...new Set(kvQueries(sql))].flatMap((s) => {
+    return [...new Set(kvQueries(sql))].filter((s) => !isHeaderQuery(s)).flatMap((s) => {
       const family = isComposerQuery(s) ? "composerData" : "bubbleId";
       return db.query(s).all(`${family}:`, `${family};`, 1_000_000) as Record<string, unknown>[];
     });
@@ -96,11 +109,22 @@ describe("cursor: Task 14 scenario", () => {
       expect(s).not.toMatch(/ItemTable/i);
     }
     const kv = kvQueries(sql);
-    expect([kv.filter(isComposerQuery).length, kv.filter(isBubbleQuery).length]).toEqual([1, 2]); // the composer range, then each composer's own
+    // the composer range; then per composer its header list (one key lookup) and its own bubble range
+    expect([kv.filter(isComposerQuery).length, kv.filter(isHeaderQuery).length, kv.filter(isBubbleQuery).length]).toEqual([1, 2, 2]);
     for (const s of kv) {
-      expect(s).toMatch(/ FROM cursorDiskKV WHERE key > \? AND key < \? ORDER BY key LIMIT \?\)/);
+      if (isHeaderQuery(s)) expect(s).toMatch(/ FROM cursorDiskKV AS kv WHERE kv\.key = \? AND json_valid\(kv\.value\)$/);
+      else expect(s).toMatch(/ FROM cursorDiskKV WHERE key > \? AND key < \? ORDER BY key LIMIT \?\)/);
       expect(s).not.toMatch(/\bkey LIKE\b|\browid\b/i);
       for (const [p] of s.matchAll(/'\$[^']*'/g)) expect(KV_PATHS).toContain(p.slice(1, -1));
+    }
+    // a header lookup returns bubble ids only
+    const store = new Database(fx.globalFile, { readonly: true });
+    try {
+      for (const s of new Set(kv.filter(isHeaderQuery))) {
+        for (const id of [A, B]) expectNoCanaries(store.query(s).all(`composerData:${id}`));
+      }
+    } finally {
+      store.close();
     }
     // what leaves SQLite: only allowlisted scalars; the message text only for user bubbles
     const rows = rowsOf(fx.globalFile, sql);
@@ -291,7 +315,7 @@ describe("cursor ide: bubbles and tools", () => {
       composerRow(plain, { created: at, updated: at }),
       userRow(plain, "p1", at, "A question in a composer with an odd id"),
       composerRow(cuSid("empty"), { created: at, updated: at }),
-      composerRow(cuSid("notime"), { headers: [cuSid("n1")] }),
+      composerRow(cuSid("notime"), { inline: [{ type: 1, text: CANARY.prompt, bubbleId: "n1" }] }),
       composerRow(cuSid("old"), { created: at, updated: at + MIN, inline: [{ type: 1, text: CANARY.prompt, bubbleId: "b1" }, { type: 2, text: CANARY.code, bubbleId: "b2" }] }),
       composerRow(cuSid("bare")),
       userRow(cuSid("bare"), "b1", at + 3 * MIN, "Only the bubble has a time"),
@@ -303,7 +327,7 @@ describe("cursor ide: bubbles and tools", () => {
     expect(r.store.session(sidOf(cuSid("notime")))).toBeUndefined();
     expect(r.store.session(sidOf(cuSid("old")))).toMatchObject({ start: at, end: at + MIN });
     expect(r.store.session(sidOf(cuSid("bare")))).toMatchObject({ start: at + 3 * MIN, end: at + 3 * MIN });
-    expect(covOf(r, "cursor.ide").skipped).toEqual({ "empty-session": 1, "no-ts": 1, "inline-message": 2 });
+    expect(covOf(r, "cursor.ide").skipped).toEqual({ "empty-session": 1, "no-ts": 1, "inline-message": 3 });
     expectNoCanaries([...allEvents(r), r.coverage]);
   });
 
@@ -347,6 +371,194 @@ describe("cursor ide: bubbles and tools", () => {
     expect(byTime(toolsOf(r, c)).map((t) => [t.name, t.ts - at])).toEqual([["read_file", 1_000], ["read_file", 2_000]]);
     expect(r.store.all("turn").map((t) => [t.ts - at, t.ms])).toEqual([[2_000, 1_250]]);
     expect(r.store.all("prompt")).toHaveLength(1);
+  });
+
+  test("only the bubbles a composer lists are mapped: 3 listed, 5 unlisted copies — events for the 3, unlisted: 5", async () => {
+    const at = t0();
+    const c = cuSid("fork");
+    const pytest = (callId: string): ToolOpts => ({ name: "run_terminal_cmd", params: { command: "pytest -q" }, callId, decision: "rejected" });
+    const rows: Row[] = [
+      composerRow(c, { created: at, updated: at + MIN, agentic: true, headers: ["l1", "l2", "l3"].map(cuSid) }),
+      userRow(c, "l1", at + 1_000, "Refactor the parser"),
+      toolRow(c, "l2", at + 2_000, { name: "read_file", callId: "listed-2" }),
+      toolRow(c, "l3", at + 3_000, pytest("listed-3"), { thinkingMs: 300 }),
+      // transcript copies the composer does not list (Cursor writes them when an agent forks itself)
+      ...[1, 2, 3, 4].map((n): Row => toolRow(c, `c${n}`, at + 3_000 + n, pytest(`copy-${n}`), { thinkingMs: 300, error: { message: CANARY.secret } })),
+      userRow(c, "c5", at + 3_005, `${CANARY.prompt} a copied question`),
+    ];
+    await bothModes(rows, (r, mode) => {
+      expect([mode, r.store.forSession(sidOf(c), "prompt").length]).toEqual([mode, 1]);
+      expect(byTime(toolsOf(r, c)).map((t) => t.callId)).toEqual(["listed-2", "listed-3"].map((x) => keyedHash(r.salt, x)));
+      expect(r.store.forSession(sidOf(c), "turn").map((t) => t.ms)).toEqual([300]);
+      expect(r.store.forSession(sidOf(c), "marker").map((m) => m.kind)).toEqual(["denial"]);
+      expect(covOf(r, "cursor.ide").skipped).toEqual({ unlisted: 5 });
+      expectNoCanaries([...allEvents(r), r.coverage]);
+    });
+  });
+
+  test("the inline conversation of an old composer is its list; a composer without a list maps every bubble", async () => {
+    const at = t0();
+    const old = cuSid("inl");
+    const free = cuSid("free");
+    await bothModes([
+      composerRow(old, { created: at, updated: at + MIN, inline: [{ type: 1, bubbleId: cuSid("i1"), text: CANARY.prompt }] }),
+      userRow(old, "i1", at, "Listed inline"),
+      userRow(old, "i2", at + 1, `${CANARY.prompt} not listed`),
+      composerRow(free, { created: at, updated: at + MIN }),
+      toolRow(free, "x1", at, { name: "read_file" }),
+      toolRow(free, "x2", at + 1, { name: "read_file" }),
+    ], (r) => {
+      expect(r.store.forSession(sidOf(old), "prompt").map((p) => p.textHash)).toEqual([keyedHash(r.salt, "Listed inline")]);
+      expect(toolsOf(r, free)).toHaveLength(2);
+      expect(covOf(r, "cursor.ide").skipped).toEqual({ unlisted: 1, "inline-message": 1 });
+    });
+  });
+
+  test("header entries without bubble ids are no list: every bubble maps (never all unlisted)", async () => {
+    const at = t0();
+    const c = cuSid("noids");
+    await bothModes([
+      composerRow(c, { created: at, updated: at + MIN, extra: { fullConversationHeadersOnly: [{ type: 1 }, { type: 2, serverBubbleId: "s" }] } }),
+      userRow(c, "u", at, "Headers without ids"),
+      toolRow(c, "t", at + 1_000, { name: "read_file" }),
+    ], (r) => {
+      expect([r.store.forSession(sidOf(c), "prompt").length, toolsOf(r, c).length]).toEqual([1, 1]);
+      expect(covOf(r, "cursor.ide").skipped).toEqual({});
+    });
+  });
+
+  test("a composer that lists messages but has no bubble row: skipped missing-bubbles; drift when no listing composer has any", async () => {
+    const at = t0();
+    const P = cuSid("has");
+    const Q = cuSid("none1");
+    const R = cuSid("none2");
+    const S = cuSid("nolist");
+    // sporadic: P's listed bubble is there, Q's are not — a visible skip, not drift
+    writeStateDb(h, globalRel(h), [
+      composerRow(P, { created: at, updated: at + MIN, headers: [cuSid("p1")] }),
+      userRow(P, "p1", at, "Is this saved?"),
+      composerRow(Q, { created: at, updated: at + MIN, headers: [cuSid("q1"), cuSid("q2")] }),
+    ]);
+    let r = await run([cuIde]);
+    expect(r.store.session(sidOf(Q))).toMatchObject({ window: "detail", start: at, end: at + MIN });
+    let cov = covOf(r, "cursor.ide");
+    expect([cov.status, cov.skipped, cov.unknownTypes]).toEqual(["ok", { "missing-bubbles": 1 }, {}]);
+    // the format-change pattern: every composer that lists messages has none (a composer without a list does not count)
+    h.cleanup();
+    h = fakeHome();
+    writeStateDb(h, globalRel(h), [
+      composerRow(Q, { created: at, updated: at + MIN, headers: [cuSid("q1"), cuSid("q2")] }),
+      composerRow(R, { created: at, updated: at + MIN, headers: [cuSid("r1")] }),
+      composerRow(S, { created: at, updated: at + MIN }),
+      userRow(S, "s1", at, "A composer without a header list"),
+    ]);
+    r = await run([cuIde]);
+    cov = covOf(r, "cursor.ide");
+    expect([cov.status, cov.skipped, cov.unknownTypes]).toEqual(["drift", { "missing-bubbles": 2 }, { "missing-bubbles:cursorDiskKV": 1 }]);
+    expect(r.warnings.some((w) => w.code === "drift" && w.source === "cursor.ide")).toBe(true);
+    // listed ids that match no bubble key (the rows are all unlisted) are missing too
+    h.cleanup();
+    h = fakeHome();
+    writeStateDb(h, globalRel(h), [
+      composerRow(Q, { created: at, updated: at + MIN, headers: [cuSid("q1")] }),
+      userRow(Q, "zz", at, "Stored under another id"),
+    ]);
+    r = await run([cuIde]);
+    cov = covOf(r, "cursor.ide");
+    expect([cov.status, cov.skipped, cov.unknownTypes]).toEqual(["drift", { unlisted: 1, "missing-bubbles": 1 }, { "missing-bubbles:cursorDiskKV": 1 }]);
+  });
+
+  test("a user bubble without text is drift missing-field:text; blank text stays empty", async () => {
+    const at = t0();
+    const c = cuSid("notext");
+    const absent = bubble(cuSid("n1"), { type: 1, ts: at });
+    delete absent.text;
+    writeStateDb(h, globalRel(h), [
+      composerRow(c, { created: at, updated: at + MIN }),
+      [`bubbleId:${c}:${cuSid("n1")}`, absent],
+      [`bubbleId:${c}:${cuSid("n2")}`, { ...bubble(cuSid("n2"), { type: 1, ts: at + 1 }), text: null }],
+      userRow(c, "n3", at + 2, "   "),
+      userRow(c, "n4", at + 3, "A real question"),
+    ]);
+    const r = await run([cuIde]);
+    expect(r.store.all("prompt").map((p) => p.textHash)).toEqual([keyedHash(r.salt, "A real question")]);
+    const cov = covOf(r, "cursor.ide");
+    expect([cov.status, cov.skipped, cov.unknownTypes]).toEqual(["drift", { empty: 1 }, { "missing-field:text": 2 }]);
+  });
+
+  test("composer ids that contain a colon: the nested composer's rows are read once, in its own range", async () => {
+    const at = t0();
+    await bothModes([
+      composerRow("x", { created: at, updated: at + MIN }),
+      toolRow("x", "o", at + 1_000, { name: "read_file", callId: "outer" }),
+      composerRow("x:y", { created: at, updated: at + MIN }),
+      toolRow("x:y", "n", at + 2_000, { name: "read_file", callId: "nested" }),
+    ], (r, mode) => {
+      const sidX = sidOf(keyedHash(r.salt, "x"));
+      const sidXY = sidOf(keyedHash(r.salt, "x:y"));
+      expect([mode, r.store.all("tool").map((t) => [t.sessionId, t.callId]).sort()]).toEqual([mode, [
+        [sidX, keyedHash(r.salt, "outer")], [sidXY, keyedHash(r.salt, "nested")],
+      ].sort()]);
+    });
+  });
+
+  test("one prompt or session the mapping fails on is a bad-record: later prompts and composers still map", async () => {
+    const at = t0();
+    const C1 = "00000000-0000-4000-a000-000000000001";
+    const C2 = "00000000-0000-4000-a000-000000000002";
+    const C3 = "00000000-0000-4000-a000-000000000003";
+    writeStateDb(h, globalRel(h), [
+      composerRow(C1, { created: at, updated: at + MIN }),
+      userRow(C1, "a", at, "Explode here"),
+      userRow(C1, "b", at + 1_000, "Then carry on"),
+      composerRow(C2, { created: at, updated: at + MIN }),
+      userRow(C2, "c", at, "The second composer"),
+      composerRow(C3, { created: at, updated: at + MIN }),
+      userRow(C3, "d", at, "The third composer"),
+    ]);
+    const events: Ev[] = [];
+    const logs: [string, string, number | undefined][] = [];
+    const salt = new Uint8Array(32);
+    const ctx: ScanCtx = {
+      env: h.env, now: Date.now(), salt, signal: new AbortController().signal,
+      temp: { dir: () => h.root, disposeAll: () => {}, active: 0 },
+      emit: (e) => {
+        if (e.k === "session" && e.id === sidOf(C2)) throw new Error("injected emit failure");
+        events.push(e);
+      },
+      hash: (v) => {
+        if (v === "Explode here") throw new Error("injected mapping failure");
+        return keyedHash(salt, v);
+      },
+      registerCwd: (cwd) => keyedHash(salt, cwd),
+      log: (level, code, n) => { logs.push([level, code, n]); },
+    };
+    const [cand] = cuIde.locate(h.env, [h.env.home]);
+    await cuIde.scan(cand!, ctx);
+    const prompts = events.filter((e): e is PromptEv => e.k === "prompt");
+    expect(prompts.map((p) => p.textHash)).toEqual(["Then carry on", "The second composer", "The third composer"].map((t) => keyedHash(salt, t)));
+    expect(events.filter((e): e is SessionEv => e.k === "session").map((e) => e.id)).toEqual([sidOf(C1), sidOf(C3)]);
+    const cov = events.find((e): e is CoverageEv => e.k === "coverage")!;
+    expect([cov.status, cov.skipped]).toEqual(["ok", { "bad-record": 2 }]);
+    expect(logs).toEqual([["warn", "cu.bad-record", 2]]);
+  });
+
+  test("dual shapes: agent from unifiedMode alone or from isAgentic alone; a child listed only in subagentComposerIds gets its parent", async () => {
+    const at = t0();
+    const parent = cuSid("par2");
+    const kid = cuSid("kid2");
+    writeStateDb(h, globalRel(h), [
+      composerRow(cuSid("mode"), { created: at, updated: at, mode: "agent", headers: [cuSid("m")] }), userRow(cuSid("mode"), "m", at, "Mode only"),
+      composerRow(cuSid("flag"), { created: at, updated: at, agentic: true, mode: "chat", headers: [cuSid("f")] }), userRow(cuSid("flag"), "f", at, "Flag only"),
+      composerRow(cuSid("none"), { created: at, updated: at, headers: [cuSid("n")] }), userRow(cuSid("none"), "n", at, "Neither"),
+      composerRow(parent, { created: at, updated: at + MIN, agentic: true, subagentIds: [kid], headers: [cuSid("p")] }), userRow(parent, "p", at, "Delegate it"),
+      composerRow(kid, { created: at, updated: at + MIN, agentic: true, sub: { toolCallId: "launch-2" }, headers: [cuSid("k")] }),
+      toolRow(kid, "k", at + 1_000, { name: "read_file" }),
+    ]);
+    const r = await run([cuIde]);
+    expect([cuSid("mode"), cuSid("flag"), cuSid("none")].map((id) => r.store.session(sidOf(id))!.surface)).toEqual(["agent", "agent", "chat"]);
+    expect(r.store.session(sidOf(kid))).toMatchObject({ origin: "subagent", parentId: sidOf(parent) });
+    expect(r.store.session(sidOf(parent))!.parentId).toBeUndefined();
   });
 
   test("prompts are mapped in time order, whatever order their keys or rows come in: task starts and similarity follow the clock", async () => {
@@ -584,6 +796,19 @@ describe("cursor ide: legacy ItemTable fallback", () => {
     expect(r.store.all("prompt").map((p) => p.textHash)).toEqual([keyedHash(r.salt, "At the cap")]);
     expect(covOf(r, "cursor.ide")).toMatchObject({ note: "too-large", skipped: { "too-large": 1 }, files: 2, records: 2 });
     expect(r.warnings.some((w) => w.code === "too-large" && w.source === "cursor.ide")).toBe(true);
+  });
+
+  test("composer.composerData in its older bare-list form: a session per head", async () => {
+    const at = t0();
+    writeStateDb(h, globalRel(h), [], [["composer.composerData", [
+      { composerId: cuSid("L1"), name: CANARY.project, createdAt: at, lastUpdatedAt: at + MIN, unifiedMode: "agent" },
+      { composerId: cuSid("L2"), createdAt: at + MIN, lastUpdatedAt: at + 2 * MIN, isAgentic: false, modelConfig: { modelName: CU_GPT } },
+    ]]], { kv: false });
+    const r = await run([cuIde]);
+    expect(r.store.all("session").map((s) => [s.id, s.surface, s.start - at, s.end - at, s.models]).sort()).toEqual([
+      [sidOf(cuSid("L1")), "agent", 0, MIN, []], [sidOf(cuSid("L2")), "chat", MIN, 2 * MIN, [CU_GPT]],
+    ].sort());
+    expectNoCanaries([...allEvents(r), r.coverage]);
   });
 
   test("legacy values of the wrong shape are drift; unparsable ones are counted", async () => {

@@ -127,14 +127,14 @@ export class Pass {
 
   constructor(private readonly db: RoDb, private readonly table: string, private readonly tally: Tally, private readonly ctx: ScanCtx) {}
 
-  private page(sql: string, params: unknown[]): Obj[] | undefined {
+  private page(sql: string, params: unknown[], rows = true): Obj[] | undefined {
     if (this.failed || this.ctx.signal.aborted) return undefined;
     const first = !this.started;
     this.started = true;
     try {
-      const rows = this.db.all<Obj>(sql, ...params);
-      this.tally.records += rows.length;
-      return rows;
+      const got = this.db.all<Obj>(sql, ...params);
+      if (rows) this.tally.records += got.length;
+      return got;
     } catch (e) {
       this.failed = true;
       if (first && !isBusyError(e)) {
@@ -160,6 +160,11 @@ export class Pass {
       if (typeof last !== "string") return false; // keys inside a text range are text
       after = last;
     }
+  }
+
+  /** One lookup within the pass (it is not counted as rows read): its first row; undefined when it has none, or when it failed (`failed`). */
+  lookup(sql: string, params: unknown[]): Obj | undefined {
+    return this.page(sql, params, false)?.[0];
   }
 
   /** The rows of `sql` in rowid order (it selects the rowid as `rid` and binds the last rowid read and the page size). True when every page was read. */
@@ -276,6 +281,13 @@ const family = (mode: Mode, prefix: string): string => (mode === "key"
 const head = (mode: Mode): string => (mode === "key" ? "key, ok" : "rid, key, ok");
 const order = (mode: Mode): string => (mode === "key" ? "ORDER BY key" : "ORDER BY rid");
 
+/** The bubble ids an array of the value `col` lists (`fullConversationHeadersOnly`, or an old composer's inline `conversation`), as a JSON array of ids. */
+const listedIds = (col: string, path: string): string =>
+  `(SELECT json_group_array(json_extract(h.value, '$.bubbleId')) FROM json_each(${col}, '${path}') AS h WHERE h.type = 'object')`;
+/** One composer's listed bubble ids, looked up by its key just before its bubbles are read (key index only). */
+const HEADER_SQL = `SELECT ${listedIds("kv.value", "$.fullConversationHeadersOnly")} AS hids, ${listedIds("kv.value", "$.conversation")} AS iids `
+  + `FROM ${KV} AS kv WHERE kv.key = ? AND json_valid(kv.value)`;
+
 const COMPOSER_FIELDS = [
   field("json_extract", "$.createdAt", "created"), field("json_extract", "$.lastUpdatedAt", "updated"),
   field("json_extract", "$.isAgentic", "agentic"), field("json_extract", "$.unifiedMode", "mode"),
@@ -303,7 +315,12 @@ const TOOL_PARTS = [
   `CASE WHEN ${isOneOf(MCP_NAMES)} OR tname LIKE 'mcp%' THEN ${either([inJson("p", ["$.server"]), inJson("a", ["$.server"])])} END AS server`,
   `CASE WHEN ${isOneOf(TERMINAL_NAMES)} THEN ${inJson("r", ["$.exitCodeV2", "$.exitCode"])} END AS exit`,
 ];
-const composerSql = (mode: Mode): string => `SELECT ${head(mode)}, ${COMPOSER_FIELDS.join(", ")} FROM (${family(mode, "composerData")}) ${order(mode)}`;
+/** Without the key index there is no cheap lookup per composer: the composer scan carries the listed ids itself. */
+const LISTED_FIELDS = [
+  `CASE WHEN ok THEN ${listedIds("v", "$.fullConversationHeadersOnly")} END AS hids`, `CASE WHEN ok THEN ${listedIds("v", "$.conversation")} END AS iids`,
+];
+const composerSql = (mode: Mode): string =>
+  `SELECT ${head(mode)}, ${[...COMPOSER_FIELDS, ...(mode === "rowid" ? LISTED_FIELDS : [])].join(", ")} FROM (${family(mode, "composerData")}) ${order(mode)}`;
 const bubbleSql = (mode: Mode): string =>
   `SELECT ${head(mode)}, type, created, model, thinking, err, tfd, tname, tid, tstatus, decision, tcall, text, ${TOOL_PARTS.join(", ")} `
   + `FROM (SELECT ${head(mode)}, ${BUBBLE_FIELDS.join(", ")} FROM (${family(mode, "bubbleId")})) ${order(mode)}`;
@@ -319,11 +336,20 @@ function after(key: unknown, prefix: string): string | undefined {
   return typeof key === "string" && key.startsWith(prefix) && key.length > prefix.length ? key.slice(prefix.length) : undefined;
 }
 
-/** `bubbleId:<composerId>:<bubbleId>` → the composer id. */
-function bubbleComposer(key: unknown): string | undefined {
+/**
+ * `bubbleId:<composerId>:<bubbleId>` → its composer and bubble ids. A bubble id holds no colon, so the composer id runs
+ * to the last one (a composer id can hold colons).
+ */
+function bubbleKey(key: unknown): { composer: string; bubble: string } | undefined {
   const rest = after(key, "bubbleId:");
-  const at = rest === undefined ? -1 : rest.indexOf(":");
-  return at > 0 && at < rest!.length - 1 ? rest!.slice(0, at) : undefined;
+  const at = rest === undefined ? -1 : rest.lastIndexOf(":");
+  return at > 0 && at < rest!.length - 1 ? { composer: rest!.slice(0, at), bubble: rest!.slice(at + 1) } : undefined;
+}
+
+/** The bubble ids a composer lists, from the JSON arrays of ids its header list and inline conversation give; undefined when they name none. */
+function listed(...arrays: unknown[]): Set<string> | undefined {
+  const ids = new Set(arrays.flatMap(idList));
+  return ids.size > 0 ? ids : undefined;
 }
 
 /** The ids of a JSON array (the text `json_extract` returns for one), strings only. */
@@ -350,8 +376,12 @@ interface Composer {
   readonly agent: boolean;
   readonly model?: string;
   readonly models: string[];
-  /** Messages the composer lists (bubble headers) or holds inline. */
-  readonly content: number;
+  /** Messages the composer lists in its header list (`fullConversationHeadersOnly`). */
+  readonly listed: number;
+  /** Messages an old composer holds inline (`conversation`). */
+  readonly inline: number;
+  /** The bubble ids it lists: only those are mapped, while its bubbles are read; undefined when it lists none. */
+  ids?: Set<string>;
   /** Updated inside the detail window, or of unknown age: its bubbles are read. */
   readonly detail: boolean;
   start?: number;
@@ -427,11 +457,13 @@ export class DiskKv {
     const inline = dup ? 0 : count(r.inline);
     if (inline > 0) this.tally.skipped["inline-message"] = (this.tally.skipped["inline-message"] ?? 0) + inline;
     const times = [toEpochMs(r.created, this.ctx.now), toEpochMs(r.updated, this.ctx.now)].filter((t): t is number => t !== undefined);
+    const detail = times.length === 0 || Math.max(...times) >= this.windowStart;
     const c: Composer = {
       raw, id, origin: sub ? "subagent" : "human", dup, agent: r.agentic === 1 || r.mode === "agent", models: model === undefined ? [] : [model],
-      content: count(r.headers) + inline, detail: times.length === 0 || Math.max(...times) >= this.windowStart,
-      bubbles: 0, bubblesRead: false, prompts: [], times: [], ...(model !== undefined && { model }),
+      listed: dup ? 0 : count(r.headers), inline, detail, bubbles: 0, bubblesRead: false, prompts: [], times: [], ...(model !== undefined && { model }),
     };
+    // the rowid scan carries the listed ids (kept for composers whose bubbles will be read); the key path looks them up later
+    if (detail && !dup) c.ids = listed(r.hids, r.iids);
     for (const t of times) this.span(c, t);
     for (const child of [...idList(r.subs), ...idList(r.subagents)]) if (!this.parents.has(child)) this.parents.set(child, id);
     this.composers.set(raw, c);
@@ -443,8 +475,14 @@ export class DiskKv {
     for (const c of this.composers.values()) {
       if (c.dup || !c.detail) continue;
       if (pass.failed || this.ctx.signal.aborted) break;
-      c.bubblesRead = pass.byKey(SQL.key.bubbles, `bubbleId:${c.raw}:`, `bubbleId:${c.raw};`, (rows) => {
-        for (const r of rows) eachRow(() => this.bubble(c, r), this.tally);
+      if (c.listed + c.inline > 0) {
+        const row = pass.lookup(HEADER_SQL, [`composerData:${c.raw}`]);
+        if (pass.failed) break;
+        c.ids = listed(row?.hids, row?.iids);
+      }
+      const lo = `bubbleId:${c.raw}:`;
+      c.bubblesRead = pass.byKey(SQL.key.bubbles, lo, `bubbleId:${c.raw};`, (rows) => {
+        for (const r of rows) eachRow(() => this.inRange(c, lo, r), this.tally);
       });
       this.flush(c);
     }
@@ -462,16 +500,27 @@ export class DiskKv {
     }
   }
 
-  private scanned(r: Obj): void {
-    const raw = bubbleComposer(r.key);
-    if (raw === undefined) return this.tally.skip("bad-record");
-    const c = this.composers.get(raw);
-    if (!c) return this.tally.skip("orphan");
-    if (c.dup) return this.tally.skip("duplicate");
-    if (c.detail) this.bubble(c, r);
+  /** A row of a composer's own key range; one whose rest holds a colon belongs to a nested composer (`<id>:<more>`), read in its own range. */
+  private inRange(c: Composer, lo: string, r: Obj): void {
+    const rest = typeof r.key === "string" ? r.key.slice(lo.length) : "";
+    if (rest !== "" && !rest.includes(":")) this.bubble(c, r, rest);
   }
 
-  private bubble(c: Composer, r: Obj): void {
+  private scanned(r: Obj): void {
+    const key = bubbleKey(r.key);
+    if (key === undefined) return this.tally.skip("bad-record");
+    const c = this.composers.get(key.composer);
+    if (!c) return this.tally.skip("orphan");
+    if (c.dup) return this.tally.skip("duplicate");
+    if (c.detail) this.bubble(c, r, key.bubble);
+  }
+
+  /**
+   * One bubble of a composer inside the window. A composer that lists its bubble ids has only those mapped: rows it
+   * does not list (the transcript copies Cursor writes when an agent forks itself) are skipped `unlisted`.
+   */
+  private bubble(c: Composer, r: Obj, bubbleId: string): void {
+    if (c.ids !== undefined && !c.ids.has(bubbleId)) return this.tally.skip("unlisted");
     c.bubbles++;
     if (r.ok !== 1) return this.tally.skip("parse");
     if (r.type !== 1 && r.type !== 2) return this.tally.unknownKey(`bubble-type:${bubbleType(r.type)}`);
@@ -494,12 +543,15 @@ export class DiskKv {
     if (r.err !== undefined && r.err !== null && r.err !== "null") this.marker(c, ts, "error");
   }
 
-  /** The person's message, kept until the composer's bubbles are read. A subagent's user bubbles are its parent's briefs. */
+  /**
+   * The person's message, kept until the composer's bubbles are read. A subagent's user bubbles are its parent's briefs.
+   * A user bubble without a text field is drift `missing-field:text`; a blank one is skipped `empty`.
+   */
   private prompt(c: Composer, r: Obj, ts: number): void {
     if (c.origin !== "human") return;
-    const text = typeof r.text === "string" ? r.text : undefined;
-    if (text === undefined || text.trim() === "") return this.tally.skip("empty");
-    c.prompts.push({ ts, text });
+    if (typeof r.text !== "string") return this.tally.unknownKey("missing-field:text");
+    if (r.text.trim() === "") return this.tally.skip("empty");
+    c.prompts.push({ ts, text: r.text });
   }
 
   /**
@@ -515,15 +567,19 @@ export class DiskKv {
       while (at < times.length && times[at]! < p.ts) at++;
       const before = at > 0 ? times[at - 1] : undefined;
       const isTaskStart = i === 0 || (before !== undefined && p.ts - before >= TASK_GAP_MS);
-      const ev: PromptEv = {
-        k: "prompt", tool: TOOL, source: IDE_SOURCE, ts: p.ts, sessionId: c.id, window: "detail", origin: "human",
-        intent: classifyIntent(p.text), features: promptFeatures(p.text, { isTaskStart, prevText: prev }), textHash: this.ctx.hash(p.text.trim()),
-      };
-      this.out(c, ev);
+      const prevText = prev;
+      eachRow(() => {
+        const ev: PromptEv = {
+          k: "prompt", tool: TOOL, source: IDE_SOURCE, ts: p.ts, sessionId: c.id, window: "detail", origin: "human",
+          intent: classifyIntent(p.text), features: promptFeatures(p.text, { isTaskStart, prevText }), textHash: this.ctx.hash(p.text.trim()),
+        };
+        this.out(c, ev);
+      }, this.tally);
       prev = p.text;
     }
     c.prompts = [];
     c.times = [];
+    c.ids = undefined;
   }
 
   /**
@@ -582,34 +638,45 @@ export class DiskKv {
   }
 
   /**
-   * One SessionEv per composer that is not a copy. Inside the window (`detail`): `start`/`end` from its times and its
-   * bubbles'; a composer that lists no message and has no bubble is skipped `empty-session` — only once all its bubbles
-   * were read, since a pass that stopped early cannot tell — and one without any time `no-ts`. Outside the window
-   * (`lifetime`), from the composer alone: counted `outside-window` (its bubbles were not read), or `empty-session`
-   * when it lists no message.
+   * One SessionEv per composer that is not a copy, each mapped on its own (a failure is a bad-record). Inside the window
+   * (`detail`): `start`/`end` from its times and its bubbles'; a composer that lists no message and has no bubble is
+   * skipped `empty-session` — only once all its bubbles were read, since a pass that stopped early cannot tell — and one
+   * without any time `no-ts`. A composer whose header list names messages none of which has a bubble row counts
+   * `missing-bubbles` (its session is still emitted); when every composer that lists messages is such a one, the format
+   * has changed: drift `missing-bubbles:cursorDiskKV`. Outside the window (`lifetime`), from the composer alone: counted
+   * `outside-window` (its bubbles were not read), or `empty-session` when it lists no message.
    */
   private sessions(): void {
+    let missing = 0;
+    let found = false;
     for (const c of this.composers.values()) {
       if (c.dup) continue;
-      const empty = c.content === 0 && (c.detail ? c.bubblesRead && c.bubbles === 0 : true);
-      if (empty) {
-        this.tally.skip("empty-session");
-        continue;
+      if (c.detail && c.bubblesRead && c.listed > 0) {
+        if (c.bubbles > 0) found = true;
+        else {
+          missing++;
+          this.tally.skip("missing-bubbles");
+        }
       }
-      if (!c.detail) this.tally.skip("outside-window");
-      if (c.start === undefined || c.end === undefined) {
-        this.tally.skip("no-ts");
-        continue;
-      }
-      const s: SessionEv = {
-        k: "session", tool: TOOL, source: IDE_SOURCE, id: c.id, window: c.detail ? "detail" : "lifetime", origin: c.origin, start: c.start,
-        end: c.end, models: [...c.models], surface: c.agent ? "agent" : "chat",
-      };
-      const parent = this.parents.get(c.raw);
-      if (parent !== undefined && parent !== c.id) s.parentId = parent;
-      this.ctx.emit(s);
-      this.tally.span(c.start);
-      this.tally.span(c.end);
+      eachRow(() => this.session(c), this.tally);
     }
+    // every composer that lists messages has none of them: the bubbles' key family has moved or been renamed
+    if (missing > 0 && !found) this.tally.unknownKey(`missing-bubbles:${KV}`);
+  }
+
+  private session(c: Composer): void {
+    const empty = c.listed + c.inline === 0 && (c.detail ? c.bubblesRead && c.bubbles === 0 : true);
+    if (empty) return this.tally.skip("empty-session");
+    if (!c.detail) this.tally.skip("outside-window");
+    if (c.start === undefined || c.end === undefined) return this.tally.skip("no-ts");
+    const s: SessionEv = {
+      k: "session", tool: TOOL, source: IDE_SOURCE, id: c.id, window: c.detail ? "detail" : "lifetime", origin: c.origin, start: c.start,
+      end: c.end, models: [...c.models], surface: c.agent ? "agent" : "chat",
+    };
+    const parent = this.parents.get(c.raw);
+    if (parent !== undefined && parent !== c.id) s.parentId = parent;
+    this.ctx.emit(s);
+    this.tally.span(c.start);
+    this.tally.span(c.end);
   }
 }

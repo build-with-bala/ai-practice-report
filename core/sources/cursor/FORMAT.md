@@ -58,6 +58,9 @@ Composer and bubble ids are UUIDs; subagent composers can carry a `task-` prefix
   `agent`, `chat`, …), `forceMode` (string), `modelConfig` {`modelName` (string), `maxMode`, …} (`modelConfig` one
   source), `fullConversationHeadersOnly[]` {`bubbleId`, `type`, `serverBubbleId`?, `grouping`?} — the message list,
   `richText`, `text`, `context`, `gitWorktree`, `latestChatGenerationUUID` (never read).
+- A composer's key range can hold far more bubble rows than its list names: when an agent forks itself, Cursor writes
+  full transcript copies, about 50 rows per visible message (a Cursor forum report found hundreds of thousands of
+  unlisted rows, nearly all copies of listed ones).
 - Subagents: `subagentInfo` (object; present on a subagent's composer) {`toolCallId` (the launching call; one
   source), `forkedFromComposerId`, `parentRequestId`, …}; a parent lists its children in `subComposerIds[]` and
   `subagentComposerIds[]` (strings). A bug in some versions persists one forked launch hundreds of times, each copy
@@ -129,6 +132,14 @@ conversations live in `cursorDiskKV`.
   a table that then has no rowid either (`WITHOUT ROWID`) is drift `table-unreadable:cursorDiskKV`. The first query of
   a pass that fails for any reason but a busy store is drift `table-unreadable:cursorDiskKV`; a busy store or any later
   failure is an io-error. Either ends the pass.
+- **Listed bubbles only.** Just before a composer's bubble range is read, its listed bubble ids are looked up by its
+  key: `SELECT <ids of fullConversationHeadersOnly>, <ids of conversation> FROM cursorDiskKV AS kv WHERE kv.key = ? AND
+  json_valid(kv.value)`, each a `json_group_array` of `json_extract(h.value, '$.bubbleId')` over `json_each` of the
+  array, so only ids leave SQLite. A composer whose header list (or, in the oldest format, inline conversation) names
+  bubble ids has only those bubbles mapped; the other rows of its range are skipped `unlisted`. The set is held for that
+  composer only and dropped once its bubbles are read. A composer with no list, or a list whose entries carry no
+  `bubbleId`, has every bubble mapped. In the rowid fallback (no key index, so no cheap lookup by key) the composer scan
+  extracts the same id lists, kept for the composers inside the window until the bubble scan ends.
 - **The detail window.** A composer is inside it when it was last updated (`lastUpdatedAt`, else `createdAt`) within
   the 90 days before the scan — or at or after `since` when the scan sets one; one with neither time is taken as
   inside. Only the bubbles of composers inside the window are read.
@@ -147,17 +158,26 @@ conversations live in `cursorDiskKV`.
   no message. Messages held inline (oldest format) have no time: counted as
   skipped `inline-message`, not mapped. No `projectKey`: a composer does not name its workspace (the workspace index is
   in `ItemTable`, which is not read when composers exist).
-- **Bubbles.** Read by key, only bubbles under a known composer's key are ever seen. In the rowid fallback, a bubble
-  whose composer has no `composerData` row (a deleted chat) is skipped `orphan`, and one whose key is not
-  `bubbleId:<composerId>:<bubbleId>` is a `bad-record`. A `type` other than 1 or 2 is drift `bubble-type:<n>`
-  (`(other)`, `(none)`); one without a plausible `createdAt` is skipped `no-ts` (its model still counts).
+- **Bubbles.** Read by key, only bubbles under a known composer's key are ever seen. A bubble id holds no colon, while a
+  composer id can: composer `a`'s range also holds the rows of a composer `a:b`, so a row whose rest after
+  `bubbleId:a:` holds a colon is left to that composer's own range (in the rowid fallback the composer id runs to the
+  key's last colon). In the rowid fallback, a bubble whose composer has no `composerData` row (a deleted chat) is skipped
+  `orphan`, and one whose key is not `bubbleId:<composerId>:<bubbleId>` is a `bad-record`. A `type` other than 1 or 2 is
+  drift `bubble-type:<n>` (`(other)`, `(none)`); one without a plausible `createdAt` is skipped `no-ts` (its model still
+  counts).
+- **Missing bubbles.** A composer inside the window whose header list names messages but none of them has a row
+  (after its range was read in full) is skipped `missing-bubbles`; its session is still emitted, without events. When
+  at least one composer is missing its bubbles and no composer that lists messages has any, the bubbles' key family has
+  moved or been renamed: drift `missing-bubbles:cursorDiskKV`, so a format change can never pass as a quiet store.
+  Composers that hold their messages inline (the oldest format) have no bubble rows by design and are not counted.
   - **PromptEv** per type-1 bubble with non-blank text, in composers that are not subagents (a subagent's user
     bubbles are its parent's briefs): origin `human`, `detail`; intent, features and `textHash` (keyed hash of the
     trimmed text) from the text in memory. A composer's prompts are mapped once its bubbles are read, in time order
     (keys sort by bubble id, not by time): `isTaskStart` = its first prompt, or one ≥ 30 min after the latest earlier
     bubble of the composer; `simToPrev` against its previous prompt. Only that composer's prompt texts and bubble times
-    are held meanwhile (in the rowid fallback, those of every composer inside the window, until the scan ends). Blank
-    text is skipped `empty`.
+    are held meanwhile (in the rowid fallback, those of every composer inside the window, until the scan ends). Each
+    prompt is mapped on its own: one the mapping fails on is a `bad-record` and the others go on. A user bubble without
+    a `text` field (absent or null) is drift `missing-field:text`; blank text is skipped `empty`.
   - **ToolEv** per assistant (type-2) bubble with `toolFormerData`: `name` = the built-in name (above), else the name the numeric `tool`
     stands for, else `mcp` for an `mcp_`/`mcp-` name, else `other`; `callId` = keyed hash of `toolCallId`. Terminal
     tools (`run_terminal_cmd`, `run_terminal_command`, `run_terminal_command_v2`, `Shell`) take `classifyCommand` of
@@ -184,9 +204,11 @@ conversations live in `cursorDiskKV`.
 - **Coverage**: `files`/`bytes` = stores whose tables were listed (main file size); `records` = composer and bubble
   rows read, plus legacy values; `from`/`to` = first/last event time; no versions (the stores name none). The source
   is an error when every store present fails to open or read, unless a store was too large to copy. Skipped:
-  `parse`, `orphan`, `duplicate`, `no-ts`, `empty`, `empty-session`, `outside-window`, `inline-message`, `draft`,
-  `bad-record` (also warn log `cu.bad-record` with the count), `io-error`, `too-large`. Drift: `missing-column:<name>`,
-  `no-key-index:cursorDiskKV`, `table-unreadable:cursorDiskKV`, `bubble-type:<n>`, `<legacy key>:shape`.
+  `parse`, `orphan`, `duplicate`, `unlisted`, `missing-bubbles`, `no-ts`, `empty`, `empty-session`, `outside-window`,
+  `inline-message`, `draft`, `bad-record` (a row, prompt or session the mapping failed on; also warn log `cu.bad-record`
+  with the count), `io-error`, `too-large`. Drift: `missing-column:<name>`, `no-key-index:cursorDiskKV`,
+  `table-unreadable:cursorDiskKV`, `missing-bubbles:cursorDiskKV`, `missing-field:text`, `bubble-type:<n>`,
+  `<legacy key>:shape`.
 
 ## ai-code-tracking.db (`cursor.tracking`)
 
@@ -248,8 +270,8 @@ strings are both accepted). One machine reported every line column of `scored_co
 - Bubbles are read only for composers updated inside the detail window (90 days, or since `since`): older
   conversations count as lifetime sessions without prompts, tools or turns. A composer whose own times are old is
   outside the window even if a bubble of it is newer.
-- A forked subagent's copy of its parent's messages counts the parent's tool calls once more; copies of one launch
-  are read once.
+- Transcript copies a composer does not list are skipped (`unlisted`), and copies of one subagent launch are read
+  once; but a forked subagent whose own list names its parent's messages counts the parent's tool calls once more.
 - Token counts (zero in current versions), the context meter and request ids are not mapped; neither are the
   timings Cursor keeps per bubble in some versions.
 - Composers have no project: the workspace index is not read.
