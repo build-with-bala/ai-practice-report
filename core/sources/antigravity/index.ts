@@ -32,6 +32,7 @@ export const agIde: SourcePlugin = {
   id: IDE_SOURCE,
   tier: "P0",
   beta: false,
+  window: "lifetime",
   describe: {
     reads: [
       "<Antigravity user>/globalStorage/state.vscdb and <Antigravity IDE user>/globalStorage/state.vscdb, table ItemTable — only the value of antigravityUnifiedStateSync.trajectorySummaries, by exact key: per conversation its id, step count, creation and last change times, and its first workspace folder (kept only as a keyed project hash)",
@@ -51,6 +52,7 @@ export const agBrain: SourcePlugin = {
   id: BRAIN_SOURCE,
   tier: "P0",
   beta: false,
+  window: "lifetime",
   describe: {
     reads: [
       "<home>/.gemini/antigravity/brain/<conversation>/{task,implementation_plan,walkthrough}.md and <home>/.gemini/antigravity-cli/brain/<conversation>/… — existence and last modification time only",

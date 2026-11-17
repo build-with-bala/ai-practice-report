@@ -20,8 +20,9 @@ export interface Warning { code: "drift" | "error" | "too-large" | "temp-leftove
 export interface ScanResult { store: EventStore; coverage: CoverageEv[]; warnings: Warning[]; cwds: Map<string, string>;
   salt: Uint8Array; startedAt: number; finishedAt: number; tempClean: boolean }
 
+/** Coverage the orchestrator writes for a plugin (absent, error, aborted), in the window the plugin reports. */
 function emptyCoverage(p: SourcePlugin, status: CoverageEv["status"], note?: string): CoverageEv {
-  const ev: CoverageEv = { k: "coverage", tool: p.tool, source: p.id, window: "detail", status, beta: p.beta,
+  const ev: CoverageEv = { k: "coverage", tool: p.tool, source: p.id, window: p.window ?? "detail", status, beta: p.beta,
     files: 0, bytes: 0, records: 0, skipped: {}, unknownTypes: {}, versions: [] };
   if (note !== undefined) ev.note = note;
   return ev;

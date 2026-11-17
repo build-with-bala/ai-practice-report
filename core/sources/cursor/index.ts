@@ -101,6 +101,7 @@ export const cuTracking: SourcePlugin = {
   id: TRACKING_SOURCE,
   tier: "P0",
   beta: false,
+  window: "lifetime",
   describe: {
     reads: ["<home>/.cursor/ai-tracking/ai-code-tracking.db, table scored_commits — commit and scoring time, tab, composer and human lines added; the commit hash only to count a commit once"],
     neverReads: [

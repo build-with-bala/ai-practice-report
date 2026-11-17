@@ -36,6 +36,7 @@ export const cxThreads: SourcePlugin = {
   id: THREADS_SOURCE,
   tier: "P0",
   beta: false,
+  window: "lifetime",
   describe: {
     reads: [
       "<codex>/state_<N>.sqlite (highest N) — threads: id, source, originator, model, reasoning effort, approval mode, sandbox policy type, token total, created/updated times, CLI version, cwd, and whether the git columns are set; thread_spawn_edges: parent and child thread ids",
@@ -57,6 +58,7 @@ export const cxHistory: SourcePlugin = {
   id: HISTORY_SOURCE,
   tier: "P0",
   beta: false,
+  window: "lifetime",
   describe: {
     reads: ["<codex>/history.jsonl — one line per prompt typed in the CLI, kept after rollouts are pruned: session_id, ts, text"],
     neverReads: ["prompt text is parsed in memory for intent, features and a keyed hash, and never kept"],
@@ -70,6 +72,7 @@ export const cxConfig: SourcePlugin = {
   id: CONFIG_SOURCE,
   tier: "P0",
   beta: false,
+  window: "lifetime",
   describe: {
     reads: [
       "<codex>/config.toml — section headers only: [profiles.<name>], [mcp_servers.<name>], [plugins.<id>]",

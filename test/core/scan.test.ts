@@ -163,4 +163,28 @@ describe("scan hygiene", () => {
   });
 });
 
+describe("coverage the orchestrator writes", () => {
+  const lifetime = (id: string, run: (ctx: ScanCtx) => Promise<void> | void, n = 1): SourcePlugin => ({ ...plugin("codex", id, run, false, n), window: "lifetime" });
+
+  test("absent and error coverage take the plugin's window", async () => {
+    const absent = lifetime("absent", () => {}, 0);
+    const failing = lifetime("failing", () => { throw new TypeError("x"); });
+    const unlocatable = lifetime("unlocatable", () => {});
+    unlocatable.locate = () => { throw new SyntaxError("x"); };
+    const r = await scan({ env, plugins: [absent, failing, unlocatable] });
+    expect(r.coverage.map((c) => [c.source, c.status, c.window]).sort()).toEqual([
+      ["absent", "absent", "lifetime"], ["failing", "error", "lifetime"], ["unlocatable", "error", "lifetime"],
+    ]);
+  });
+
+  test("aborted coverage takes the plugin's window; a plugin without one gets detail", async () => {
+    const ac = new AbortController();
+    const first = plugin("codex", "first", () => { ac.abort(); });
+    const later = lifetime("later", () => {});
+    const plain = plugin("cursor", "plain", () => {});
+    const r = await scan({ env, plugins: [first, later, plain], concurrency: 1, signal: ac.signal });
+    expect(r.coverage.filter((c) => c.note === "aborted").map((c) => [c.source, c.window]).sort()).toEqual([["later", "lifetime"], ["plain", "detail"]]);
+  });
+});
+
 process.on("exit", () => rmSync(home, { recursive: true, force: true }));
