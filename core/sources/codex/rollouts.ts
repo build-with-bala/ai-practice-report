@@ -260,7 +260,8 @@ class RolloutReader {
     const meta: Meta = { origin: "human", inRepo: !!p.git };
     const source = p.source;
     if (typeof source === "string") {
-      meta.origin = source === "exec" ? "scripted" : "human";
+      // `codex exec` is a script; through its MCP server, Codex is driven by another client or agent
+      meta.origin = source === "exec" ? "scripted" : source === "mcp" ? "peer" : "human";
       meta.surface = SURFACE.test(source) ? source : "other";
     } else if (isObj(source) && "subagent" in source) {
       meta.origin = "subagent";

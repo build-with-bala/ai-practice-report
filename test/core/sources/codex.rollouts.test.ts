@@ -216,11 +216,11 @@ describe("codex rollouts: prompts", () => {
     expect(byOrigin("scripted")).toEqual([false, false]);
   });
 
-  test("sources: exec is scripted, any other string is human, Claude Code as originator is peer whatever the source", async () => {
+  test("sources: exec is scripted, mcp is peer, any other string is human, Claude Code as originator is peer whatever the source", async () => {
     const cases: [unknown, string | undefined, string, string][] = [
       ["cli", undefined, "human", "cli"],
       ["vscode", undefined, "human", "vscode"],
-      ["mcp", undefined, "human", "mcp"],
+      ["mcp", undefined, "peer", "mcp"],
       ["exec", undefined, "scripted", "exec"],
       ["exec", "Claude Code", "peer", "exec"],
       [CANARY.prompt, undefined, "human", "other"],
@@ -237,7 +237,7 @@ describe("codex rollouts: prompts", () => {
     const deep = r.store.session(sidOf(ids[7]!))!;
     expect(deep).toMatchObject({ parentId: sidOf(keyedHash(r.salt, "not-a-uuid")), spawnDepth: 2, agentType: keyedHash(r.salt, CANARY.project) });
     expect(r.store.session(sidOf(ids[6]!))!.parentId).toBeUndefined();
-    expect(r.store.all("prompt").map((p) => p.origin)).toEqual(["human", "human", "human", "scripted", "peer", "human"]);
+    expect(r.store.all("prompt").map((p) => p.origin)).toEqual(["human", "human", "peer", "scripted", "peer", "human"]);
     expect(r.coverage[0]!.unknownTypes).toEqual({});
     expectNoCanaries(allEvents(r));
   });

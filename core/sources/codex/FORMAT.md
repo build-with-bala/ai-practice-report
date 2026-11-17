@@ -162,10 +162,11 @@ CLI's EventMsg tags (`exec_command_end`, `mcp_tool_call_end`, `collab_*`, `realt
   hash (before a `session_meta`, the id in the file name). A thread seen in an earlier rollout (e.g. both live and
   archived) is read once: later rollouts naming it count as skipped `duplicate`. `callId` = keyed hash of the call id
   (or of the item id for nested calls).
-- **SessionEv** per rollout: origin from `source` — `exec` → scripted; `{subagent: …}` → subagent (`parentId`
-  from `thread_spawn.parent_thread_id`, else `parent_thread_id`; `spawnDepth` = `depth`; `agentType` = the role
-  when built in, else its keyed hash); any other string, or no source → human; `originator` exactly `Claude Code`
-  → peer, whatever the source. `surface` = the source string (lower-case token, else `other`) or `subagent`; `version` =
+- **SessionEv** per rollout: origin from `source` — `exec` → scripted; `mcp` (Codex run through its MCP server,
+  driven by another client or agent) → peer; `{subagent: …}` → subagent (`parentId` from
+  `thread_spawn.parent_thread_id`, else `parent_thread_id`; `spawnDepth` = `depth`; `agentType` = the role when
+  built in, else its keyed hash); any other string, or no source → human; `originator` exactly `Claude Code` → peer,
+  whatever the source. `surface` = the source string (lower-case token, else `other`) or `subagent`; `version` =
   `cli_version`; `projectKey` from `cwd`; `inRepo` = `git` present; `models` = distinct `turn_context` models;
   `start`/`end` = first/last own line time. A source object without `subagent` is drift `session_meta.source:shape`.
 - **Forked history is skipped**: lines with `ordinal` below `subagent_history_start_ordinal` (copied from the parent)
