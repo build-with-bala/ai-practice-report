@@ -2,8 +2,12 @@ import type { CheckKind, ToolCategory } from "../../model/ids";
 import { classifyCommand } from "../../text/commands";
 import { extOfPath, isObj, num, str } from "../common/guards";
 
-/** One tool action: per call, or per file for patches. Names are the CLI's built-in tool names, `mcp`, or `other`. */
-export interface CxToolCall { name: string; category: ToolCategory; checks: CheckKind[]; editExt?: string; added?: number; removed?: number; mcpServer?: string }
+/**
+ * One tool action: per call, or per file for patches. Names are the CLI's built-in tool names, `mcp`, or `other`.
+ * `commandLine` is set on shell commands only: whether a command line was found to classify (never on other actions).
+ */
+export interface CxToolCall { name: string; category: ToolCategory; checks: CheckKind[]; editExt?: string; added?: number; removed?: number; mcpServer?: string;
+  commandLine?: boolean }
 /** How an action ended, from the item that completed it. */
 export interface CxOutcome { ok?: boolean; exit?: number; ms?: number }
 
@@ -52,10 +56,11 @@ function commandLine(cmd: unknown): string {
   return argv.join(" ");
 }
 
-/** A command's category and checks: `classifyCommand` of its command line. */
+/** A command's category and checks: `classifyCommand` of its command line, and whether it had one. */
 function command(name: string, cmd: unknown): CxToolCall {
-  const { category, checks } = classifyCommand(commandLine(cmd));
-  return { name, category, checks };
+  const line = commandLine(cmd);
+  const { category, checks } = classifyCommand(line);
+  return { name, category, checks, commandLine: line.trim() !== "" };
 }
 
 function edit(ext: string | undefined, added: number, removed: number): CxToolCall {

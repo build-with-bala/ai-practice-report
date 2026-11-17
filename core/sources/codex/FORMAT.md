@@ -243,7 +243,10 @@ CLI's EventMsg tags (`exec_command_end`, `mcp_tool_call_end`, `collab_*`, `realt
   `fileTs` = the file name's local time; **FileFactEv** likewise.
 - **CoverageEv**: `files`/`bytes` of fully read rollouts, `records` = parsed lines; skipped `sniffed`, `oversize`,
   `parse`, `io-error`, `duplicate`, `foreign-item`, `exec-interaction`, `bad-record` (also logged once per root as
-  `warn cx.bad-record`); `versions` = `cli_version`s; `from`/`to` = first/last event time.
+  `warn cx.bad-record`); `versions` = `cli_version`s; `from`/`to` = first/last event time. Once per root the
+  shell-command events with and without a command line (from the call's arguments or the command item completing it)
+  are logged as `debug codex.cmd-extracted` and `debug codex.cmd-missing` — a falling share means the command lines
+  moved where the reader does not look.
 
 **Dropped before parsing** (from the first 512 bytes): `world_state`, `token_usage_record`; response items
 `reasoning`, `function_call_output`, `custom_tool_call_output`, `tool_search_output`, `agent_message`,

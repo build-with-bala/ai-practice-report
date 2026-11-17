@@ -176,6 +176,8 @@ function resetTime(x: Obj, ts: number): number | undefined {
 }
 
 interface Turn { model?: string; effort?: string; start?: number }
+/** Shell-command events of one root, by whether a command line was found (logged at debug level to check parsing). */
+interface CommandCounts { extracted: number; missing: number }
 /** `subagent`: the thread's source is a subagent one, whatever its final origin. */
 interface Meta { origin: Origin; subagent: boolean; cwd?: string; surface?: string; version?: string; parentId?: string; spawnDepth?: number; agentType?: string; inRepo: boolean }
 
@@ -201,6 +203,8 @@ class RolloutReader {
   private readonly lastRate = new Map<string, string>();
   private readonly pending = new Map<string, ToolEv[]>();
   private readonly done = new Set<string>();
+  /** Shell-command events not emitted yet → whether a command line was found (by their call, or the item completing it). */
+  private readonly commandLineFound = new WeakMap<ToolEv, boolean>();
 
   constructor(
     private readonly file: string,
@@ -208,6 +212,7 @@ class RolloutReader {
     private readonly ctx: ScanCtx,
     private readonly tally: Tally,
     private readonly seen: Set<string>,
+    private readonly commands: CommandCounts,
   ) {
     // until session_meta names the thread: the id in the file name (the CLI's own), else a keyed hash of the name
     const name = path.basename(file);
@@ -221,6 +226,14 @@ class RolloutReader {
 
   private out(ev: Ev): void {
     if ("ts" in ev && typeof ev.ts === "number") this.tally.span(ev.ts);
+    if (ev.k === "tool") {
+      const found = this.commandLineFound.get(ev);
+      if (found !== undefined) {
+        this.commandLineFound.delete(ev);
+        if (found) this.commands.extracted++;
+        else this.commands.missing++;
+      }
+    }
     this.ctx.emit(ev);
   }
 
@@ -354,6 +367,7 @@ class RolloutReader {
     if (c.added !== undefined) ev.linesAdded = c.added;
     if (c.removed !== undefined) ev.linesRemoved = c.removed;
     if (c.mcpServer !== undefined) ev.mcpServer = c.mcpServer;
+    if (c.commandLine !== undefined) this.commandLineFound.set(ev, c.commandLine);
     return ev;
   }
 
@@ -439,6 +453,7 @@ class RolloutReader {
           ev.category = ran.category;
           if (ran.checks.length > 0) ev.checks = ran.checks;
         }
+        if (ran?.commandLine && this.commandLineFound.has(ev)) this.commandLineFound.set(ev, true);
         RolloutReader.apply(ev, outcome);
         this.out(ev);
       }
@@ -574,10 +589,10 @@ class RolloutReader {
   }
 }
 
-async function scanFile(file: string, ctx: ScanCtx, tally: Tally, seen: Set<string>): Promise<void> {
+async function scanFile(file: string, ctx: ScanCtx, tally: Tally, seen: Set<string>, commands: CommandCounts): Promise<void> {
   const st = safeStat(file);
   if (!st?.isFile()) return;
-  const reader = new RolloutReader(file, fileTime(path.basename(file)), ctx, tally, seen);
+  const reader = new RolloutReader(file, fileTime(path.basename(file)), ctx, tally, seen, commands);
   let complete = true;
   try {
     for await (const item of readJsonl(file, { sniffSkip: sniffHeavy, signal: ctx.signal })) {
@@ -636,16 +651,23 @@ function rolloutFiles(dir: string, tally: Tally, depth = 0, out: string[] = []):
   return out;
 }
 
-/** Scan `<codex>/sessions` and `<codex>/archived_sessions`; each thread once (the first rollout naming it); one CoverageEv, last. */
+/**
+ * Scan `<codex>/sessions` and `<codex>/archived_sessions`; each thread once (the first rollout naming it); one CoverageEv,
+ * last. The shell-command events with and without a command line are logged once (debug `codex.cmd-extracted`,
+ * `codex.cmd-missing`): a share that falls means the CLI moved its command lines somewhere the reader does not look.
+ */
 export async function scanRollouts(c: Candidate, ctx: ScanCtx): Promise<void> {
   const tally = new Tally(TOOL, ROLLOUTS_SOURCE);
   const seen = new Set<string>();
+  const commands: CommandCounts = { extracted: 0, missing: 0 };
   for (const folder of ["sessions", "archived_sessions"]) {
     for (const file of rolloutFiles(path.join(c.root, folder), tally)) {
       if (ctx.signal.aborted) break;
-      await scanFile(file, ctx, tally, seen);
+      await scanFile(file, ctx, tally, seen, commands);
     }
   }
+  ctx.log("debug", "codex.cmd-extracted", commands.extracted);
+  ctx.log("debug", "codex.cmd-missing", commands.missing);
   const bad = tally.skipped["bad-record"] ?? 0;
   if (bad > 0) ctx.log("warn", "cx.bad-record", bad); // a mapping bug must not look like a healthy source
   ctx.emit(tally.coverage());

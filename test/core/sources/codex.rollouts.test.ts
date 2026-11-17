@@ -417,6 +417,26 @@ describe("codex rollouts: tools", () => {
     expect(findCanaries(tools.map((t) => ({ ...t, mcpServer: undefined })))).toEqual([]);
     expectNoCanaries([...allEvents(r), r.coverage], { allow: ["mcp"] });
   });
+
+  test("command events with and without a command line are counted once per root (debug logs)", async () => {
+    buildCodexRollouts(h); // four commands, each with its command line: two Code Mode cells, an exec_command call and its item, a subagent's cell
+    rollout((r) => {
+      r.fnOutput(r.fn("exec_command", { yield_time_ms: 1_000 }));               // names no command, and nothing completes it
+      r.command(CANARY.code, 0, { id: r.fn("exec_command", {}) });               // named by the command item that completes it
+      r.item("local_shell_call", { call_id: "ls-1", status: "completed", action: { type: "exec", command: [] } }); // an empty argv
+      r.fn("write_stdin", { session_id: 3, chars: "" });                          // input to a running command: not a command
+      r.command("ls", 0, { source: "user_shell" });                               // the person's own command: not a tool event
+    }).write(h);
+    const other = path.join(h.root, "home2");
+    rollout((r) => { r.fn("shell", { command: 42 }); }).write(h, "sessions", path.relative(h.env.home, path.join(other, ".codex")));
+    const logs: [string, string, number | undefined][] = [];
+    const r = await scan({ env: { ...h.env, wslHomes: [other] }, wsl: true, plugins: [cxRollouts], onLog: (level, code, n) => logs.push([level, code, n]) });
+    expect(r.coverage.map((c) => c.status).sort()).toEqual(["drift", "ok"]); // the Task 11 scenario has an unknown event type
+    expect(logs.filter(([, code]) => code.startsWith("codex.cmd-")).sort()).toEqual([
+      ["debug", "codex.cmd-extracted", 0], ["debug", "codex.cmd-extracted", 5], ["debug", "codex.cmd-missing", 1], ["debug", "codex.cmd-missing", 2],
+    ]);
+    expectNoCanaries(logs);
+  });
 });
 
 describe("codex rollouts: turns, usage, rate limits, markers", () => {
@@ -619,7 +639,7 @@ describe("codex rollouts: drift, ids, locate, errors", () => {
     await cxRollouts.scan(cand!, ctx);
     const cov = events.find((e): e is CoverageEv => e.k === "coverage")!;
     expect(cov.skipped["bad-record"]).toBe(1);
-    expect(logs).toEqual([["warn", "cx.bad-record", 1]]);
+    expect(logs.filter(([level]) => level === "warn")).toEqual([["warn", "cx.bad-record", 1]]);
     expect(events.filter((e) => e.k === "prompt")).toHaveLength(1);
   });
 });
@@ -648,17 +668,22 @@ describe("cxToolCalls", () => {
   const fc = (name: string, args: unknown, extra: Record<string, unknown> = {}) => ({ type: "function_call", name, arguments: JSON.stringify(args), call_id: "call_1", ...extra });
   const item = (type: string, fields: Record<string, unknown>) => ({ type, id: "i1", ...fields });
   const one = (name: string, category: string, extra: Record<string, unknown> = {}) => [{ name, category, checks: [], ...extra }];
+  /** A shell command: its category and checks, and whether a command line was found (`commandLine`). */
+  const ran = (name: string, category: string, checks: string[] = [], commandLine = true) => [{ name, category, checks, commandLine }];
   const cmd = (script: string, parsed: unknown[]) => item("CommandExecution", { command: ["/bin/zsh", "-lc", script], parsed_cmd: parsed, exit_code: 0, source: "unified_exec_startup" });
   const cases: [string, unknown, unknown][] = [
     ["Code Mode exec cell", { type: "custom_tool_call", name: "exec", input: "await tools.exec_command({ cmd: \"bun test\" })", call_id: "c" }, []],
     ["Code Mode wait", fc("wait", { cell_id: "1", yield_time_ms: 1_000 }), []],
-    ["exec_command", fc("exec_command", { cmd: "pnpm lint" }), [{ name: "exec_command", category: "lint", checks: ["lint"] }]],
-    ["exec_command without cmd", fc("exec_command", {}), one("exec_command", "shell")],
-    ["exec_command with unparseable arguments", { type: "function_call", name: "exec_command", arguments: "{", call_id: "c" }, one("exec_command", "shell")],
-    ["shell argv", fc("shell", { command: ["bash", "-lc", "cargo test"] }), [{ name: "shell", category: "test", checks: ["test"] }]],
-    ["shell argv without a shell", fc("shell", { command: ["go", "build", "./..."] }), [{ name: "shell", category: "build", checks: ["build"] }]],
-    ["shell_command string", fc("shell_command", { command: "git push" }), one("shell_command", "git")],
-    ["local shell", { type: "local_shell_call", call_id: "c", status: "completed", action: { type: "exec", command: ["make", "build"] } }, [{ name: "local_shell", category: "build", checks: ["build"] }]],
+    ["exec_command", fc("exec_command", { cmd: "pnpm lint" }), ran("exec_command", "lint", ["lint"])],
+    ["exec_command without cmd", fc("exec_command", {}), ran("exec_command", "shell", [], false)],
+    ["exec_command with unparseable arguments", { type: "function_call", name: "exec_command", arguments: "{", call_id: "c" }, ran("exec_command", "shell", [], false)],
+    ["exec_command with a blank cmd", fc("exec_command", { cmd: "  \n" }), ran("exec_command", "shell", [], false)],
+    ["shell argv", fc("shell", { command: ["bash", "-lc", "cargo test"] }), ran("shell", "test", ["test"])],
+    ["shell argv without a shell", fc("shell", { command: ["go", "build", "./..."] }), ran("shell", "build", ["build"])],
+    ["shell argv that is not all strings", fc("shell", { command: ["bash", "-lc", 7] }), ran("shell", "shell", [], false)],
+    ["shell_command string", fc("shell_command", { command: "git push" }), ran("shell_command", "git")],
+    ["local shell", { type: "local_shell_call", call_id: "c", status: "completed", action: { type: "exec", command: ["make", "build"] } }, ran("local_shell", "build", ["build"])],
+    ["local shell without an action", { type: "local_shell_call", call_id: "c", status: "completed" }, ran("local_shell", "shell", [], false)],
     ["write_stdin", fc("write_stdin", { session_id: 3, chars: "" }), one("write_stdin", "shell")],
     ["update_plan", fc("update_plan", { plan: [] }), one("update_plan", "plan")],
     ["spawn_agent", fc("spawn_agent", { message: "m" }, { namespace: "collaboration" }), one("spawn_agent", "delegate")],
@@ -688,15 +713,16 @@ describe("cxToolCalls", () => {
     ["apply_patch freeform", { type: "custom_tool_call", name: "apply_patch", call_id: "c", input: "*** Begin Patch\n*** Update File: a/b.rs\n@@\n-x\n+y\n+z\n*** End Patch\n" }, [{ name: "apply_patch", category: "edit", checks: [], editExt: "rs", added: 2, removed: 1 }]],
     ["apply_patch function", fc("apply_patch", { input: "*** Begin Patch\r\n*** Add File: Dockerfile\r\n+FROM x\r\n*** End Patch" }), [{ name: "apply_patch", category: "edit", checks: [], added: 1, removed: 0 }]],
     ["apply_patch without files", { type: "custom_tool_call", name: "apply_patch", call_id: "c", input: "garbage" }, []],
-    ["command: sed is not a reader", cmd("sed -n 1,80p src/a.ts", [{ type: "read", cmd: "sed", name: "a.ts", path: "src/a.ts" }]), one("exec_command", "shell")],
-    ["command: search", cmd("rg foo", [{ type: "search", cmd: "rg foo", query: "foo" }]), one("exec_command", "search")],
-    ["command: list files", cmd("ls -la", [{ type: "list_files", cmd: "ls -la" }]), one("exec_command", "read")],
-    ["command: read then search", cmd("cat a; rg b", [{ type: "read", cmd: "cat a" }, { type: "search", cmd: "rg b" }]), one("exec_command", "read")],
-    ["command: read and a test", cmd("cat a && npm test", [{ type: "read", cmd: "cat a" }, { type: "unknown", cmd: "npm test" }]), [{ name: "exec_command", category: "test", checks: ["test"] }]],
-    ["command: a test parsed as read", cmd("bun test src/a.test.ts", [{ type: "read", cmd: "bun test src/a.test.ts" }]), [{ name: "exec_command", category: "test", checks: ["test"] }]],
-    ["command: unknown", cmd("python3 x.py", [{ type: "unknown", cmd: "python3 x.py" }]), one("exec_command", "shell")],
-    ["command: no parse", item("CommandExecution", { command: ["/bin/bash", "-c", "docker ps"] }), one("exec_command", "container")],
-    ["command: string", item("CommandExecution", { command: "npm run build" }), [{ name: "exec_command", category: "build", checks: ["build"] }]],
+    ["command: sed is not a reader", cmd("sed -n 1,80p src/a.ts", [{ type: "read", cmd: "sed", name: "a.ts", path: "src/a.ts" }]), ran("exec_command", "shell")],
+    ["command: search", cmd("rg foo", [{ type: "search", cmd: "rg foo", query: "foo" }]), ran("exec_command", "search")],
+    ["command: list files", cmd("ls -la", [{ type: "list_files", cmd: "ls -la" }]), ran("exec_command", "read")],
+    ["command: read then search", cmd("cat a; rg b", [{ type: "read", cmd: "cat a" }, { type: "search", cmd: "rg b" }]), ran("exec_command", "read")],
+    ["command: read and a test", cmd("cat a && npm test", [{ type: "read", cmd: "cat a" }, { type: "unknown", cmd: "npm test" }]), ran("exec_command", "test", ["test"])],
+    ["command: a test parsed as read", cmd("bun test src/a.test.ts", [{ type: "read", cmd: "bun test src/a.test.ts" }]), ran("exec_command", "test", ["test"])],
+    ["command: unknown", cmd("python3 x.py", [{ type: "unknown", cmd: "python3 x.py" }]), ran("exec_command", "shell")],
+    ["command: no parse", item("CommandExecution", { command: ["/bin/bash", "-c", "docker ps"] }), ran("exec_command", "container")],
+    ["command: string", item("CommandExecution", { command: "npm run build" }), ran("exec_command", "build", ["build"])],
+    ["command: none recorded", item("CommandExecution", { exit_code: 0 }), ran("exec_command", "shell", [], false)],
     ["command run by the person", item("CommandExecution", { command: ["/bin/zsh", "-lc", "ls"], source: "user_shell" }), []],
     ["input sent to a running command", item("CommandExecution", { command: ["/bin/zsh", "-lc", "npm test"], source: "unified_exec_interaction", exit_code: 0 }), []],
     ["file change", item("FileChange", { changes: { "/p/a.md": { type: "add", content: "a\nb\nc\n" }, "/p/b.ts": { type: "update", unified_diff: "@@ -1 +1 @@\n-x\n+y\n" }, "/p/.env": { type: "delete", content: "K=1\nJ=2" } } }), [
