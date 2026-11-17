@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { copyFileSync, existsSync, statSync } from "node:fs";
+import { closeSync, copyFileSync, existsSync, openSync, readSync, statSync } from "node:fs";
 import path from "node:path";
 import type { TempDirs } from "../sources/types";
 
@@ -12,7 +12,7 @@ export interface RoDb {
   columns(table: string): string[];
   close(): void;
   readonly copied: boolean;
-  /** Opened with `immutable=1`: a WAL store whose writer closed it, so no `-wal` holds content to miss. */
+  /** Opened with `immutable=1`: a WAL store without a `-wal` (its writer closed it), so there is no WAL content to miss. */
   readonly immutable: boolean;
 }
 
@@ -36,12 +36,11 @@ function escapeSpecials(p: string): string {
 }
 
 const BUSY = /SQLITE_BUSY|database is locked|SQLITE_LOCKED/i;
-const CANT_OPEN = /SQLITE_CANTOPEN|unable to open database file/i;
-function matches(e: unknown, re: RegExp): boolean {
+/** A busy or locked store: what a reader gets while a writer holds a lock, so worth a private copy or a later try. */
+export function isBusyError(e: unknown): boolean {
   const err = e as { message?: unknown; code?: unknown } | null;
-  return re.test(String(err?.message ?? "")) || re.test(String(err?.code ?? ""));
+  return BUSY.test(String(err?.message ?? "")) || BUSY.test(String(err?.code ?? ""));
 }
-const isBusy = (e: unknown): boolean => matches(e, BUSY);
 
 class Handle implements RoDb {
   constructor(private db: Database, readonly copied: boolean, readonly immutable = false) {}
@@ -70,36 +69,69 @@ class Handle implements RoDb {
 
 const defaultOpener = (uri: string) => new Database(uri, { readonly: true });
 
+function closeQuietly(db: Database): void {
+  try {
+    db.close();
+  } catch {
+    /* ignore */
+  }
+}
+
 function tryOpen(file: string, opener: (uri: string) => Database, params = "mode=ro"): Database {
   const db = opener(`${sqliteUri(file)}?${params}`);
   try {
     db.query("PRAGMA schema_version").get();
   } catch (e) {
-    try {
-      db.close();
-    } catch {
-      /* ignore */
-    }
+    closeQuietly(db);
     throw e;
   }
   return db;
 }
 
+/** The database header says WAL mode: its file format write and read versions (bytes 18 and 19) are both 2. */
+function walMode(file: string): boolean {
+  let fd: number | undefined;
+  try {
+    fd = openSync(file, "r");
+    const head = new Uint8Array(20);
+    return readSync(fd, head, 0, 20, 0) === 20 && head[18] === 2 && head[19] === 2;
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+}
+
+/**
+ * Opens a store read-only; null when it cannot be opened. How is decided before opening, from the file itself:
+ * - a WAL store (by its header) without a `-wal` — its writer closed it — opens with `immutable=1`: there is no WAL
+ *   content to miss, and an immutable open never writes `-wal`/`-shm` beside the store, which a plain read-only open
+ *   does on some SQLite builds (others refuse to open such a store at all). If a `-wal` appears while it opens (a writer
+ *   started), the store is reopened as below;
+ * - any other store opens with `mode=ro`, and a busy one falls back to a private copy.
+ */
 export function openRo(file: string, temp: TempDirs, opener: (uri: string) => Database = defaultOpener): RoDb | null {
   if (!existsSync(file)) return null;
+  if (walMode(file) && !existsSync(file + "-wal")) {
+    let db: Database;
+    try {
+      db = tryOpen(file, opener, "mode=ro&immutable=1");
+    } catch {
+      return null;
+    }
+    if (!existsSync(file + "-wal")) return new Handle(db, false, true);
+    closeQuietly(db);
+  }
   try {
     return new Handle(tryOpen(file, opener), false);
   } catch (e) {
-    // A read-only connection cannot create a WAL store's -wal, so once the writer has closed the store (no -wal left)
-    // it cannot be opened with mode=ro alone; immutable is safe then, as there is no WAL content to miss.
-    if (matches(e, CANT_OPEN) && !existsSync(file + "-wal")) {
-      try {
-        return new Handle(tryOpen(file, opener, "mode=ro&immutable=1"), false, true);
-      } catch {
-        return null;
-      }
-    }
-    if (!isBusy(e)) return null;
+    if (!isBusyError(e)) return null;
   }
   try {
     if (statSync(file).size > MAX_COPY_BYTES) return null;

@@ -294,9 +294,11 @@ not read: goals_<N>.sqlite, logs_<N>.sqlite, memories_<N>.sqlite, queue_<N>.sqli
 
 The SQLite stores are WAL databases written by the CLI and its app server (verified locally); the CLI numbers each
 store and moves to a new number on a breaking migration, so the regular file with the highest N (compared as a number)
-is the current one. When the CLI closes a store cleanly it removes the `-wal` (verified locally); a read-only connection
-cannot create one, so `openRo` then opens the store with `immutable=1` — no WAL content exists to be missed — and never
-writes beside it.
+is the current one. When the CLI closes a store cleanly it removes the `-wal` (verified locally). `openRo` decides
+before opening: a store whose header marks WAL mode (bytes 18 and 19 both 2) and that has no `-wal` is opened with
+`immutable=1` — there is no WAL content to miss, and nothing is written beside the store. A plain read-only open of such
+a store creates `-wal` and `-shm` beside it on the stock SQLite build (Linux, Windows) and fails on Apple's (macOS).
+If a `-wal` appears while it opens (the CLI started writing), the store is reopened `mode=ro`, as is every other store.
 
 ## state_<N>.sqlite (verified locally; table definitions per the CLI program)
 
