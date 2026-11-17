@@ -124,7 +124,7 @@ describe("antigravity: Task 15 scenario", () => {
     expect(r.store.session(sidOf(K))).toMatchObject({ window: "lifetime", origin: "human", start: fx.t0 + 30 * MIN, end: fx.t0 + 31 * MIN });
     expect(r.store.session(sidOf(P))!.parentId).toBeUndefined();
     expect(r.store.session(sidOf(P))!.spawnDepth).toBeUndefined();
-    expect(markers(r, "interrupt").map((m) => m.ts - fx.t0)).toEqual([31 * MIN]);
+    expect(markers(r, "interrupt").map((m) => [m.ts - fx.t0, m.detail, m.proxyTs])).toEqual([[31 * MIN, "killed", true]]); // stamped by the row's last change
   });
 
   test("prompts and usage from the transcript: text in memory only (intent, features, keyed hash), token counts", async () => {
@@ -350,7 +350,7 @@ describe("antigravity cli: conversations/<id>.db steps", () => {
   const t0 = () => fixtureStart();
   const tools = (r: Result): ToolEv[] => byTime(r.store.all("tool"));
 
-  test("step types: tool steps by category under their names; input, replies, checkpoints, messages and questions to the person are no tools; unknown types drift", async () => {
+  test("step types: tool steps by category under their names; questions and notices to the person are meta; input, replies, checkpoints and messages are no tools; unknown types drift", async () => {
     const at = t0();
     let n = 0;
     const s = (type: number, extra: Partial<StepOpts> = {}): StepOpts => ({ type, ts: at + ++n * 1_000, ...extra });
@@ -366,7 +366,7 @@ describe("antigravity cli: conversations/<id>.db steps", () => {
       ["file_change", "edit"], ["command_status", "shell"], ["list_directory", "read"], ["find", "search"], ["click_browser_pixel", "browser"],
       ["browser_subagent", "browser"], ["search_web", "web"], ["mcp_tool", "mcp"], ["git_commit", "git"], ["invoke_subagent", "delegate"],
       ["task_boundary", "plan"], ["wait", "schedule"], ["edit_notebook", "notebook"], ["shell_exec", "shell"], ["generate_image", "other"],
-      ["tool_search", "other"],
+      ["tool_search", "other"], ["notify_user", "meta"], ["ask_question", "meta"],
     ]);
     const cov = covOf(r, "antigravity.cli");
     expect([cov.status, cov.records, cov.unknownTypes]).toEqual(["drift", 26, { "step-type:999": 1, "step-type:(other)": 1 }]);
@@ -448,7 +448,7 @@ describe("antigravity cli: conversations/<id>.db steps", () => {
       g(7, "read_browser_page"), g(8, "invoke_subagent"), g(9, "manage_task"), g(10, "schedule"), g(11, "generate_image"),
       g(12, `mcp_${CANARY.mcp}_lookup`), g(13, `${CANARY.project}_custom_tool`), g(14, ""),
       { type: STEP.GENERIC, metadata: pbEncode([[1, pbTs(at + 15_000)]]) },
-      // questions and notices to the person, and the end of a turn, are no tool calls
+      // questions and notices to the person, and the end of a turn: bookkeeping, emitted as meta
       g(16, "ask_question"), g(17, "ask_permission"), g(18, "ask_custom_permission"), g(19, "notify_user"), g(20, "finish"),
     ]);
     const r = await run([agCli]);
@@ -457,8 +457,10 @@ describe("antigravity cli: conversations/<id>.db steps", () => {
       ["run_command", "shell", undefined], ["search_web", "web", undefined], ["read_browser_page", "browser", undefined],
       ["invoke_subagent", "delegate", undefined], ["manage_task", "todo", undefined], ["schedule", "schedule", undefined], ["generate_image", "other", undefined],
       ["mcp", "mcp", undefined], ["generic", "other", undefined], ["generic", "other", undefined], ["generic", "other", undefined],
+      ["ask_question", "meta", undefined], ["ask_permission", "meta", undefined], ["ask_custom_permission", "meta", undefined],
+      ["notify_user", "meta", undefined], ["finish", "meta", undefined],
     ]);
-    expect(r.store.session(sidOf(P))!.end).toBe(at + 20_000); // the steps that are no tools still widen the span
+    expect(r.store.session(sidOf(P))!.end).toBe(at + 20_000);
     expect(tools(r).every((t) => t.mcpServer === undefined)).toBe(true);
     expectNoCanaries([...allEvents(r), r.coverage]);
   });
@@ -482,11 +484,29 @@ describe("antigravity cli: conversations/<id>.db steps", () => {
     expectNoCanaries([...allEvents(r), r.coverage]);
   });
 
-  test("status: done is ok; error, canceled and interrupted are not; any other has no outcome", async () => {
+  test("status: done is ok, error is not; canceled and interrupted steps did not run to an end of their own; any other says nothing", async () => {
     const at = t0();
     writeSteps(h, P, [STATUS.DONE, STATUS.ERROR, STATUS.CANCELED, STATUS.INTERRUPTED, STATUS.RUNNING].map((status, i) => ({ type: STEP.VIEW_FILE, status, ts: at + i })));
     const r = await run([agCli]);
-    expect(tools(r).map((t) => t.ok)).toEqual([true, false, false, false, undefined]);
+    expect(tools(r).map((t) => [t.ok, t.outcome])).toEqual([[true, undefined], [false, undefined], [undefined, "cancelled"], [undefined, "interrupted"], [undefined, undefined]]);
+  });
+
+  test("a run command the person rejected was denied: no ok or exit, a denial marker; typed check steps list their checks", async () => {
+    const at = t0();
+    writeSteps(h, P, [
+      { type: STEP.RUN_COMMAND, ts: at, payload: runPayload({ cmd: "npm test", rejected: true }) },
+      { type: STEP.RUN_COMMAND, ts: at + 1_000, payload: runPayload({ cmd: "npm test", exit: 1 }) },
+      { type: STEP.RUN_COMMAND, ts: at + 2_000, status: STATUS.CANCELED, payload: runPayload({ cmd: "npm test", exit: 1 }) },
+      { type: STEP.BLAZE_TEST_TARGETS, ts: at + 3_000 }, { type: STEP.COMPILE, ts: at + 4_000, status: STATUS.ERROR }, { type: STEP.LINT_APPLET, ts: at + 5_000 },
+    ]);
+    const r = await run([agCli]);
+    expect(tools(r).map((t) => [t.name, t.category, t.checks, t.ok, t.outcome, t.exit])).toEqual([
+      ["run_command", "test", ["test"], undefined, "denied", undefined], ["run_command", "test", ["test"], false, undefined, 1],
+      ["run_command", "test", ["test"], undefined, "cancelled", undefined],
+      ["blaze_test_targets", "test", ["test"], true, undefined, undefined], ["compile", "build", ["build"], false, undefined, undefined],
+      ["lint_applet", "lint", ["lint"], true, undefined, undefined],
+    ]);
+    expect(markers(r, "denial").map((m) => [m.detail, m.ts - at])).toEqual([["user", 0]]);
   });
 
   test("times from the step metadata: without metadata or a creation time no-ts; metadata that is not protobuf is drift; errors only with a time", async () => {
@@ -796,6 +816,7 @@ describe("antigravity brain: plan artifacts", () => {
       [sidOf(keyedHash(r.salt, "not-a-uuid")), "plan-artifact", "task"],
     ].sort());
     expect(r.store.all("marker").find((m) => m.sessionId === sidOf(a) && m.detail === "task")!.ts).toBe(old.getTime());
+    expect(r.store.all("marker").every((m) => m.proxyTs === true)).toBe(true); // a file's mtime is never activity
     expect(r.coverage.map((c) => [c.source, c.status, c.records])).toEqual([["antigravity.brain", "ok", 2], ["antigravity.brain", "ok", 2]]);
     expectNoCanaries([...allEvents(r), r.coverage]);
   });

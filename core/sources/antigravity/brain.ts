@@ -51,7 +51,8 @@ export async function scanBrain(c: Candidate, ctx: ScanCtx): Promise<void> {
         continue;
       }
       tally.records++;
-      const m: MarkerEv = { k: "marker", tool: TOOL, source: BRAIN_SOURCE, ts, sessionId: agSessionId(name, ctx), kind: "plan-artifact", detail };
+      // the file's modification time stands in for when the artifact was written: it is never activity of its own
+      const m: MarkerEv = { k: "marker", tool: TOOL, source: BRAIN_SOURCE, ts, sessionId: agSessionId(name, ctx), kind: "plan-artifact", detail, proxyTs: true };
       ctx.emit(m);
       tally.span(ts);
     }

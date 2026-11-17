@@ -122,14 +122,15 @@ export function stepMetadata(ms: number, tool = "run_command", args: unknown = {
 }
 
 /**
- * A run-command payload (`CortexStepRunCommand`: 23 command line, 2 cwd, 4 stdout, 6 exit code — left out here for 0), or the
- * step wrapping it as field 28 (`run_command`) next to its type (1) and status (4).
+ * A run-command payload (`CortexStepRunCommand`: 23 command line, 2 cwd, 4 stdout, 6 exit code — left out here for 0, 14 user
+ * rejected), or the step wrapping it as field 28 (`run_command`) next to its type (1) and status (4).
  */
-export function runPayload(o: { cmd?: string; exit?: number; wrapped?: boolean }): Uint8Array {
+export function runPayload(o: { cmd?: string; exit?: number; wrapped?: boolean; rejected?: boolean }): Uint8Array {
   const fields: PbList = [];
   if (o.cmd !== undefined) fields.push([23, o.cmd]);
   fields.push([2, CANARY.path], [4, `${CANARY.secret} output`]);
   if (o.exit !== undefined && o.exit !== 0) fields.push([6, o.exit]);
+  if (o.rejected) fields.push([14, 1]);
   const rc = pbEncode(fields);
   return o.wrapped ? pbEncode([[1, STEP.RUN_COMMAND], [4, STATUS.DONE], [28, rc]]) : rc;
 }

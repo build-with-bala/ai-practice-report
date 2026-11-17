@@ -110,14 +110,15 @@ const STEP_NAMES: ReadonlySet<string> = new Set(STEP_TYPES.values());
 const RUN_COMMAND = 21;
 
 /**
- * Steps that are not tool calls: the person's input (prompts come from the transcript), the model's replies, questions and
- * notices to the person, the end of a turn, checkpoints, system, context and memory messages, choices between proposals.
+ * Steps that are not tool calls: the person's input (prompts come from the transcript), the model's replies, checkpoints,
+ * system, context and memory messages, choices between proposals. (Questions and notices to the person and the end of a
+ * turn are calls the agent makes: `meta` tool events.)
  */
 const NOT_TOOLS: ReadonlySet<string> = new Set([
-  "UNSPECIFIED", "DUMMY", "FINISH", "PLAN_INPUT", "USER_INPUT", "PLANNER_RESPONSE", "ERROR_MESSAGE", "CHECKPOINT", "SUGGESTED_RESPONSES",
+  "UNSPECIFIED", "DUMMY", "PLAN_INPUT", "USER_INPUT", "PLANNER_RESPONSE", "ERROR_MESSAGE", "CHECKPOINT", "SUGGESTED_RESPONSES",
   "RETRIEVE_MEMORY", "MANAGER_FEEDBACK", "TOOL_CALL_PROPOSAL", "TOOL_CALL_CHOICE", "TRAJECTORY_CHOICE", "BRAIN_UPDATE", "PROPOSAL_FEEDBACK",
   "CODE_ACKNOWLEDGEMENT", "KNOWLEDGE_GENERATION", "EPHEMERAL_MESSAGE", "CONVERSATION_HISTORY", "KNOWLEDGE_ARTIFACTS", "SYSTEM_MESSAGE",
-  "CIDER_AGENT_DUMMY", "KI_INSERTION", "DIRECTORY_RULES", "NOTIFY_USER", "ASK_QUESTION",
+  "CIDER_AGENT_DUMMY", "KI_INSERTION", "DIRECTORY_RULES",
 ]);
 const byCategory = (category: ToolCategory, names: string[]): [string, ToolCategory][] => names.map((n) => [n, category]);
 /** Tool steps by category; every step type whose name holds `BROWSER` is browser work; any other tool step is `other`. */
@@ -133,12 +134,14 @@ const CATEGORIES: ReadonlyMap<string, ToolCategory> = new Map([
   ...byCategory("package", ["INSTALL_APPLET_DEPENDENCIES", "INSTALL_APPLET_PACKAGE"]),
   ...byCategory("cloud", ["SET_UP_FIREBASE", "DEPLOY_FIREBASE", "SET_UP_CLOUD_SQL"]),
   ...byCategory("db", ["CLOUD_SQL_UPDATE_SCHEMA", "CLOUD_SQL_EXECUTE_SQL"]),
+  ...byCategory("meta", ["NOTIFY_USER", "ASK_QUESTION", "FINISH"]),
   ["GIT_COMMIT", "git"], ["INVOKE_SUBAGENT", "delegate"], ["TASK_BOUNDARY", "plan"], ["WAIT", "schedule"], ["BLAZE_TEST_TARGETS", "test"],
   ["LINT_APPLET", "lint"],
 ]);
 const categoryOf = (name: string): ToolCategory => CATEGORIES.get(name) ?? (name.includes("BROWSER") ? "browser" : "other");
-/** `CortexStepStatus`: 3 done; 6 canceled, 7 error, 12 interrupted. */
-const STATUS_OK: ReadonlyMap<number, boolean> = new Map([[3, true], [6, false], [7, false], [12, false]]);
+/** `CortexStepStatus`: 3 done, 7 error (ran and failed); 6 canceled and 12 interrupted did not run to an end of their own. */
+const STATUS_OK: ReadonlyMap<number, boolean> = new Map([[3, true], [7, false]]);
+const STATUS_NOT_ENDED: ReadonlyMap<number, NonNullable<ToolEv["outcome"]>> = new Map([[6, "cancelled"], [12, "interrupted"]]);
 
 const GENERIC = 132;
 /**
@@ -158,10 +161,10 @@ const GENERIC_TOOLS: ReadonlyMap<string, ToolCategory> = new Map([
   ...byCategory("delegate", ["invoke_subagent", "define_subagent", "manage_subagents", "send_message"]),
   ...byCategory("schedule", ["schedule", "wait", "wait_5_seconds"]),
   ...byCategory("other", ["generate_image", "manage_inbox", "update_focus", "list_permissions", "list_plugin_accounts", "search_marketplace"]),
+  // bookkeeping and talk with the person: questions, permission requests and notices to the person, the end of a turn
+  ...byCategory("meta", ["ask_question", "ask_permission", "ask_custom_permission", "notify_user", "finish"]),
   ["manage_task", "todo"], ["task_boundary", "plan"], ["run_workflow", "workflow"],
 ]);
-/** Built-in calls that are no tool use (as NOT_TOOLS for step types): questions, permission requests and notices to the person, the end of a turn. */
-const NOT_A_TOOL: ReadonlySet<string> = new Set(["ask_question", "ask_permission", "ask_custom_permission", "notify_user", "finish"]);
 /** Tools of MCP servers: names that start with `mcp_` or `mcp-` (the server's name sits inside, so it is never parsed out). */
 const MCP_PREFIX = /^mcp[_-]/i;
 
@@ -173,13 +176,9 @@ const toolCall = (meta: Fields): Fields | null => {
   return f ? pbTryNested(f.v) : null;
 };
 
-/**
- * The tool a generic step's call names: a built-in name with its category, an MCP tool as `mcp`, anything else (or no call)
- * `generic`; undefined for a built-in call that is no tool use.
- */
-function genericTool(call: Fields | null): { name: string; category: ToolCategory } | undefined {
+/** The tool a generic step's call names: a built-in name with its category, an MCP tool as `mcp`, anything else (or no call) `generic`. */
+function genericTool(call: Fields | null): { name: string; category: ToolCategory } {
   const raw = call ? pbStr(call.get(2)?.[0]) : undefined;
-  if (raw !== undefined && NOT_A_TOOL.has(raw)) return undefined;
   const category = raw === undefined ? undefined : GENERIC_TOOLS.get(raw);
   if (category !== undefined) return { name: raw!, category };
   if (raw !== undefined && MCP_PREFIX.test(raw)) return { name: "mcp", category: "mcp" };
@@ -400,7 +399,8 @@ function summary(r: Obj, convs: Map<string, Conv>, ctx: ScanCtx, tally: Tally): 
   tally.span(s.start);
   tally.span(s.end);
   if (r.killed === 1) {
-    const m: MarkerEv = { k: "marker", tool: TOOL, source: CLI_SOURCE, ts: s.end, sessionId: id, kind: "interrupt" };
+    // the row has no time of the kill: its last change stands in for it, and is never activity of its own
+    const m: MarkerEv = { k: "marker", tool: TOOL, source: CLI_SOURCE, ts: s.end, sessionId: id, kind: "interrupt", detail: "killed", proxyTs: true };
     ctx.emit(m);
   }
 }
@@ -429,21 +429,22 @@ function readSummaries(db: RoDb, tables: Set<string>, convs: Map<string, Conv>, 
 const STEP_COLUMNS = ["step_type", "status", "metadata", "error_details", "step_payload"] as const;
 
 /**
- * A run-command step's payload — `CortexStepRunCommand` (23 `command_line`, else 1 `command`; 6 `exit_code`), or the step
- * wrapping it as field 28 (`run_command`), whose own field 1 is the step type: only the command line and the exit code are
- * read; the cwd and output in it are dropped.
+ * A run-command step's payload — `CortexStepRunCommand` (23 `command_line`, else 1 `command`; 6 `exit_code`; 14
+ * `user_rejected`), or the step wrapping it as field 28 (`run_command`), whose own field 1 is the step type: only the
+ * command line, the exit code and whether the person rejected it are read; the cwd and output in it are dropped.
  */
-function runCommand(v: unknown): { cmd?: string; exit?: number } {
+function runCommand(v: unknown): { cmd?: string; exit?: number; rejected?: true } {
   const top = v instanceof Uint8Array ? pbTryNested(v) : null;
   if (!top) return {};
   const wrapped = top.get(28)?.find((f) => f.wire === 2);
   const rc = wrapped ? pbTryNested(wrapped.v) : top.get(1)?.some((f) => f.wire === 0) ? null : top;
   if (!rc) return {};
   const exit = rc.get(6)?.find((f) => f.wire === 0);
-  const out: { cmd?: string; exit?: number } = {};
+  const out: { cmd?: string; exit?: number; rejected?: true } = {};
   const cmd = pbStr(rc.get(23)?.[0]) ?? pbStr(rc.get(1)?.[0]);
   if (cmd !== undefined && cmd.trim() !== "") out.cmd = cmd;
   if (exit?.wire === 0) out.exit = Number(BigInt.asIntN(32, exit.v));
+  if (rc.get(14)?.some((f) => f.wire === 0 && f.v !== 0n)) out.rejected = true;
   return out;
 }
 
@@ -472,8 +473,10 @@ class Conversation {
     this.ctx.emit(ev);
   }
 
-  private marker(ts: number, kind: MarkerKind): void {
-    this.out({ k: "marker", tool: TOOL, source: CLI_SOURCE, ts, sessionId: this.id, kind });
+  private marker(ts: number, kind: MarkerKind, detail?: string): void {
+    const m: MarkerEv = { k: "marker", tool: TOOL, source: CLI_SOURCE, ts, sessionId: this.id, kind };
+    if (detail !== undefined) m.detail = detail;
+    this.out(m);
   }
 
   readSteps(db: RoDb, tables: Set<string>): void {
@@ -526,7 +529,8 @@ class Conversation {
   /**
    * One step: an error marker when it records error details, and a ToolEv when it is a tool step — named by its type, in its
    * type's category, a generic step by the tool its metadata names; a run command takes the category, checks and exit code
-   * of its command line. An unknown type is drift. Every timed step widens the conversation's span.
+   * of its command line. A step canceled or interrupted, or a run command the person rejected (a denial), did not run to an
+   * end of its own: an outcome and no ok or exit. An unknown type is drift. Every timed step widens the conversation's span.
    */
   private step(r: Obj): void {
     if (r.pbig === 1) this.tally.skip("oversize"); // a run command's payload above BLOB_CAP never left SQLite
@@ -544,26 +548,32 @@ class Conversation {
     if (NOT_TOOLS.has(name)) return;
     const call = toolCall(meta.fields);
     const kind = type === GENERIC ? genericTool(call) : { name: name.toLowerCase(), category: categoryOf(name) };
-    if (kind === undefined) return; // a generic call that is no tool use
     const ev: ToolEv = { k: "tool", tool: TOOL, source: CLI_SOURCE, ts, sessionId: this.id, ...kind };
     const status = num(r.status);
-    const ok = status === undefined ? undefined : STATUS_OK.get(status);
-    if (ok !== undefined) ev.ok = ok;
+    let outcome = status === undefined ? undefined : STATUS_NOT_ENDED.get(status);
+    let exit: number | undefined;
     if (kind.name === "run_command") {
       // a typed run command's payload, else the call's arguments (generic steps, and steps kept without their payload)
-      const run = type === RUN_COMMAND ? runCommand(r.payload) : {};
+      const run: ReturnType<typeof runCommand> = type === RUN_COMMAND ? runCommand(r.payload) : {};
       const cmd = run.cmd ?? callCommand(call);
       if (cmd !== undefined) {
         const { category, checks } = classifyCommand(cmd);
         ev.category = category;
         if (checks.length > 0) ev.checks = checks;
       }
-      if (run.exit !== undefined) {
-        ev.exit = run.exit;
-        ev.ok = run.exit === 0;
-      }
+      if (run.rejected) outcome = "denied";
+      exit = run.exit;
+    }
+    if (outcome !== undefined) ev.outcome = outcome;
+    else if (exit !== undefined) {
+      ev.exit = exit;
+      ev.ok = exit === 0;
+    } else {
+      const ok = status === undefined ? undefined : STATUS_OK.get(status);
+      if (ok !== undefined) ev.ok = ok;
     }
     this.out(ev);
+    if (outcome === "denied") this.marker(ts, "denial", "user");
   }
 
   /**

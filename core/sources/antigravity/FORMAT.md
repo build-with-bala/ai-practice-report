@@ -72,7 +72,8 @@ when never set, which `toEpochMs` rejects as implausible). There is no creation 
 - **Battle forks**: a fork whose `winning_conversation_id` names another conversation lost; its transcript's inputs are
   copies of the winner's and are skipped `battle-copy` (its session is still emitted, `surface: "battle"`). The winner's,
   and every fork's before a winner is set, are prompts.
-- **MarkerEv** `interrupt` per killed conversation, at its `end`.
+- **MarkerEv** `interrupt` per killed conversation, `detail: "killed"`, at its `end` with `proxyTs: true` (the row records
+  no time of the kill: its last change stands in, and is never counted as activity).
 
 ## conversations/<conversation id>.db (verified locally; meanings per the program)
 
@@ -124,18 +125,21 @@ What the reader does:
   `READ_TERMINAL`, `RESTART_DEV_SERVER`), read (`VIEW_FILE`, `LIST_DIRECTORY`, `VIEW_CODE_ITEM`, `VIEW_FILE_OUTLINE`),
   search (`GREP_SEARCH`, `FIND`, `CODE_SEARCH`, `MQUERY`, `INTERNAL_SEARCH`, `TRAJECTORY_SEARCH`, `FIND_ALL_REFERENCES`,
   `MOMA`), browser (every type whose name holds `BROWSER`), web, mcp, notebook, build, test, lint, package, cloud, db, git,
-  delegate, plan, schedule (the table in `cli.ts`), any other tool step `other`. Not tool events: the person's input (its
-  prompts come from the transcript), the model's replies, questions and notices to the person (`NOTIFY_USER`,
-  `ASK_QUESTION`), the end of a turn, checkpoints, system, ephemeral and context messages, proposals and choices (`NOT_TOOLS`
-  in `cli.ts`). An unknown step type is drift `step-type:<n>` (`(other)` beyond 9999).
+  delegate, plan, schedule (the table in `cli.ts`), meta (`NOTIFY_USER`, `ASK_QUESTION`, `FINISH`: questions and notices
+  to the person and the end of a turn — bookkeeping, counted apart from actions), any other tool step `other`. A step whose
+  category is a check (`BLAZE_TEST_TARGETS` test, `COMPILE`/`COMPILE_APPLET`/`BLAZE_BUILD_TARGETS` build, `LINT_APPLET`
+  lint) lists that check in `checks`. Not tool events: the person's input (its prompts come from the transcript), the
+  model's replies, checkpoints, system, ephemeral and context messages, proposals and choices (`NOT_TOOLS` in `cli.ts`). An
+  unknown step type is drift `step-type:<n>` (`(other)` beyond 9999).
   - GENERIC steps take the name and category of the tool their call names when it is a built-in name; an `mcp_`/`mcp-`
     name is `mcp` (the server inside it is never parsed out); any other name, or none, is `generic`, category `other`. The
-    built-in calls that are no tool use — `ask_question`, `ask_permission`, `ask_custom_permission`, `notify_user`, `finish`
-    (`NOT_A_TOOL`) — make no tool event; like every timed step they still widen the conversation's span.
+    bookkeeping calls — `ask_question`, `ask_permission`, `ask_custom_permission`, `notify_user`, `finish` — are `meta`.
   - Run commands (typed, or a GENERIC `run_command` call) take `classifyCommand` of the command line — the payload's
     `command_line` (else `command`), else the call's `CommandLine` argument — and `exit` from the payload's `exit_code`
-    (`ok` = exit 0). Only a run_command call's arguments are parsed; nothing of them is kept.
-  - `ok` from the status: done → true; error, canceled, interrupted → false; others none.
+    (`ok` = exit 0). A payload whose `user_rejected` is set (program) was denied: `outcome: "denied"`, no `ok` or `exit`,
+    and a `denial` marker (`detail: "user"`). Only a run_command call's arguments are parsed; nothing of them is kept.
+  - From the status: done → `ok` true; error → `ok` false; canceled → `outcome: "cancelled"`, interrupted →
+    `outcome: "interrupted"` (neither has `ok` or `exit`); others none.
 - **SessionEv** (window `detail`) per conversation with a timed step or transcript record: `start`/`end` = its earliest/latest
   step and record times, origin and surface as its summary row says (else `human`, `cli`), `models` = the transcript's model
   names. It merges with the summary row's session (start earliest, end latest, window detail).
@@ -221,8 +225,9 @@ SQLite, VS Code's `ItemTable` (`key` TEXT, `value` BLOB; verified locally) — w
 brief — none present locally, in either brain folder). Each brain folder is its own candidate.
 
 - **MarkerEv** `plan-artifact` per regular file present (`lstat` only: never opened), `detail` = `task`,
-  `implementation_plan` or `walkthrough`, `ts` = its last modification, `sessionId` from the folder's name. Hidden entries
-  and every other file are ignored.
+  `implementation_plan` or `walkthrough`, `ts` = its last modification with `proxyTs: true` (a file time stands in for
+  when it was written; it is never activity), `sessionId` from the folder's name. Hidden entries and every other file are
+  ignored.
 - **Coverage** (window `lifetime`): `records` = markers; `files`/`bytes` 0 (nothing is read); skipped `no-ts`.
 
 ## Never read
