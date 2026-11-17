@@ -1,6 +1,6 @@
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { __observeQueries, MAX_COPY_BYTES, openRo, sqliteUri } from "../../../core/io/sqlite";
@@ -44,9 +44,62 @@ describe("openRo", () => {
     expect(db.get<{ n: number }>(sql)!.n).toBe(1);
     expect(seen).toContain(sql);
     expect(db.copied).toBe(false);
+    expect(db.immutable).toBe(false); // a -wal is present: mode=ro, so uncheckpointed rows are seen
     expect(t.active).toBe(0);
     db.close();
     w.close();
+  });
+  test("closed WAL store (no -wal left): opened immutable, read-only, nothing created beside it", () => {
+    const f = path.join(root, "closed", "c.db");
+    const w = mk(f);
+    w.exec("INSERT INTO t VALUES (2, 'b')");
+    w.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    w.close();
+    // a writer that closes cleanly removes its -wal and -shm (some SQLite builds keep them; remove them as such a writer does)
+    rmSync(f + "-wal", { force: true });
+    rmSync(f + "-shm", { force: true });
+    const t = new TempRegistry(root);
+    const db = openRo(f, t)!;
+    expect(db).not.toBeNull();
+    expect([db.immutable, db.copied]).toEqual([true, false]);
+    expect(db.get<{ n: number }>("select count(*) n from t")!.n).toBe(2);
+    expect(db.columns("t")).toEqual(["id", "name"]);
+    db.close();
+    expect([existsSync(f + "-wal"), existsSync(f + "-shm"), t.active]).toEqual([false, false, 0]);
+  });
+  test("cannot-open falls back to immutable only when there is no -wal; other failures do not", () => {
+    const f = path.join(root, "cant", "c.db");
+    mk(f, false).close();
+    const t = new TempRegistry(root);
+    const cantOpen = () => Object.assign(new Error("unable to open database file"), { code: "SQLITE_CANTOPEN" });
+    const uris: string[] = [];
+    const ro = `${sqliteUri(f)}?mode=ro`;
+    const db = openRo(f, t, (uri) => {
+      uris.push(uri);
+      if (uris.length === 1) throw cantOpen();
+      return new Database(uri, { readonly: true });
+    })!;
+    expect([db.immutable, db.copied]).toEqual([true, false]);
+    expect(uris).toEqual([ro, `${ro}&immutable=1`]);
+    db.close();
+
+    writeFileSync(f + "-wal", "");
+    uris.length = 0;
+    expect(openRo(f, t, (uri) => { uris.push(uri); throw cantOpen(); })).toBeNull();
+    expect(uris).toEqual([ro]);
+    rmSync(f + "-wal");
+
+    uris.length = 0;
+    expect(openRo(f, t, (uri) => { uris.push(uri); throw new Error("file is not a database"); })).toBeNull();
+    expect(uris).toEqual([ro]);
+
+    const junk = path.join(root, "cant", "junk.db");
+    writeFileSync(junk, "not a database");
+    expect(openRo(junk, t, (uri) => {
+      if (!uri.includes("immutable")) throw cantOpen();
+      return new Database(uri, { readonly: true });
+    })).toBeNull();
+    expect(t.active).toBe(0);
   });
   test("path with spaces, unicode, # and ?", () => {
     const f = path.join(root, "dir with space", "ünï#?.db");
@@ -65,6 +118,7 @@ describe("openRo", () => {
       return new Database(uri, { readonly: true });
     })!;
     expect(db.copied).toBe(true);
+    expect(db.immutable).toBe(false);
     expect(t.active).toBe(1);
     expect(db.get<{ n: number }>("select count(*) n from t")!.n).toBe(1);
     db.close();

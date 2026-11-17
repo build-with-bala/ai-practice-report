@@ -294,7 +294,9 @@ not read: goals_<N>.sqlite, logs_<N>.sqlite, memories_<N>.sqlite, queue_<N>.sqli
 
 The SQLite stores are WAL databases written by the CLI and its app server (verified locally); the CLI numbers each
 store and moves to a new number on a breaking migration, so the regular file with the highest N (compared as a number)
-is the current one.
+is the current one. When the CLI closes a store cleanly it removes the `-wal` (verified locally); a read-only connection
+cannot create one, so `openRo` then opens the store with `immutable=1` — no WAL content exists to be missed — and never
+writes beside it.
 
 ## state_<N>.sqlite (verified locally; table definitions per the CLI program)
 
@@ -443,10 +445,6 @@ such as `.env`, `.tools.<tool>`), `[model_providers.<id>]`, and more.
 
 ## Limits (lifetime layer)
 
-- A read-only open of a WAL database needs its `-wal` file; when the CLI has closed `state_<N>.sqlite` cleanly the file
-  is gone, `openRo` cannot open the store (SQLITE_CANTOPEN) and `codex.threads` reports `error` until the CLI opens it
-  again (verified locally with a synthetic WAL database: an empty `-wal` beside the file, or beside a private copy, is
-  enough).
 - An index row holds a thread's latest state (model, approval, sandbox, last update); earlier settings are not kept.
   Older rows have no `originator`: a rollout of the same thread driven by Claude Code says `peer` where the index says
   `human`, and merged sessions take the fields of whichever reader arrived first.

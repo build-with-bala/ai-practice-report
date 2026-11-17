@@ -12,6 +12,8 @@ export interface RoDb {
   columns(table: string): string[];
   close(): void;
   readonly copied: boolean;
+  /** Opened with `immutable=1`: a WAL store whose writer closed it, so no `-wal` holds content to miss. */
+  readonly immutable: boolean;
 }
 
 let observer: ((sql: string) => void) | undefined;
@@ -34,13 +36,15 @@ function escapeSpecials(p: string): string {
 }
 
 const BUSY = /SQLITE_BUSY|database is locked|SQLITE_LOCKED/i;
-function isBusy(e: unknown): boolean {
+const CANT_OPEN = /SQLITE_CANTOPEN|unable to open database file/i;
+function matches(e: unknown, re: RegExp): boolean {
   const err = e as { message?: unknown; code?: unknown } | null;
-  return BUSY.test(String(err?.message ?? "")) || BUSY.test(String(err?.code ?? ""));
+  return re.test(String(err?.message ?? "")) || re.test(String(err?.code ?? ""));
 }
+const isBusy = (e: unknown): boolean => matches(e, BUSY);
 
 class Handle implements RoDb {
-  constructor(private db: Database, readonly copied: boolean) {}
+  constructor(private db: Database, readonly copied: boolean, readonly immutable = false) {}
   all<T>(sql: string, ...p: unknown[]): T[] {
     observer?.(sql);
     return this.db.query(sql).all(...(p as never[])) as T[];
@@ -66,8 +70,8 @@ class Handle implements RoDb {
 
 const defaultOpener = (uri: string) => new Database(uri, { readonly: true });
 
-function tryOpen(file: string, opener: (uri: string) => Database): Database {
-  const db = opener(sqliteUri(file) + "?mode=ro");
+function tryOpen(file: string, opener: (uri: string) => Database, params = "mode=ro"): Database {
+  const db = opener(`${sqliteUri(file)}?${params}`);
   try {
     db.query("PRAGMA schema_version").get();
   } catch (e) {
@@ -86,6 +90,15 @@ export function openRo(file: string, temp: TempDirs, opener: (uri: string) => Da
   try {
     return new Handle(tryOpen(file, opener), false);
   } catch (e) {
+    // A read-only connection cannot create a WAL store's -wal, so once the writer has closed the store (no -wal left)
+    // it cannot be opened with mode=ro alone; immutable is safe then, as there is no WAL content to miss.
+    if (matches(e, CANT_OPEN) && !existsSync(file + "-wal")) {
+      try {
+        return new Handle(tryOpen(file, opener, "mode=ro&immutable=1"), false, true);
+      } catch {
+        return null;
+      }
+    }
     if (!isBusy(e)) return null;
   }
   try {
