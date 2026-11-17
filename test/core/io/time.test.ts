@@ -25,6 +25,25 @@ describe("toEpochMs", () => {
   });
 });
 
+/** The process zone when this file started, before any test changed process.env.TZ. */
+const startZone = new Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+/**
+ * Runs `f` with `process.env.TZ = tz`, then restores the zone by assignment: TZ's previous value, or — when it was unset —
+ * the zone that was in effect (`bun test` runs in UTC with TZ unset; assigning "" would switch to the system zone instead).
+ * Never `delete process.env.TZ`: in Bun 1.3 that removes the variable's setter, so the zone stays at its last value and
+ * later assignments are ignored for the rest of the process, every later test file included.
+ */
+function withTz(tz: string, f: () => void): void {
+  const saved = process.env.TZ ?? new Intl.DateTimeFormat().resolvedOptions().timeZone;
+  try {
+    process.env.TZ = tz;
+    f();
+  } finally {
+    process.env.TZ = saved;
+  }
+}
+
 describe("localDay", () => {
   const ms = Date.UTC(2026, 10, 16, 12, 30);
   test("explicit zones", () => {
@@ -32,15 +51,13 @@ describe("localDay", () => {
     expect(localDay(ms, "UTC")).toBe("2026-11-16");
   });
   test("default zone follows process.env.TZ", () => {
-    const prev = process.env.TZ;
-    try {
-      process.env.TZ = "Pacific/Auckland";
-      expect(localDay(ms)).toBe("2026-11-17");
-      process.env.TZ = "UTC";
-      expect(localDay(ms)).toBe("2026-11-16");
-    } finally {
-      if (prev === undefined) delete process.env.TZ;
-      else process.env.TZ = prev;
-    }
+    withTz("Pacific/Auckland", () => expect(localDay(ms)).toBe("2026-11-17"));
+    withTz("UTC", () => expect(localDay(ms)).toBe("2026-11-16"));
+  });
+  test("after a test restored it, the zone is the starting one and later changes still apply", () => {
+    expect(new Intl.DateTimeFormat().resolvedOptions().timeZone).toBe(startZone);
+    withTz("Pacific/Auckland", () => expect(localDay(ms)).toBe("2026-11-17"));
+    withTz("UTC", () => expect(localDay(ms)).toBe("2026-11-16"));
+    expect(new Intl.DateTimeFormat().resolvedOptions().timeZone).toBe(startZone);
   });
 });
