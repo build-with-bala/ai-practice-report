@@ -133,9 +133,17 @@ describe("openRo", () => {
     const db = openRo(empty, new TempRegistry(root), recording(uris))!;
     expect([uris, db.immutable, db.tables()]).toEqual([[`${sqliteUri(empty)}?mode=ro`], false, []]);
     db.close();
+    // only bytes 18 and 19 both 2 mean WAL; such a file that is no database fails its immutable open, with no retry
     const junk = path.join(root, "short", "junk.db");
     writeFileSync(junk, "x".repeat(18) + "\u0002\u0002" + "y".repeat(80));
-    expect(openRo(junk, new TempRegistry(root))).toBeNull();
+    uris.length = 0;
+    expect(openRo(junk, new TempRegistry(root), recording(uris))).toBeNull();
+    expect(uris).toEqual([`${sqliteUri(junk)}?mode=ro&immutable=1`]);
+    const half = path.join(root, "short", "half.db");
+    writeFileSync(half, "x".repeat(18) + "\u0001\u0002" + "y".repeat(80));
+    uris.length = 0;
+    expect(openRo(half, new TempRegistry(root), recording(uris))).toBeNull();
+    expect(uris).toEqual([`${sqliteUri(half)}?mode=ro`]);
   });
   test("path with spaces, unicode, # and ?", () => {
     const f = path.join(root, "dir with space", "ünï#?.db");
