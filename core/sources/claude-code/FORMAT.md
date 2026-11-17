@@ -219,7 +219,8 @@ Never read: the values inside `pastedContents`, `project`.
   (case-insensitive), else `other`; `/effort <x>` → `effort-switch`, `detail` = the first word of `<x>` when it is
   `low|medium|high|xhigh|max`, else `other`; without an argument (the interactive picker) neither has a `detail`;
   `/clear` and its aliases `/reset`, `/new` (CLI program) → `clear`; `/compact [instructions]` → `compact-manual`.
-- `DailyEv{source:"claude-code.history"}` per local day (the process time zone) with the day's prompt count.
+- `DailyEv{source:"claude-code.history", zone:"local", unit:"prompts"}` per local day (the process time zone),
+  `count` = the day's prompts.
 - Drift (`unknownTypes`): `line:not-object`, `display:missing` (no string `display`), `timestamp:missing`.
   Skipped: `parse`, `oversize`, `io-error`, `bad-ts` (a timestamp that is not a plausible time), `empty` (blank
   `display`), `bad-record`. Coverage `from`/`to` = first/last prompt time.
@@ -243,9 +244,10 @@ every session (`lastComputedDate`), so it can lag behind the transcripts.
 
 Read: `version`, `dailyActivity`, `dailyModelTokens`; the rest is parsed with the file and dropped.
 
-- `DailyEv{source:"claude-code.stats"}` per `dailyActivity` entry: `day` = `date`, `prompts` = `messageCount`,
-  `sessions` = `sessionCount`, `toolCalls` = `toolCallCount`, `models` = that day's `tokensByModel` (keys that are
-  not model-id-shaped become `other`; equal keys are summed; negative counts are ignored).
+- `DailyEv{source:"claude-code.stats", zone:"utc", unit:"messages"}` per `dailyActivity` entry: `day` = `date`,
+  `count` = `messageCount`, `sessions` = `sessionCount`, `toolCalls` = `toolCallCount`, `models` = that day's
+  `tokensByModel` (keys that are not model-id-shaped become `other`; equal keys are summed; negative counts are
+  ignored).
 - Drift: `version:missing`, `version:newer` (above 5), `dailyActivity:missing`, `dailyActivity:shape` (an entry
   without a real `YYYY-MM-DD` date or a numeric `messageCount`), `dailyModelTokens:type`, `dailyModelTokens:shape`.
   Coverage `records` = entries read from both arrays; `from`/`to` = start of the first and end of the last
@@ -260,7 +262,8 @@ the parse tree:
 - `oauthAccount` {`accountUuid`, `emailAddress`, `organizationUuid`, `displayName`, …} — only `accountUuid`, as a
   keyed hash → `IdentityEv{scope:"config"}`.
 - `promptQueueUseCount` (number) — incremented each time the input queue goes from empty to non-empty →
-  `MarkerEv{kind:"queue", detail:"lifetime-total", n}` with `ts` = the file's mtime (the total holds as of the last write).
+  `ConfigEv{kind:"feature", name:"prompt-queue", provenance:"bundled", uses}`: a lifetime count with no date (never a
+  marker, so the file's modification time never stands in for activity).
 - `lastPlanModeUse` (number, epoch ms; the CLI updates it at most once per 24 h) → `MarkerEv{kind:"plan-enter", ts}`.
 - `firstStartTime` (ISO string, written on first start) → coverage `from`.
 - `skillUsage` {`<name>`: {`usageCount`, `lastUsedAt` (epoch ms)}} — recorded when a skill or prompt-type slash
@@ -312,8 +315,8 @@ allowlist; it is never exported raw.
 
 ## Limits (lifetime layer)
 
-- stats-cache days are UTC days and history DailyEv days are local days: match them day by day only after bucketing
-  history prompts (`PromptEv.ts`) by UTC day.
+- stats-cache days are UTC days of messages and history days local days of prompts (`DailyEv.zone`, `DailyEv.unit`):
+  match them day by day only after bucketing history prompts (`PromptEv.ts`) by UTC day.
 - `skillUsage` counts at most one use per minute per name.
 - `lastPlanModeUse` is a single timestamp refreshed at most once a day, not a count.
 - history.jsonl and the transcripts both yield prompts, and history and transcripts both yield `compact-manual`

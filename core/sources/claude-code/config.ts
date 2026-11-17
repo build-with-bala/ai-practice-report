@@ -100,8 +100,10 @@ function readGlobalConfig(file: string, ctx: ScanCtx, tally: Tally, out: Out): G
   if (typeof uuid === "string" && uuid !== "") out({ k: "identity", tool: TOOL, source: CONFIG_SOURCE, scope: "config", hash: ctx.hash(uuid) });
   const queue = field(v, "promptQueueUseCount", isNum, tally);
   if (queue !== undefined && queue >= 0) {
-    // a running total without a date: it holds as of the file's last write
-    out({ k: "marker", tool: TOOL, source: CONFIG_SOURCE, ts: Math.floor(st?.mtimeMs ?? ctx.now), kind: "queue", detail: "lifetime-total", n: queue });
+    // a lifetime count of the CLI's own feature, without a date: a config use count, never a dated activity
+    const ev = cfg("feature", "bundled", "prompt-queue");
+    ev.uses = queue;
+    out(ev);
   }
   const plan = toEpochMs(field(v, "lastPlanModeUse", isNum, tally), ctx.now);
   if (plan !== undefined) out({ k: "marker", tool: TOOL, source: CONFIG_SOURCE, ts: plan, kind: "plan-enter" });

@@ -426,7 +426,8 @@ the index no longer has; none to an `exec` or subagent thread.
   omitted without a `session_id`), intent, features and `textHash` (keyed hash of the trimmed text) as for Claude
   Code; `isTaskStart` = first prompt of the session or ≥ 30 min after that session's previous prompt; `simToPrev`
   against that session's previous prompt (state for the 256 most recent sessions). No `hasPaste`: the line does not say.
-- **DailyEv{source:"codex.history"}** per local day (the process time zone) with the day's prompt count.
+- **DailyEv{source:"codex.history", zone:"local", unit:"prompts"}** per local day (the process time zone), `count` =
+  the day's prompts.
 - Drift: `line:not-object`, `text:missing`, `ts:missing`. Skipped: `parse`, `oversize`, `io-error`, `bad-ts` (not a
   plausible time), `empty` (blank text), `bad-record`, `not-file` (history.jsonl is read only as a regular file).
   Coverage `from`/`to` = first/last prompt time.

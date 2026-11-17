@@ -99,10 +99,10 @@ class HistoryReader {
     this.days.set(day, (this.days.get(day) ?? 0) + 1);
   }
 
-  /** One DailyEv per local day (process time zone) with that day's prompt count. */
+  /** One DailyEv per local day (process time zone) with that day's count of typed prompts. */
   finish(): void {
-    for (const [day, prompts] of [...this.days].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
-      this.ctx.emit({ k: "daily", tool: TOOL, source: HISTORY_SOURCE, day, prompts });
+    for (const [day, count] of [...this.days].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+      this.ctx.emit({ k: "daily", tool: TOOL, source: HISTORY_SOURCE, day, zone: "local", unit: "prompts", count });
     }
   }
 }

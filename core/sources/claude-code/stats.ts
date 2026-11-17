@@ -58,13 +58,14 @@ export async function scanStats(c: Candidate, ctx: ScanCtx): Promise<void> {
       for (const e of v.dailyActivity) {
         tally.records++;
         const start = isObj(e) ? dayStart(e.date) : undefined;
-        const prompts = isObj(e) ? num(e.messageCount) : undefined;
-        if (!isObj(e) || start === undefined || prompts === undefined) {
+        const messages = isObj(e) ? num(e.messageCount) : undefined;
+        if (!isObj(e) || start === undefined || messages === undefined) {
           tally.unknownKey("dailyActivity:shape");
           continue;
         }
         const day = e.date as string;
-        const ev: DailyEv = { k: "daily", tool: TOOL, source: STATS_SOURCE, day, prompts };
+        // the CLI keys its stats by UTC day and counts every message of the day's sessions, not only typed prompts
+        const ev: DailyEv = { k: "daily", tool: TOOL, source: STATS_SOURCE, day, zone: "utc", unit: "messages", count: messages };
         const sessions = num(e.sessionCount);
         const toolCalls = num(e.toolCallCount);
         if (sessions !== undefined) ev.sessions = sessions;

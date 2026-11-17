@@ -453,7 +453,7 @@ function historyDaysIn(tz: string): { zone: string; days: [string, number][] } {
     `const { scan } = await import(${url("../../../core/scan.ts")});`,
     `const { cxHistory } = await import(${url("../../../core/sources/codex/index.ts")});`,
     `const r = await scan({ env: JSON.parse(process.env.AIPR_TEST_ENV), plugins: [cxHistory] });`,
-    `console.log(JSON.stringify({ zone: new Intl.DateTimeFormat().resolvedOptions().timeZone, days: r.store.all("daily").map((d) => [d.day, d.prompts]) }));`,
+    `console.log(JSON.stringify({ zone: new Intl.DateTimeFormat().resolvedOptions().timeZone, days: r.store.all("daily").map((d) => [d.day, d.count]) }));`,
   ].join("\n");
   const child = Bun.spawnSync({
     cmd: [process.execPath, "-e", code],
@@ -477,7 +477,7 @@ describe("codex history", () => {
     expect(p[1]!.features.simToPrev).toBeGreaterThanOrEqual(0);
     expect(p[2]!.features.simToPrev).toBeUndefined();
     expect(p.every((x) => x.hasPaste === undefined)).toBe(true);
-    expect(r.store.all("daily")).toEqual(fx.days.map(([day, prompts]) => ({ k: "daily", tool: "codex", source: "codex.history", day, prompts })));
+    expect(r.store.all("daily")).toEqual(fx.days.map(([day, count]) => ({ k: "daily", tool: "codex", source: "codex.history", day, zone: "local", unit: "prompts", count })));
     expect(r.coverage[0]).toEqual({
       k: "coverage", tool: "codex", source: "codex.history", window: "lifetime", status: "ok", beta: false, files: 1,
       bytes: statSync(fx.files.history).size, records: 5, skipped: {}, unknownTypes: {}, versions: [], from: fx.historyTs[0], to: fx.historyTs[4],

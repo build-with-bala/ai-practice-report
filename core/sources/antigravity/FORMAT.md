@@ -172,7 +172,8 @@ on every line), `workspace` (string), `type` (`slash_command` on slash commands,
   intent is `command`): `sessionId` from `conversationId`; intent, features and `textHash` from `display` in memory;
   `isTaskStart` per conversation (first, or ≥ 30 min since its previous line), state for the 256 most recent conversations.
   `workspace` is never kept.
-- **DailyEv** (source `antigravity.history`) per local day with its prompt count.
+- **DailyEv** (source `antigravity.history`, `zone: "local"`, `unit: "prompts"`) per local day, `count` = its
+  prompts and slash commands.
 - Drift: `history:not-object`, `history.type:<type>`, `history.display:missing`, `history.timestamp:missing`. Skipped:
   `bad-ts` (implausible time), `empty`.
 

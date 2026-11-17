@@ -39,7 +39,7 @@ function historyDaysIn(tz: string): { zone: string; days: [string, number][] } {
     `const { scan } = await import(${url("../../../core/scan.ts")});`,
     `const { ccHistory } = await import(${url("../../../core/sources/claude-code/index.ts")});`,
     `const r = await scan({ env: JSON.parse(process.env.AIPR_TEST_ENV), plugins: [ccHistory] });`,
-    `console.log(JSON.stringify({ zone: new Intl.DateTimeFormat().resolvedOptions().timeZone, days: r.store.all("daily").map((d) => [d.day, d.prompts]) }));`,
+    `console.log(JSON.stringify({ zone: new Intl.DateTimeFormat().resolvedOptions().timeZone, days: r.store.all("daily").map((d) => [d.day, d.count]) }));`,
   ].join("\n");
   const child = Bun.spawnSync({
     cmd: [process.execPath, "-e", code],
@@ -65,7 +65,8 @@ describe("claude-code lifetime: Task 10 scenario", () => {
     expect(history.map((m) => [m.kind, m.detail])).toEqual([["model-switch", "opus"], ["effort-switch", "high"], ["clear", undefined]]);
 
     const daily = r.store.all("daily");
-    expect(daily.filter((d) => d.source === "claude-code.history").reduce((n, d) => n + d.prompts, 0)).toBe(8);
+    expect(daily.filter((d) => d.source === "claude-code.history").reduce((n, d) => n + d.count, 0)).toBe(8);
+    expect(daily.filter((d) => d.source === "claude-code.history").every((d) => d.zone === "local" && d.unit === "prompts")).toBe(true);
     expect(daily.filter((d) => d.source === "claude-code.stats").map((d) => d.day)).toEqual(fx.statsDays);
 
     expect(r.store.all("identity")).toEqual([{ k: "identity", tool: "claude-code", source: "claude-code.config", scope: "config", hash: keyedHash(r.salt, "uuid-1") }]);
@@ -116,9 +117,9 @@ describe("claude-code lifetime: Task 10 scenario", () => {
     buildCcLifetime(h);
     const r = await run([ccStats]);
     expect(r.store.all("daily")).toEqual([
-      { k: "daily", tool: "claude-code", source: "claude-code.stats", day: "2026-01-13", prompts: 120, sessions: 2, toolCalls: 40, models: { [CC_OPUS]: 50_000, [CC_HAIKU]: 4_000 } },
-      { k: "daily", tool: "claude-code", source: "claude-code.stats", day: "2026-01-14", prompts: 80, sessions: 1, toolCalls: 25, models: { [CC_OPUS]: 20_000 } },
-      { k: "daily", tool: "claude-code", source: "claude-code.stats", day: "2026-01-16", prompts: 10, sessions: 1, toolCalls: 0 },
+      { k: "daily", tool: "claude-code", source: "claude-code.stats", day: "2026-01-13", zone: "utc", unit: "messages", count: 120, sessions: 2, toolCalls: 40, models: { [CC_OPUS]: 50_000, [CC_HAIKU]: 4_000 } },
+      { k: "daily", tool: "claude-code", source: "claude-code.stats", day: "2026-01-14", zone: "utc", unit: "messages", count: 80, sessions: 1, toolCalls: 25, models: { [CC_OPUS]: 20_000 } },
+      { k: "daily", tool: "claude-code", source: "claude-code.stats", day: "2026-01-16", zone: "utc", unit: "messages", count: 10, sessions: 1, toolCalls: 0 },
     ] satisfies DailyEv[]);
     expect(r.coverage[0]).toMatchObject({
       source: "claude-code.stats", window: "lifetime", status: "ok", files: 1, records: 5, unknownTypes: {},
@@ -129,10 +130,12 @@ describe("claude-code lifetime: Task 10 scenario", () => {
   test("config: queue total, last plan-mode use, first start, usage merged into skills and plugins, MCP names", async () => {
     const fx = buildCcLifetime(h);
     const r = await run([ccConfig]);
-    const mtime = Math.floor(statSync(path.join(h.env.home, fx.configFile)).mtimeMs);
     expect(r.store.all("marker")).toEqual([
-      { k: "marker", tool: "claude-code", source: "claude-code.config", ts: mtime, kind: "queue", detail: "lifetime-total", n: 7 },
       { k: "marker", tool: "claude-code", source: "claude-code.config", ts: fx.lastPlanModeUse, kind: "plan-enter" },
+    ]);
+    // the lifetime queue total is a count of the CLI's own feature, never a dated marker
+    expect(configs(r, "feature")).toEqual([
+      { k: "config", tool: "claude-code", source: "claude-code.config", kind: "feature", name: "prompt-queue", provenance: "bundled", uses: 7 },
     ]);
     const skills = configs(r, "skill").map((s) => [s.name, s.provenance, s.uses, s.lastUsed]);
     expect(skills).toEqual([
@@ -150,7 +153,7 @@ describe("claude-code lifetime: Task 10 scenario", () => {
     expect(cov).toMatchObject({
       source: "claude-code.config", window: "lifetime", status: "ok", files: 4,
       bytes: read.reduce((n, rel) => n + statSync(path.join(h.env.home, rel)).size, 0),
-      records: r.store.all("config").length + 3, from: fx.firstStart, to: mtime,
+      records: r.store.all("config").length + 2, from: fx.firstStart, to: fx.lastPlanModeUse,
     });
     expect(cov.note).toBeUndefined();
   });
@@ -333,7 +336,7 @@ describe("claude-code stats-cache: mapping", () => {
       dailyModelTokens: [{ date: "2026-02-01", tokensByModel: [] }],
     });
     const r = await run([ccStats]);
-    expect(r.store.all("daily").map((d) => [d.day, d.prompts, d.sessions, d.toolCalls, d.models])).toEqual([["2026-02-01", 3, undefined, undefined, undefined]]);
+    expect(r.store.all("daily").map((d) => [d.day, d.count, d.sessions, d.toolCalls, d.models])).toEqual([["2026-02-01", 3, undefined, undefined, undefined]]);
     expect(r.coverage[0]).toMatchObject({
       status: "drift", unknownTypes: { "version:newer": 1, "dailyActivity:shape": 4, "dailyModelTokens:shape": 1 },
     });
@@ -445,7 +448,7 @@ describe("claude-code config: mapping", () => {
     h.writeJson("alt-claude/.claude.json", { promptQueueUseCount: 2, oauthAccount: { accountUuid: "uuid-alt" } });
     claudeJson({ promptQueueUseCount: 9, oauthAccount: { accountUuid: "uuid-home" } });
     const r = await run([ccConfig]);
-    expect(r.store.all("marker").map((m) => m.n)).toEqual([2]);
+    expect(configs(r, "feature").map((c) => c.uses)).toEqual([2]);
     expect(r.store.all("identity").map((i) => i.hash)).toEqual([keyedHash(r.salt, "uuid-alt")]);
   });
 
@@ -503,7 +506,8 @@ describe("claude-code config: mapping", () => {
     symlinkSync(global, path.join(h.env.home, ".claude.json"));
     const r = await run([ccConfig]);
     expect(configs(r, "hook").map((c) => [c.name, c.checks])).toEqual([["Stop", ["test"]]]);
-    expect(r.store.all("marker").map((m) => [m.n, m.ts])).toEqual([[1, Math.floor(statSync(global).mtimeMs)]]);
+    expect(configs(r, "feature").map((c) => [c.name, c.uses])).toEqual([["prompt-queue", 1]]);
+    expect(r.store.all("marker")).toEqual([]);
     expect(r.coverage[0]).toMatchObject({ files: 2, bytes: statSync(settings).size + statSync(global).size, skipped: {} });
   });
 

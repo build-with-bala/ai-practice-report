@@ -6,7 +6,7 @@ import { registry, scan, type ToolId } from "../../core/index";
 import { safeList } from "../../core/io/fs";
 import { TempRegistry } from "../../core/io/temp";
 import type { TempDirs } from "../../core/sources/types";
-import { buildAntigravity } from "../fixtures/antigravity";
+import { agId, buildAntigravity, STEP, writeSteps } from "../fixtures/antigravity";
 import { buildCcLifetime, buildCcTranscripts } from "../fixtures/claude-code";
 import { buildCodexIndex, buildCodexRollouts } from "../fixtures/codex";
 import { buildCopilot, CliEvents, cpSid } from "../fixtures/copilot";
@@ -51,7 +51,11 @@ function buildAll(): void {
   h.writeJsonl(path.join(".copilot", "session-state", id, "events.jsonl"), cli.records);
   buildCursor(h);
   buildAgentCli(h);
-  buildAntigravity(h);
+  const ag = buildAntigravity(h);
+  // typed check steps: their category is a check, and the contract says so in `checks` too
+  writeSteps(h, agId("T"), [
+    { type: STEP.BLAZE_TEST_TARGETS, ts: ag.t0 + 70_000 }, { type: STEP.COMPILE, ts: ag.t0 + 80_000 }, { type: STEP.LINT_APPLET, ts: ag.t0 + 90_000 },
+  ]);
 }
 
 /** A temp registry that records the dirs it makes and how many files each held when the scan disposed of them. */
@@ -95,6 +99,12 @@ describe("integration: every P0 source in one home", () => {
     for (const kind of ["session", "prompt", "tool"] as const) {
       expect([kind, [...new Set(r.store.all(kind).map((e) => e.tool))].sort()]).toEqual([kind, TOOLS]);
     }
+    // the event contract: a call whose category is a check lists that check
+    const CHECK_CATEGORIES = ["test", "build", "lint", "typecheck"];
+    const unchecked = r.store.all("tool").filter((t) => CHECK_CATEGORIES.includes(t.category) && !t.checks?.includes(t.category as never));
+    expect(unchecked.map((t) => [t.source, t.name, t.category])).toEqual([]);
+    // a call that did not run to an end of its own has no ok and no exit code
+    expect(r.store.all("tool").filter((t) => t.outcome !== undefined && (t.ok !== undefined || t.exit !== undefined))).toEqual([]);
     expect(r.warnings.filter((w) => w.code === "error" || w.code === "temp-leftover")).toEqual([]);
     expect(r.tempClean).toBe(true);
     expect(readdirSync(h.env.tmp)).toEqual([]);

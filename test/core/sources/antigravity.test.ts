@@ -628,8 +628,8 @@ describe("antigravity cli: history.jsonl", () => {
     ]);
     expect(prompts[1]!.features.simToPrev).toBeDefined();
     expect(r.store.all("daily")).toEqual([
-      { k: "daily", tool: "antigravity", source: "antigravity.history", day: localDay(at), prompts: 3 },
-      { k: "daily", tool: "antigravity", source: "antigravity.history", day: localDay(day2), prompts: 1 },
+      { k: "daily", tool: "antigravity", source: "antigravity.history", day: localDay(at), zone: "local", unit: "prompts", count: 3 },
+      { k: "daily", tool: "antigravity", source: "antigravity.history", day: localDay(day2), zone: "local", unit: "prompts", count: 1 },
     ]);
     expect(r.store.all("session")).toEqual([]);
     const cov = covOf(r, "antigravity.cli");

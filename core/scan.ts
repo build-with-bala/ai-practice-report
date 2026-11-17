@@ -7,6 +7,7 @@ import { maybeYield } from "./io/yield";
 import type { CoverageEv, Ev } from "./model/events";
 import type { ToolId } from "./model/ids";
 import { EventStore } from "./model/store";
+import { withCheckCategory } from "./sources/common/tools";
 import { registry } from "./sources/registry";
 import type { Candidate, ScanCtx, SourcePlugin, TempDirs } from "./sources/types";
 import { keyedHash, normalizePath } from "./text/hash";
@@ -95,6 +96,7 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
       const ctx: ScanCtx = {
         env, now, since: opts.since, salt, temp, signal,
         emit: (e: Ev) => {
+          if (e.k === "tool") withCheckCategory(e);
           if (e.k !== "coverage") nonCoverage.set(plugin, (nonCoverage.get(plugin) ?? 0) + 1);
           // a coverage written after the abort may describe a source read only in part: it never looks complete
           else if (signal.aborted) e = { ...e, status: "error", note: "aborted" };
