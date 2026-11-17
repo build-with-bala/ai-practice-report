@@ -14,6 +14,58 @@ const SEARCH = new Set(["rg", "grep", "ag", "ack", "fd", "find"]);
 const READ = new Set(["cat", "head", "tail", "less", "more", "bat", "wc", "nl", "stat", "ls", "tree"]);
 /** `find` actions that delete files or run commands: such a find is not a search. */
 const FIND_ACTIONS = /^-(?:delete|exec|execdir|ok|okdir)$/;
+/** Commands that only print what they are given; with their output sent to a file they write it. */
+const PRINT = new Set(["echo", "printf"]);
+/**
+ * Output sent into a file: `> f`, `>> f`, `1> f`, `&> f` — not `2> f` (errors only), `>&2` (another stream) or
+ * `/dev/null`. Run on a command whose quoted spans are blanked, so a `>` inside quotes is never seen.
+ */
+const WRITE_REDIRECT = /(?:^|[^0-9&<>])(?:1|&)?>>?(?!&)\s*(?!\/dev\/null(?:\s|$))[^\s&|;<>]/;
+/** A heredoc's delimiter after `<<` or `<<-`: a quoted word, or a bare word that starts like a name (so `1 << 2` is a shift). */
+const HEREDOC_WORD = /^(?:'([^']+)'|"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*))/;
+
+/**
+ * The command line without its heredoc bodies. Each `<<WORD`, `<<-WORD`, `<<'WORD'` or `<<"WORD"` outside quotes (not
+ * a `<<<` here-string) makes the lines after its own line, up to the line that is exactly WORD (after leading tabs for
+ * `<<-`), the text fed to the command — data, never commands — so they are dropped with their terminator. Several
+ * heredocs on one line take their bodies in order; a body never terminated runs to the end.
+ */
+function dropHeredocs(s: string): string {
+  if (!s.includes("<<")) return s;
+  const out: string[] = [];
+  const pending: { word: string; tabs: boolean }[] = [];
+  let q = "";
+  for (const line of s.split("\n")) {
+    const body = pending[0];
+    if (body) {
+      const t = line.replace(/\r$/, "");
+      if ((body.tabs ? t.replace(/^\t+/, "") : t) === body.word) pending.shift();
+      continue;
+    }
+    for (let j = 0; j < line.length; j++) {
+      const c = line[j]!;
+      if (q) {
+        if (c === q) q = "";
+        else if (c === "\\" && q === '"') j++;
+      } else if (c === '"' || c === "'") q = c;
+      else if (c === "\\") j++;
+      else if (line.startsWith("<<<", j)) j += 2;
+      else if (line.startsWith("<<", j)) {
+        let k = j + 2;
+        const tabs = line[k] === "-";
+        if (tabs) k++;
+        while (line[k] === " " || line[k] === "\t") k++;
+        const m = HEREDOC_WORD.exec(line.slice(k));
+        if (m) {
+          pending.push({ word: m[1] ?? m[2] ?? m[3]!, tabs });
+          j = k + m[0].length - 1;
+        } else j++;
+      }
+    }
+    out.push(line);
+  }
+  return out.join("\n");
+}
 
 const CATEGORY_BY_CMD: Record<string, ToolCategory> = {
   git: "git", gh: "git",
@@ -174,16 +226,32 @@ function passiveOf(cmd: string, args: string[]): ToolCategory | undefined {
   return SEARCH.has(cmd) ? "search" : READ.has(cmd) ? "read" : undefined;
 }
 
+/**
+ * Whether a command writes a file with what it prints: a printing or reading command (`echo`, `printf`, `cat`, `head`,
+ * …) whose output is sent into a file (`cat <<EOF > a.ts`), or `tee` naming a file.
+ */
+function writesFile(cmd: string, args: string[], segment: string): boolean {
+  if (cmd === "tee") return positionals(args).length > 0;
+  return (PRINT.has(cmd) || READ.has(cmd)) && WRITE_REDIRECT.test(segment);
+}
+
+/**
+ * Category and checks of a command line. Quoted spans and heredoc bodies are data, never commands. The checks of every
+ * command in the line count; the category is the first check, else the first command's own category (git, package,
+ * …), else `write` when a command writes a file with what it prints, else `read`/`search`, else `shell`.
+ */
 export function classifyCommand(cmd: string): { category: ToolCategory; checks: CheckKind[] } {
   const checks: CheckKind[] = [];
   let category: ToolCategory | undefined;
+  let written = false;
   let passive: ToolCategory | undefined;
-  for (const raw of blankQuotes(cmd).split(/&&|\|\||;|\||\n/)) {
+  for (const raw of blankQuotes(dropHeredocs(cmd)).split(/&&|\|\||;|\||\n/)) {
     const [c, args] = commandOf(raw.trim().split(/\s+/).filter(Boolean));
     if (!c) continue;
     for (const k of [...checksOf(c, args), ...extraChecks(c, args)]) if (!checks.includes(k)) checks.push(k);
     category ??= categoryOf(c, args);
+    written ||= writesFile(c, args, raw);
     passive ??= passiveOf(c, args);
   }
-  return { category: checks[0] ?? category ?? passive ?? "shell", checks };
+  return { category: checks[0] ?? category ?? (written ? "write" : undefined) ?? passive ?? "shell", checks };
 }
