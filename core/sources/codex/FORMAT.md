@@ -1,6 +1,7 @@
-# Codex — rollouts
+# Codex — rollouts; lifetime layer and configuration
 
-Reader: `codex.rollouts` (`rollouts.ts`, `tools.ts`, `uuid.ts`).
+Readers: `codex.rollouts` (`rollouts.ts`, `tools.ts`, `uuid.ts`, `origin.ts`); the lifetime layer (thread index, turn
+history, prompt history, configuration) is documented in the second half of this file.
 
 Evidence: **(verified locally)** = the type or field was confirmed on this machine with the structure probe
 (`scripts/probe.ts`) or with count-only checks run by the reader's author. **(CLI program)** = read from the installed
@@ -16,7 +17,8 @@ CLI program's own type tables (0.169.0), not seen locally. This file records nam
 
 - The file name carries the thread's creation time in **local** time (second precision) and the thread id (a UUIDv7,
   whose first 48 bits are its creation time in Unix ms). A thread is resumed by appending to its rollout.
-- Not read by this reader: `auth.json`, `config.toml`, `history.jsonl`, the SQLite stores, `shell_snapshots/`, `log/`.
+- Not read by this reader: `auth.json`, `config.toml`, `history.jsonl`, the SQLite stores (the lifetime readers below
+  read some of them), `shell_snapshots/`, `log/`.
 
 ## Line shape
 
@@ -180,7 +182,8 @@ CLI's EventMsg tags (`exec_command_end`, `mcp_tool_call_end`, `collab_*`, `realt
   hash (before a `session_meta`, the id in the file name). A thread seen in an earlier rollout (e.g. both live and
   archived) is read once: later rollouts naming it count as skipped `duplicate`. `callId` = keyed hash of the call id
   (or of the item id for nested calls).
-- **SessionEv** per rollout: origin from `source` — `exec` → scripted; `mcp` (Codex run through its MCP server,
+- **SessionEv** per rollout (origin rules in `origin.ts`, shared with the thread index reader so the two cannot
+  diverge): origin from `source` — `exec` → scripted; `mcp` (Codex run through its MCP server,
   driven by another client or agent) → peer; `{subagent: …}` → subagent (`parentId` from
   `thread_spawn.parent_thread_id`, else `parent_thread_id`; `spawnDepth` = `depth`; `agentType` = the role when
   built in, else its keyed hash); any other string, or no source → human; `originator` exactly `Claude Code` → peer,
@@ -263,3 +266,193 @@ CLI's EventMsg tags (`exec_command_end`, `mcp_tool_call_end`, `collab_*`, `realt
   treated as injected.
 - Prompts in a thread imported from another agent (`<EXTERNAL SESSION IMPORTED>`) beyond its import notice would also
   be prompts of that agent's own reader; none were seen locally.
+
+---
+
+# Lifetime layer and configuration
+
+Rollouts are pruned and archived; these stores are not, so they carry the long view. The thread index outlives the
+rollouts: locally about half of its threads have no rollout left, while every rollout has an index row. All three
+readers report coverage with window `lifetime`.
+
+## Layout
+
+```
+<codex>/state_<N>.sqlite                codex.threads   thread index (the highest N; 5 locally)
+<codex>/thread_history_<N>.sqlite       codex.threads   per-turn status and timing (the highest N; 1 locally)
+<codex>/history.jsonl                   codex.history   one line per prompt typed in the CLI
+<codex>/config.toml                     codex.config    section headers only
+<codex>/plugins/cache/<marketplace>/<plugin>/<version>/.codex-plugin/plugin.json
+                                        codex.config    installed plugins (folder names only)
+<codex>/skills/<name>/SKILL.md          codex.config    skills (names only)
+<codex>/memories/*.md                   codex.config    memory files (counted, never opened)
+<home>/.agents/.skill-lock.json         codex.config    skills placed by the shared `skills` installer (names only)
+not read: goals_<N>.sqlite, logs_<N>.sqlite, memories_<N>.sqlite, queue_<N>.sqlite, sqlite/, session_index.jsonl,
+          auth.json, config.toml.backup-*, skills/.system/ (bundled skills), memories/rollout_summaries/,
+          memories/.git, plugins/.remote-plugin-install-staging/, <home>/.agents/skills/ (shared with other agents)
+```
+
+The SQLite stores are WAL databases written by the CLI and its app server (verified locally); the CLI numbers each
+store and moves to a new number on a breaking migration, so the regular file with the highest N (compared as a number)
+is the current one.
+
+## state_<N>.sqlite (verified locally; table definitions per the CLI program)
+
+Tables (verified locally): `threads`, `thread_spawn_edges`, `_sqlx_migrations`, `thread_dynamic_tools`,
+`thread_attachments`, `thread_read_receipts`, `thread_sections`, `projects`, `project_roots`,
+`project_idempotency_keys`, `backfill_state`, `rollout_migration_state`, `rollout_migration_skipped_rollouts`,
+`remote_control_enrollments`, `external_agent_config_imports`, `guardian_review_feedback`. Only the first two are read.
+
+`threads`, one row per thread the CLI indexed, `id` the primary key. Columns (the first group is the original table,
+the rest were added by later migrations, so older stores lack them):
+
+- `id` TEXT (the thread id, a UUIDv7 — the rollout's `session_meta.payload.id`), `rollout_path` TEXT, `created_at`,
+  `updated_at` INTEGER (epoch s), `source` TEXT, `model_provider` TEXT, `cwd` TEXT, `title` TEXT, `sandbox_policy`
+  TEXT, `approval_mode` TEXT, `tokens_used` INTEGER, `has_user_event` INTEGER, `archived` INTEGER, `archived_at`
+  INTEGER, `git_sha`, `git_branch`, `git_origin_url` TEXT (nullable).
+- added: `cli_version` TEXT, `first_user_message` TEXT, `agent_nickname`, `agent_role` TEXT, `memory_mode` TEXT, `model`,
+  `reasoning_effort` TEXT, `agent_path` TEXT, `created_at_ms`, `updated_at_ms` INTEGER (epoch ms), `thread_source` TEXT
+  (`user`, `subagent`), `preview` TEXT, `recency_at`, `recency_at_ms` INTEGER, `history_mode` TEXT (`legacy`,
+  `paginated`), `name` TEXT, `is_pinned` INTEGER, `thread_section_id` TEXT, `section_position`, `section_entered_at_ms`
+  INTEGER, `project_id` TEXT, `originator` TEXT (null on older rows), `daybreak_enabled` BOOLEAN, `creator_user_id`,
+  `creator_account_id` TEXT, `attached_thread_parent_id` TEXT.
+
+Value shapes (verified locally): `source` is the rollout's `session_meta.source` — a bare token (`cli`, `exec`,
+`vscode`, …) or the JSON text of a subagent source object (`{"subagent": {"thread_spawn": {parent_thread_id, depth,
+agent_path, agent_nickname, agent_role}}}` or `{"subagent": "<kind>"}`). `sandbox_policy` is JSON: `{type}` with
+`type` ∈ `workspace-write`, `read-only`, `disabled`, `managed`; older policies add `writable_roots[]` (paths),
+`network_access`, `exclude_tmpdir_env_var`, `exclude_slash_tmp`; `managed` ones add `file_system {type, entries[]
+{access, path {type, value}}}` (paths) and `network`. `approval_mode` is a token (`never`, `on-request`, …).
+
+`thread_spawn_edges` (`parent_thread_id` TEXT, `child_thread_id` TEXT primary key, `status` TEXT, e.g. `open`): one row
+per spawned subagent thread (verified locally; both ends have index rows).
+
+## thread_history_<N>.sqlite (verified locally; table definitions per the CLI program)
+
+Tables: `thread_turns`, `thread_items`, `thread_realtime_items`, `thread_history_projection_state`, `_sqlx_migrations`.
+Only `thread_turns` is read. The CLI projects only paginated rollouts (`history_mode: paginated`) into it, so legacy
+threads have no turns here.
+
+`thread_turns` (primary key `thread_id`, `turn_id`): `thread_id`, `turn_id` TEXT, `rollout_ordinal` INTEGER, `status`
+TEXT (`completed`, `interrupted`, `failed`, `inProgress` — the app server's turn status, camelCase), `error_json` TEXT,
+`started_at`, `completed_at` INTEGER (epoch s; `completed_at` is null while a turn is in progress), `duration_ms`
+INTEGER, `first_user_item_id`, `final_agent_item_id` TEXT, `rollout_byte_offset`, `rollout_end_ordinal`,
+`rollout_end_byte_offset` INTEGER, `root_turn_id` TEXT. `thread_items` holds each item's full JSON (messages, commands,
+outputs).
+
+## Never selected
+
+The SQL names only the columns below, validated against `pragma_table_info` first; it never uses `*` (not even
+`COUNT(*)`) and binds every value as a parameter. Never selected, because they hold user, model, path or account text:
+
+- `threads`: `first_user_message`, `title`, `preview`, `name` (the name a person gives a thread), `agent_nickname`,
+  `agent_path`, `rollout_path`, `creator_user_id`, `creator_account_id`; the values of `git_sha`, `git_branch`,
+  `git_origin_url` (only tested for presence inside SQL, `COALESCE(<col>, '') <> ''`); and `model_provider`,
+  `tokens_used`, `reasoning_effort`, `agent_role`, `memory_mode`, `thread_source`, `history_mode`, `recency_*`,
+  `archived*`, `is_pinned`, `section*`, `project_id`, `daybreak_enabled`, `attached_thread_parent_id`, `has_user_event`
+  (not needed; `tokens_used` and `reasoning_effort` have no event field to go to).
+- `thread_spawn_edges.status`; `thread_turns`: `error_json`, `first_user_item_id`, `final_agent_item_id`, the rollout
+  offsets.
+- Never read at all: `thread_items`, `thread_realtime_items`, `thread_history_projection_state`,
+  `thread_dynamic_tools` (tool descriptions and schemas), `thread_attachments` (payloads), `projects` and
+  `project_roots` (names, paths), `thread_sections` (names), `thread_read_receipts`, `remote_control_enrollments`
+  (account and server ids), `external_agent_config_imports`, `guardian_review_feedback`, `rollout_migration_*`
+  (rollout paths), `backfill_state`.
+
+## What the thread reader emits (`codex.threads`, `indexdb.ts`)
+
+- **Columns read**: `threads`: `id`, `source`, `originator`, `model`, `approval_mode`, `sandbox_policy`, `created_at`,
+  `created_at_ms`, `updated_at`, `updated_at_ms`, `cli_version`, `cwd`, and git presence; `thread_spawn_edges`:
+  `parent_thread_id`, `child_thread_id`; `thread_turns`: `thread_id`, `status`, `started_at`, `completed_at`,
+  `duration_ms`. Each one missing is drift `missing-column:<name>` and the rest is still read; a missing table is drift
+  `missing-table:<name>`. Without `threads.id`, `thread_turns.thread_id`/`status` or either edge column that table is
+  skipped. Tables are read in rowid pages of 5,000 rows (`WHERE rowid > ? ORDER BY rowid LIMIT ?`).
+- **Ids**: `codex:<thread id>`, the id verbatim when UUID-shaped, else its keyed hash — the same form as the rollouts'
+  session ids and `RolloutFactEv.threadId`, so index rows and rollouts join and their sessions merge in the store.
+- **ThreadRowEv** per `threads` row: `threadId`, `createdAt` = `created_at_ms`, else `created_at`.
+- **SessionEv** (window `lifetime`) per thread with a creation time (else skipped `no-ts`): `start` = created,
+  `end` = updated (never before `start`); origin, `surface`, `parentId`, `spawnDepth`, `agentType` from `source` and
+  `originator` by the rollouts' rules (`origin.ts`: `exec` → scripted, `mcp` → peer, a subagent source → subagent,
+  `originator` exactly `Claude Code` → peer unless the source is a subagent one, else human). `source` text that starts
+  with `{`, `[` or `"` is parsed as JSON; JSON that does not parse, or a source that is neither a string nor a subagent
+  object, is drift `threads.source:shape` (surface `other`). `models` = [`model`] (model-id-shaped, else `other`);
+  `version` = `cli_version` (version-shaped); `projectKey` from `cwd`; `inRepo` = any git column set; `approval` =
+  `approval_mode` and `sandbox` = the policy's `type` when token-shaped (`^[a-z][a-z0-9_-]{0,31}$`), else `other` — a
+  policy that is neither such a token nor JSON with a string `type` is drift `threads.sandbox_policy:shape`. The policy
+  is parsed in memory; its paths are never kept.
+- **EdgeEv** per `thread_spawn_edges` row: `parentId`, `childId` (ids as above); an empty id is skipped `bad-row`.
+- **TurnEv** (window `lifetime`) per finished turn: `status` = `completed`, `failed` or `interrupted`; `ts` =
+  `completed_at`, else `started_at` (neither → skipped `no-ts`); `ms` = `duration_ms` when ≥ 0, else
+  `completed_at − started_at`; no model or effort (the table has none). `inProgress` turns have not ended: skipped
+  `in-progress`, not drift. Any other status is drift `turn-status:<value>` (kept when camelCase letters, else
+  `(other)`; not a string → `(none)`).
+- **Coverage**: `files`/`bytes` = stores opened (main file size); `records` = rows read; skipped `no-ts`,
+  `in-progress`, `bad-row`, `io-error` (a query that fails — busy, locked, corrupt — ends that table; an unopenable turn
+  history); `versions` = `cli_version`s; `from`/`to` = earliest/latest session start or end and turn time. A thread
+  index that exists but cannot be opened makes the reader throw: coverage `error` (warn log `cx.db-unopenable`).
+
+## history.jsonl (verified locally)
+
+JSONL, one object per line, no `type` field: `session_id` (string — the thread id), `ts` (number, epoch s), `text`
+(string — the prompt as typed). Every line locally belongs to an interactive (`cli`, `vscode`) thread or to a thread
+the index no longer has; none to an `exec` or subagent thread.
+
+- **PromptEv** per line: window `lifetime`, origin `human`, `sessionId` = `codex:<id>` (UUID verbatim, else keyed hash;
+  omitted without a `session_id`), intent, features and `textHash` (keyed hash of the trimmed text) as for Claude
+  Code; `isTaskStart` = first prompt of the session or ≥ 30 min after that session's previous prompt; `simToPrev`
+  against that session's previous prompt (state for the 256 most recent sessions). No `hasPaste`: the line does not say.
+- **DailyEv{source:"codex.history"}** per local day (the process time zone) with the day's prompt count.
+- Drift: `line:not-object`, `text:missing`, `ts:missing`. Skipped: `parse`, `oversize`, `io-error`, `bad-ts` (not a
+  plausible time), `empty` (blank text), `bad-record`, `not-file` (history.jsonl is read only as a regular file).
+  Coverage `from`/`to` = first/last prompt time.
+
+## config.toml (header shapes verified locally; schema per the CLI program)
+
+TOML. Read through a symlink (dotfiles setups). Only section header lines are parsed, by a line-level scanner (no TOML
+library): values are scanned only to know where they end — basic and literal strings, multi-line strings (`"""`,
+`'''`, closed by three to five quotes), arrays and inline tables spanning lines, comments — so a `[` inside a value is
+never a header; no value is kept. Lines are streamed (a line over 32 MiB ends the read: skipped `oversize`).
+
+Tables seen locally: `[features]`, `[tui]`, `[tui.<k>]`, `[notice.<k>]`, `[plugins."<plugin>@<marketplace>"]`,
+`[projects."<path>"]` (trust levels). The CLI also reads `[profiles.<name>]`, `[mcp_servers.<name>]` (with sub-tables
+such as `.env`, `.tools.<tool>`), `[model_providers.<id>]`, and more.
+
+- **profile**: one ConfigEv per distinct `profiles.<name>` (sub-tables count once); `name` kept only when shaped like a
+  drift-key type name (`^[a-z][a-z0-9_-]{0,47}$`), else omitted; provenance `authored`.
+- **mcp-server**: one per distinct `mcp_servers.<name>`, `name` raw (for the export allowlist; never exported raw),
+  provenance `unknown` (as for Claude Code). The table body (command, args, env, headers) is never read.
+- **plugin**: one per distinct id among `plugins.<id>` tables and the plugin cache's `<plugin>@<marketplace>` folders,
+  `name` raw, provenance `installed`. Whether a plugin is enabled is in the table body, so it is not known.
+- Drift: `config.toml:syntax` per line that is not blank, a comment, a header or `key = value`, and per header that does
+  not parse; `config.toml:unterminated` when a multi-line value is still open at the end. Skipped: `io-error`,
+  `not-file`, `oversize`.
+
+## Plugins, skills, memories (verified locally)
+
+- **Plugins**: the cache folders `plugins/cache/<marketplace>/<plugin>/` (a `<version>/.codex-plugin/plugin.json`
+  inside); a config id `<plugin>@<marketplace>` names the same plugin. Only folder names are read; hidden entries are
+  skipped; manifests are never opened.
+- **skill**: one per `skills/<name>/` folder holding a `SKILL.md` (symlinked folders followed; hidden ones skipped,
+  among them `.system`, which holds the bundled skills and a `.codex-system-skills.marker`). Provenance `installed` when
+  `<home>/.agents/.skill-lock.json` lists the name (only the keys of its `skills` are read), `unknown` when that lock
+  exists but cannot be read, else `authored`. The lock is read only when there is at least one skill.
+- **memory-file**: one per `*.md` file directly in `memories/` (the CLI writes `MEMORY.md`, `memory_summary.md`,
+  `raw_memories.md` there), no name, provenance `authored` (as for Claude Code); never opened. The folder is a git work
+  tree with `rollout_summaries/` and `.codex-baseline/`, which are not counted.
+- **Coverage**: `files`/`bytes` = config.toml and the skills lock when read; `records` = ConfigEvs emitted.
+
+## Limits (lifetime layer)
+
+- A read-only open of a WAL database needs its `-wal` file; when the CLI has closed `state_<N>.sqlite` cleanly the file
+  is gone, `openRo` cannot open the store (SQLITE_CANTOPEN) and `codex.threads` reports `error` until the CLI opens it
+  again (verified locally with a synthetic WAL database: an empty `-wal` beside the file, or beside a private copy, is
+  enough).
+- An index row holds a thread's latest state (model, approval, sandbox, last update); earlier settings are not kept.
+  Older rows have no `originator`: a rollout of the same thread driven by Claude Code says `peer` where the index says
+  `human`, and merged sessions take the fields of whichever reader arrived first.
+- Turns exist only for paginated threads; unfinished turns (`inProgress`) are not counted.
+- Profiles, MCP servers or plugins defined without a header (dotted keys such as `profiles.x.model = …`, inline tables
+  under `[profiles]`) are not counted.
+- Skills placed by Codex's own installer skill leave no record and count as `authored`.
+- history.jsonl and rollouts both yield prompts, and the thread index and rollouts both yield sessions and turns: they
+  are told apart by `source`/`window`, never summed.

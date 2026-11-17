@@ -11,6 +11,8 @@ export const str = (v: unknown): string | undefined => (typeof v === "string" &&
 export const UUID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 /** A tool version string (`2.1.300`, `0.169.0`, `1.2.3-alpha.4`). */
 export const VERSION = /^\d{1,4}\.\d{1,4}\.\d{1,6}(?:[-+][0-9A-Za-z.-]{1,32})?$/;
+/** A lower-case enum token as tools write settings and sources (`on-request`, `workspace-write`, `exec`). */
+export const TOKEN = /^[a-z][a-z0-9_-]{0,31}$/;
 const MODEL = /^[A-Za-z0-9][A-Za-z0-9.:_[\]-]{0,63}$/;
 const EXT = /^[a-z0-9]{1,12}$/;
 

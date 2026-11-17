@@ -325,3 +325,213 @@ export function buildCodexRollouts(h: FakeHome): CxFixture {
     heavy: all.reduce((n, r) => n + r.heavy, 0),
   };
 }
+
+// ---- Task 12: thread index (state_N.sqlite), turn history (thread_history_N.sqlite), history.jsonl, config ----
+
+/** The `threads` columns of state_5.sqlite in table order (names verified locally; types per the CLI program's DDL). */
+export const THREAD_COLUMNS = [
+  "id", "rollout_path", "created_at", "updated_at", "source", "model_provider", "cwd", "title", "sandbox_policy", "approval_mode",
+  "tokens_used", "has_user_event", "archived", "archived_at", "git_sha", "git_branch", "git_origin_url", "cli_version",
+  "first_user_message", "agent_nickname", "agent_role", "memory_mode", "model", "reasoning_effort", "agent_path",
+  "created_at_ms", "updated_at_ms", "thread_source", "preview", "recency_at", "recency_at_ms", "history_mode", "name",
+  "is_pinned", "thread_section_id", "section_position", "section_entered_at_ms", "project_id", "originator",
+  "daybreak_enabled", "creator_user_id", "creator_account_id", "attached_thread_parent_id",
+] as const;
+export type ThreadColumn = (typeof THREAD_COLUMNS)[number];
+export type ThreadRow = Partial<Record<ThreadColumn, unknown>>;
+const INTEGER_COLUMNS = new Set<string>([
+  "created_at", "updated_at", "tokens_used", "has_user_event", "archived", "archived_at", "created_at_ms", "updated_at_ms",
+  "recency_at", "recency_at_ms", "is_pinned", "section_position", "section_entered_at_ms", "daybreak_enabled",
+]);
+
+/** The `thread_turns` columns of thread_history_1.sqlite in table order. */
+export const TURN_COLUMNS = [
+  "thread_id", "turn_id", "rollout_ordinal", "status", "error_json", "started_at", "completed_at", "duration_ms",
+  "first_user_item_id", "final_agent_item_id", "rollout_byte_offset", "rollout_end_ordinal", "rollout_end_byte_offset", "root_turn_id",
+] as const;
+export type TurnRow = Partial<Record<(typeof TURN_COLUMNS)[number], unknown>>;
+
+/** A sandbox policy as the CLI stores it: JSON whose writable roots and file-system entries hold paths. */
+export const MANAGED_SANDBOX = JSON.stringify({
+  type: "managed", file_system: { type: "restricted", entries: [{ access: "write", path: { type: "literal", value: { path: CANARY.path } } }] }, network: "enabled",
+});
+
+/**
+ * One `threads` row as the CLI writes it. Every text column the reader must never select holds a canary: the first
+ * message, title, preview, name, nickname, rollout and agent paths, git branch and remote, creator ids.
+ */
+export function threadRow(id: string, createdMs: number, o: ThreadRow = {}): ThreadRow {
+  const updatedMs = createdMs + 30 * 60_000;
+  return {
+    id, rollout_path: `${CANARY.path}/.codex/sessions/rollout-${id}.jsonl`, created_at: secs(createdMs), updated_at: secs(updatedMs), source: "cli",
+    model_provider: "openai", cwd: CANARY.path, title: CANARY.project, sandbox_policy: MANAGED_SANDBOX, approval_mode: "on-request",
+    tokens_used: 123_456, has_user_event: 0, archived: 0, archived_at: null, git_sha: "a1b2c3d", git_branch: CANARY.project,
+    git_origin_url: `https://${CANARY.host}/${CANARY.project}.git`, cli_version: CX_VERSION, first_user_message: CANARY.prompt,
+    agent_nickname: null, agent_role: null, memory_mode: "enabled", model: CX_MAX, reasoning_effort: "high", agent_path: null,
+    created_at_ms: createdMs, updated_at_ms: updatedMs, thread_source: "user", preview: CANARY.prompt, recency_at: secs(updatedMs),
+    recency_at_ms: updatedMs, history_mode: "paginated", name: CANARY.project, is_pinned: 0, thread_section_id: null,
+    section_position: null, section_entered_at_ms: null, project_id: null, originator: "codex-tui", daybreak_enabled: null,
+    creator_user_id: CANARY.email, creator_account_id: CANARY.token, attached_thread_parent_id: null,
+    ...o,
+  };
+}
+
+/** One `thread_turns` row; `startedS`/`completedS` in epoch seconds, as the CLI stores them. */
+export function turnRow(threadId: string, turnId: string, status: unknown, startedS: number | null, completedS: number | null, durationMs: number | null, o: TurnRow = {}): TurnRow {
+  return {
+    thread_id: threadId, turn_id: turnId, rollout_ordinal: 0, status, error_json: status === "failed" ? JSON.stringify({ message: CANARY.secret }) : null,
+    started_at: startedS, completed_at: completedS, duration_ms: durationMs, first_user_item_id: `item-${CANARY.project}`, final_agent_item_id: null,
+    rollout_byte_offset: 0, rollout_end_ordinal: null, rollout_end_byte_offset: null, root_turn_id: turnId, ...o,
+  };
+}
+
+const ddl = (table: string, columns: readonly string[], types: (c: string) => string, extra = ""): string =>
+  `CREATE TABLE ${table} (${columns.map((c) => `${c} ${types(c)}`).join(", ")}${extra})`;
+
+/** A state_N.sqlite with `threads` (only `columns`, in this order), `thread_spawn_edges`, and tables the reader never reads. */
+export function writeStateDb(h: FakeHome, rel: string, threads: ThreadRow[], edges: [string, string, string][] = [], o: { columns?: readonly string[]; noEdgesTable?: boolean; extraDdl?: string[] } = {}): string {
+  const columns = o.columns ?? THREAD_COLUMNS;
+  const statements = [
+    "CREATE TABLE _sqlx_migrations (version BIGINT PRIMARY KEY, description TEXT NOT NULL, installed_on TIMESTAMP, success BOOLEAN NOT NULL, checksum BLOB NOT NULL, execution_time BIGINT NOT NULL)",
+    ddl("threads", columns, (c) => (c === "id" ? "TEXT PRIMARY KEY" : INTEGER_COLUMNS.has(c) ? "INTEGER" : "TEXT")),
+    ...(o.noEdgesTable ? [] : ["CREATE TABLE thread_spawn_edges (parent_thread_id TEXT NOT NULL, child_thread_id TEXT NOT NULL PRIMARY KEY, status TEXT NOT NULL)"]),
+    "CREATE TABLE thread_dynamic_tools (thread_id TEXT NOT NULL, position INTEGER NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL, input_schema TEXT NOT NULL, defer_loading INTEGER, namespace TEXT)",
+    ...(o.extraDdl ?? []),
+  ];
+  const rows: Record<string, unknown[][]> = {
+    threads: threads.map((t) => columns.map((c) => t[c as ThreadColumn] ?? null)),
+    thread_dynamic_tools: [[threads[0]?.id ?? "t", 0, CANARY.project, CANARY.prompt, `{"secret":"${CANARY.secret}"}`, 0, null]],
+  };
+  if (!o.noEdgesTable) rows.thread_spawn_edges = edges;
+  return h.sqlite(rel, statements, rows);
+}
+
+/** A thread_history_N.sqlite with `thread_turns` and `thread_items` (whose item JSON the reader never reads). */
+export function writeTurnsDb(h: FakeHome, rel: string, turns: TurnRow[], o: { columns?: readonly string[] } = {}): string {
+  const columns = o.columns ?? TURN_COLUMNS;
+  const int = new Set(["rollout_ordinal", "started_at", "completed_at", "duration_ms", "rollout_byte_offset", "rollout_end_ordinal", "rollout_end_byte_offset"]);
+  return h.sqlite(rel, [
+    ddl("thread_turns", columns, (c) => (int.has(c) ? "INTEGER" : "TEXT"), columns.includes("turn_id") ? ", PRIMARY KEY (thread_id, turn_id)" : ""),
+    "CREATE TABLE thread_items (thread_id TEXT NOT NULL, turn_id TEXT NOT NULL, item_id TEXT NOT NULL, rollout_ordinal INTEGER NOT NULL, created_at_ms INTEGER NOT NULL, item_json TEXT NOT NULL, item_type TEXT, PRIMARY KEY (thread_id, turn_id, item_id))",
+  ], {
+    thread_turns: turns.map((t) => columns.map((c) => t[c as keyof TurnRow] ?? null)),
+    thread_items: [[turns[0]?.thread_id ?? "t", "turn-1", "item-1", 0, 0, JSON.stringify({ type: "UserMessage", text: CANARY.prompt }), "UserMessage"]],
+  });
+}
+
+/** One history.jsonl line as the CLI writes it: `ts` in epoch seconds. */
+export function cxHistoryLine(text: string, tsMs: number, sessionId?: string): Record<string, unknown> {
+  return { ...(sessionId !== undefined && { session_id: sessionId }), ts: secs(tsMs), text };
+}
+
+/** Epoch ms of a local wall-clock time `daysAgo` days before today (process time zone). */
+export function localTime(daysAgo: number, hh: number, mm = 0): number {
+  const d = new Date();
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate() - daysAgo, hh, mm).getTime();
+}
+
+export interface CxIndexFixture {
+  ids: { cli: string; exec: string; sub: string };
+  /** Creation and last-update times (epoch ms) per thread. */
+  created: { cli: number; exec: number; sub: number };
+  updated: { cli: number; exec: number; sub: number };
+  /** The four turns, in table order: thread key, status, completion time (ms) and duration. */
+  turns: { thread: "cli" | "exec" | "sub"; status: "completed" | "failed" | "interrupted"; ts: number; ms: number }[];
+  /** Times (ms) of the history lines in file order, and prompts per local day. */
+  historyTs: number[];
+  days: [string, number][];
+  /** Absolute paths of the files the readers should read. */
+  files: { state: string; turns: string; history: string; config: string };
+}
+
+/**
+ * Task 12 scenario. state_5.sqlite: three threads — `cli` (in a repo, cwd CANARY.path), `exec` (no repo, /work/projB) and a
+ * subagent spawned by `cli` (role explorer) — whose text columns hold canaries (first message CANARY.prompt, title
+ * CANARY.project, …); one spawn edge. An older state_4.sqlite with a fourth thread must be ignored. thread_history_1.sqlite:
+ * four turns (2 completed, 1 failed, 1 interrupted). history.jsonl: five prompts over two local days. config.toml: two
+ * profiles (one with a sub-table), an MCP server CANARY.mcp whose body holds CANARY.secret, a plugin, a project table keyed
+ * by CANARY.path. skills/: one skill (plus bundled ones under .system); plugins/cache: two plugins; memories/: two files.
+ */
+export function buildCodexIndex(h: FakeHome): CxIndexFixture {
+  const t0 = fixtureStart();
+  // thread times carry milliseconds (the `_ms` columns keep them, the seconds columns do not); turn times are whole seconds
+  const created = { cli: t0 + 123, exec: t0 + 60 * 60_000 + 456, sub: t0 + 5 * 60_000 + 789 };
+  const updated = { cli: t0 + 40 * 60_000 + 321, exec: t0 + 62 * 60_000 + 654, sub: t0 + 15 * 60_000 + 987 };
+  const ids = { cli: uuidV7(created.cli - 1000, 0xa1), exec: uuidV7(created.exec - 1000, 0xa2), sub: uuidV7(created.sub - 1000, 0xa3) };
+  const spawn = { subagent: { thread_spawn: { parent_thread_id: ids.cli, depth: 1, agent_path: "/root/explorer_1", agent_nickname: CANARY.project, agent_role: "explorer" } } };
+  const at = (k: keyof typeof ids, extra: ThreadRow) => threadRow(ids[k], created[k], { updated_at: secs(updated[k]), updated_at_ms: updated[k], ...extra });
+  const state = writeStateDb(h, ".codex/state_5.sqlite", [
+    at("cli", {}),
+    at("exec", {
+      source: "exec", originator: "codex_exec", cwd: "/work/projB", git_sha: null, git_branch: null, git_origin_url: null, model: CX_MINI,
+      reasoning_effort: "low", approval_mode: "never", sandbox_policy: JSON.stringify({ type: "disabled" }), cli_version: "0.168.0",
+    }),
+    at("sub", { source: JSON.stringify(spawn), thread_source: "subagent", agent_nickname: CANARY.project, agent_role: "explorer", agent_path: CANARY.path }),
+  ], [[ids.cli, ids.sub, "open"]]);
+  writeStateDb(h, ".codex/state_4.sqlite", [threadRow(uuidV7(t0 - 86_400_000, 0xa4), t0 - 86_400_000)]);
+
+  const turns: CxIndexFixture["turns"] = [
+    { thread: "cli", status: "completed", ts: t0 + 2 * 60_000, ms: 61_000 },
+    { thread: "cli", status: "interrupted", ts: t0 + 10 * 60_000, ms: 9_000 },
+    { thread: "exec", status: "failed", ts: t0 + 61 * 60_000, ms: 15_000 },
+    { thread: "sub", status: "completed", ts: t0 + 10 * 60_000 + 5_000, ms: 20_000 },
+  ];
+  const turnsFile = writeTurnsDb(h, ".codex/thread_history_1.sqlite", turns.map((t, i) =>
+    turnRow(ids[t.thread], `turn-${i + 1}`, t.status, secs(t.ts - t.ms), secs(t.ts), t.ms, { rollout_ordinal: i })));
+
+  const historyTs = [localTime(3, 10), localTime(3, 11), localTime(2, 9), localTime(2, 9, 10), localTime(2, 9, 20)];
+  const history = h.writeJsonl(".codex/history.jsonl", [
+    cxHistoryLine(`Fix the importer so it rejects empty input. ${CANARY.prompt}`, historyTs[0]!, ids.cli),
+    cxHistoryLine("Why does the importer reject empty input?", historyTs[1]!, ids.cli),
+    cxHistoryLine("Add pagination to the list endpoint", historyTs[2]!, ids.exec),
+    cxHistoryLine("Does it handle the last page?", historyTs[3]!, ids.exec),
+    cxHistoryLine("ok ship it", historyTs[4]!, ids.exec),
+  ]);
+  const day = (ms: number) => { const d = new Date(ms); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
+
+  const config = h.write(".codex/config.toml", [
+    "# Codex configuration",
+    `model = "${CX_MAX}"`,
+    'model_reasoning_effort = "high"',
+    "",
+    "[profiles.fast]",
+    `model = "${CX_MINI}"`,
+    'approval_policy = "never"',
+    "",
+    "[profiles.deep]",
+    `model = "${CX_MAX}"`,
+    'model_reasoning_effort = "xhigh"',
+    "",
+    "[profiles.deep.features]",
+    "web_search = true",
+    "",
+    `[mcp_servers.${CANARY.mcp}]`,
+    'command = "npx"',
+    `args = ["-y", "@acme/mcp", "--token", "${CANARY.secret}"]`,
+    "",
+    `[mcp_servers.${CANARY.mcp}.env]`,
+    `API_KEY = "${CANARY.secret}"`,
+    "",
+    '[plugins."demo@market"]',
+    "enabled = true",
+    "",
+    `[projects."${CANARY.path}"]`,
+    'trust_level = "trusted"',
+    "",
+  ].join("\n"));
+  h.write(".codex/config.toml.backup-20260101-0000", `[profiles.${CANARY.project}]\n`);
+
+  h.write(".codex/skills/review-helper/SKILL.md", `---\nname: review-helper\ndescription: ${CANARY.prompt}\n---\n${CANARY.code}\n`);
+  h.write(".codex/skills/.system/.codex-system-skills.marker", "1\n");
+  h.write(".codex/skills/.system/imagegen/SKILL.md", `---\nname: imagegen\n---\n${CANARY.code}\n`);
+  h.writeJson(".codex/plugins/cache/market/demo/1.0.0/.codex-plugin/plugin.json", { name: "demo", description: CANARY.prompt });
+  h.writeJson(".codex/plugins/cache/market/other/2.0.0/.codex-plugin/plugin.json", { name: "other", mcpServers: { [CANARY.mcp]: { env: { K: CANARY.secret } } } });
+  h.write(".codex/memories/MEMORY.md", `- ${CANARY.prompt}\n`);
+  h.write(".codex/memories/memory_summary.md", `${CANARY.email} ${CANARY.code}\n`);
+
+  return {
+    ids, created, updated, turns, historyTs,
+    days: [[day(historyTs[0]!), 2], [day(historyTs[2]!), 3]],
+    files: { state, turns: turnsFile, history, config },
+  };
+}

@@ -7,8 +7,11 @@ import { isObj, type Obj } from "./guards";
 const TYPE_NAME = /^[a-z][a-z0-9_-]{0,47}$/;
 const SIDECAR_MAX = 8 * 1024 * 1024;
 
+/** A string shaped like a schema type name (lower-case token), the shape drift keys keep verbatim. */
+export const isTypeName = (s: string): boolean => TYPE_NAME.test(s);
+
 /** A record or payload type as a drift key: the name when it looks like a schema token, else `(other)` / `(none)`. */
-export const typeKey = (type: unknown): string => (typeof type !== "string" ? "(none)" : TYPE_NAME.test(type) ? type : "(other)");
+export const typeKey = (type: unknown): string => (typeof type !== "string" ? "(none)" : isTypeName(type) ? type : "(other)");
 
 /** Coverage counters for one candidate of one source; `coverage()` builds the source's single CoverageEv. */
 export class Tally {

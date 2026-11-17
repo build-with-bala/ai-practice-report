@@ -8,8 +8,9 @@ import { sid, type MarkerKind, type Origin } from "../../model/ids";
 import { classifyIntent } from "../../text/intent";
 import { promptFeatures } from "../../text/structure";
 import { listDir, Tally, typeKey } from "../common/coverage";
-import { idPart, isObj, num, oneOf, safeModel, str, UUID, VERSION, type Obj } from "../common/guards";
+import { isObj, num, oneOf, safeModel, str, VERSION, type Obj } from "../common/guards";
 import type { Candidate, ScanCtx } from "../types";
+import { cxSource, cxThreadId } from "./origin";
 import { cxOutcome, cxToolCalls, type CxOutcome, type CxToolCall } from "./tools";
 import { uuidV7Ms } from "./uuid";
 
@@ -99,14 +100,11 @@ const MAX_DEPTH = 6;
 const ROLLOUT_FILE = /^rollout-.*\.jsonl$/;
 const FILE_TS = /^rollout-(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})/;
 const FILE_ID = /-([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\.jsonl$/;
-const SURFACE = /^[a-z][a-z0-9_-]{0,31}$/;
 /** A rate-limit bucket id (`rate_limits.limit_id`) is kept when it has this shape, else it becomes `other`. */
 const BUCKET = /^[a-z][a-z0-9_-]{0,31}$/;
 /** The CLI's reasoning effort levels (ReasoningEffort, 0.169). */
 const EFFORTS: ReadonlySet<string> = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
 const ABORT_REASONS: ReadonlySet<string> = new Set(["interrupted", "replaced", "review_ended", "budget_limited"]);
-/** Agent roles the CLI ships; any other role is a config name and is kept only as a keyed hash. */
-const BUILTIN_ROLES: ReadonlySet<string> = new Set(["default", "explorer", "awaiter"]);
 const MIN_RESET_MS = Date.UTC(2015, 0, 1);
 const MAX_RESET_AHEAD_MS = 400 * 86_400_000;
 
@@ -265,7 +263,7 @@ class RolloutReader {
     const raw = str(p.id);
     if (raw !== undefined) {
       this.rawId = raw;
-      this.sessionId = sid(TOOL, idPart(raw, UUID, this.ctx));
+      this.sessionId = cxThreadId(raw, this.ctx);
     }
     if (this.seen.has(this.sessionId)) {
       this.duplicate = true;
@@ -275,29 +273,10 @@ class RolloutReader {
     const ts = toEpochMs(v.timestamp, this.ctx.now);
     if (ts !== undefined) this.tick(ts);
 
-    const meta: Meta = { origin: "human", subagent: false, inRepo: !!p.git };
-    const source = p.source;
-    if (typeof source === "string") {
-      // `codex exec` is a script; through its MCP server, Codex is driven by another client or agent
-      meta.origin = source === "exec" ? "scripted" : source === "mcp" ? "peer" : "human";
-      meta.surface = SURFACE.test(source) ? source : "other";
-    } else if (isObj(source) && "subagent" in source) {
-      meta.origin = "subagent";
-      meta.subagent = true;
-      meta.surface = "subagent";
-      const spawn = isObj(source.subagent) && isObj(source.subagent.thread_spawn) ? source.subagent.thread_spawn : undefined;
-      const parent = str(spawn?.parent_thread_id) ?? str(p.parent_thread_id);
-      if (parent !== undefined) meta.parentId = sid(TOOL, idPart(parent, UUID, this.ctx));
-      const depth = num(spawn?.depth);
-      if (depth !== undefined && Number.isInteger(depth) && depth >= 0) meta.spawnDepth = depth;
-      const role = str(spawn?.agent_role);
-      if (role !== undefined) meta.agentType = BUILTIN_ROLES.has(role) ? role : this.ctx.hash(role);
-    } else if (source !== undefined) {
-      this.tally.unknownKey("session_meta.source:shape");
-      meta.surface = "other";
-    }
-    // Codex driven by another agent — except its subagents, which inherit the originator and stay subagents
-    if (p.originator === "Claude Code" && !meta.subagent) meta.origin = "peer";
+    // origin, surface and subagent links, by the rules the thread index reader shares (origin.ts)
+    const { unknownShape, ...driver } = cxSource(p.source, p.originator, this.ctx, p.parent_thread_id);
+    if (unknownShape) this.tally.unknownKey("session_meta.source:shape");
+    const meta: Meta = { ...driver, inRepo: !!p.git };
     const version = str(p.cli_version);
     if (version !== undefined && VERSION.test(version)) {
       meta.version = version;
