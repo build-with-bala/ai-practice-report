@@ -14,8 +14,11 @@ import { Journal } from "./journal";
 import { mapSession, rawSessionId, TOOL, uriToPath, VSCODE_SOURCE } from "./map";
 
 export const JETBRAINS_SOURCE = "copilot.jetbrains";
-/** Legacy session files are whole JSON documents, parsed in one piece (the shared small-JSON limit); larger ones are skipped. */
-const LEGACY_MAX_BYTES = 8 * 1024 * 1024;
+/**
+ * Legacy session files are whole JSON documents, parsed in one piece. They grow with long agent sessions, so the cap is
+ * 64 MiB (as for Claude Code's global config); larger ones are skipped `too-large`.
+ */
+const LEGACY_MAX_BYTES = 64 * 1024 * 1024;
 /** The JetBrains plugin keeps its OAuth tokens here, beside the IDE folders: skipped by name, never stat'ed or opened. */
 const OAUTH_FILES = new Set(["apps.json", "hosts.json"]);
 const CHAT_STORE_DIR = /^chat-.+-sessions$/;
@@ -218,7 +221,7 @@ export const cpVscode: SourcePlugin = {
   describe: {
     reads: [
       "<VS Code user>/workspaceStorage/*/chatSessions/*.jsonl — chat session journals (VS Code 1.109+), replayed in memory (Code, Code - Insiders, VSCodium)",
-      "<VS Code user>/workspaceStorage/*/chatSessions/*.json — older chat sessions, one JSON document each (up to 8 MiB)",
+      "<VS Code user>/workspaceStorage/*/chatSessions/*.json — older chat sessions, one JSON document each (up to 64 MiB)",
       "<VS Code user>/globalStorage/emptyWindowChatSessions/*.{jsonl,json} — chat sessions of windows without a folder",
       "<VS Code user>/workspaceStorage/*/workspace.json — the folder of the workspace, kept only as a keyed project hash",
       "<VS Code user>/globalStorage/github.copilot-chat/session-store.db — sessions: id, cwd, host type, created and updated times; turns: session id and time",

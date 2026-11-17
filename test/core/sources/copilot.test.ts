@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, utimesSync } from "node:fs";
+import { chmodSync, closeSync, mkdirSync, openSync, statSync, utimesSync, writeSync } from "node:fs";
 import path from "node:path";
 import { __observeQueries } from "../../../core/io/sqlite";
 import type { Ev, ToolEv } from "../../../core/model/events";
@@ -394,16 +394,42 @@ describe("copilot vscode: mapping rules", () => {
     expectNoCanaries([...allEvents(r), r.coverage, r.warnings]);
   });
 
-  test("unreadable and oversized files are counted, not fatal: parse errors, oversized lines, a legacy file over 8 MiB", async () => {
+  test("invalid files and lines are counted, not fatal: a legacy file that does not parse, a broken journal line", async () => {
     const at = t0();
     h.write(path.join(chatDir("w"), `${cpSid("bad")}.json`), "{ not json");
     h.write(path.join(chatDir("w"), `${cpSid("partj")}.jsonl`), `${JSON.stringify({ kind: 0, v: sessionRoot(cpSid("partj"), [request({ ts: at })]) })}\n{ broken\n`);
-    h.write(path.join(chatDir("w"), `${cpSid("big")}.json`), JSON.stringify(sessionRoot(cpSid("big"), [request({ ts: at, text: "x".repeat(9 * 1024 * 1024) })])));
     const r = await run([cpVscode]);
     const c = covOf(r, "copilot.vscode");
-    expect(c.skipped).toMatchObject({ parse: 2, "too-large": 1 });
-    expect(c.note).toBe("too-large");
+    expect(c.skipped).toEqual({ parse: 2 });
+    expect(c.note).toBeUndefined();
     expect(r.store.all("session").map((s) => s.id)).toEqual([sidOf(cpSid("partj"))]);
+  });
+
+  test("legacy files are read up to 64 MiB: a file of exactly the cap is read, one byte more is skipped too-large", async () => {
+    const CAP = 64 * 1024 * 1024;
+    const at = t0();
+    // trailing spaces keep the document valid JSON; both files hold the same session text, one byte apart in size
+    const padded = (id: string, size: number) => {
+      const json = JSON.stringify(sessionRoot(id, [request({ ts: at })]));
+      const file = h.write(path.join(chatDir("w"), `${id}.json`), json);
+      const fd = openSync(file, "a");
+      try {
+        const spaces = Buffer.alloc(1024 * 1024, 0x20);
+        for (let left = size - Buffer.byteLength(json); left > 0; left -= spaces.length) writeSync(fd, spaces, 0, Math.min(left, spaces.length));
+      } finally {
+        closeSync(fd);
+      }
+      expect(statSync(file).size).toBe(size);
+    };
+    padded(cpSid("atcap"), CAP);
+    padded(cpSid("over"), CAP + 1);
+    const r = await run([cpVscode]);
+    expect(r.store.all("session").map((s) => s.id)).toEqual([sidOf(cpSid("atcap"))]);
+    const c = covOf(r, "copilot.vscode");
+    expect(c.skipped).toEqual({ "too-large": 1 });
+    expect(c.note).toBe("too-large");
+    expect(c.files).toBe(1);
+    expect(c.bytes).toBe(CAP);
     expect(r.warnings.some((w) => w.code === "too-large" && w.source === "copilot.vscode")).toBe(true);
   });
 

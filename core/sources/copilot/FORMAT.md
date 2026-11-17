@@ -127,7 +127,7 @@ Built-in tool ids (VS Code program and extension program): see `VSCODE_TOOLS` in
   first. A session is read once: a file whose name or `sessionId` was already read counts as skipped `duplicate`, unread
   when its name matches. So a session kept as journal and legacy file is read from its journal, and a session copied to
   another workspace from the copy written last. A journal is streamed line by line into its session object; a legacy file
-  is parsed whole (up to 8 MiB — larger is skipped `too-large`, coverage `note: "too-large"`). The session object is
+  is parsed whole (up to 64 MiB — larger is skipped `too-large`, coverage `note: "too-large"`). The session object is
   mapped and dropped before the next file.
 - **SessionEv** per session with requests (`detail`, origin `human`): id `copilot:<sessionId>` (verbatim when UUID-shaped,
   else its keyed hash; the file name when the object has no `sessionId`); `start`/`end` = earliest/latest of
@@ -234,7 +234,8 @@ they are never stat'ed, opened or returned by `locate()`. Coverage per config fo
 
 - Tool events carry the request's time; parts have no times of their own.
 - An edit tool whose group VS Code never wrote (a failed edit) can claim a later tool's group when neither names its file.
-- Legacy session files over 8 MiB are skipped (`too-large`).
+- Legacy session files over 64 MiB are skipped (`too-large`); each one is parsed whole, so one that large is held in
+  memory once while it is read.
 - Request token counts and credits (`promptTokens`, `completionTokens`, `copilotCredits`, `modelTotals`) are not mapped.
 - `externalEdit` and `workspaceEdit` parts (edits made by other agents in VS Code, file moves) are not counted as edits.
 - Sessions imported from a chat export (legacy `isImported: true`; the journal no longer records it) are read like any other.
