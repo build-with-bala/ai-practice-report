@@ -7,7 +7,7 @@ import type { CommitFactEv } from "../../model/events";
 import { Tally } from "../common/coverage";
 import { num, str, type Obj } from "../common/guards";
 import type { Candidate, ScanCtx } from "../types";
-import { eachRow, pageableColumns, pages, q, readStore, TOOL } from "./diskkv";
+import { eachRow, pageableColumns, Pass, q, readStore, TOOL } from "./diskkv";
 
 export const TRACKING_SOURCE = "cursor.tracking";
 const DB_NAME = "ai-code-tracking.db";
@@ -73,7 +73,7 @@ export async function scanTracking(c: Candidate, ctx: ScanCtx): Promise<void> {
     const have = pageableColumns(db, tables, TABLE, COLUMNS, tally);
     if (!have || !TIMES.some((t) => have.has(t))) return;
     const sql = `SELECT rowid AS rid, ${COLUMNS.filter((x) => have.has(x)).map(q).join(", ")} FROM ${q(TABLE)} WHERE rowid > ? ORDER BY rowid LIMIT ?`;
-    for (const rows of pages(db, sql, TABLE, tally, ctx)) for (const r of rows) eachRow(() => commit(r, seen, ctx, tally), tally);
+    new Pass(db, TABLE, tally, ctx).byRowid(sql, (rows) => { for (const r of rows) eachRow(() => commit(r, seen, ctx, tally), tally); });
   });
   if (!read && tally.note !== "too-large") throw new TrackingUnreadable("the Cursor tracking store could not be read");
   const bad = tally.skipped["bad-record"] ?? 0;

@@ -38,7 +38,8 @@ SQLite. Tables (both `(key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)`): `Item
 state, also Cursor's account tokens `cursorAuth/*`) and `cursorDiskKV` (Cursor's own data, in the global store). Newer
 versions add a relational `composerHeaders` table (`composerId`, `workspaceId`, `createdAt`, `lastUpdatedAt`,
 `isArchived`, `isSubagent`, `value`, …); it is not read. A value is JSON text (stored as TEXT or as a BLOB of text).
-`ON CONFLICT REPLACE` gives a rewritten row a new rowid, so rowid order is the order rows were last written.
+`UNIQUE` gives `key` an index (SQLite's `sqlite_autoindex_cursorDiskKV_1`), which the reader pages by. `ON CONFLICT
+REPLACE` gives a rewritten row a new rowid but keeps its key.
 
 ### cursorDiskKV key families
 
@@ -109,34 +110,54 @@ conversations live in `cursorDiskKV`.
 
 ## What `cursor.ide` emits
 
-- **Queries.** `cursorDiskKV` is read in two passes — composers, then bubbles — each `WHERE key LIKE '<family>:%' AND
-  rowid > ? ORDER BY rowid LIMIT ?` (pages of 2,000), selecting `json_valid(value)` and only `json_extract`/`json_type`
-  of the fields listed: values never leave SQLite whole. The text of a bubble is selected only when its `type` is 1. A
-  tool's `params`, `rawArgs` and `result` are parsed inside SQLite, and only for the tools that need them: the
-  command line of terminal tools, the target file of file tools, the `server` of MCP tools, the exit code of terminal
-  tools. A value that is not valid JSON is skipped `parse` (the row still counts). `key` and `value` are checked
-  against the table first (each missing: drift `missing-column:<name>`); a table declared `WITHOUT ROWID`, or whose
-  first page fails for any reason but a busy store, is drift `table-unreadable:cursorDiskKV`; a busy store or a later
-  page that fails is an io-error.
-- **Composers → SessionEv** (`detail`), one per composer, emitted after the bubbles: id `cursor:<composerId>` (the id
-  from the key, verbatim when UUID-shaped, else its keyed hash); `start`/`end` = earliest/latest of `createdAt`,
-  `lastUpdatedAt` and the composer's bubble times; `surface: "agent"` when `isAgentic` or `unifiedMode` is `agent`,
+- **Queries.** `cursorDiskKV` is read by key, in pages of 2,000, each resuming after the last key read:
+  `SELECT key, … FROM cursorDiskKV WHERE key > ? AND key < ? ORDER BY key LIMIT ?`, an index range seek. Composers are
+  the range `'composerData:'` .. `'composerData;'` (`;` sorts right after `:`, so the range holds exactly the keys that
+  start with `composerData:`, case-sensitive); then each composer inside the detail window (below) has its bubbles read
+  as its own range `'bubbleId:<composerId>:'` .. `'bubbleId:<composerId>;'`, so the bubbles of older conversations and
+  of copies are never read. The value is read once per row inside SQLite (`value AS v`) together with
+  `json_valid(value)`, and only `json_extract`/`json_type` of the fields listed leave SQLite: values never leave it
+  whole. The text of a bubble is selected only when its `type` is 1. A tool's `params`, `rawArgs` and `result` are
+  parsed inside SQLite, and only for the tools that need them: the command line of terminal tools, the target file of
+  file tools, the `server` of MCP tools, the exit code of terminal tools. A value that is not valid JSON is skipped
+  `parse` (the row still counts). `key` and `value` are checked against the table first (each missing: drift
+  `missing-column:<name>`). The key index is checked in `pragma_index_list`/`pragma_index_xinfo`: a unique, non-partial
+  index on `key` alone in binary order (Cursor's `UNIQUE`, or the primary key of a `WITHOUT ROWID` table keyed by `key`).
+  Without one — the schema differs — the reader falls back to one rowid scan per key family, `WHERE key LIKE
+  '<family>:%' AND rowid > ? ORDER BY rowid LIMIT ?` (correct, but it reads every row; bubbles are matched to their
+  composer by key, and those outside the window are read but not mapped), and records drift `no-key-index:cursorDiskKV`;
+  a table that then has no rowid either (`WITHOUT ROWID`) is drift `table-unreadable:cursorDiskKV`. The first query of
+  a pass that fails for any reason but a busy store is drift `table-unreadable:cursorDiskKV`; a busy store or any later
+  failure is an io-error. Either ends the pass.
+- **The detail window.** A composer is inside it when it was last updated (`lastUpdatedAt`, else `createdAt`) within
+  the 90 days before the scan — or at or after `since` when the scan sets one; one with neither time is taken as
+  inside. Only the bubbles of composers inside the window are read.
+- **Composers → SessionEv**, one per composer, emitted after the bubbles: window `detail` inside the window,
+  `lifetime` outside it; id `cursor:<composerId>` (the id from the key, verbatim when UUID-shaped, else its keyed
+  hash); `start`/`end` = earliest/latest of `createdAt`, `lastUpdatedAt` and (inside the window) the composer's bubble
+  times; `surface: "agent"` when `isAgentic` or `unifiedMode` is `agent`,
   else `"chat"`; `models` = `modelConfig.modelName`, then each bubble's `modelInfo.modelName` in order of first use
   (the shared model-id guard: `other` when not id-shaped); origin `human`, or `subagent` when the composer has a
   `subagentInfo` object; `parentId` = the session of the composer whose `subComposerIds`/`subagentComposerIds`
-  lists it. A copy of a subagent launch already read (same `subagentInfo.toolCallId`) is skipped `duplicate`, and so
-  are its bubbles. A composer that lists no message and has no bubble is skipped `empty-session` (only when every
-  bubble page was read); one without any time `no-ts`. Messages held inline (oldest format) have no time: counted as
+  lists it. A copy of a subagent launch already read (same `subagentInfo.toolCallId`) is skipped `duplicate`, and its
+  bubbles are never read. Inside the window, a composer that lists no message and has no bubble is skipped
+  `empty-session` (only when all its bubbles were read: a pass that stopped early cannot tell); one without any time
+  `no-ts`. Outside the window, a composer's session comes from the composer alone (its own times, its model setting)
+  and it is counted as skipped `outside-window` (its bubbles were not read) — or skipped `empty-session` when it lists
+  no message. Messages held inline (oldest format) have no time: counted as
   skipped `inline-message`, not mapped. No `projectKey`: a composer does not name its workspace (the workspace index is
   in `ItemTable`, which is not read when composers exist).
-- **Bubbles.** A bubble whose composer has no `composerData` row (a deleted chat) is skipped `orphan`; one whose key
-  is not `bubbleId:<composerId>:<bubbleId>` is a `bad-record`; a `type` other than 1 or 2 is drift `bubble-type:<n>`
+- **Bubbles.** Read by key, only bubbles under a known composer's key are ever seen. In the rowid fallback, a bubble
+  whose composer has no `composerData` row (a deleted chat) is skipped `orphan`, and one whose key is not
+  `bubbleId:<composerId>:<bubbleId>` is a `bad-record`. A `type` other than 1 or 2 is drift `bubble-type:<n>`
   (`(other)`, `(none)`); one without a plausible `createdAt` is skipped `no-ts` (its model still counts).
   - **PromptEv** per type-1 bubble with non-blank text, in composers that are not subagents (a subagent's user
     bubbles are its parent's briefs): origin `human`, `detail`; intent, features and `textHash` (keyed hash of the
-    trimmed text) from the text in memory; `isTaskStart` = the composer's first prompt, or ≥ 30 min after the latest
-    bubble time seen in the composer so far; `simToPrev` against the composer's previous prompt (kept for the 256
-    most recently active composers). Blank text is skipped `empty`.
+    trimmed text) from the text in memory. A composer's prompts are mapped once its bubbles are read, in time order
+    (keys sort by bubble id, not by time): `isTaskStart` = its first prompt, or one ≥ 30 min after the latest earlier
+    bubble of the composer; `simToPrev` against its previous prompt. Only that composer's prompt texts and bubble times
+    are held meanwhile (in the rowid fallback, those of every composer inside the window, until the scan ends). Blank
+    text is skipped `empty`.
   - **ToolEv** per assistant (type-2) bubble with `toolFormerData`: `name` = the built-in name (above), else the name the numeric `tool`
     stands for, else `mcp` for an `mcp_`/`mcp-` name, else `other`; `callId` = keyed hash of `toolCallId`. Terminal
     tools (`run_terminal_cmd`, `run_terminal_command`, `run_terminal_command_v2`, `Shell`) take `classifyCommand` of
@@ -163,8 +184,9 @@ conversations live in `cursorDiskKV`.
 - **Coverage**: `files`/`bytes` = stores whose tables were listed (main file size); `records` = composer and bubble
   rows read, plus legacy values; `from`/`to` = first/last event time; no versions (the stores name none). The source
   is an error when every store present fails to open or read, unless a store was too large to copy. Skipped:
-  `parse`, `orphan`, `duplicate`, `no-ts`, `empty`, `empty-session`, `inline-message`, `draft`, `bad-record` (also
-  warn log `cu.bad-record` with the count), `io-error`, `too-large`.
+  `parse`, `orphan`, `duplicate`, `no-ts`, `empty`, `empty-session`, `outside-window`, `inline-message`, `draft`,
+  `bad-record` (also warn log `cu.bad-record` with the count), `io-error`, `too-large`. Drift: `missing-column:<name>`,
+  `no-key-index:cursorDiskKV`, `table-unreadable:cursorDiskKV`, `bubble-type:<n>`, `<legacy key>:shape`.
 
 ## ai-code-tracking.db (`cursor.tracking`)
 
@@ -219,10 +241,13 @@ strings are both accepted). One machine reported every line column of `scored_co
 - Nothing here was verified against a real Cursor store; field names follow public descriptions and can be wrong or
   out of date. Unknown bubble types and schema changes surface as drift; a renamed field would surface only as
   missing data.
-- A bubble rewritten while the scan runs (Cursor open, the active chat) can be read twice or missed: pages are read
-  one query at a time, and a rewrite moves a row to a new rowid.
-- Prompts are ordered by when their rows were last written, which can differ from when they were sent, for
-  `isTaskStart` and `simToPrev`.
+- The store is live while Cursor runs, and pages are read one query at a time. Read by key, a row is read at most
+  once (a rewrite keeps its key), but a row written behind the read position during the scan — a new message in a
+  conversation already read — is missed. In the rowid fallback, a rewritten row moves to a new rowid, so it can be read
+  twice or missed.
+- Bubbles are read only for composers updated inside the detail window (90 days, or since `since`): older
+  conversations count as lifetime sessions without prompts, tools or turns. A composer whose own times are old is
+  outside the window even if a bubble of it is newer.
 - A forked subagent's copy of its parent's messages counts the parent's tool calls once more; copies of one launch
   are read once.
 - Token counts (zero in current versions), the context meter and request ids are not mapped; neither are the

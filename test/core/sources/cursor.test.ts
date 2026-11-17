@@ -35,6 +35,8 @@ const allEvents = (r: Result) => KINDS.flatMap((k) => [...r.store.all(k)] as Ev[
 const covOf = (r: Result, source: string) => r.coverage.find((c) => c.source === source)!;
 const sidOf = (raw: string) => `cursor:${raw}`;
 const toolsOf = (r: Result, raw: string): readonly ToolEv[] => r.store.forSession(sidOf(raw), "tool");
+const byTime = <T extends { ts: number }>(xs: readonly T[]): T[] => [...xs].sort((a, b) => a.ts - b.ts);
+const DAY = 86_400_000;
 const observe = () => {
   const sql: string[] = [];
   __observeQueries((s) => sql.push(s));
@@ -58,11 +60,18 @@ const KV_PATHS = new Set([
 const IN_MEMORY = new Set(["text", "tcall", "cmd", "target", "server"]);
 const kvQueries = (sql: string[]) => sql.filter((s) => /\bFROM cursorDiskKV\b/.test(s));
 
-/** Runs each captured cursorDiskKV page query against the store itself and returns every row it yields. */
+/** The query reads composers (else bubbles): only composer queries extract `subagentInfo`. */
+const isComposerQuery = (s: string): boolean => s.includes("'$.subagentInfo'");
+const isBubbleQuery = (s: string): boolean => kvQueries([s]).length > 0 && !isComposerQuery(s);
+
+/** Runs each captured cursorDiskKV page query against the store itself, over its whole key family, and returns every row it yields. */
 function rowsOf(file: string, sql: string[]): Record<string, unknown>[] {
   const db = new Database(file, { readonly: true });
   try {
-    return [...new Set(kvQueries(sql))].flatMap((s) => db.query(s).all(Number.MIN_SAFE_INTEGER, 1_000_000) as Record<string, unknown>[]);
+    return [...new Set(kvQueries(sql))].flatMap((s) => {
+      const family = isComposerQuery(s) ? "composerData" : "bubbleId";
+      return db.query(s).all(`${family}:`, `${family};`, 1_000_000) as Record<string, unknown>[];
+    });
   } finally {
     db.close();
   }
@@ -75,7 +84,7 @@ const userRow = (c: string, label: string, ts: number | undefined, text: string)
 const composerRow = (id: string, o: Parameters<typeof composer>[1] = {}): Row => [`composerData:${id}`, composer(id, o)];
 
 describe("cursor: Task 14 scenario", () => {
-  test("sessions, prompts, tests, denial, error, thinking turn, commits; prefix-paged SQL that never touches ItemTable; no canaries", async () => {
+  test("sessions, prompts, tests, denial, error, thinking turn, commits; key-range SQL that never touches ItemTable; no canaries", async () => {
     const fx = buildCursor(h);
     const sql = observe();
     const r = await run();
@@ -87,9 +96,10 @@ describe("cursor: Task 14 scenario", () => {
       expect(s).not.toMatch(/ItemTable/i);
     }
     const kv = kvQueries(sql);
-    expect(kv.length).toBeGreaterThanOrEqual(2);
+    expect([kv.filter(isComposerQuery).length, kv.filter(isBubbleQuery).length]).toEqual([1, 2]); // the composer range, then each composer's own
     for (const s of kv) {
-      expect(s).toMatch(/WHERE key LIKE '(composerData|bubbleId):%' AND rowid > \? ORDER BY rowid LIMIT \?/);
+      expect(s).toMatch(/ FROM cursorDiskKV WHERE key > \? AND key < \? ORDER BY key LIMIT \?\)/);
+      expect(s).not.toMatch(/\bkey LIKE\b|\browid\b/i);
       for (const [p] of s.matchAll(/'\$[^']*'/g)) expect(KV_PATHS).toContain(p.slice(1, -1));
     }
     // what leaves SQLite: only allowlisted scalars; the message text only for user bubbles
@@ -205,7 +215,7 @@ describe("cursor ide: bubbles and tools", () => {
       t({ name: "edit_file", params: { targetFile: "/w/raw.py" }, raw: true }),
     ]);
     const r = await run([cuIde]);
-    expect(toolsOf(r, c).map((x) => [x.name, x.category, x.checks, x.editExt, x.mcpServer])).toEqual([
+    expect(byTime(toolsOf(r, c)).map((x) => [x.name, x.category, x.checks, x.editExt, x.mcpServer])).toEqual([
       ["read_file", "read", undefined, undefined, undefined], ["codebase_search", "search", undefined, undefined, undefined],
       ["grep_search", "search", undefined, undefined, undefined], ["file_search", "search", undefined, undefined, undefined],
       ["list_dir", "read", undefined, undefined, undefined], ["edit_file", "edit", undefined, "ts", undefined],
@@ -237,14 +247,14 @@ describe("cursor ide: bubbles and tools", () => {
       t(cmd(`${CANARY.secret} not json`, "error")), t(cmd(undefined, undefined, "accepted")),
     ]);
     const r = await run([cuIde]);
-    expect(toolsOf(r, c).map((x) => [x.ok, x.exit])).toEqual([
+    expect(byTime(toolsOf(r, c)).map((x) => [x.ok, x.exit])).toEqual([
       [true, undefined], [false, undefined], [false, undefined], [undefined, undefined], [undefined, undefined], [false, undefined],
       [true, 0], [false, 2], [true, undefined], [true, 0], [false, undefined], [undefined, undefined],
     ]);
     expect(r.store.all("marker").map((m) => m.kind)).toEqual(["denial"]);
   });
 
-  test("bubbles: times as ISO or epoch ms; without a time, unknown composer, invalid JSON or a blank message they are skipped and counted", async () => {
+  test("bubbles: times as ISO or epoch ms; without a time, invalid JSON or a blank message skipped and counted; keys outside the composer's range never read", async () => {
     const c = cuSid("edge");
     const at = t0();
     writeStateDb(h, globalRel(h), [
@@ -263,10 +273,10 @@ describe("cursor ide: bubbles and tools", () => {
     const r = await run([cuIde]);
     expect(r.store.forSession(sidOf(c), "prompt").map((p) => p.ts - at)).toEqual([1_000, 2_000, 7_000]);
     const cov = covOf(r, "cursor.ide");
-    expect(cov.skipped).toEqual({ "no-ts": 1, empty: 1, orphan: 1, parse: 1, "bad-record": 1 });
+    expect(cov.skipped).toEqual({ "no-ts": 1, empty: 1, parse: 1 }); // the orphan and the bad key are not in c's range
     expect(cov.unknownTypes).toEqual({ "bubble-type:3": 1, "bubble-type:(other)": 1 });
     expect(cov.status).toBe("drift");
-    expect(cov.records).toBe(1 + 10);
+    expect(cov.records).toBe(1 + 8);
     expectNoCanaries([...allEvents(r), r.coverage, r.warnings]);
   });
 
@@ -319,8 +329,8 @@ describe("cursor ide: bubbles and tools", () => {
       [sidOf(child), "subagent", sidOf(parent)], [sidOf(parent), "human", undefined],
     ]);
     expect(r.store.all("prompt").map((p) => p.sessionId)).toEqual([sidOf(parent)]);
-    expect(r.store.all("tool").map((t) => [t.sessionId, t.category])).toEqual([[sidOf(parent), "delegate"], [sidOf(child), "read"]]);
-    expect(covOf(r, "cursor.ide").skipped).toEqual({ duplicate: 3 });
+    expect(byTime(r.store.all("tool")).map((t) => [t.sessionId, t.category])).toEqual([[sidOf(parent), "delegate"], [sidOf(child), "read"]]);
+    expect(covOf(r, "cursor.ide").skipped).toEqual({ duplicate: 1 }); // the copy; its bubbles are never queried
     expectNoCanaries([...allEvents(r), r.coverage]);
   });
 
@@ -334,23 +344,72 @@ describe("cursor ide: bubbles and tools", () => {
       toolRow(c, "t", at + 2_000, { name: "read_file" }, { thinkingMs: 1_250 }),
     ]);
     const r = await run([cuIde]);
-    expect(toolsOf(r, c).map((t) => [t.name, t.ts - at])).toEqual([["read_file", 1_000], ["read_file", 2_000]]);
+    expect(byTime(toolsOf(r, c)).map((t) => [t.name, t.ts - at])).toEqual([["read_file", 1_000], ["read_file", 2_000]]);
     expect(r.store.all("turn").map((t) => [t.ts - at, t.ms])).toEqual([[2_000, 1_250]]);
     expect(r.store.all("prompt")).toHaveLength(1);
   });
 
-  test("bubbles are paged 2,000 rows at a time: every page is read", async () => {
-    const c = cuSid("many");
+  test("prompts are mapped in time order, whatever order their keys or rows come in: task starts and similarity follow the clock", async () => {
     const at = t0();
-    const rows: Row[] = [composerRow(c, { created: at, updated: at + MIN })];
-    for (let i = 0; i < 4_500; i++) rows.push(toolRow(c, `m${i}`, at + i, { name: "read_file" }));
+    const c = cuSid("order");
+    // bubble ids sort a2 < m3 < z1, rows are written m3, z1, a2; the clock says z1, a2 (40 min later), m3
+    const kvRows: Row[] = [
+      composerRow(c, { created: at, updated: at + 45 * MIN }),
+      userRow(c, "m3", at + 41 * MIN, "Now rename the helper"),
+      userRow(c, "z1", at + 1_000, "Write the importer"),
+      toolRow(c, "t0", at + 2_000, { name: "read_file" }),
+      userRow(c, "a2", at + 40 * MIN, "Add a test for the importer"),
+    ];
+    for (const kvDdl of [undefined, "CREATE TABLE cursorDiskKV (key TEXT, value BLOB)"]) {
+      h.cleanup();
+      h = fakeHome();
+      writeStateDb(h, globalRel(h), kvRows, [], kvDdl === undefined ? {} : { kvDdl });
+      const r = await run([cuIde]);
+      const prompts = r.store.forSession(sidOf(c), "prompt");
+      expect(prompts.map((p) => p.ts - at)).toEqual([1_000, 40 * MIN, 41 * MIN]);
+      expect(prompts.map((p) => p.textHash)).toEqual(["Write the importer", "Add a test for the importer", "Now rename the helper"].map((t) => keyedHash(r.salt, t)));
+      expect(prompts.map((p) => p.features.isTaskStart)).toEqual([true, true, false]);
+      expect(prompts.map((p) => p.features.simToPrev === undefined)).toEqual([true, false, false]);
+    }
+  });
+
+  test("keyset pages by key: over 2,000 composers and a 4,500-bubble composer each read exactly once; keys beside the ranges never", async () => {
+    const at = t0();
+    // ids that share prefixes (cmp-1, cmp-10, cmp-100, cmp-1000): one composer's range must not reach into another's
+    const ids = Array.from({ length: 2_050 }, (_, i) => `cmp-${i}`);
+    const big = cuSid("big");
+    const rows: Row[] = [];
+    for (const id of ids) {
+      rows.push(composerRow(id, { created: at, updated: at + MIN }));
+      rows.push([`bubbleId:${id}:b`, bubble("b", { type: 2, ts: at + 1_000, tool: { name: "read_file", callId: `call-${id}` } })]);
+    }
+    rows.push(composerRow(big, { created: at, updated: at + MIN }));
+    for (let i = 0; i < 4_500; i++) rows.push(toolRow(big, `g${i}`, at + i, { name: "read_file", callId: `call-big-${i}` }));
+    const stray = (label: string) => bubble(cuSid(label), { type: 2, ts: at, tool: { name: "read_file", callId: `stray-${label}` } });
+    rows.push(
+      // beside the composer range ('composerData:' .. 'composerData;'): its bounds, a lower-case twin, neighbours in sort order
+      ["composerData:", composer("x", { created: at, updated: at })], ["composerData;", composer("x", { created: at, updated: at })],
+      ["composerData;x", composer("x", { created: at, updated: at })], ["composerData9", composer("x", { created: at, updated: at })],
+      ["composerData", composer("x", { created: at, updated: at })], ["composerdata:lower", composer("x", { created: at, updated: at })],
+      // beside cmp-1's bubble range ('bubbleId:cmp-1:' .. 'bubbleId:cmp-1;')
+      ["bubbleId:cmp-1", stray("s1")], ["bubbleId:cmp-1:", stray("s2")], ["bubbleId:cmp-1;", stray("s3")], ["bubbleId:cmp-1;x", stray("s4")],
+      ["bubbleId:cmp-19", stray("s5")],
+    );
     writeStateDb(h, globalRel(h), rows);
     const sql = observe();
     const r = await run([cuIde]);
     __observeQueries(undefined);
-    expect(toolsOf(r, c)).toHaveLength(4_500);
-    expect(sql.filter((s) => s.includes("'bubbleId:%'"))).toHaveLength(3);
-    expect(covOf(r, "cursor.ide").records).toBe(4_501);
+    expect(r.store.all("session")).toHaveLength(ids.length + 1);
+    const calls = r.store.all("tool").map((t) => t.callId);
+    const expected = [...ids.map((id) => `call-${id}`), ...Array.from({ length: 4_500 }, (_, i) => `call-big-${i}`)].map((c) => keyedHash(r.salt, c));
+    expect(calls.length).toBe(expected.length);
+    expect(new Set(calls)).toEqual(new Set(expected));
+    // two composer pages (2,051 rows); one bubble page per small composer, three for the big one
+    expect(sql.filter(isComposerQuery)).toHaveLength(2);
+    expect(sql.filter(isBubbleQuery)).toHaveLength(ids.length + 3);
+    const cov = covOf(r, "cursor.ide");
+    expect(cov.records).toBe(ids.length + 1 + ids.length + 4_500);
+    expect([cov.skipped, cov.unknownTypes]).toEqual([{}, {}]);
   });
 
   test("a WAL store whose writer is gone is read in place, nothing written beside it", async () => {
@@ -362,6 +421,67 @@ describe("cursor ide: bubbles and tools", () => {
     const r = await run([cuIde]);
     expect(r.store.all("prompt")).toHaveLength(1);
     expect([existsSync(`${file}-wal`), existsSync(`${file}-shm`)]).toEqual([false, false]);
+  });
+});
+
+describe("cursor ide: the detail window (bubbles of composers updated in the last 90 days, or since --since)", () => {
+  const OLD = cuSid("old");
+  const NEW = cuSid("new");
+  const EMPTY = cuSid("empty");
+  /** An old composer (updated 100 days ago) and a recent one (3 days ago), each with a prompt and a tool; an old composer that lists no message. */
+  function store(): { old: number; recent: number } {
+    const old = Date.now() - 100 * DAY;
+    const recent = fixtureStart();
+    writeStateDb(h, globalRel(h), [
+      composerRow(OLD, { created: old - MIN, updated: old, agentic: true, model: CU_SONNET, headers: [cuSid("o1"), cuSid("o2")] }),
+      userRow(OLD, "o1", old - 30_000, `${CANARY.prompt} an old question`),
+      toolRow(OLD, "o2", old - 20_000, { name: "read_file" }, { model: CU_GPT, thinkingMs: 400 }),
+      composerRow(NEW, { created: recent, updated: recent + MIN, model: CU_SONNET, headers: [cuSid("n1"), cuSid("n2")] }),
+      userRow(NEW, "n1", recent, "A recent question"),
+      toolRow(NEW, "n2", recent + 1_000, { name: "read_file" }, { model: CU_GPT }),
+      composerRow(EMPTY, { created: old, updated: old }),
+    ]);
+    return { old, recent };
+  }
+
+  test("outside the window: a lifetime session from the composer alone, its bubbles never queried; inside: full detail", async () => {
+    const { old, recent } = store();
+    const sql = observe();
+    const r = await run([cuIde]);
+    __observeQueries(undefined);
+    expect(r.store.session(sidOf(OLD))).toMatchObject({
+      window: "lifetime", origin: "human", surface: "agent", start: old - MIN, end: old, models: [CU_SONNET],
+    });
+    for (const k of ["prompt", "tool", "turn", "marker"] as const) expect(r.store.forSession(sidOf(OLD), k)).toEqual([]);
+    expect(r.store.session(sidOf(NEW))).toMatchObject({ window: "detail", start: recent, end: recent + MIN, models: [CU_SONNET, CU_GPT] });
+    expect([r.store.forSession(sidOf(NEW), "prompt").length, toolsOf(r, NEW).length]).toEqual([1, 1]);
+    expect(r.store.session(sidOf(EMPTY))).toBeUndefined();
+    expect(sql.filter(isBubbleQuery)).toHaveLength(1); // the recent composer's range only
+    const cov = covOf(r, "cursor.ide");
+    expect(cov.skipped).toEqual({ "outside-window": 1, "empty-session": 1 });
+    expect(cov.records).toBe(3 + 2);
+    expectNoCanaries([...allEvents(r), r.coverage]);
+  });
+
+  test("--since replaces the 90 days: an earlier since brings the old composer into detail, a later one moves the recent one out", async () => {
+    const { old } = store();
+    let r = await scan({ env: h.env, plugins: [cuIde], since: old - 10 * DAY });
+    expect([r.store.session(sidOf(OLD))!.window, r.store.session(sidOf(NEW))!.window]).toEqual(["detail", "detail"]);
+    expect(r.store.forSession(sidOf(OLD), "prompt")).toHaveLength(1);
+    expect(r.store.forSession(sidOf(OLD), "turn").map((t) => t.ms)).toEqual([400]);
+    expect(covOf(r, "cursor.ide").skipped).toEqual({ "empty-session": 1 });
+    r = await scan({ env: h.env, plugins: [cuIde], since: Date.now() - DAY });
+    expect([r.store.session(sidOf(OLD))!.window, r.store.session(sidOf(NEW))!.window]).toEqual(["lifetime", "lifetime"]);
+    expect(allEvents(r).filter((e) => e.k !== "session")).toEqual([]);
+    expect(covOf(r, "cursor.ide").skipped).toEqual({ "outside-window": 2, "empty-session": 1 });
+  });
+
+  test("a composer of unknown age is read as if inside the window", async () => {
+    const at = fixtureStart();
+    writeStateDb(h, globalRel(h), [composerRow(A, { headers: [cuSid("u")] }), userRow(A, "u", at, "When was this?")]);
+    const r = await run([cuIde]);
+    expect(r.store.session(sidOf(A))).toMatchObject({ window: "detail", start: at, end: at });
+    expect(r.store.all("prompt")).toHaveLength(1);
   });
 });
 
@@ -482,23 +602,69 @@ describe("cursor ide: legacy ItemTable fallback", () => {
 describe("cursor ide: stores that cannot be read", () => {
   const t0 = () => fixtureStart();
 
-  test("a WITHOUT ROWID cursorDiskKV cannot be paged: drift table-unreadable, never paged, no legacy fallback", async () => {
-    writeStateDb(h, globalRel(h), [composerRow(A, { created: t0(), updated: t0() })], AUTH_ITEMS,
+  test("a WITHOUT ROWID cursorDiskKV keyed by key is read by its primary key, like the usual table", async () => {
+    const at = t0();
+    writeStateDb(h, globalRel(h), [composerRow(A, { created: at, updated: at }), userRow(A, "x", at, "Hello")], AUTH_ITEMS,
       { kvDdl: "CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value BLOB) WITHOUT ROWID" });
+    const r = await run([cuIde]);
+    expect(r.store.all("prompt")).toHaveLength(1);
+    expect(covOf(r, "cursor.ide")).toMatchObject({ status: "ok", unknownTypes: {} });
+  });
+
+  test("without a key index and without rowids (WITHOUT ROWID, another primary key) the table cannot be paged: drift, no legacy fallback", async () => {
+    writeStateDb(h, globalRel(h), [composerRow(A, { created: t0(), updated: t0() })], AUTH_ITEMS,
+      { kvDdl: "CREATE TABLE cursorDiskKV (key TEXT, value BLOB, PRIMARY KEY (key, value)) WITHOUT ROWID" });
     const sql = observe();
     const r = await run([cuIde]);
     __observeQueries(undefined);
     expect(kvQueries(sql)).toEqual([]);
     expect(sql.some((s) => /ItemTable/.test(s))).toBe(false);
     const cov = covOf(r, "cursor.ide");
-    expect([cov.status, cov.skipped, cov.unknownTypes]).toEqual(["drift", {}, { "table-unreadable:cursorDiskKV": 1 }]);
+    expect([cov.status, cov.skipped, cov.unknownTypes]).toEqual(["drift", {}, { "no-key-index:cursorDiskKV": 1, "table-unreadable:cursorDiskKV": 1 }]);
     expect(r.warnings.some((w) => w.code === "drift" && w.source === "cursor.ide")).toBe(true);
+  });
+
+  test("without a key index (no index, a case-folding or a partial one): one rowid scan per key family, prefix-filtered — drift no-key-index", async () => {
+    const at = t0();
+    const old = Date.now() - 100 * DAY;
+    const kvRows: Row[] = [
+      composerRow(A, { created: at, updated: at + MIN, agentic: true }),
+      userRow(A, "u1", at + 1_000, "Explain the parser"),
+      toolRow(A, "t1", at + 2_000, { name: "run_terminal_cmd", params: { command: "pytest -q" }, decision: "rejected" }),
+      userRow(A, "u2", at + 3_000, "And the lexer?"),
+      userRow(cuSid("gone"), "o1", at, `${CANARY.prompt} of a deleted chat`),
+      [`bubbleId:${A}`, bubble("x", { type: 1, ts: at, text: CANARY.prompt })],
+      composerRow(B, { created: old, updated: old, headers: [cuSid("b1")] }),
+      userRow(B, "b1", old, `${CANARY.prompt} long ago`),
+    ];
+    for (const [variant, kvDdl] of [
+      ["none", "CREATE TABLE cursorDiskKV (key TEXT, value BLOB)"],
+      ["nocase", "CREATE TABLE cursorDiskKV (key TEXT, value BLOB); CREATE UNIQUE INDEX kv_key ON cursorDiskKV (key COLLATE NOCASE)"],
+      ["partial", "CREATE TABLE cursorDiskKV (key TEXT, value BLOB); CREATE UNIQUE INDEX kv_key ON cursorDiskKV (key) WHERE key IS NOT NULL"],
+    ] as const) {
+      h.cleanup();
+      h = fakeHome();
+      writeStateDb(h, globalRel(h), kvRows, [], { kvDdl });
+      const sql = observe();
+      const r = await run([cuIde]);
+      __observeQueries(undefined);
+      const kv = kvQueries(sql);
+      expect([variant, kv.length]).toEqual([variant, 2]);
+      for (const s of kv) expect(s).toMatch(/ FROM cursorDiskKV WHERE key LIKE '(composerData|bubbleId):%' AND rowid > \? ORDER BY rowid LIMIT \?\)/);
+      expect(r.store.all("session").map((s) => [s.id, s.window, s.surface]).sort()).toEqual([[sidOf(A), "detail", "agent"], [sidOf(B), "lifetime", "chat"]].sort());
+      expect(byTime(r.store.all("prompt")).map((p) => [p.ts - at, p.features.isTaskStart])).toEqual([[1_000, true], [3_000, false]]);
+      expect(r.store.all("tool").map((t) => [t.category, t.ok])).toEqual([["test", false]]);
+      expect(r.store.all("marker").map((m) => m.kind)).toEqual(["denial"]);
+      const cov = covOf(r, "cursor.ide");
+      expect([cov.status, cov.unknownTypes, cov.skipped]).toEqual(["drift", { "no-key-index:cursorDiskKV": 1 }, { orphan: 1, "bad-record": 1, "outside-window": 1 }]);
+      expectNoCanaries([...allEvents(r), r.coverage, r.warnings]);
+    }
   });
 
   test("a first page that fails for good is drift table-unreadable; a busy page is an io-error; neither falls back to ItemTable", async () => {
     const at = t0();
     writeStateDb(h, globalRel(h), [composerRow(A, { created: at, updated: at }), userRow(A, "x", at, "Hello")], AUTH_ITEMS);
-    __observeQueries((s) => { if (s.includes("'composerData:%'")) throw new Error("no such function: json_valid"); });
+    __observeQueries((s) => { if (isComposerQuery(s)) throw new Error("no such function: json_valid"); });
     let r = await run([cuIde]);
     __observeQueries(undefined);
     let cov = covOf(r, "cursor.ide");
@@ -508,7 +674,7 @@ describe("cursor ide: stores that cannot be read", () => {
     const sql: string[] = [];
     __observeQueries((s) => {
       sql.push(s);
-      if (s.includes("'bubbleId:%'")) throw new Error("database is locked");
+      if (isBubbleQuery(s)) throw new Error("database is locked");
     });
     r = await run([cuIde]);
     __observeQueries(undefined);
