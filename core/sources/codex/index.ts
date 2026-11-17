@@ -21,7 +21,7 @@ export const cxRollouts: SourcePlugin = {
     neverReads: [
       "prompt, reply, tool input and output, command and patch text are parsed in memory for counts and never kept",
       "reasoning, tool outputs, developer and assistant messages, world state, per-response token records and image-generation results are skipped before parsing",
-      "base instructions, AGENTS.md and environment context, agent nicknames and paths, git remotes and commit hashes",
+      "base instructions, AGENTS.md and environment context, agent nicknames and paths, git remotes and commit hashes are parsed in memory and never kept",
     ],
   },
   locate: codexRoots,

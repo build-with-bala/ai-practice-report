@@ -9,6 +9,11 @@ const BARE_BUILD = new Set(["webpack", "esbuild", "rollup"]);
 const BARE_LINT = new Set(["eslint", "flake8", "pylint", "golangci-lint", "stylelint", "shellcheck", "rubocop", "ktlint", "swiftlint", "markdownlint", "hadolint", "phpcs", "ruff"]);
 const BARE_TYPECHECK = new Set(["mypy", "pyright", "svelte-check", "phpstan", "psalm"]);
 const SUB_BUILD_TOOLS = new Set(["vite", "next", "nuxt", "astro"]);
+/** Commands that only search or only read files; they rank behind every other category in the same command line. */
+const SEARCH = new Set(["rg", "grep", "ag", "ack", "fd", "find"]);
+const READ = new Set(["cat", "head", "tail", "less", "more", "bat", "wc", "nl", "stat", "ls", "tree"]);
+/** `find` actions that delete files or run commands: such a find is not a search. */
+const FIND_ACTIONS = /^-(?:delete|exec|execdir|ok|okdir)$/;
 
 const CATEGORY_BY_CMD: Record<string, ToolCategory> = {
   git: "git", gh: "git",
@@ -163,14 +168,22 @@ function categoryOf(cmd: string, args: string[]): ToolCategory | undefined {
   return CATEGORY_BY_CMD[cmd];
 }
 
+/** `read` or `search` for a command that only reads or searches files; undefined otherwise. */
+function passiveOf(cmd: string, args: string[]): ToolCategory | undefined {
+  if (cmd === "find") return args.some((a) => FIND_ACTIONS.test(a)) ? undefined : "search";
+  return SEARCH.has(cmd) ? "search" : READ.has(cmd) ? "read" : undefined;
+}
+
 export function classifyCommand(cmd: string): { category: ToolCategory; checks: CheckKind[] } {
   const checks: CheckKind[] = [];
   let category: ToolCategory | undefined;
+  let passive: ToolCategory | undefined;
   for (const raw of blankQuotes(cmd).split(/&&|\|\||;|\||\n/)) {
     const [c, args] = commandOf(raw.trim().split(/\s+/).filter(Boolean));
     if (!c) continue;
     for (const k of [...checksOf(c, args), ...extraChecks(c, args)]) if (!checks.includes(k)) checks.push(k);
     category ??= categoryOf(c, args);
+    passive ??= passiveOf(c, args);
   }
-  return { category: checks[0] ?? category ?? "shell", checks };
+  return { category: checks[0] ?? category ?? passive ?? "shell", checks };
 }

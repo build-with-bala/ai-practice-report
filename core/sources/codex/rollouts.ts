@@ -100,6 +100,8 @@ const ROLLOUT_FILE = /^rollout-.*\.jsonl$/;
 const FILE_TS = /^rollout-(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})/;
 const FILE_ID = /-([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\.jsonl$/;
 const SURFACE = /^[a-z][a-z0-9_-]{0,31}$/;
+/** A rate-limit bucket id (`rate_limits.limit_id`) is kept when it has this shape, else it becomes `other`. */
+const BUCKET = /^[a-z][a-z0-9_-]{0,31}$/;
 /** The CLI's reasoning effort levels (ReasoningEffort, 0.169). */
 const EFFORTS: ReadonlySet<string> = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
 const ABORT_REASONS: ReadonlySet<string> = new Set(["interrupted", "replaced", "review_ended", "budget_limited"]);
@@ -108,19 +110,30 @@ const BUILTIN_ROLES: ReadonlySet<string> = new Set(["default", "explorer", "awai
 const MIN_RESET_MS = Date.UTC(2015, 0, 1);
 const MAX_RESET_AHEAD_MS = 400 * 86_400_000;
 
-/** User-role messages the CLI writes itself (context, instructions, notices, skill bodies, `!` shell output): never prompts. */
-const INJECTED = [
-  "<environment_context", "<user_instructions", "<recommended_plugins", "<image", "<codex_internal_context", "<turn_aborted",
-  "# AGENTS.md", "<skill", "<user_shell_command", "<subagent_notification",
+/**
+ * Start markers of user-role messages the CLI writes itself — context, instructions, notices, skill bodies, `!` shell
+ * output, review results — which are never prompts. A marker matches only as a whole tag (`<skill>`, `<skill …`), so a
+ * prompt that starts with `<skills…` is still a prompt. The last group are CLI notices whose role is not confirmed; a
+ * person does not type them.
+ */
+const INJECTED_TAGS = [
+  "environment_context", "user_instructions", "recommended_plugins", "image", "codex_internal_context", "turn_aborted", "skill",
+  "user_shell_command", "subagent_notification", "user_action", "realtime_delegation",
+  "current_time_reminder", "current_time_unavailable", "agent_message_board_notification", "EXTERNAL SESSION IMPORTED",
 ];
+const INJECTED = new RegExp(`^(?:<(?:${INJECTED_TAGS.join("|")})(?=[\\s>/]|$)|# AGENTS\\.md(?=\\s|$))`);
 /** A person's reply to a question the agent sent them, wrapped by the CLI. */
 const QUESTION_REPLY = "send_user_message_question_reply";
-/** An input_text part that is only an attached image's wrapper tag (`<image name=[Image #1]>`, `</image>`). */
-const IMAGE_TAG = /^\s*(?:<image\b[^>]*>\s*(?:<\/image>)?|<\/image>)\s*$/;
+/**
+ * An input_text part the CLI adds around an attached image: its wrapper tags (`<image name=[Image #1]>`, `</image>`) or a
+ * notice that the image was resized.
+ */
+const ATTACHMENT_PART = /^\s*(?:<image\b[^>]*>\s*(?:<\/image>)?|<\/image>|<image_resize_notice>[\s\S]*<\/image_resize_notice>)\s*$/;
+const RESIZE_NOTICES = /^\s*(?:<image_resize_notice>[\s\S]*?<\/image_resize_notice>\s*)+/;
 
 /**
  * The person's text in a user-role message's content, or undefined when the CLI wrote the message itself. Input text parts
- * are joined with "\n" after dropping attached images' wrapper tags; a question reply is unwrapped.
+ * are joined with "\n" after dropping attached images' wrapper parts and resize notices; a question reply is unwrapped.
  */
 function promptText(content: unknown): { text: string; images: boolean } | undefined {
   const texts: string[] = [];
@@ -130,12 +143,12 @@ function promptText(content: unknown): { text: string; images: boolean } | undef
     for (const c of content) {
       if (!isObj(c)) continue;
       if (c.type === "input_image") images = true;
-      else if (c.type === "input_text" && typeof c.text === "string" && !IMAGE_TAG.test(c.text)) texts.push(c.text);
+      else if (c.type === "input_text" && typeof c.text === "string" && !ATTACHMENT_PART.test(c.text)) texts.push(c.text);
     }
   }
-  let text = texts.join("\n");
+  let text = texts.join("\n").replace(RESIZE_NOTICES, "");
   const lead = text.trimStart();
-  if (INJECTED.some((tag) => lead.startsWith(tag))) return undefined;
+  if (INJECTED.test(lead)) return undefined;
   if (lead.startsWith(`<${QUESTION_REPLY}>`)) {
     const inner = lead.slice(QUESTION_REPLY.length + 2);
     const end = inner.lastIndexOf(`</${QUESTION_REPLY}>`);
@@ -166,7 +179,8 @@ function resetTime(x: Obj, ts: number): number | undefined {
 }
 
 interface Turn { model?: string; effort?: string; start?: number }
-interface Meta { origin: Origin; cwd?: string; surface?: string; version?: string; parentId?: string; spawnDepth?: number; agentType?: string; inRepo: boolean }
+/** `subagent`: the thread's source is a subagent one, whatever its final origin. */
+interface Meta { origin: Origin; subagent: boolean; cwd?: string; surface?: string; version?: string; parentId?: string; spawnDepth?: number; agentType?: string; inRepo: boolean }
 
 /** Streams one rollout and turns its lines into events, keeping only small per-file state. */
 class RolloutReader {
@@ -226,8 +240,12 @@ class RolloutReader {
       return;
     }
     if (type === "session_meta") return this.sessionMeta(v);
-    // a forked subagent rollout starts with history copied from its parent: those lines come before the history-start ordinal
-    if (this.historyStart !== undefined && typeof v.ordinal === "number" && v.ordinal < this.historyStart) return;
+    // a fork (subagents) starts with history copied from its parent: those lines come before the history-start ordinal.
+    // They yield nothing, but the token totals and rate limits they reach are what the thread's own counts continue from.
+    if (this.historyStart !== undefined && typeof v.ordinal === "number" && v.ordinal < this.historyStart) {
+      if (type === "event_msg" && isObj(v.payload) && v.payload.type === "token_count") this.tokenCount(v.payload, toEpochMs(v.timestamp, this.ctx.now), false);
+      return;
+    }
     const ts = toEpochMs(v.timestamp, this.ctx.now);
     if (ts !== undefined) this.tick(ts);
     const p = isObj(v.payload) ? v.payload : undefined;
@@ -257,7 +275,7 @@ class RolloutReader {
     const ts = toEpochMs(v.timestamp, this.ctx.now);
     if (ts !== undefined) this.tick(ts);
 
-    const meta: Meta = { origin: "human", inRepo: !!p.git };
+    const meta: Meta = { origin: "human", subagent: false, inRepo: !!p.git };
     const source = p.source;
     if (typeof source === "string") {
       // `codex exec` is a script; through its MCP server, Codex is driven by another client or agent
@@ -265,6 +283,7 @@ class RolloutReader {
       meta.surface = SURFACE.test(source) ? source : "other";
     } else if (isObj(source) && "subagent" in source) {
       meta.origin = "subagent";
+      meta.subagent = true;
       meta.surface = "subagent";
       const spawn = isObj(source.subagent) && isObj(source.subagent.thread_spawn) ? source.subagent.thread_spawn : undefined;
       const parent = str(spawn?.parent_thread_id) ?? str(p.parent_thread_id);
@@ -277,7 +296,8 @@ class RolloutReader {
       this.tally.unknownKey("session_meta.source:shape");
       meta.surface = "other";
     }
-    if (p.originator === "Claude Code") meta.origin = "peer"; // Codex driven by another agent
+    // Codex driven by another agent — except its subagents, which inherit the originator and stay subagents
+    if (p.originator === "Claude Code" && !meta.subagent) meta.origin = "peer";
     const version = str(p.cli_version);
     if (version !== undefined && VERSION.test(version)) {
       meta.version = version;
@@ -329,7 +349,7 @@ class RolloutReader {
   }
 
   private userMessage(p: Obj, ts: number | undefined): void {
-    if (this.origin === "subagent" || ts === undefined) return; // a subagent's user messages are its parent's briefs
+    if (this.meta?.subagent || ts === undefined) return; // a subagent's user messages are its parent's briefs
     const found = promptText(p.content);
     if (!found) return;
     const { text, images } = found;
@@ -421,32 +441,57 @@ class RolloutReader {
       this.tally.unknownKey("item:(other)"); // item tags are PascalCase, like names, so they are never copied
       return;
     }
+    if (this.foreign(p.thread_id) || (item.type === "CollabAgentToolCall" && this.foreign(item.sender_thread_id))) {
+      this.tally.skip("foreign-item");
+      return;
+    }
     const id = str(item.id);
     const outcome = cxOutcome(item);
+    // input sent to a command that is already running: never a command of its own
+    const interaction = item.type === "CommandExecution" && item.source === "unified_exec_interaction";
     const waiting = id === undefined ? undefined : this.pending.get(id);
     if (waiting) {
       this.pending.delete(id!);
       this.finished(id!);
-      const [exec] = item.type === "CommandExecution" && waiting.length === 1 ? cxToolCalls(item) : [];
+      // the command that ran decides a linked shell call's category and checks (the call may not have named it);
+      // input sent to a running command, like a command the person ran, names no command of its own
+      const [ran] = item.type === "CommandExecution" && waiting.length === 1 ? cxToolCalls(item) : [];
       for (const ev of waiting) {
-        if (exec && ev.category === "shell") ev.category = exec.category; // the CLI's parse of the command that ran
+        if (ran && ev.category === "shell") {
+          ev.category = ran.category;
+          if (ran.checks.length > 0) ev.checks = ran.checks;
+        }
         RolloutReader.apply(ev, outcome);
         this.out(ev);
       }
       return;
     }
     if (id !== undefined && this.done.has(id)) return;
+    if (interaction) {
+      this.tally.skip("exec-interaction");
+      return;
+    }
+    const calls = cxToolCalls(item);
     const at = toEpochMs(p.started_at_ms, this.ctx.now) ?? ts ?? this.clock;
-    if (at === undefined) return;
-    for (const c of cxToolCalls(item)) {
+    if (calls.length === 0 || at === undefined) return;
+    for (const c of calls) {
       const ev = this.toolEv(c, at, id);
       RolloutReader.apply(ev, outcome);
       this.out(ev);
     }
+    if (id !== undefined) this.finished(id); // the same item again, or its call arriving after it, is not counted twice
   }
 
-  /** Usage of the last model response (never the running totals), once per change of the totals; rate limits per window. */
-  private tokenCount(p: Obj, ts: number | undefined): void {
+  /** A thread id that is present and is not this rollout's own. */
+  private foreign(threadId: unknown): boolean {
+    return typeof threadId === "string" && this.rawId !== undefined && threadId !== this.rawId;
+  }
+
+  /**
+   * Usage of the last model response (never the running totals), once per change of the totals; rate limits per bucket
+   * and window. With `emit` false (copied history) only the baselines move.
+   */
+  private tokenCount(p: Obj, ts: number | undefined, emit = true): void {
     if (ts === undefined) return;
     const info = isObj(p.info) ? p.info : undefined;
     const last = info && isObj(info.last_token_usage) ? info.last_token_usage : undefined;
@@ -456,18 +501,23 @@ class RolloutReader {
         this.lastTotals = key;
         const n = (v: unknown) => Math.max(0, num(v) ?? 0);
         const cached = n(last.cached_input_tokens);
-        this.out({
-          k: "usage", tool: TOOL, source: ROLLOUTS_SOURCE, ts, sessionId: this.sessionId, model: this.model ?? "other",
-          inTok: Math.max(0, n(last.input_tokens) - cached), outTok: n(last.output_tokens), cacheR: cached, cacheW: n(last.cache_write_input_tokens),
-        });
+        if (emit) {
+          this.out({
+            k: "usage", tool: TOOL, source: ROLLOUTS_SOURCE, ts, sessionId: this.sessionId, model: this.model ?? "other",
+            inTok: Math.max(0, n(last.input_tokens) - cached), outTok: n(last.output_tokens), cacheR: cached, cacheW: n(last.cache_write_input_tokens),
+          });
+        }
       }
     }
     const limits = isObj(p.rate_limits) ? p.rate_limits : undefined;
-    if (limits) for (const window of ["primary", "secondary"] as const) this.rateLimit(window, limits[window], ts);
+    if (!limits) return;
+    const id = str(limits.limit_id);
+    const bucket = id === undefined ? undefined : BUCKET.test(id) ? id : "other";
+    for (const window of ["primary", "secondary"] as const) this.rateLimit(bucket, window, limits[window], ts, emit);
   }
 
-  /** One RateLimitEv per window present; a snapshot equal to that window's previous one is not repeated. */
-  private rateLimit(window: "primary" | "secondary", x: unknown, ts: number): void {
+  /** One RateLimitEv per window present; a snapshot equal to the previous one of its bucket and window is not repeated. */
+  private rateLimit(bucket: string | undefined, window: "primary" | "secondary", x: unknown, ts: number, emit: boolean): void {
     const used = isObj(x) ? num(x.used_percent) : undefined;
     if (!isObj(x) || used === undefined) return;
     const ev: RateLimitEv = { k: "ratelimit", tool: TOOL, source: ROLLOUTS_SOURCE, ts, window, usedPercent: used };
@@ -475,10 +525,12 @@ class RolloutReader {
     if (minutes !== undefined) ev.windowMinutes = minutes;
     const resets = resetTime(x, ts);
     if (resets !== undefined) ev.resetsAt = resets;
+    if (bucket !== undefined) ev.bucket = bucket;
+    const slot = `${bucket ?? ""}|${window}`;
     const key = `${used}|${minutes}|${resets}`;
-    if (this.lastRate.get(window) === key) return;
-    this.lastRate.set(window, key);
-    this.out(ev);
+    if (this.lastRate.get(slot) === key) return;
+    this.lastRate.set(slot, key);
+    if (emit) this.out(ev);
   }
 
   private endTurn(p: Obj, ts: number | undefined, status: "completed" | "interrupted"): void {

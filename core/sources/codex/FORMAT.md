@@ -58,7 +58,10 @@ roles are `default`, `explorer`, `awaiter` (CLI program); any other role comes f
 **Forked history.** A subagent that inherits its parent's context starts its rollout with its own `session_meta`
 (ordinal 0), then a copy of the parent's history — including the parent's `session_meta` (another id), turn contexts,
 user messages, tool calls, turn ends — and only then its own lines, from ordinal `subagent_history_start_ordinal` on
-(verified locally). A fork without that field carries no copied lines.
+(verified locally). Other forks (`forked_from_id` with a string source) copy nothing: with `history_mode: "paginated"`
+their `history_base` {`thread_id`, `end_ordinal_exclusive`, `end_byte_offset`} points into the parent's rollout, and
+`forked_from_ordinal_exclusive` names the fork point there (verified locally). `history_mode` is `legacy` for rollouts
+without ordinals, else `paginated` (verified locally).
 
 ### `turn_context.payload`
 
@@ -85,13 +88,28 @@ Other payload types are drift: `response_item:<type>`.
 **User message content** parts: `{type: "input_text", text}`, `{type: "input_image", image_url}`. The CLI writes
 context and notices as user-role messages of their own (verified locally unless marked):
 `<environment_context>`, `# AGENTS.md instructions for <dir>` + `<INSTRUCTIONS>`, `<recommended_plugins>`,
-`<codex_internal_context source=…>`, `<turn_aborted>`, `<skill>` (the body of a skill the person named),
-`<user_shell_command>` (a command the person ran with `!` and its output), `<user_instructions>` (older CLIs;
-CLI program), `<subagent_notification>` (CLI program). An attached image is written as the parts
-`<image name=[Image #n]>`, the image, `</image>`, followed by the person's text. A reply the person types to a
-question the agent sent them is wrapped in `<send_user_message_question_reply>…</send_user_message_question_reply>`.
-The CLI also records each actual user input separately: as an `item_completed` `UserMessage` item (newer CLIs) or an
-`event_msg` `user_message` (older ones).
+`<codex_internal_context source=…>` (goal context; the `<objective>`/`<untrusted_objective>` blocks of the goal
+templates sit inside it), `<turn_aborted>`, `<skill>` (the body of a skill the person named), `<user_shell_command>` (a
+command the person ran with `!` and its output); CLI program: `<user_instructions>` (older CLIs),
+`<subagent_notification>`, `<user_action>` (the results of `/review`, completed or interrupted),
+`<realtime_delegation>` (a request the realtime voice conversation hands to Codex). The CLI also defines
+`<current_time_reminder>`, `<current_time_unavailable>`, `<agent_message_board_notification>` and an
+`<EXTERNAL SESSION IMPORTED>` marker for imported sessions, whose role is not confirmed. An attached image is written as
+the parts `<image name=[Image #n]>`, the image, `</image>`, followed by the person's text; a resized image adds an
+`<image_resize_notice>…</image_resize_notice>` part (CLI program). A reply the person types to a question the agent
+sent them is wrapped in `<send_user_message_question_reply>…</send_user_message_question_reply>`. The CLI also records
+each actual user input separately: as an `item_completed` `UserMessage` item (newer CLIs) or an `event_msg`
+`user_message` (older ones). Newer CLIs tag every part with a provenance
+(`internal_chat_message_metadata_passthrough.content_item_metadata[].provenance.type`: `user`, `harness`, `agents_md`,
+`skills`, `developer_instructions`, …); the context messages above carry `harness`/`agents_md`, the person's text
+`user` (verified locally; not read, older rollouts lack it).
+
+Developer-role, never a user message (verified locally unless marked): `<permissions instructions>`,
+`<collaboration_mode>`, `<multi_agent_mode>`, `<multi_agent_role>`, `<model_switch>`, `<skills_instructions>`,
+`<plugins_instructions>`, `<apps_instructions>`, `<tools>`, `<model_instructions>`; CLI program:
+`<environments_instructions>`, `<realtime_conversation>`, `<side_conversation>`, `<personality_spec>`, … .
+`<turn_aborted>` and `<recommended_plugins>` are written into developer messages too (verified locally).
+`<proposed_plan>` is the format of the assistant's plan (CLI program).
 
 **Code Mode.** Current CLIs give the model one free-form tool, `custom_tool_call` named `exec`, whose `input` is
 JavaScript run in a V8 isolate (an optional first-line pragma `// @exec: {"yield_time_ms": …}`); the script calls the
@@ -166,22 +184,29 @@ CLI's EventMsg tags (`exec_command_end`, `mcp_tool_call_end`, `collab_*`, `realt
   driven by another client or agent) → peer; `{subagent: …}` → subagent (`parentId` from
   `thread_spawn.parent_thread_id`, else `parent_thread_id`; `spawnDepth` = `depth`; `agentType` = the role when
   built in, else its keyed hash); any other string, or no source → human; `originator` exactly `Claude Code` → peer,
-  whatever the source. `surface` = the source string (lower-case token, else `other`) or `subagent`; `version` =
-  `cli_version`; `projectKey` from `cwd`; `inRepo` = `git` present; `models` = distinct `turn_context` models;
-  `start`/`end` = first/last own line time. A source object without `subagent` is drift `session_meta.source:shape`.
-- **Forked history is skipped**: lines with `ordinal` below `subagent_history_start_ordinal` (copied from the parent)
-  yield nothing, so the parent's prompts, tools, turns and usage are not counted twice.
-- **PromptEv** for user-role messages of non-subagent threads (a subagent's user messages are its parent's briefs),
-  origin = the session's: input text parts joined with "\n" after dropping attached images' `<image …>`/`</image>`
-  wrapper parts; a message whose text starts (after whitespace) with `<environment_context`, `<user_instructions`,
-  `<recommended_plugins`, `<image`, `<codex_internal_context`, `<turn_aborted`, `# AGENTS.md`, `<skill`,
-  `<user_shell_command` or `<subagent_notification` is not a prompt; `<send_user_message_question_reply>` is unwrapped
-  to the reply. `hasPaste` = the message attaches images. Intent, features and `textHash` (keyed hash of the trimmed
-  text) as for Claude Code; `isTaskStart` = first human prompt or ≥ 30 min since the thread's last line.
+  whatever the string source (a subagent source wins: its subagents inherit the originator and stay subagents).
+  `surface` = the source string (lower-case token, else `other`) or `subagent`; `version` = `cli_version`;
+  `projectKey` from `cwd`; `inRepo` = `git` present; `models` = distinct `turn_context` models; `start`/`end` =
+  first/last own line time. A source object without `subagent` is drift `session_meta.source:shape`.
+- **Copied history is skipped**: lines with `ordinal` below `subagent_history_start_ordinal` — whatever the source —
+  yield nothing, so the parent's prompts, tools, turns and usage are not counted twice; the token totals and rate
+  limits they reach are the baselines the thread's own `token_count`s are compared with, so the fork point's re-emitted
+  count is not new usage. Paginated forks reference their parent's history (`history_base`) and copy nothing.
+- **PromptEv** for user-role messages of threads whose source is not a subagent one (a subagent's user messages are
+  its parent's briefs), origin = the session's: input text parts joined with "\n" after dropping attached images'
+  `<image …>`/`</image>` wrapper parts and `<image_resize_notice>` notices; a message whose text starts (after
+  whitespace) with the whole tag `<environment_context`, `<user_instructions`, `<recommended_plugins`, `<image`,
+  `<codex_internal_context`, `<turn_aborted`, `<skill`, `<user_shell_command`, `<subagent_notification`,
+  `<user_action`, `<realtime_delegation`, `<current_time_reminder`, `<current_time_unavailable`,
+  `<agent_message_board_notification` or `<EXTERNAL SESSION IMPORTED` (followed by whitespace, `>`, `/` or the end), or
+  with `# AGENTS.md`, is not a prompt — `<skills…` or `<image_…` text is; `<send_user_message_question_reply>` is
+  unwrapped to the reply. `hasPaste` = the message attaches images. Intent, features and `textHash` (keyed hash of the
+  trimmed text) as for Claude Code; `isTaskStart` = first human prompt or ≥ 30 min since the thread's last line.
 - **ToolEv** (`cxToolCalls`), one per call, or per file for apply_patch:
   - shell tools (`exec_command`, `shell`, `shell_command`, `local_shell`): `classifyCommand` of the command line (a
-    `[<shell>, -c…, <script>]` argv is unwrapped to the script); a result of plain `shell` becomes `read` (every
-    `parsed_cmd` entry `read`) or `search` (every entry `read`, `list_files` or `search`).
+    `[<shell>, -c…, <script>]` argv is unwrapped to the script), as for Claude Code's shell tools; it recognises
+    reading (`cat`, `head`, `tail`, `ls`, …) and searching (`rg`, `grep`, `find`, …) behind every other category.
+    `parsed_cmd` is not read.
   - `apply_patch` → `edit` per file, `editExt` from the path, `linesAdded`/`linesRemoved` from the file's `+`/`-` lines;
     `FileChange` items → the same per changed file (update: the diff's lines; add/delete: the content's lines).
   - `update_plan` → plan; `view_image`/`ImageView` → read; `web_search_call`, `web_search`, the `web` namespace and
@@ -192,23 +217,30 @@ CLI's EventMsg tags (`exec_command_end`, `mcp_tool_call_end`, `collab_*`, `realt
   - Code Mode `exec` cells and their `wait` resumptions are not tool events: the nested calls are, from their items.
     Commands the person ran (`source: user_shell`) are not tool events.
   - A call waits for the item with its `call_id`: `ok` = exit code 0 (else from `status`), `exit`, `ms` from
-    `duration`; a linked command's category is re-derived from the command that ran. Items without such a call are
-    their own events, timed by `started_at_ms`. Calls no item completes are emitted at the end of the file.
+    `duration`; a linked shell call that classified as plain `shell` takes the category and checks of the command that
+    ran. Items without such a call are their own events, timed by `started_at_ms`; an item id is counted once, so the
+    same item again, or its call arriving after it, adds nothing. Calls no item completes are emitted at the end of
+    the file.
+  - Input sent to a running command (`CommandExecution` with `source: unified_exec_interaction`) never makes a command
+    event: it completes the call with its id, else it is skipped (`exec-interaction`).
+  - An item recorded for another thread (`item_completed.thread_id`, or a `CollabAgentToolCall`'s `sender_thread_id`,
+    present and not this rollout's thread id) is not this session's: skipped (`foreign-item`).
 - **TurnEv** at `task_complete` (completed) and `turn_aborted` (interrupted): model and effort of the turn's
   `turn_context` (effort outside the CLI's levels → `other`; model strings not id-shaped → `other`), `ms` =
   `duration_ms`, else the time since the turn's `task_started`.
 - **UsageEv** per `token_count` whose `total_token_usage` changed since the previous one, from `last_token_usage`:
   `inTok` = input − cached, `cacheR` = cached, `cacheW` = cache-write, `outTok` = output; model = the turn's.
 - **RateLimitEv** per window (`primary`, `secondary`) present with a numeric `used_percent`: `windowMinutes`,
-  `resetsAt` (`resets_at` in s or ms, else line time + `resets_in_seconds`); a snapshot equal to the window's previous
-  one in the same rollout is not repeated. Rate limits belong to the account: the event has no session.
+  `resetsAt` (`resets_at` in s or ms, else line time + `resets_in_seconds`), `bucket` = `limit_id` when it matches
+  `^[a-z][a-z0-9_-]{0,31}$`, else `other` (absent without one); a snapshot equal to the previous one of its bucket and
+  window in the same rollout is not repeated. Rate limits belong to the account: the event has no session.
 - **MarkerEv**: `interrupt` per `turn_aborted` (`detail` = `interrupted`, `replaced`, `review_ended`,
   `budget_limited`, else `other`); `compact-auto` per `compacted` line.
 - **RolloutFactEv** per fully read rollout: `threadId` = the session id, `uuidTs` = the thread id's UUIDv7 time,
   `fileTs` = the file name's local time; **FileFactEv** likewise.
 - **CoverageEv**: `files`/`bytes` of fully read rollouts, `records` = parsed lines; skipped `sniffed`, `oversize`,
-  `parse`, `io-error`, `duplicate`, `bad-record` (also logged once per root as `warn cx.bad-record`); `versions` =
-  `cli_version`s; `from`/`to` = first/last event time.
+  `parse`, `io-error`, `duplicate`, `foreign-item`, `exec-interaction`, `bad-record` (also logged once per root as
+  `warn cx.bad-record`); `versions` = `cli_version`s; `from`/`to` = first/last event time.
 
 **Dropped before parsing** (from the first 512 bytes): `world_state`, `token_usage_record`; response items
 `reasoning`, `function_call_output`, `custom_tool_call_output`, `tool_search_output`, `agent_message`,
@@ -222,10 +254,12 @@ CLI's EventMsg tags (`exec_command_end`, `mcp_tool_call_end`, `collab_*`, `realt
 - Code Mode calls that complete no item — `write_stdin`, `update_plan` and other tools called from a cell, MCP or
   namespaced tools whose items the CLI does not write, image generations run from a cell (their items are dropped
   before parsing), and cells that fail before calling a tool — are not counted. A cell's own outcome is not read.
-- Commands the CLI's parser marks `unknown` and `classifyCommand` does not recognise (scripts, loops, file operations)
-  stay `shell`.
+- Commands `classifyCommand` does not recognise (scripts, loops, file operations) stay `shell`.
 - `compacted` does not say whether compaction was automatic or asked for; every one is `compact-auto`.
 - Usage deduplication compares a `token_count`'s totals with the previous one in the same rollout.
 - A session's `end` (and the file's `lastTs`) is the time of its last parsed line; lines dropped before parsing do not
   move it.
-- `<image`-led messages are prompts only through the wrapper shape above; any other `<image…` text is treated as injected.
+- `<image`-led messages are prompts only through the wrapper shape above; any other `<image>`/`<image …` text is
+  treated as injected.
+- Prompts in a thread imported from another agent (`<EXTERNAL SESSION IMPORTED>`) beyond its import notice would also
+  be prompts of that agent's own reader; none were seen locally.

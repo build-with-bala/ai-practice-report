@@ -180,26 +180,54 @@ describe("codex rollouts: prompts", () => {
         `<skill>\n<name>${CANARY.project}</name>\n${CANARY.code}\n</skill>`,
         `<user_shell_command>\n<command>ls</command>\n<result>\n${CANARY.secret}\n</result>\n</user_shell_command>`,
         `<subagent_notification>\n{"agent_path":"/root/a","status":"completed"}\n</subagent_notification>`,
+        `<user_action>\n  <context>User initiated a review task. Here's the full review output from reviewer model.</context>\n  <action>review</action>\n  <results>\n  ${CANARY.code}\n  </results>\n  </user_action>`,
+        "<user_action>\n  <context>User initiated a review task, but was interrupted.</context>\n  <action>review</action>\n  <results>\n  None.\n  </results>\n</user_action>",
+        `<realtime_delegation>\n<input>${CANARY.prompt}</input>\n</realtime_delegation>`,
+        "<current_time_reminder>It is now later than you think.</current_time_reminder>",
+        `<agent_message_board_notification>${CANARY.prompt}</agent_message_board_notification>`,
+        `<EXTERNAL SESSION IMPORTED>\n${CANARY.prompt}`,
         `<image name=[Image #1]>${CANARY.secret}</image>`,
+        "<image_resize_notice>\nImage 1 in the preceding user message was resized from 4000x3000 pixels.\n</image_resize_notice>",
         "   ",
       ]) r.user(injected);
       r.user("<image name=[Image #1]>", IMAGE, "</image>", IMAGE, "What is wrong in this screenshot?")
         .user("<image name=[Image #1]>", IMAGE, "</image>")
+        .user("<image name=[Image #2]>", IMAGE, "</image>", "<image_resize_notice>\nImage 2 in the preceding user message was resized from 4000x3000 pixels.\n</image_resize_notice>", "Crop the header")
+        .user("<image name=[Image #3]>", IMAGE, "</image>", "Blur the faces", "<image_resize_notice>\nImage 3 in the preceding user message was resized from 4000x3000 pixels.\n</image_resize_notice>")
         .user("<send_user_message_question_reply>\nUse the second option.\n</send_user_message_question_reply>")
-        .user("<notes>keep both</notes> and refactor the parser", "with tests");
+        .user("<notes>keep both</notes> and refactor the parser", "with tests")
+        .user("<skills-list> renders twice")
+        .user("<image_gallery> needs lazy loading")
+        .user("<user_actions> table is empty");
     });
     r1.write(h);
     const r = await run();
     const prompts = r.store.all("prompt");
     expect(prompts.map((p) => p.textHash)).toEqual([
       keyedHash(r.salt, "What is wrong in this screenshot?"),
+      keyedHash(r.salt, "Crop the header"),
+      keyedHash(r.salt, "Blur the faces"),
       keyedHash(r.salt, "Use the second option."),
       keyedHash(r.salt, "<notes>keep both</notes> and refactor the parser\nwith tests"),
+      keyedHash(r.salt, "<skills-list> renders twice"),
+      keyedHash(r.salt, "<image_gallery> needs lazy loading"),
+      keyedHash(r.salt, "<user_actions> table is empty"),
     ]);
-    expect(prompts.map((p) => p.hasPaste)).toEqual([true, undefined, undefined]);
+    expect(prompts.map((p) => p.hasPaste)).toEqual([true, true, true, undefined, undefined, undefined, undefined, undefined]);
     expect(prompts[0]!.features.hasContext).toBe(true);
-    expect(prompts.map((p) => p.intent)).toEqual(["question", "spec", "spec"]);
+    expect(prompts.map((p) => p.intent)).toEqual(["question", "spec", "spec", "spec", "spec", "spec", "spec", "spec"]);
     expectNoCanaries(allEvents(r));
+  });
+
+  test("a subagent thread stays a subagent with no prompts, even when Claude Code drives Codex", async () => {
+    const parent = "0190f1b2-3c4d-7e5f-8a9b-0c1d2e3f4a5b";
+    const x = rollout((r) => r.user("Look into the importer and report back."), {
+      source: { subagent: { thread_spawn: { parent_thread_id: parent, depth: 1, agent_role: "explorer" } } }, originator: "Claude Code",
+    });
+    x.write(h);
+    const r = await run();
+    expect(r.store.session(sidOf(x.id))).toMatchObject({ origin: "subagent", parentId: sidOf(parent), surface: "subagent" });
+    expect(r.store.all("prompt")).toEqual([]);
   });
 
   test("a new task starts after 30 idle minutes; scripted prompts are never task starts", async () => {
@@ -244,26 +272,77 @@ describe("codex rollouts: prompts", () => {
 });
 
 describe("codex rollouts: tools", () => {
-  test("nested items carry their own outcome, start time and hashed id; commands are classified with the CLI's own parse", async () => {
+  test("nested items carry their own outcome, start time and hashed id; commands are classified by classifyCommand alone", async () => {
     const started = fixtureStart() + 10 * 60_000;
+    const notes = `${CANARY.path}/notes.md`;
     const r1 = rollout((r) => {
-      r.cell("await Promise.all([tools.exec_command({ cmd: 'sed -n 1,80p src/a.ts' }), tools.exec_command({ cmd: 'rg -n foo src' })]);");
-      r.command("sed -n 1,80p src/a.ts", 0, { parsed: [{ type: "read", cmd: "sed -n 1,80p src/a.ts", name: "a.ts", path: "src/a.ts" }], id: "exec-r", startedAt: started })
-        .command("rg -n foo src", 1, { parsed: [{ type: "search", cmd: "rg -n foo src", query: "foo", path: "src" }] })
+      r.cell(`await Promise.all([tools.exec_command({ cmd: "cat ${notes}" }), tools.exec_command({ cmd: "rg -n '${CANARY.prompt}' ${CANARY.path}" })]);`);
+      r.command(`cat ${notes}`, 0, { parsed: [{ type: "read", cmd: `cat ${notes}`, name: CANARY.project, path: notes }], id: "exec-r", startedAt: started })
+        .command(`rg -n '${CANARY.prompt}' ${CANARY.path}`, 1, { parsed: [{ type: "search", cmd: `rg -n '${CANARY.prompt}'`, query: CANARY.prompt, path: CANARY.path }] })
         .command("ls src", 0, { parsed: [{ type: "list_files", cmd: "ls src", path: "src" }] })
+        .command("sed -n 1,80p src/a.ts", 0, { parsed: [{ type: "read", cmd: "sed -n 1,80p src/a.ts", name: "a.ts", path: "src/a.ts" }] })
         .command("cat package.json && npm test", 0, { parsed: [{ type: "read", cmd: "cat package.json", name: "package.json", path: "package.json" }, { type: "unknown", cmd: "npm test" }] })
-        .command("git status", 0)
-        .command("python3 scripts/gen.py", 2, { secs: 0.25 })
+        .command(`git commit -m "${CANARY.prompt}"`, 0)
+        .command(`python3 ${CANARY.path}/gen.py --token ${CANARY.token}`, 2, { secs: 0.25 })
         .command("ls", 0, { source: "user_shell" });
     });
     r1.write(h);
     const r = await run();
     const tools = r.store.all("tool");
     expect(tools.map((t) => [t.category, t.ok, t.exit])).toEqual([
-      ["read", true, 0], ["search", false, 1], ["search", true, 0], ["test", true, 0], ["git", true, 0], ["shell", false, 2],
+      ["read", true, 0], ["search", false, 1], ["read", true, 0], ["shell", true, 0], ["test", true, 0], ["git", true, 0], ["shell", false, 2],
     ]);
     expect(tools[0]).toMatchObject({ name: "exec_command", ts: started, ms: 1_000, callId: keyedHash(r.salt, "exec-r") });
-    expect(tools[5]).toMatchObject({ ms: 250 });
+    expect(tools[6]).toMatchObject({ ms: 250 });
+    expectNoCanaries([...allEvents(r), r.coverage]);
+  });
+
+  test("an item seen twice, or before its call, is one tool event", async () => {
+    const r1 = rollout((r) => {
+      r.command("bun test", 0, { id: "exec-twice" }).repeatLast();
+      r.command("npm run build", 1, { id: "call_early" });
+      r.fn("exec_command", { cmd: "npm run build" }, { callId: "call_early" });
+    });
+    r1.write(h);
+    const r = await run();
+    expect(r.store.all("tool").map((t) => [t.callId, t.category, t.ok])).toEqual([
+      [keyedHash(r.salt, "exec-twice"), "test", true], [keyedHash(r.salt, "call_early"), "build", false],
+    ]);
+  });
+
+  test("a call completed by the command that ran takes that command's category and checks", async () => {
+    const r1 = rollout((r) => {
+      const c = r.fn("exec_command", { yield_time_ms: 1_000 });
+      r.command("npm test", 0, { id: c });
+    });
+    r1.write(h);
+    const r = await run();
+    expect(r.store.all("tool")).toEqual([expect.objectContaining({ name: "exec_command", category: "test", checks: ["test"], ok: true, exit: 0 })]);
+  });
+
+  test("input sent to a running command updates its call or is skipped; it is never a new command", async () => {
+    const r1 = rollout((r) => {
+      const w = r.fn("write_stdin", { session_id: 3, chars: "" });
+      r.command("npm run dev", 0, { id: w, source: "unified_exec_interaction" });
+      r.command("npm test", 0, { source: "unified_exec_interaction" });
+    });
+    r1.write(h);
+    const r = await run();
+    expect(r.store.all("tool")).toEqual([expect.objectContaining({ name: "write_stdin", category: "shell", ok: true, exit: 0 })]);
+    expect(r.coverage[0]!.skipped).toMatchObject({ "exec-interaction": 1 });
+  });
+
+  test("items another thread recorded are not this session's", async () => {
+    const other = "0190f1b2-3c4d-7e5f-8a9b-0c1d2e3f4a5b";
+    const r1 = rollout((r) => {
+      r.event("item_completed", { thread_id: other, turn_id: "turn-1", started_at_ms: r.t, item: { type: "CommandExecution", id: "exec-o", command: ["/bin/zsh", "-lc", "bun test"], exit_code: 0, source: "unified_exec_startup" } });
+      r.completed({ type: "CollabAgentToolCall", id: "collab-o", tool: "spawn_agent", status: "completed", sender_thread_id: other });
+      r.command("bun test", 0);
+    });
+    r1.write(h);
+    const r = await run();
+    expect(r.store.all("tool").map((t) => t.name)).toEqual(["exec_command"]);
+    expect(r.coverage[0]!.skipped).toMatchObject({ "foreign-item": 2 });
   });
 
   test("calls are completed by the item with their call id; items without one are their own events", async () => {
@@ -375,6 +454,56 @@ describe("codex rollouts: turns, usage, rate limits, markers", () => {
       ["secondary", 1, 10_080, (Math.floor(at / 1000) + 432_000) * 1000],
       ["primary", 7, 300, lastTs + 600_000],
     ]);
+  });
+});
+
+describe("codex rollouts: forks and rate-limit buckets", () => {
+  test("copied history is skipped for a fork of any source; usage and rate limits re-emitted at the fork point are not new", async () => {
+    const parent = "0190f1b2-3c4d-7e5f-8a9b-0c1d2e3f4a5b";
+    const at = fixtureStart();
+    const x = new CxRollout(at, uuidV7(at - 1000, 0x77), { source: "vscode", extra: { forked_from_id: parent, history_mode: "paginated" } });
+    x.meta();
+    // lines copied from the parent come first
+    x.rec("session_meta", { id: parent, source: "cli" })
+      .turn("turn-1", "gpt-5.0-codex", "high")
+      .user(`Fix the importer. ${CANARY.prompt}`);
+    const c = x.cell(`await tools.exec_command({ cmd: "bun test" });`);
+    x.command("bun test", 1).cellOutput(c)
+      .tokens({ input: 9_000, cached: 1_000, output: 100 }, rateLimits(at, 40))
+      .aborted("turn-1", "interrupted", 1_000);
+    const copiedTokens = structuredClone(x.records[x.records.length - 2]!.payload);
+    (x.records[0]!.payload as Record<string, unknown>).subagent_history_start_ordinal = x.nextOrdinal;
+    // the thread's own lines: the CLI re-emits the fork point's token_count before any new response
+    x.turn("turn-2", CX_MINI, "medium")
+      .rec("event_msg", copiedTokens)
+      .user("Now add a regression test.")
+      .tokens({ input: 2_000, cached: 500, output: 50 }, rateLimits(at, 41));
+    x.write(h);
+    const r = await run();
+    expect(r.store.session(sidOf(x.id))).toMatchObject({ origin: "human", models: [CX_MINI] });
+    expect(r.store.all("prompt").map((p) => p.textHash)).toEqual([keyedHash(r.salt, "Now add a regression test.")]);
+    expect(r.store.all("tool")).toEqual([]);
+    expect(r.store.all("marker")).toEqual([]);
+    expect(r.store.all("usage").map((u) => [u.inTok, u.cacheR, u.outTok])).toEqual([[1_500, 500, 50]]);
+    expect(r.store.all("ratelimit").map((l) => l.usedPercent)).toEqual([41]);
+    expectNoCanaries(allEvents(r));
+  });
+
+  test("rate limits carry their bucket (limit_id, shape-checked) and are deduplicated per bucket and window", async () => {
+    const at = fixtureStart();
+    const limits = (bucket: unknown, primary: number) => ({ ...rateLimits(at, primary), limit_id: bucket });
+    const x = rollout((r) => {
+      r.event("token_count", { info: null, rate_limits: limits("codex", 10) })
+        .event("token_count", { info: null, rate_limits: limits("codex_mini", 3) })
+        .event("token_count", { info: null, rate_limits: limits("codex", 10) })
+        .event("token_count", { info: null, rate_limits: limits("codex_mini", 3) })
+        .event("token_count", { info: null, rate_limits: limits(CANARY.prompt, 7) })
+        .event("token_count", { info: null, rate_limits: limits(null, 8) });
+    }, {}, at);
+    x.write(h);
+    const r = await run();
+    expect(r.store.all("ratelimit").map((l) => [l.bucket, l.usedPercent])).toEqual([["codex", 10], ["codex_mini", 3], ["other", 7], [undefined, 8]]);
+    expectNoCanaries(allEvents(r));
   });
 });
 
@@ -559,16 +688,17 @@ describe("cxToolCalls", () => {
     ["apply_patch freeform", { type: "custom_tool_call", name: "apply_patch", call_id: "c", input: "*** Begin Patch\n*** Update File: a/b.rs\n@@\n-x\n+y\n+z\n*** End Patch\n" }, [{ name: "apply_patch", category: "edit", checks: [], editExt: "rs", added: 2, removed: 1 }]],
     ["apply_patch function", fc("apply_patch", { input: "*** Begin Patch\r\n*** Add File: Dockerfile\r\n+FROM x\r\n*** End Patch" }), [{ name: "apply_patch", category: "edit", checks: [], added: 1, removed: 0 }]],
     ["apply_patch without files", { type: "custom_tool_call", name: "apply_patch", call_id: "c", input: "garbage" }, []],
-    ["command: read", cmd("sed -n 1,80p src/a.ts", [{ type: "read", cmd: "sed", name: "a.ts", path: "src/a.ts" }]), one("exec_command", "read")],
+    ["command: sed is not a reader", cmd("sed -n 1,80p src/a.ts", [{ type: "read", cmd: "sed", name: "a.ts", path: "src/a.ts" }]), one("exec_command", "shell")],
     ["command: search", cmd("rg foo", [{ type: "search", cmd: "rg foo", query: "foo" }]), one("exec_command", "search")],
-    ["command: list files", cmd("ls -la", [{ type: "list_files", cmd: "ls -la" }]), one("exec_command", "search")],
-    ["command: read then search", cmd("cat a; rg b", [{ type: "read", cmd: "cat a" }, { type: "search", cmd: "rg b" }]), one("exec_command", "search")],
+    ["command: list files", cmd("ls -la", [{ type: "list_files", cmd: "ls -la" }]), one("exec_command", "read")],
+    ["command: read then search", cmd("cat a; rg b", [{ type: "read", cmd: "cat a" }, { type: "search", cmd: "rg b" }]), one("exec_command", "read")],
     ["command: read and a test", cmd("cat a && npm test", [{ type: "read", cmd: "cat a" }, { type: "unknown", cmd: "npm test" }]), [{ name: "exec_command", category: "test", checks: ["test"] }]],
     ["command: a test parsed as read", cmd("bun test src/a.test.ts", [{ type: "read", cmd: "bun test src/a.test.ts" }]), [{ name: "exec_command", category: "test", checks: ["test"] }]],
     ["command: unknown", cmd("python3 x.py", [{ type: "unknown", cmd: "python3 x.py" }]), one("exec_command", "shell")],
     ["command: no parse", item("CommandExecution", { command: ["/bin/bash", "-c", "docker ps"] }), one("exec_command", "container")],
     ["command: string", item("CommandExecution", { command: "npm run build" }), [{ name: "exec_command", category: "build", checks: ["build"] }]],
     ["command run by the person", item("CommandExecution", { command: ["/bin/zsh", "-lc", "ls"], source: "user_shell" }), []],
+    ["input sent to a running command", item("CommandExecution", { command: ["/bin/zsh", "-lc", "npm test"], source: "unified_exec_interaction", exit_code: 0 }), []],
     ["file change", item("FileChange", { changes: { "/p/a.md": { type: "add", content: "a\nb\nc\n" }, "/p/b.ts": { type: "update", unified_diff: "@@ -1 +1 @@\n-x\n+y\n" }, "/p/.env": { type: "delete", content: "K=1\nJ=2" } } }), [
       { name: "apply_patch", category: "edit", checks: [], editExt: "md", added: 3, removed: 0 },
       { name: "apply_patch", category: "edit", checks: [], editExt: "ts", added: 1, removed: 1 },

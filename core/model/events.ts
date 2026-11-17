@@ -27,7 +27,8 @@ export interface IdentityEv extends Base { k: "identity"; scope: "session" | "co
 export interface FileFactEv extends Base { k: "file"; pathHash: string; bytes: number; mtime: number; birth?: number; ctime?: number; firstTs?: number; lastTs?: number }
 export interface RolloutFactEv extends Base { k: "codex-rollout"; threadId: string; uuidTs?: number; fileTs?: number }
 export interface ThreadRowEv extends Base { k: "codex-thread-row"; threadId: string; createdAt?: number }
-export interface RateLimitEv extends Base { k: "ratelimit"; ts: number; window: "primary" | "secondary"; windowMinutes?: number; usedPercent: number; resetsAt?: number }
+export interface RateLimitEv extends Base { k: "ratelimit"; ts: number; window: "primary" | "secondary"; windowMinutes?: number; usedPercent: number; resetsAt?: number;
+  bucket?: string }   // the provider's rate-limit bucket id (shape-checked), when the trace names one
 export interface CommitFactEv extends Base { k: "commit"; ts: number; aiLines?: number; humanLines?: number; repoKey?: string }
 export interface CoverageEv extends Base { k: "coverage"; window: Window;
   status: "ok" | "empty" | "absent" | "drift" | "error" | "present-undecodable"; beta: boolean; installed?: boolean;

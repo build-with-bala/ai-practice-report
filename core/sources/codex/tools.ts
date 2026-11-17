@@ -36,8 +36,8 @@ const MCP_NAME = /^mcp__(.+?)__(.+)$/;
 const MCP_NAMESPACE = /^mcp__(.+?)(?:__)?$/;
 /** Older CLIs named MCP tools `<server>__<tool>`. */
 const SERVER_TOOL = /^([A-Za-z0-9_-]+?)__(.+)$/;
-/** What the CLI's own parse of a command says it does (`parsed_cmd[].type`). */
-const READ_KINDS = new Set(["read", "list_files", "search"]);
+/** CommandExecution sources that are not a command the agent started: the person's `!` command, input to a running one. */
+const NOT_AGENT_COMMANDS = new Set(["user_shell", "unified_exec_interaction"]);
 
 const plain = (name: string, category: ToolCategory): CxToolCall => ({ name, category, checks: [] });
 const mcp = (server: string | undefined): CxToolCall => (server === undefined ? plain("mcp", "mcp") : { ...plain("mcp", "mcp"), mcpServer: server });
@@ -52,16 +52,9 @@ function commandLine(cmd: unknown): string {
   return argv.join(" ");
 }
 
-/**
- * A command's category: `classifyCommand` first (test, build, git, …); a plain `shell` result becomes `read` or `search`
- * when the CLI's own parse says every part only reads files, lists files or searches.
- */
-function command(name: string, cmd: unknown, parsed?: unknown): CxToolCall {
+/** A command's category and checks: `classifyCommand` of its command line. */
+function command(name: string, cmd: unknown): CxToolCall {
   const { category, checks } = classifyCommand(commandLine(cmd));
-  if (category === "shell" && Array.isArray(parsed) && parsed.length > 0) {
-    const kinds = parsed.map((p) => (isObj(p) ? p.type : undefined));
-    if (kinds.every((k) => typeof k === "string" && READ_KINDS.has(k))) return { name, category: kinds.every((k) => k === "read") ? "read" : "search", checks };
-  }
   return { name, category, checks };
 }
 
@@ -159,7 +152,8 @@ function callOf(name: string | undefined, args: unknown, namespace: string | und
  * The tool actions in one rollout entry: a response_item payload (`function_call`, `custom_tool_call`, `local_shell_call`,
  * `web_search_call`) or a completed item (`CommandExecution`, `FileChange`, `McpToolCall`, `ImageView`, `Extension`,
  * `CollabAgentToolCall`, `DynamicToolCall`). One entry per call, or per file for apply_patch; none for Code Mode cells,
- * commands the person ran, and entries that are not tool actions. Command, patch and argument text never leave.
+ * commands the person ran, input sent to a running command, and entries that are not tool actions. Command, patch and
+ * argument text never leave.
  */
 export function cxToolCalls(item: unknown): CxToolCall[] {
   if (!isObj(item)) return [];
@@ -173,7 +167,7 @@ export function cxToolCalls(item: unknown): CxToolCall[] {
     case "web_search_call":
       return [plain("web_search", "web")];
     case "CommandExecution":
-      return item.source === "user_shell" ? [] : [command("exec_command", item.command, item.parsed_cmd)];
+      return typeof item.source === "string" && NOT_AGENT_COMMANDS.has(item.source) ? [] : [command("exec_command", item.command)];
     case "FileChange":
       return fileChanges(item.changes);
     case "McpToolCall":
