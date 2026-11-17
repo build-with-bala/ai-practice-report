@@ -1,7 +1,7 @@
 # Codex — rollouts; lifetime layer and configuration
 
-Readers: `codex.rollouts` (`rollouts.ts`, `tools.ts`, `uuid.ts`, `origin.ts`, `effort.ts`); the lifetime layer (thread index, turn
-history, prompt history, configuration) is documented in the second half of this file.
+Readers: `codex.rollouts` (`rollouts.ts`, `tools.ts`, `uuid.ts`, `origin.ts`, `effort.ts`); the lifetime layer (thread
+index, turn history, prompt history, configuration) is documented in the second half of this file.
 
 Evidence: **(verified locally)** = the type or field was confirmed on this machine with the structure probe
 (`scripts/probe.ts`) or with count-only checks run by the reader's author. **(CLI program)** = read from the installed
@@ -356,6 +356,10 @@ The SQL names only the columns below, validated against `pragma_table_info` firs
   `is_pinned`, `section*`, `project_id`, `daybreak_enabled`, `attached_thread_parent_id`, `has_user_event`.
 - `thread_spawn_edges.status`; `thread_turns`: `error_json`, `first_user_item_id`, `final_agent_item_id`, the rollout
   offsets.
+- Selected and parsed in memory, partly kept: `threads.source` — a subagent thread's JSON also carries
+  `thread_spawn.agent_path` and `agent_nickname`, which are parsed and never kept; only `parent_thread_id` (as an id),
+  `depth` and `agent_role` (a built-in role, else its keyed hash) are kept. `threads.sandbox_policy` — only its `type`
+  is kept, never its paths.
 - Never read at all: `thread_items`, `thread_realtime_items`, `thread_history_projection_state`,
   `thread_dynamic_tools` (tool descriptions and schemas), `thread_attachments` (payloads), `projects` and
   `project_roots` (names, paths), `thread_sections` (names), `thread_read_receipts`, `remote_control_enrollments`
@@ -370,11 +374,14 @@ The SQL names only the columns below, validated against `pragma_table_info` firs
   `parent_thread_id`, `child_thread_id`; `thread_turns`: `thread_id`, `status`, `started_at`, `completed_at`,
   `duration_ms`. Each one missing is drift `missing-column:<name>` and the rest is still read; a missing table is drift
   `missing-table:<name>`. Without `threads.id`, `thread_turns.thread_id`/`status` or either edge column that table is
-  skipped. Tables are read in rowid pages of 5,000 rows (`WHERE rowid > ? ORDER BY rowid LIMIT ?`).
+  skipped. Tables are read in rowid pages of 5,000 rows (`WHERE rowid > ? ORDER BY rowid LIMIT ?`). A table that
+  cannot be paged — declared `WITHOUT ROWID` (checked in `sqlite_master.sql` before paging), or whose first page fails
+  for any reason but a busy store — is drift `table-unreadable:<name>` and is skipped.
 - **Ids**: `codex:<thread id>`, the id verbatim when UUID-shaped, else its keyed hash — the same form as the rollouts'
   session ids and `RolloutFactEv.threadId`, so index rows and rollouts join and their sessions merge in the store:
-  start = earliest, end = latest, models = the sorted union, a non-human origin wins (subagent > peer > scripted > scheduled >
-  system > human), window `detail` when the rollout's session is one; other fields keep the first value that arrived.
+  start = earliest, end = latest, models = the sorted union, a non-human origin wins (subagent > peer > scripted >
+  scheduled > system > human), window `detail` when the rollout's session is one; other fields keep the first value
+  that arrived.
 - **ThreadRowEv** per `threads` row: `threadId`, `createdAt` = `created_at_ms`, else `created_at`.
 - **TotalsEv** per `threads` row with a `tokens_used` count (≥ 0, zero included): `sessionId`, `tokens` = the CLI's
   running token total for the thread — the only token figure for threads whose rollout is gone. Where a rollout
@@ -398,10 +405,12 @@ The SQL names only the columns below, validated against `pragma_table_info` firs
   `completed_at − started_at`; no model or effort (the table has none). `inProgress` turns have not ended: skipped
   `in-progress`, not drift. Any other status is drift `turn-status:<value>` (kept when camelCase letters, else
   `(other)`; not a string → `(none)`).
-- **Coverage**: `files`/`bytes` = stores opened (main file size); `records` = rows read; skipped `no-ts`,
-  `in-progress`, `bad-row`, `io-error` (a query that fails — busy, locked, corrupt — ends that table; an unopenable turn
-  history); `versions` = `cli_version`s; `from`/`to` = earliest/latest session start or end and turn time. A thread
-  index that exists but cannot be opened makes the reader throw: coverage `error` (warn log `cx.db-unopenable`).
+- **Coverage**: `files`/`bytes` = stores read (main file size); `records` = rows read; skipped `no-ts`,
+  `in-progress`, `bad-row`, `bad-record` (a row the mapping failed on; warn log `cx.bad-record` once with the count),
+  `io-error` (a store that cannot be opened — warn `cx.db-unopenable` — or fails while read, a busy page, a later page
+  that fails); `versions` = `cli_version`s; `from`/`to` = earliest/latest session start or end and turn time. Each store
+  is read on its own: one that fails does not stop the other. Only when every store present fails does the reader
+  throw, making the coverage `error`.
 
 ## history.jsonl (verified locally)
 

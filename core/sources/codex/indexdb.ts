@@ -1,6 +1,6 @@
 import path from "node:path";
 import { safeStat } from "../../io/fs";
-import { openRo, type RoDb } from "../../io/sqlite";
+import { isBusyError, openRo, type RoDb } from "../../io/sqlite";
 import { toEpochMs } from "../../io/time";
 import type { SessionEv, ThreadRowEv, TurnEv } from "../../model/events";
 import { listDir, Tally } from "../common/coverage";
@@ -36,8 +36,11 @@ const IN_PROGRESS = "inProgress";
 /** An unknown status keeps its value in the drift key when it has the enum's shape (camelCase letters), else `(other)`. */
 const STATUS_SHAPE = /^[a-z][A-Za-z]{0,31}$/;
 
-/** The thread index exists but cannot be opened: without it the source has nothing to say. */
-class ThreadIndexUnreadable extends Error {}
+/** Rows are paged by rowid, which a table declared WITHOUT ROWID does not have. */
+const WITHOUT_ROWID = /\bWITHOUT\s+ROWID\b/i;
+
+/** Every thread store present failed to open or read: the source has nothing to say. */
+class ThreadStoresUnreadable extends Error {}
 
 const q = (name: string): string => `"${name}"`;
 
@@ -55,36 +58,48 @@ function newest(root: string, names: string[], re: RegExp): string | undefined {
 }
 
 /**
- * The allowlisted columns `table` has; each missing one is drift `missing-column:<name>`. Undefined when the table is
- * missing (drift `missing-table:<name>`) or its schema cannot be read (io-error).
+ * The allowlisted columns of a table the reader can page; each missing one is drift `missing-column:<name>`. Undefined
+ * when the table is missing (drift `missing-table:<name>`), declared WITHOUT ROWID (drift `table-unreadable:<name>`), or
+ * its schema cannot be read (io-error).
  */
-function columnsOf(db: RoDb, tables: Set<string>, table: string, wanted: readonly string[], tally: Tally): Set<string> | undefined {
+function readableColumns(db: RoDb, tables: Set<string>, table: string, wanted: readonly string[], tally: Tally): Set<string> | undefined {
   if (!tables.has(table)) {
     tally.unknownKey(`missing-table:${table}`);
     return undefined;
   }
   let have: Set<string>;
+  let ddl: unknown;
   try {
     have = new Set(db.columns(table));
+    ddl = db.get<{ sql: unknown }>("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", table)?.sql;
   } catch {
     tally.skip("io-error");
+    return undefined;
+  }
+  if (typeof ddl === "string" && WITHOUT_ROWID.test(ddl)) {
+    tally.unknownKey(`table-unreadable:${table}`);
     return undefined;
   }
   for (const c of wanted) if (!have.has(c)) tally.unknownKey(`missing-column:${c}`);
   return have;
 }
 
-/** Rows of `table` in rowid order, PAGE per query; a failing query (busy, locked, corrupt) is an io-error and ends the table. */
+/**
+ * Rows of `table` in rowid order, PAGE per query. A first page that fails other than busy means the query can never work
+ * on this table: drift `table-unreadable:<name>`. A busy store, or a later page that fails, is an io-error. Either ends
+ * the table.
+ */
 function* pages(db: RoDb, table: string, select: string[], tally: Tally, ctx: ScanCtx): Generator<Obj[]> {
   const sql = `SELECT rowid AS rid, ${select.join(", ")} FROM ${q(table)} WHERE rowid > ? ORDER BY rowid LIMIT ?`;
   let after = Number.MIN_SAFE_INTEGER;
-  for (;;) {
+  for (let first = true; ; first = false) {
     if (ctx.signal.aborted) return;
     let rows: Obj[];
     try {
       rows = db.all<Obj>(sql, after, PAGE);
-    } catch {
-      tally.skip("io-error");
+    } catch (e) {
+      if (first && !isBusyError(e)) tally.unknownKey(`table-unreadable:${table}`);
+      else tally.skip("io-error");
       ctx.log("warn", "cx.db-query");
       return;
     }
@@ -172,29 +187,38 @@ function thread(r: Obj, ctx: ScanCtx, tally: Tally): void {
   tally.span(end);
 }
 
+/** Maps each row; a row the mapping fails on is skipped as bad-record (logged once per scan) and the others go on. */
+function eachRow(rows: Obj[], map: (r: Obj) => void, tally: Tally): void {
+  for (const r of rows) {
+    try {
+      map(r);
+    } catch {
+      tally.skip("bad-record");
+    }
+  }
+}
+
 function readThreads(db: RoDb, tables: Set<string>, ctx: ScanCtx, tally: Tally): void {
-  const have = columnsOf(db, tables, "threads", [...THREAD_COLUMNS, ...GIT_COLUMNS], tally);
+  const have = readableColumns(db, tables, "threads", [...THREAD_COLUMNS, ...GIT_COLUMNS], tally);
   if (!have?.has("id")) return;
   const select = THREAD_COLUMNS.filter((c) => have.has(c)).map(q);
   const git = GIT_COLUMNS.filter((c) => have.has(c));
   if (git.length > 0) select.push(`(${git.map((c) => `COALESCE(${q(c)}, '') <> ''`).join(" OR ")}) AS in_repo`);
-  for (const rows of pages(db, "threads", select, tally, ctx)) for (const r of rows) thread(r, ctx, tally);
+  for (const rows of pages(db, "threads", select, tally, ctx)) eachRow(rows, (r) => thread(r, ctx, tally), tally);
+}
+
+/** One `thread_spawn_edges` row: an EdgeEv; an empty id is a bad row. */
+function edge(r: Obj, ctx: ScanCtx, tally: Tally): void {
+  const parent = str(r.parent_thread_id);
+  const child = str(r.child_thread_id);
+  if (parent === undefined || child === undefined) return tally.skip("bad-row");
+  ctx.emit({ k: "edge", tool: TOOL, source: THREADS_SOURCE, parentId: cxThreadId(parent, ctx), childId: cxThreadId(child, ctx) });
 }
 
 function readEdges(db: RoDb, tables: Set<string>, ctx: ScanCtx, tally: Tally): void {
-  const have = columnsOf(db, tables, "thread_spawn_edges", EDGE_COLUMNS, tally);
+  const have = readableColumns(db, tables, "thread_spawn_edges", EDGE_COLUMNS, tally);
   if (!have || !EDGE_COLUMNS.every((c) => have.has(c))) return;
-  for (const rows of pages(db, "thread_spawn_edges", EDGE_COLUMNS.map(q), tally, ctx)) {
-    for (const r of rows) {
-      const parent = str(r.parent_thread_id);
-      const child = str(r.child_thread_id);
-      if (parent === undefined || child === undefined) {
-        tally.skip("bad-row");
-        continue;
-      }
-      ctx.emit({ k: "edge", tool: TOOL, source: THREADS_SOURCE, parentId: cxThreadId(parent, ctx), childId: cxThreadId(child, ctx) });
-    }
-  }
+  for (const rows of pages(db, "thread_spawn_edges", EDGE_COLUMNS.map(q), tally, ctx)) eachRow(rows, (r) => edge(r, ctx, tally), tally);
 }
 
 /** One `thread_turns` row: a lifetime TurnEv for a finished turn, timed at its end (else its start). */
@@ -220,56 +244,64 @@ function turn(r: Obj, ctx: ScanCtx, tally: Tally): void {
 }
 
 function readTurns(db: RoDb, tables: Set<string>, ctx: ScanCtx, tally: Tally): void {
-  const have = columnsOf(db, tables, "thread_turns", TURN_COLUMNS, tally);
+  const have = readableColumns(db, tables, "thread_turns", TURN_COLUMNS, tally);
   if (!have?.has("thread_id") || !have.has("status")) return;
   const select = TURN_COLUMNS.filter((c) => have.has(c)).map(q);
-  for (const rows of pages(db, "thread_turns", select, tally, ctx)) for (const r of rows) turn(r, ctx, tally);
+  for (const rows of pages(db, "thread_turns", select, tally, ctx)) eachRow(rows, (r) => turn(r, ctx, tally), tally);
 }
 
-/** Runs `body` with the store's table names; the file counts as read once its schema is listed; the store is always closed. */
-function withStore(db: RoDb, file: string, tally: Tally, body: (tables: Set<string>) => void): void {
+/**
+ * Opens and reads one store on its own; it counts as read once its tables are listed, and is always closed. A store
+ * that cannot be opened (warn `cx.db-unopenable`), or that fails while it is read (warn `cx.db-unreadable`), is an
+ * io-error. True when its tables were listed.
+ */
+function readStore(file: string, ctx: ScanCtx, tally: Tally, body: (db: RoDb, tables: Set<string>) => void): boolean {
+  const db = openRo(file, ctx.temp);
+  if (!db) {
+    tally.skip("io-error");
+    ctx.log("warn", "cx.db-unopenable");
+    return false;
+  }
+  let listed = false;
   try {
-    let tables: Set<string>;
-    try {
-      tables = new Set(db.tables());
-    } catch {
-      tally.skip("io-error");
-      return;
-    }
+    const tables = new Set(db.tables());
+    listed = true;
     tally.files++;
     tally.bytes += safeStat(file)?.size ?? 0;
-    body(tables);
+    body(db, tables);
+  } catch {
+    tally.skip("io-error");
+    ctx.log("warn", "cx.db-unreadable");
   } finally {
     db.close();
   }
+  return listed;
 }
 
 /**
  * Scan the newest thread index (`state_<N>.sqlite`: threads, spawn edges) and turn history (`thread_history_<N>.sqlite`:
- * turns) under a Codex home; one CoverageEv, last. An index that exists but cannot be opened makes the source an error.
+ * turns) under a Codex home; one CoverageEv, last. Each store is read on its own, so one that fails does not stop the
+ * other; only when every store present fails is the source an error.
  */
 export async function scanThreads(c: Candidate, ctx: ScanCtx): Promise<void> {
   const tally = new Tally(TOOL, THREADS_SOURCE, "lifetime");
   const names = listDir(c.root, tally);
-  const state = newest(c.root, names, STATE_DB);
-  const turns = newest(c.root, names, TURNS_DB);
-  if (state !== undefined) {
-    const db = openRo(state, ctx.temp);
-    if (!db) {
-      ctx.log("warn", "cx.db-unopenable");
-      throw new ThreadIndexUnreadable("the thread index could not be opened");
-    }
-    withStore(db, state, tally, (tables) => {
+  const stores: [string | undefined, (db: RoDb, tables: Set<string>) => void][] = [
+    [newest(c.root, names, STATE_DB), (db, tables) => {
       readThreads(db, tables, ctx, tally);
       readEdges(db, tables, ctx, tally);
-    });
+    }],
+    [newest(c.root, names, TURNS_DB), (db, tables) => readTurns(db, tables, ctx, tally)],
+  ];
+  let present = 0;
+  let read = 0;
+  for (const [file, body] of stores) {
+    if (file === undefined || ctx.signal.aborted) continue;
+    present++;
+    if (readStore(file, ctx, tally, body)) read++;
   }
-  if (turns !== undefined && !ctx.signal.aborted) {
-    const db = openRo(turns, ctx.temp);
-    if (!db) {
-      tally.skip("io-error");
-      ctx.log("warn", "cx.db-unopenable");
-    } else withStore(db, turns, tally, (tables) => readTurns(db, tables, ctx, tally));
-  }
+  if (present > 0 && read === 0) throw new ThreadStoresUnreadable("no Codex thread store could be read");
+  const bad = tally.skipped["bad-record"] ?? 0;
+  if (bad > 0) ctx.log("warn", "cx.bad-record", bad); // a mapping bug must not look like a healthy source
   ctx.emit(tally.coverage());
 }

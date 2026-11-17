@@ -3,12 +3,12 @@ import { chmodSync, mkdirSync, statSync, symlinkSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { __observeQueries } from "../../../core/io/sqlite";
-import type { ConfigEv } from "../../../core/model/events";
+import type { ConfigEv, CoverageEv, Ev } from "../../../core/model/events";
 import { scan } from "../../../core/scan";
 import { cxConfig, cxHistory, cxRollouts, cxThreads } from "../../../core/sources/codex";
 import { TomlHeaders } from "../../../core/sources/codex/config";
 import { registry } from "../../../core/sources/registry";
-import type { SourcePlugin } from "../../../core/sources/types";
+import type { ScanCtx, SourcePlugin } from "../../../core/sources/types";
 import { keyedHash } from "../../../core/text/hash";
 import { CANARY, expectNoCanaries } from "../../kit/canary";
 import { fakeHome, type FakeHome } from "../../kit/home";
@@ -36,6 +36,33 @@ const tally = (xs: (string | undefined)[]) => xs.reduce<Record<string, number>>(
 const skipChmod = process.platform === "win32" || process.getuid?.() === 0;
 const MIN = 60_000;
 
+/**
+ * What each SELECT may name, by the table it reads: the columns the thread reader is allowed to select (written out here,
+ * independently of the reader) plus `rowid`, `rid` and `in_repo`; schema lookups name only schema columns.
+ */
+const MAY_NAME: Record<string, readonly string[]> = {
+  threads: [
+    "id", "source", "originator", "model", "reasoning_effort", "approval_mode", "sandbox_policy", "tokens_used", "created_at",
+    "created_at_ms", "updated_at", "updated_at_ms", "cli_version", "cwd", "git_sha", "git_branch", "git_origin_url", "rowid", "rid", "in_repo",
+  ],
+  thread_spawn_edges: ["parent_thread_id", "child_thread_id", "rowid", "rid"],
+  thread_turns: ["thread_id", "status", "started_at", "completed_at", "duration_ms", "rowid", "rid"],
+  sqlite_master: ["name", "type", "sql"],
+  pragma_table_info: ["name"],
+};
+const SQL_WORDS = new Set(["select", "from", "where", "order", "by", "limit", "as", "and", "or", "coalesce"]);
+/** The table or table-valued function a statement reads. */
+const sourceOf = (sql: string): string | undefined => /\bFROM\s+(?:"([^"]+)"|([A-Za-z_]\w*))/i.exec(sql)?.slice(1).find((x) => x !== undefined);
+/** Identifiers in a statement that its table's list does not allow (string literals and parameters are not identifiers). */
+function unlisted(sql: string): string[] {
+  const body = sql.replace(/'(?:[^']|'')*'/g, " ");
+  const table = sourceOf(body);
+  const allowed = new Set([table, ...(MAY_NAME[table ?? ""] ?? [])]);
+  return [...body.matchAll(/"((?:[^"]|"")+)"|\b([A-Za-z_]\w*)\b/g)]
+    .map((m) => (m[1] ?? m[2])!)
+    .filter((w) => !SQL_WORDS.has(w.toLowerCase()) && !allowed.has(w));
+}
+
 describe("codex lifetime: Task 12 scenario", () => {
   test("lifetime sessions, edge, turns, prompts and days, config, thread rows; SQL never selects text columns; no canaries", async () => {
     const fx = buildCodexIndex(h);
@@ -44,11 +71,15 @@ describe("codex lifetime: Task 12 scenario", () => {
     const r = await run();
     __observeQueries(undefined);
 
-    expect(sql.length).toBeGreaterThan(0);
+    for (const table of ["threads", "thread_spawn_edges", "thread_turns", "sqlite_master", "pragma_table_info"]) {
+      expect(sql.some((s) => sourceOf(s) === table)).toBe(true);
+    }
     for (const s of sql) {
       expect(s).not.toContain("*");
-      expect(s).not.toMatch(/first_user_message|title|preview/i);
+      expect([s, unlisted(s)]).toEqual([s, []]);
     }
+    // the check is not vacuous: a column outside the allowlist, even a schema word on a data table, is caught
+    expect(unlisted('SELECT rowid AS rid, "id", "title", name FROM "threads" WHERE rowid > ? ORDER BY rowid LIMIT ?')).toEqual(["title", "name"]);
     expect(r.store.all("session").map((s) => [s.id, s.origin, s.window])).toEqual([
       [sidOf(fx.ids.cli), "human", "lifetime"], [sidOf(fx.ids.exec), "scripted", "lifetime"], [sidOf(fx.ids.sub), "subagent", "lifetime"],
     ]);
@@ -262,15 +293,21 @@ describe("codex threads: thread index and turn history", () => {
     expect(covOf(r, "codex.threads")).toMatchObject({ status: "ok", records: 1, skipped: { "no-ts": 1 } });
   });
 
-  test("tables are read in rowid pages with explicit columns and bound parameters", async () => {
+  /** A thread index with `n` minimal threads, inserted in one statement. */
+  const manyThreads = (n: number) => {
     const at = secs(fixtureStart());
     writeStateDb(h, ".codex/state_5.sqlite", [], [], {
       extraDdl: [
-        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 10001) "
+        `WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ${n}) `
         + "INSERT INTO threads (id, created_at, updated_at, source, cwd, sandbox_policy, approval_mode) "
         + `SELECT printf('00000000-0000-4000-8000-%012d', i), ${at} + i, ${at} + i, 'exec', '/work/p', '{"type":"read-only"}', 'never' FROM n`,
       ],
     });
+  };
+  const PAGE_QUERY = (table: string) => new RegExp(`\\bFROM "${table}" WHERE rowid > \\? ORDER BY rowid LIMIT \\?`);
+
+  test("tables are read in rowid pages with explicit columns and bound parameters", async () => {
+    manyThreads(10_001);
     const sql: string[] = [];
     __observeQueries((s) => sql.push(s));
     const r = await run([cxThreads]);
@@ -282,20 +319,98 @@ describe("codex threads: thread index and turn history", () => {
     expect(covOf(r, "codex.threads")).toMatchObject({ status: "ok", records: 10_001 });
   });
 
-  test("an unopenable thread index makes the source an error; an unopenable turn history is an io-error", async () => {
+  test("each store is read on its own: one that cannot be opened is an io-error; only when none opens is the source an error", async () => {
+    const at = fixtureStart();
+    const id = uuidV7(at - 1000, 0xf1);
+    // the thread index cannot be opened: the turn history is still read
     h.write(".codex/state_5.sqlite", "not a database");
+    writeTurnsDb(h, ".codex/thread_history_1.sqlite", [turnRow(id, "t1", "completed", secs(at), secs(at + 1_000), 1_000)]);
     let r = await run([cxThreads]);
+    expect(r.store.all("turn").map((t) => t.sessionId)).toEqual([sidOf(id)]);
+    expect(covOf(r, "codex.threads")).toMatchObject({ status: "ok", files: 1, records: 1, skipped: { "io-error": 1 } });
+    // neither can be opened
+    h.write(".codex/thread_history_1.sqlite", "not a database either");
+    r = await run([cxThreads]);
     expect(r.coverage).toEqual([expect.objectContaining({ source: "codex.threads", status: "error" })]);
     expect(r.warnings).toEqual([expect.objectContaining({ code: "error", source: "codex.threads" })]);
-
+    // the turn history cannot be opened: the thread index is still read
     h.cleanup();
     h = fakeHome();
-    const at = fixtureStart();
-    writeStateDb(h, ".codex/state_5.sqlite", [threadRow(uuidV7(at - 1000, 0xf1), at)]);
+    writeStateDb(h, ".codex/state_5.sqlite", [threadRow(id, at)]);
     h.write(".codex/thread_history_1.sqlite", "not a database either");
     r = await run([cxThreads]);
     expect(r.store.all("session")).toHaveLength(1);
     expect(covOf(r, "codex.threads")).toMatchObject({ status: "ok", files: 1, skipped: { "io-error": 1 } });
+  });
+
+  test("a WITHOUT ROWID table cannot be paged: drift table-unreadable, and it is never queried", async () => {
+    const at = fixtureStart();
+    const id = uuidV7(at - 1000, 0xf3);
+    writeStateDb(h, ".codex/state_5.sqlite", [threadRow(id, at)]);
+    h.sqlite(".codex/thread_history_1.sqlite", [
+      "CREATE TABLE thread_turns (thread_id TEXT NOT NULL, turn_id TEXT NOT NULL, status TEXT NOT NULL, started_at INTEGER, completed_at INTEGER, duration_ms INTEGER, PRIMARY KEY (thread_id, turn_id)) WITHOUT ROWID",
+    ], { thread_turns: [[id, "t1", "completed", secs(at), secs(at + 1_000), 1_000]] });
+    const sql: string[] = [];
+    __observeQueries((s) => sql.push(s));
+    const r = await run([cxThreads]);
+    __observeQueries(undefined);
+    expect(sql.filter((s) => sourceOf(s) === "thread_turns")).toEqual([]);
+    expect([r.store.all("session").length, r.store.all("turn").length]).toEqual([1, 0]);
+    const cov = covOf(r, "codex.threads");
+    expect([cov.status, cov.skipped, cov.unknownTypes]).toEqual(["drift", {}, { "table-unreadable:thread_turns": 1 }]);
+  });
+
+  test("a first page that fails for good is drift table-unreadable; a busy page, or a later page, is an io-error", async () => {
+    const at = fixtureStart();
+    const id = uuidV7(at - 1000, 0xf4);
+    writeStateDb(h, ".codex/state_5.sqlite", [threadRow(id, at)], [[id, uuidV7(at - 1000, 0xf5), "open"]]);
+    // WITHOUT ROWID spelled with a comment between its words: only the paged query itself can fail on it
+    h.sqlite(".codex/thread_history_1.sqlite", [
+      "CREATE TABLE thread_turns (thread_id TEXT NOT NULL, turn_id TEXT NOT NULL, status TEXT NOT NULL, started_at INTEGER, completed_at INTEGER, duration_ms INTEGER, PRIMARY KEY (thread_id, turn_id)) WITHOUT/**/ROWID",
+    ], { thread_turns: [[id, "t1", "completed", secs(at), secs(at + 1_000), 1_000]] });
+    __observeQueries((s) => {
+      if (PAGE_QUERY("thread_spawn_edges").test(s)) throw new Error("database is locked");
+    });
+    let r = await run([cxThreads]);
+    __observeQueries(undefined);
+    expect([r.store.all("session").length, r.store.all("edge").length, r.store.all("turn").length]).toEqual([1, 0, 0]);
+    let cov = covOf(r, "codex.threads");
+    expect([cov.status, cov.skipped, cov.unknownTypes]).toEqual(["drift", { "io-error": 1 }, { "table-unreadable:thread_turns": 1 }]);
+
+    h.cleanup();
+    h = fakeHome();
+    manyThreads(5_001);
+    let pages = 0;
+    __observeQueries((s) => {
+      if (PAGE_QUERY("threads").test(s) && ++pages === 2) throw Object.assign(new Error("disk I/O error"), { code: "SQLITE_IOERR" });
+    });
+    r = await run([cxThreads]);
+    __observeQueries(undefined);
+    expect(r.store.all("session")).toHaveLength(5_000);
+    cov = covOf(r, "codex.threads");
+    expect([cov.status, cov.skipped, cov.unknownTypes]).toEqual(["ok", { "io-error": 1 }, {}]);
+  });
+
+  test("a row the mapper cannot handle is counted as bad-record and logged once; the other rows are read", async () => {
+    const at = fixtureStart();
+    writeStateDb(h, ".codex/state_5.sqlite", [threadRow("boom", at), threadRow(uuidV7(at - 1000, 0xf6), at + MIN)]);
+    const events: Ev[] = [];
+    const logs: [string, string, number | undefined][] = [];
+    const salt = new Uint8Array(32);
+    const ctx: ScanCtx = {
+      env: h.env, now: Date.now(), salt, signal: new AbortController().signal,
+      temp: { dir: () => h.root, disposeAll: () => {}, active: 0 },
+      emit: (e) => { events.push(e); },
+      hash: (v) => { if (v === "boom") throw new Error("injected mapping failure"); return keyedHash(salt, v); },
+      registerCwd: (cwd) => keyedHash(salt, cwd),
+      log: (level, code, n) => { logs.push([level, code, n]); },
+    };
+    const [cand] = cxThreads.locate(h.env, [h.env.home]);
+    await cxThreads.scan(cand!, ctx);
+    const cov = events.find((e): e is CoverageEv => e.k === "coverage")!;
+    expect([cov.status, cov.skipped]).toEqual(["ok", { "bad-record": 1 }]);
+    expect(events.filter((e) => e.k === "session")).toHaveLength(1);
+    expect(logs).toEqual([["warn", "cx.bad-record", 1]]);
   });
 
   test("no Codex home: absent; a Codex home without stores: empty; CODEX_HOME replaces ~/.codex", async () => {

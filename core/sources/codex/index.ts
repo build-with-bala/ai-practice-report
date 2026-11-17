@@ -43,6 +43,7 @@ export const cxThreads: SourcePlugin = {
     ],
     neverReads: [
       "threads.first_user_message, title, preview and name, agent nicknames and paths, rollout paths, creator ids and the git commit, branch and remote are never selected (git columns are only tested for presence, inside SQL)",
+      "a subagent thread's source JSON is parsed in memory and only its parent thread id, depth and role are kept; the agent path and nickname inside it are parsed but never kept",
       "sandbox policies are parsed in memory for their type; their paths are never kept",
       "thread_items (message, command and output JSON), thread_turns.error_json and every other table and store (logs, goals, memories, queue)",
     ],
