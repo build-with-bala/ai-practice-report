@@ -1,6 +1,7 @@
 // Synthetic Antigravity stores. Table, column and JSON field names follow the stores as the structure probe showed them on the
 // fixture author's machine; protobuf field numbers and enum numbers follow the Antigravity programs' own type tables (see
-// FORMAT.md) and are written out here independently of the reader. Every value is invented.
+// FORMAT.md) and are written out here independently of the reader — except the trajectory summary, which is encoded with the
+// reader's `TRAJ_FIELDS` (pinned to the program's numbers by a test). Every value is invented.
 import { Database } from "bun:sqlite";
 import path from "node:path";
 import { vscodeUser } from "../../core/env/paths";
@@ -45,7 +46,7 @@ function writeDb(h: FakeHome, rel: string, ddl: string[], rows: Record<string, u
   return file;
 }
 
-/** The time format mattn's go-sqlite3 writes for a Go `time.Time` (`2006-01-02 15:04:05.999999999-07:00`), here in UTC. */
+/** The time format a Go SQLite driver writes for a Go `time.Time` (`2006-01-02 15:04:05.999999999-07:00`), here in UTC. */
 export const goTime = (ms: number): string => new Date(ms).toISOString().replace("T", " ").replace("Z", "000000+00:00");
 /** Go's zero `time.Time`, which a `not null` time column holds when the CLI never set it. */
 export const GO_ZERO_TIME = "0001-01-01 00:00:00+00:00";
@@ -63,7 +64,7 @@ export const SUMMARIES_DDL = `CREATE TABLE conversation_summaries (conversation_
 
 export interface SummaryOpts {
   id: string; steps?: number; modified?: number | string; input?: number | string; workspaces?: unknown; parent?: string; depth?: number;
-  battle?: string; killed?: boolean;
+  battle?: string; winner?: string; killed?: boolean; source?: string;
 }
 
 /** One `conversation_summaries` row; every text column the reader must never select holds a canary. */
@@ -72,8 +73,8 @@ export function summaryRow(o: SummaryOpts): unknown[] {
   const workspaces = typeof o.workspaces === "string" ? o.workspaces : JSON.stringify(o.workspaces ?? [`file://${CANARY.path}`]);
   return [
     o.id, `${CANARY.prompt} title`, `${CANARY.code} preview`, o.steps ?? 4, time(o.modified), workspaces, "CASCADE_RUN_STATUS_IDLE",
-    "CORTEX_TRAJECTORY_SOURCE_CLI", `${CANARY.project}-project`, `${CANARY.project} agent`, o.parent ?? "", o.depth ?? 0, o.battle ?? "",
-    o.battle ? `${CANARY.secret}-winner` : "", 0, o.killed ? 1 : 0, time(o.input), 3, CANARY.path,
+    o.source ?? "CORTEX_TRAJECTORY_SOURCE_CLI", `${CANARY.project}-project`, `${CANARY.project} agent`, o.parent ?? "", o.depth ?? 0, o.battle ?? "",
+    o.winner ?? (o.battle ? `${CANARY.secret}-winner` : ""), 0, o.killed ? 1 : 0, time(o.input), 3, CANARY.path,
     pbEncode([[1, `${CANARY.prompt} summary`], [2, 4], [4, CANARY.secret]]), `${CANARY.project}-group`,
   ];
 }
@@ -89,7 +90,7 @@ export const STEP = {
   CODE_ACTION: 5, GIT_COMMIT: 6, GREP_SEARCH: 7, VIEW_FILE: 8, LIST_DIRECTORY: 9, USER_INPUT: 14, PLANNER_RESPONSE: 15, ERROR_MESSAGE: 17,
   RUN_COMMAND: 21, CHECKPOINT: 23, FIND: 25, COMMAND_STATUS: 28, SEARCH_WEB: 33, MCP_TOOL: 38, OPEN_BROWSER_URL: 56, CLICK_BROWSER_PIXEL: 64,
   TASK_BOUNDARY: 81, NOTIFY_USER: 82, BROWSER_SUBAGENT: 85, FILE_CHANGE: 86, EPHEMERAL_MESSAGE: 90, GENERATE_IMAGE: 91, SYSTEM_MESSAGE: 101,
-  WAIT: 102, SHELL_EXEC: 112, EDIT_NOTEBOOK: 126, INVOKE_SUBAGENT: 127, GENERIC: 132, TOOL_SEARCH: 140,
+  WAIT: 102, SHELL_EXEC: 112, EDIT_NOTEBOOK: 126, INVOKE_SUBAGENT: 127, GENERIC: 132, ASK_QUESTION: 138, TOOL_SEARCH: 140,
 } as const;
 /** `CortexStepStatus` numbers. */
 export const STATUS = { RUNNING: 2, DONE: 3, CANCELED: 6, ERROR: 7, INTERRUPTED: 12 } as const;

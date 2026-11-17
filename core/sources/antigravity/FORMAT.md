@@ -44,21 +44,34 @@ array of URIs, and the time columns are not null — Go times as text, `YYYY-MM-
 when never set, which `toEpochMs` rejects as implausible). There is no creation time.
 
 - **Columns read**: `conversation_id`, `step_count`, `last_modified_time`, `last_user_input_time`, `workspace_uris`,
-  `parent_conversation_id`, `nesting_depth`, `killed`, and `battle_id` only as a presence test inside SQL
-  (`(COALESCE("battle_id", '') <> '') AS battle`), in rowid pages of 1,000 (`WHERE rowid > ? ORDER BY rowid LIMIT ?`).
-  Each one missing is drift `missing-column:<name>` (without `conversation_id` nothing is read); no table is drift
-  `missing-table:conversation_summaries`; `WITHOUT ROWID`, or a first page that fails for any reason but a busy store, is
-  drift `table-unreadable:conversation_summaries`.
+  `parent_conversation_id`, `nesting_depth`, `killed`; and, inside SQL only (their values never leave SQLite), `battle_id`
+  as a presence test (`(COALESCE("battle_id", '') <> '') AS battle`), `winning_conversation_id` against the row's own id
+  (`(COALESCE("winning_conversation_id", '') NOT IN ('', "conversation_id")) AS battle_loser`), and `source` mapped by a fixed
+  `CASE COALESCE("source", '') WHEN '<enum name>' THEN '<code>' … ELSE 'other' END AS src` (below). Rowid pages of 1,000
+  (`WHERE rowid > ? ORDER BY rowid LIMIT ?`). Each one missing is drift `missing-column:<name>` (without `conversation_id`
+  nothing is read); no table is drift `missing-table:conversation_summaries`; `WITHOUT ROWID`, or a first page that fails for
+  any reason but a busy store, is drift `table-unreadable:conversation_summaries`.
 - **Never selected**: `title`, `preview`, `raw_summary` (the summary message, title inside), `agent_name`, `status`,
-  `source`, `project_id`, `app_data_dir`, `group_id`, `winning_conversation_id`, `not_fully_idle`,
-  `last_user_input_step_index`, and the battle id itself.
+  `project_id`, `app_data_dir`, `group_id`, `not_fully_idle`, `last_user_input_step_index`, and the values of `battle_id`,
+  `winning_conversation_id` and `source`.
+- **`source`** holds a `CortexTrajectorySource` name (program; verified locally by counts only: every row's value is empty or
+  one of the names below mapped to `human` — no row maps to `other`). Codes, from the program's enum: unset (`''`,
+  `CORTEX_TRAJECTORY_SOURCE_UNSPECIFIED`) → `none` (origin `human`); `…_CLI`, `…_CASCADE_CLIENT`, `…_INTERACTIVE_CASCADE`,
+  `…_JETBOX` (the desktop app), `…_EXPLAIN_PROBLEM`, `…_REFACTOR_FUNCTION` (IDE actions the person starts) → `human`;
+  `…_SDK`, `…_EVAL`, `…_EVAL_TASK`, `…_ASYNC_PRR`, `…_ASYNC_CF`, `…_ASYNC_SL`, `…_ASYNC_PRD`, `…_ASYNC_CM`, `…_REPLAY` →
+  `scripted`; `…_AGENT_API` (the Agent API: the `agentapi` tool other agents and plugins drive Antigravity through, per the
+  program) → `peer`; `…_SUBAGENT` → `subagent`; any other value → `other`: origin `system` and drift
+  `conversation_summaries.source:(other)`.
 - **SessionEv** (window `lifetime`) per row: `start`/`end` = the earlier/later of `last_user_input_time` and
   `last_modified_time` (the steps and transcript, merged in by id, reach back further); `surface` `battle` when a battle id
-  is set, else `cli`; origin `subagent` when `parent_conversation_id` names another conversation or `nesting_depth` is above
-  0, else `human`; `parentId` = the parent's session; `spawnDepth` = `nesting_depth` (subagents only); `projectKey` from the
-  first `file:` URI of `workspace_uris` (`null` or `[]`: none; anything but a JSON array: drift
-  `conversation_summaries.workspace_uris:shape`); `models` empty (no column names one). `step_count` 0 is skipped
-  `empty-session`; neither time plausible `no-ts`; no id `bad-row`.
+  is set, else `cli`; origin `subagent` when `parent_conversation_id` names another conversation, `nesting_depth` is above 0
+  or the source is a subagent's, else the source's origin; `parentId` = the parent's session; `spawnDepth` (subagents only) =
+  `nesting_depth` when at least 1, else 1; `projectKey` from the first `file:` URI of `workspace_uris` (`null` or `[]`: none;
+  anything but a JSON array: drift `conversation_summaries.workspace_uris:shape`); `models` empty (no column names one).
+  `step_count` 0 is skipped `empty-session`; neither time plausible `no-ts`; no id `bad-row`.
+- **Battle forks**: a fork whose `winning_conversation_id` names another conversation lost; its transcript's inputs are
+  copies of the winner's and are skipped `battle-copy` (its session is still emitted, `surface: "battle"`). The winner's,
+  and every fork's before a winner is set, are prompts.
 - **MarkerEv** `interrupt` per killed conversation, at its `end`.
 
 ## conversations/<conversation id>.db (verified locally; meanings per the program)
@@ -90,13 +103,21 @@ message stored apart (program): `step_type` = `CortexStepType`, `status` = `Cort
 
 What the reader does:
 
-- **Query**: `SELECT rowid AS rid, "step_type", "status", "metadata", ("error_details" IS NOT NULL AND length("error_details")
-  > 0) AS err, CASE WHEN "step_type" = 21 THEN "step_payload" END AS payload FROM "steps" WHERE rowid > ? ORDER BY rowid LIMIT
-  ?`, pages of 256 (each row carries its metadata). The error details never leave SQLite; the payload leaves it only for
-  run commands. Columns checked first (each missing: drift `missing-column:<name>`; without `step_type` nothing is read; no
-  table: `missing-table:steps`; `WITHOUT ROWID` or a failing first page: `table-unreadable:steps`).
+- **Query**: `SELECT rowid AS rid, "step_type", "status", CASE WHEN length("metadata") <= 1048576 THEN "metadata" END AS
+  metadata, CASE WHEN length("metadata") > 1048576 THEN substr("metadata", 1, 64) END AS mhead, ("error_details" IS NOT NULL
+  AND length("error_details") > 0) AS err, CASE WHEN "step_type" = 21 AND length("step_payload") <= 1048576 THEN
+  "step_payload" END AS payload, ("step_type" = 21 AND length("step_payload") > 1048576) AS pbig FROM "steps" WHERE rowid > ?
+  ORDER BY rowid LIMIT ?`, pages of 32. The error details never leave SQLite; the payload leaves it only for run commands; a
+  metadata blob or payload above 1 MiB never leaves it (the metadata holds every call's arguments — whole files — and the
+  payload the command's output), so a page holds at most about 64 MiB. Columns checked first (each missing: drift
+  `missing-column:<name>`; without `step_type` nothing is read; no table: `missing-table:steps`; `WITHOUT ROWID` or a failing
+  first page: `table-unreadable:steps`).
 - **Time**: the metadata is decoded in memory and only `created_at` is taken; without it the step is skipped `no-ts`;
-  metadata that is not protobuf is drift `steps.metadata:shape`.
+  metadata that is not protobuf is drift `steps.metadata:shape`. Oversize: each blob above the cap is skipped `oversize`,
+  and the step is still mapped by its type, without what the blob held. Of an oversize metadata blob its first 64 bytes are
+  read and only the complete fields among them used — the program writes a message's fields in number order, so
+  `created_at` (1) comes first; without it there, `no-ts`. An oversize run-command payload gives no command line or exit
+  code (the call's arguments still may).
 - **MarkerEv** `error` per step with error details (presence only), at the step's time.
 - **ToolEv** per tool step, `name` = its step type's name in lower case, category by type: edit (`CODE_ACTION`,
   `FILE_CHANGE`, `MOVE`, `DELETE_DIRECTORY`), shell (`RUN_COMMAND`, `SHELL_EXEC`, `SEND_COMMAND_INPUT`, `COMMAND_STATUS`,
@@ -104,10 +125,13 @@ What the reader does:
   search (`GREP_SEARCH`, `FIND`, `CODE_SEARCH`, `MQUERY`, `INTERNAL_SEARCH`, `TRAJECTORY_SEARCH`, `FIND_ALL_REFERENCES`,
   `MOMA`), browser (every type whose name holds `BROWSER`), web, mcp, notebook, build, test, lint, package, cloud, db, git,
   delegate, plan, schedule (the table in `cli.ts`), any other tool step `other`. Not tool events: the person's input (its
-  prompts come from the transcript), the model's replies, checkpoints, system, ephemeral and context messages, proposals and
-  choices (`NOT_TOOLS` in `cli.ts`). An unknown step type is drift `step-type:<n>` (`(other)` beyond 9999).
+  prompts come from the transcript), the model's replies, questions and notices to the person (`NOTIFY_USER`,
+  `ASK_QUESTION`), the end of a turn, checkpoints, system, ephemeral and context messages, proposals and choices (`NOT_TOOLS`
+  in `cli.ts`). An unknown step type is drift `step-type:<n>` (`(other)` beyond 9999).
   - GENERIC steps take the name and category of the tool their call names when it is a built-in name; an `mcp_`/`mcp-`
-    name is `mcp` (the server inside it is never parsed out); any other name, or none, is `generic`, category `other`.
+    name is `mcp` (the server inside it is never parsed out); any other name, or none, is `generic`, category `other`. The
+    built-in calls that are no tool use — `ask_question`, `ask_permission`, `ask_custom_permission`, `notify_user`, `finish`
+    (`NOT_A_TOOL`) — make no tool event; like every timed step they still widen the conversation's span.
   - Run commands (typed, or a GENERIC `run_command` call) take `classifyCommand` of the command line — the payload's
     `command_line` (else `command`), else the call's `CommandLine` argument — and `exit` from the payload's `exit_code`
     (`ok` = exit 0). Only a run_command call's arguments are parsed; nothing of them is kept.
@@ -125,11 +149,13 @@ JSONL, one object per step: `step_index` (number), `type` (string: a `CortexStep
 (string), `media[]` {`mime_type`, `uri`}, `truncated_fields[]` (strings: fields cut short). No model field was seen.
 `input_tokens` excludes cached tokens (a count-only check: it is below `cache_read_tokens` on most records).
 
-- **PromptEv** (window `detail`, origin `human`) per `USER_INPUT` record from `USER_EXPLICIT` — unless its conversation is a
-  subagent's (a subagent's inputs are its parent's briefs): intent, features and `textHash` (keyed hash of the trimmed
-  `content`) from the text in memory; `hasPaste` when an `image/` medium is attached; `isTaskStart` = the conversation's
-  first prompt or ≥ 30 min after its previous record; `simToPrev` against its previous prompt. No time: skipped `no-ts`;
-  blank: `empty`; no string `content`: drift `transcript.content:missing`. Implicit inputs are not prompts.
+- **PromptEv** (window `detail`) per `USER_INPUT` record from `USER_EXPLICIT`, its origin the conversation's (`human`,
+  `scripted`, `peer` or `system`, from the summary row; `human` without one) — unless the conversation is a subagent's (its
+  inputs are its parent's briefs) or a losing battle fork's (copies of the winner's: skipped `battle-copy`): intent,
+  features and `textHash` (keyed hash of the trimmed `content`) from the text in memory; `hasPaste` when an `image/` medium
+  is attached; `isTaskStart` = the conversation's first prompt or ≥ 30 min after its previous record; `simToPrev` against its
+  previous prompt. No time: skipped `no-ts`; blank: `empty`; no string `content`: drift `transcript.content:missing`.
+  Implicit inputs are not prompts.
 - **UsageEv** per record with a token count: `inTok` = `input_tokens`, `outTok` = `output_tokens`, `cacheR` =
   `cache_read_tokens`, `cacheW` = `cache_write_tokens` (not seen locally), each 0 when absent; `model` = the record's
   `model` when it is model-id-shaped (else `other`; no model field: `other`). No time: skipped `no-ts`.
@@ -154,7 +180,8 @@ on every line), `workspace` (string), `type` (`slash_command` on slash commands,
 
 `antigravity.cli`, window `detail`: `files`/`bytes` = stores whose tables were listed and JSONL files read to their end;
 `records` = summary and step rows, transcript records and history lines; `from`/`to` = first/last event time; no versions.
-Skipped: `empty-session`, `no-ts`, `bad-row`, `empty`, `bad-ts`, `parse`, `oversize`, `io-error` (a store that cannot be
+Skipped: `empty-session`, `no-ts`, `bad-row`, `empty`, `bad-ts`, `battle-copy`, `parse`, `oversize` (a JSONL line above
+32 MiB, or a step blob above 1 MiB), `io-error` (a store that cannot be
 opened — warn `ag.db-unopenable` — or read, a busy or failing later page, a JSONL read error), `bad-record` (a row or record
 the mapping failed on; warn `ag.bad-record` with the count). Each store is read on its own; only when every store present
 fails is the source an error.
@@ -182,7 +209,8 @@ SQLite, VS Code's `ItemTable` (`key` TEXT, `value` BLOB; verified locally) — w
   Nothing else of the summary is kept. No steps: skipped `empty-session`; no time `no-ts`; no id `no-id`.
 - Drift: `trajectorySummaries:shape` (the value does not decode to topic entries), `trajectorySummaries.entry:shape` (an
   entry, its row or its summary does not decode), `trajectorySummaries:no-steps` (every entry that decodes lacks a step
-  count: proto3 writes no 0, so a moved field would look like empty conversations). An empty value is no conversation.
+  count: proto3 writes no 0, so a moved field would look like empty conversations). A NULL or empty value is no
+  conversation.
 - **Coverage** (window `lifetime`): `files`/`bytes` = the store, `records` = topic entries. A store that cannot be opened or
   read makes the source an error, unless it is a locked store above `MAX_COPY_BYTES` (`note: "too-large"`).
 
@@ -200,7 +228,9 @@ brief — none present locally, in either brain folder). Each brain folder is it
 
 - `ItemTable` keys other than the trajectory summaries, and never by pattern: `antigravityUnifiedStateSync.oauthToken`,
   `antigravityAuthStatus` and the account's other values are never selected.
-- Summary text columns (`title`, `preview`, `raw_summary`, `agent_name`) and the other columns listed above; the battle id.
+- Summary text columns (`title`, `preview`, `raw_summary`, `agent_name`) and the other columns listed above; the values of
+  the battle id, the winning fork's id and the source (used inside SQL only).
+- Step metadata and run-command payloads above 1 MiB (only the metadata's first 64 bytes leave SQLite).
 - Step error details, permissions, task details, render info, non-command payloads; tool-call arguments other than a
   run_command's `CommandLine`; tool summaries; command working folders and output; the other tables of the step stores.
 - Transcript replies, thinking, tool calls, errors and media; `transcript_full.jsonl`; history workspace paths.
@@ -212,9 +242,12 @@ brief — none present locally, in either brain folder). Each brain folder is it
 - Usage has no model (the transcript names none; the steps' model usage and `gen_metadata` are not read): `other`.
 - GENERIC run commands have no exit code (their result sits in the payload, which is selected for typed run commands only);
   their `ok` comes from the status.
-- Origin: the summaries' `source` and the IDE summaries' trajectory metadata (parent, nesting) are not read, so SDK- or
-  agent-API-driven CLI conversations and IDE subagent trajectories count as human.
-- Battle-mode forks are subagents only when they name a parent; otherwise their copied inputs would count as prompts again.
+- Origin: the IDE summaries' `source` (20) and trajectory metadata (parent, nesting) are not read, so IDE subagent and
+  SDK-driven trajectories count as human; the CLI's come from its summary rows.
+- Battle forks: until a winner is set, every fork's copied inputs count as prompts; afterwards only the winner's.
+- An oversize step (a blob above 1 MiB) keeps its type's category but loses what the blob held: a generic step its tool's
+  name (`generic`), a run command its command line and exit code from that blob, the step its time when `created_at` is not
+  among the metadata's first 64 bytes.
 - A long input can be cut short in the transcript (`truncated_fields`); its features are computed on what is there.
 - The prompt log and the transcripts both yield prompts for the same inputs: they are told apart by `source` and `window`,
   never summed.

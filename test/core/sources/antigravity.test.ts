@@ -53,15 +53,17 @@ const skipChmod = process.platform === "win32" || process.getuid?.() === 0;
 const MAY_NAME: Record<string, readonly string[]> = {
   conversation_summaries: [
     "conversation_id", "step_count", "last_modified_time", "last_user_input_time", "workspace_uris", "parent_conversation_id", "nesting_depth",
-    "killed", "battle_id", "rowid", "rid", "battle",
+    "killed", "battle_id", "winning_conversation_id", "source", "rowid", "rid", "battle", "battle_loser", "src",
   ],
-  steps: ["step_type", "status", "metadata", "error_details", "step_payload", "rowid", "rid", "err", "payload"],
+  steps: ["step_type", "status", "metadata", "error_details", "step_payload", "rowid", "rid", "err", "payload", "mhead", "pbig"],
   ItemTable: ["key", "value"],
   sqlite_master: ["name", "type", "sql"],
   pragma_table_info: ["name"],
 };
-const SQL_WORDS = new Set(["select", "from", "where", "order", "by", "limit", "as", "and", "or", "coalesce", "case", "when", "then", "end", "is", "not",
-  "null", "length"]);
+const SQL_WORDS = new Set(["select", "from", "where", "order", "by", "limit", "as", "and", "or", "coalesce", "case", "when", "then", "else", "end", "is",
+  "not", "null", "length", "substr", "in"]);
+/** Result columns that may carry trace bytes into memory (parsed there, never kept): the step metadata, its head, a run command's payload. */
+const STEP_IN_MEMORY = new Set(["metadata", "mhead", "payload"]);
 /** The table or table-valued function a statement reads. */
 const sourceOf = (sql: string): string | undefined => /\bFROM\s+(?:"([^"]+)"|([A-Za-z_]\w*))/i.exec(sql)?.slice(1).find((x) => x !== undefined);
 /** Identifiers in a statement that its table's list does not allow (string literals, numbers and parameters are not identifiers). */
@@ -199,19 +201,74 @@ describe("antigravity cli: conversation_summaries.db", () => {
     expectNoCanaries([...allEvents(r), r.coverage]);
   });
 
-  test("subagents: by parent or by nesting depth; a row naming itself as parent is not one", async () => {
+  test("subagents: by parent or by nesting depth, at least depth 1; a row naming itself as parent is not one", async () => {
     const at = t0();
-    const [A, D, S] = [agId("A"), agId("D"), agId("S")];
+    const [A, D, S, Z] = [agId("A"), agId("D"), agId("S"), agId("Z")];
     writeSummaries(h, [
       { id: A, input: at, modified: at },
       { id: D, depth: 2, input: at, modified: at },
       { id: S, parent: S, input: at, modified: at },
       { id: C, parent: A, depth: 1, input: at, modified: at },
+      { id: Z, parent: A, depth: 0, input: at, modified: at },
     ]);
     const r = await run([agCli]);
-    expect([A, D, S, C].map((id) => r.store.session(sidOf(id))).map((s) => [s!.origin, s!.parentId, s!.spawnDepth])).toEqual([
+    expect([A, D, S, C, Z].map((id) => r.store.session(sidOf(id))).map((s) => [s!.origin, s!.parentId, s!.spawnDepth])).toEqual([
       ["human", undefined, undefined], ["subagent", undefined, 2], ["human", undefined, undefined], ["subagent", sidOf(A), 1],
+      ["subagent", sidOf(A), 1],
     ]);
+  });
+
+  test("battle forks: a losing fork's copied inputs are no prompts again (battle-copy); the winner's and an undecided fork's are; all battle sessions", async () => {
+    const at = t0();
+    const [W, L, U] = [agId("BW"), agId("BL"), agId("BU")];
+    const file = writeSummaries(h, [
+      { id: W, battle: "battle-1", winner: W, input: at, modified: at + MIN },
+      { id: L, battle: "battle-1", winner: W, input: at, modified: at + MIN },
+      { id: U, battle: "battle-2", winner: "", input: at, modified: at + MIN },
+    ]);
+    for (const id of [W, L, U]) h.writeJsonl(transcriptRel(id), [userInput(0, at, "Build the parser"), userInput(1, at + 1_000, "Add its tests")]);
+    const sql = observe();
+    const r = await run([agCli]);
+    __observeQueries(undefined);
+    expect(r.store.all("prompt").map((p) => p.sessionId).sort()).toEqual([W, W, U, U].map(sidOf).sort());
+    expect([W, L, U].map((id) => [r.store.session(sidOf(id))!.surface, r.store.session(sidOf(id))!.window])).toEqual([
+      ["battle", "detail"], ["battle", "detail"], ["battle", "detail"],
+    ]);
+    expect(covOf(r, "antigravity.cli").skipped).toEqual({ "battle-copy": 2 });
+    const page = sql.find((s) => sourceOf(s) === "conversation_summaries")!;
+    expect(page).toContain(`(COALESCE("winning_conversation_id", '') NOT IN ('', "conversation_id")) AS battle_loser`);
+    for (const row of rowsOf(file, page)) expect([0, 1]).toContain(row.battle_loser as number);
+  });
+
+  test("source: the program's trajectory sources, mapped inside SQL — SDK, eval, async and replay scripted; the agent API peer; unknown system and drift; prompts follow", async () => {
+    const at = t0();
+    const S = "CORTEX_TRAJECTORY_SOURCE_";
+    const rows: [label: string, source: string, origin: string][] = [
+      ["s0", "", "human"], ["s1", `${S}UNSPECIFIED`, "human"], ["s2", `${S}CLI`, "human"], ["s3", `${S}CASCADE_CLIENT`, "human"],
+      ["s4", `${S}INTERACTIVE_CASCADE`, "human"], ["s5", `${S}JETBOX`, "human"], ["s6", `${S}EXPLAIN_PROBLEM`, "human"],
+      ["s7", `${S}REFACTOR_FUNCTION`, "human"], ["s8", `${S}SDK`, "scripted"], ["s9", `${S}EVAL`, "scripted"], ["s10", `${S}EVAL_TASK`, "scripted"],
+      ["s11", `${S}ASYNC_PRR`, "scripted"], ["s12", `${S}ASYNC_CF`, "scripted"], ["s13", `${S}ASYNC_SL`, "scripted"], ["s14", `${S}ASYNC_PRD`, "scripted"],
+      ["s15", `${S}ASYNC_CM`, "scripted"], ["s16", `${S}REPLAY`, "scripted"], ["s17", `${S}AGENT_API`, "peer"], ["s18", `${S}SUBAGENT`, "subagent"],
+      ["s19", `${S}NEW_KIND`, "system"], ["s20", CANARY.prompt, "system"],
+    ];
+    const file = writeSummaries(h, rows.map(([l, source]) => ({ id: agId(l), source, input: at, modified: at })));
+    for (const l of ["s2", "s8", "s17", "s18", "s19"]) h.writeJsonl(transcriptRel(agId(l)), [userInput(0, at, "Run the importer")]);
+    const sql = observe();
+    const r = await run([agCli]);
+    __observeQueries(undefined);
+    expect(rows.map(([l]) => [l, r.store.session(sidOf(agId(l)))!.origin])).toEqual(rows.map(([l, , o]) => [l, o]));
+    expect(r.store.session(sidOf(agId("s18")))).toMatchObject({ spawnDepth: 1 });
+    expect(r.store.session(sidOf(agId("s18")))!.parentId).toBeUndefined();
+    // the transcripts' inputs take their conversation's origin; a subagent's are its parent's briefs
+    const byLabel = new Map(rows.map(([l]) => [sidOf(agId(l)), l]));
+    expect(r.store.all("prompt").map((p) => [byLabel.get(p.sessionId!), p.origin]).sort()).toEqual([
+      ["s17", "peer"], ["s19", "system"], ["s2", "human"], ["s8", "scripted"],
+    ]);
+    expect(covOf(r, "antigravity.cli").unknownTypes).toEqual({ "conversation_summaries.source:(other)": 2 });
+    // the value never leaves SQLite: only a fixed code does
+    const page = sql.find((s) => sourceOf(s) === "conversation_summaries")!;
+    for (const row of rowsOf(file, page)) expect(["none", "human", "scripted", "peer", "subagent", "other"]).toContain(row.src as string);
+    expectNoCanaries([...allEvents(r), r.coverage]);
   });
 
   test("times: Go time strings, the earliest of the two as start; a row without any time, without steps or without an id is skipped", async () => {
@@ -293,40 +350,42 @@ describe("antigravity cli: conversations/<id>.db steps", () => {
   const t0 = () => fixtureStart();
   const tools = (r: Result): ToolEv[] => byTime(r.store.all("tool"));
 
-  test("step types: tool steps by category under their names; input, replies, checkpoints and messages are no tools; unknown types are drift", async () => {
+  test("step types: tool steps by category under their names; input, replies, checkpoints, messages and questions to the person are no tools; unknown types drift", async () => {
     const at = t0();
     let n = 0;
     const s = (type: number, extra: Partial<StepOpts> = {}): StepOpts => ({ type, ts: at + ++n * 1_000, ...extra });
     writeSteps(h, P, [
       s(STEP.FILE_CHANGE), s(STEP.COMMAND_STATUS), s(STEP.LIST_DIRECTORY), s(STEP.FIND), s(STEP.CLICK_BROWSER_PIXEL), s(STEP.BROWSER_SUBAGENT),
       s(STEP.SEARCH_WEB), s(STEP.MCP_TOOL), s(STEP.GIT_COMMIT), s(STEP.INVOKE_SUBAGENT), s(STEP.TASK_BOUNDARY), s(STEP.WAIT), s(STEP.EDIT_NOTEBOOK),
-      s(STEP.SHELL_EXEC), s(STEP.NOTIFY_USER), s(STEP.GENERATE_IMAGE), s(STEP.TOOL_SEARCH),
+      s(STEP.SHELL_EXEC), s(STEP.GENERATE_IMAGE), s(STEP.TOOL_SEARCH),
       s(STEP.USER_INPUT), s(STEP.PLANNER_RESPONSE), s(STEP.CHECKPOINT), s(STEP.EPHEMERAL_MESSAGE), s(STEP.SYSTEM_MESSAGE), s(STEP.ERROR_MESSAGE),
-      s(999), s(4_000_000),
+      s(STEP.NOTIFY_USER), s(STEP.ASK_QUESTION), s(999), s(4_000_000),
     ]);
     const r = await run([agCli]);
     expect(tools(r).map((t) => [t.name, t.category])).toEqual([
       ["file_change", "edit"], ["command_status", "shell"], ["list_directory", "read"], ["find", "search"], ["click_browser_pixel", "browser"],
       ["browser_subagent", "browser"], ["search_web", "web"], ["mcp_tool", "mcp"], ["git_commit", "git"], ["invoke_subagent", "delegate"],
-      ["task_boundary", "plan"], ["wait", "schedule"], ["edit_notebook", "notebook"], ["shell_exec", "shell"], ["notify_user", "other"],
-      ["generate_image", "other"], ["tool_search", "other"],
+      ["task_boundary", "plan"], ["wait", "schedule"], ["edit_notebook", "notebook"], ["shell_exec", "shell"], ["generate_image", "other"],
+      ["tool_search", "other"],
     ]);
     const cov = covOf(r, "antigravity.cli");
-    expect([cov.status, cov.records, cov.unknownTypes]).toEqual(["drift", 25, { "step-type:999": 1, "step-type:(other)": 1 }]);
+    expect([cov.status, cov.records, cov.unknownTypes]).toEqual(["drift", 26, { "step-type:999": 1, "step-type:(other)": 1 }]);
     // the conversation's detail session spans its steps
-    expect(r.store.session(sidOf(P))).toMatchObject({ window: "detail", origin: "human", surface: "cli", start: at + 1_000, end: at + 25_000 });
+    expect(r.store.session(sidOf(P))).toMatchObject({ window: "detail", origin: "human", surface: "cli", start: at + 1_000, end: at + 26_000 });
   });
 
   test("run commands: the command line classified in memory with its exit code, in either payload layout; without a command, plain shell", async () => {
     const at = t0();
+    // the rows without a command in their payload record a call that is not a run_command, so nothing else can supply one
+    const noCall = (ms: number) => stepMetadata(ms, "view_file", { AbsolutePath: CANARY.path });
     const file = writeSteps(h, P, [
       { type: STEP.RUN_COMMAND, ts: at + 1_000, payload: runPayload({ cmd: "pytest -q", exit: 1 }) },
       { type: STEP.RUN_COMMAND, ts: at + 2_000, payload: runPayload({ cmd: "npm run build", wrapped: true }) },
       { type: STEP.RUN_COMMAND, ts: at + 3_000, payload: runPayload({ cmd: "git status", exit: 128, wrapped: true }) },
-      { type: STEP.RUN_COMMAND, ts: at + 4_000, payload: runPayload({}) },
-      { type: STEP.RUN_COMMAND, ts: at + 5_000, payload: null },
-      { type: STEP.RUN_COMMAND, ts: at + 6_000, payload: new TextEncoder().encode(`${CANARY.secret} not protobuf ÿ`) },
-      { type: STEP.RUN_COMMAND, ts: at + 7_000, payload: pbEncode([[1, STEP.RUN_COMMAND], [4, STATUS.DONE]]) },
+      { type: STEP.RUN_COMMAND, metadata: noCall(at + 4_000), payload: runPayload({}) },
+      { type: STEP.RUN_COMMAND, metadata: noCall(at + 5_000), payload: null },
+      { type: STEP.RUN_COMMAND, metadata: noCall(at + 6_000), payload: new TextEncoder().encode(`${CANARY.secret} not protobuf ÿ`) },
+      { type: STEP.RUN_COMMAND, metadata: noCall(at + 7_000), payload: pbEncode([[1, STEP.RUN_COMMAND], [4, STATUS.DONE]]) },
       { type: STEP.CODE_ACTION, ts: at + 8_000 },
     ]);
     const sql = observe();
@@ -338,14 +397,46 @@ describe("antigravity cli: conversations/<id>.db steps", () => {
     ]);
     // what leaves SQLite: the payload of run-command steps only; error details as a flag
     const page = sql.find((s) => sourceOf(s) === "steps")!;
-    expect(page).toContain(`CASE WHEN "step_type" = 21 THEN "step_payload" END AS payload`);
+    expect(page).toContain(`CASE WHEN "step_type" = 21 AND length("step_payload") <= 1048576 THEN "step_payload" END AS payload`);
     expect(page).toContain(`("error_details" IS NOT NULL AND length("error_details") > 0) AS err`);
     const rows = rowsOf(file, page);
     expect(rows).toHaveLength(8);
     for (const row of rows) {
-      for (const [col, v] of Object.entries(row)) if (col !== "metadata" && col !== "payload") expect([col, findCanaries(v)]).toEqual([col, []]);
+      for (const [col, v] of Object.entries(row)) if (!STEP_IN_MEMORY.has(col)) expect([col, findCanaries(v)]).toEqual([col, []]);
       if (row.step_type !== STEP.RUN_COMMAND) expect(row.payload).toBeNull();
     }
+    expectNoCanaries([...allEvents(r), r.coverage]);
+  });
+
+  test("blob caps: metadata or a payload above 1 MiB never leaves SQLite — counted oversize; the step still maps by its type, timed by the metadata's head", async () => {
+    const at = t0();
+    const big = "x".repeat(1_100_000);
+    // created_at first, as the program writes fields in number order; the call (with the command) far beyond the head
+    const bigMeta = (ms: number, tool: string) =>
+      pbEncode([[1, pbTs(ms)], [4, pbEncode([[1, `call-${CANARY.secret}`], [2, tool], [3, JSON.stringify({ CommandLine: "pytest -q", Content: `${CANARY.code}${big}` })]])]]);
+    const file = writeSteps(h, P, [
+      { type: STEP.VIEW_FILE, metadata: bigMeta(at + 1_000, "view_file"), error: true },
+      { type: STEP.GENERIC, metadata: bigMeta(at + 2_000, "run_command") },
+      { type: STEP.RUN_COMMAND, metadata: stepMetadata(at + 3_000, "view_file"), payload: runPayload({ cmd: `pytest ${big}`, exit: 1 }) },
+      { type: STEP.RUN_COMMAND, metadata: bigMeta(at + 4_000, "run_command"), payload: runPayload({ cmd: "npm run build" }) },
+      { type: STEP.VIEW_FILE, metadata: pbEncode([[4, pbEncode([[1, big]])], [1, pbTs(at + 5_000)]]) },
+    ]);
+    const sql = observe();
+    const r = await run([agCli]);
+    __observeQueries(undefined);
+    expect(tools(r).map((t) => [t.ts - at, t.name, t.category, t.checks, t.exit])).toEqual([
+      [1_000, "view_file", "read", undefined, undefined],
+      [2_000, "generic", "other", undefined, undefined], // its call, and the command in it, never left SQLite
+      [3_000, "run_command", "shell", undefined, undefined], // so did its payload
+      [4_000, "run_command", "build", ["build"], undefined], // the payload still classifies it
+    ]);
+    expect(markers(r, "error").map((m) => m.ts - at)).toEqual([1_000]);
+    // the last step's head holds no time (a large field comes first): no-ts
+    expect(covOf(r, "antigravity.cli").skipped).toEqual({ oversize: 5, "no-ts": 1 });
+    const page = sql.find((s) => sourceOf(s) === "steps")!;
+    expect(rowsOf(file, page).map((row) => [row.metadata === null, (row.mhead as Uint8Array | null)?.length ?? null, row.payload === null, row.pbig])).toEqual([
+      [true, 64, true, 0], [true, 64, true, 0], [false, null, true, 1], [true, 64, false, 0], [true, 64, true, 0],
+    ]);
     expectNoCanaries([...allEvents(r), r.coverage]);
   });
 
@@ -354,17 +445,20 @@ describe("antigravity cli: conversations/<id>.db steps", () => {
     const g = (i: number, tool: string): StepOpts => ({ type: STEP.GENERIC, metadata: stepMetadata(at + i * 1_000, tool) });
     writeSteps(h, P, [
       g(1, "read_file"), g(2, "search_in_file"), g(3, "edit_file"), g(4, "write_file"), g(5, "run_command"), g(6, "search_web"),
-      g(7, "read_browser_page"), g(8, "invoke_subagent"), g(9, "manage_task"), g(10, "schedule"), g(11, "ask_question"),
+      g(7, "read_browser_page"), g(8, "invoke_subagent"), g(9, "manage_task"), g(10, "schedule"), g(11, "generate_image"),
       g(12, `mcp_${CANARY.mcp}_lookup`), g(13, `${CANARY.project}_custom_tool`), g(14, ""),
       { type: STEP.GENERIC, metadata: pbEncode([[1, pbTs(at + 15_000)]]) },
+      // questions and notices to the person, and the end of a turn, are no tool calls
+      g(16, "ask_question"), g(17, "ask_permission"), g(18, "ask_custom_permission"), g(19, "notify_user"), g(20, "finish"),
     ]);
     const r = await run([agCli]);
     expect(tools(r).map((t) => [t.name, t.category, t.checks])).toEqual([
       ["read_file", "read", undefined], ["search_in_file", "search", undefined], ["edit_file", "edit", undefined], ["write_file", "write", undefined],
       ["run_command", "shell", undefined], ["search_web", "web", undefined], ["read_browser_page", "browser", undefined],
-      ["invoke_subagent", "delegate", undefined], ["manage_task", "todo", undefined], ["schedule", "schedule", undefined], ["ask_question", "other", undefined],
+      ["invoke_subagent", "delegate", undefined], ["manage_task", "todo", undefined], ["schedule", "schedule", undefined], ["generate_image", "other", undefined],
       ["mcp", "mcp", undefined], ["generic", "other", undefined], ["generic", "other", undefined], ["generic", "other", undefined],
     ]);
+    expect(r.store.session(sidOf(P))!.end).toBe(at + 20_000); // the steps that are no tools still widen the span
     expect(tools(r).every((t) => t.mcpServer === undefined)).toBe(true);
     expectNoCanaries([...allEvents(r), r.coverage]);
   });
@@ -609,11 +703,16 @@ describe("antigravity ide: trajectory summaries", () => {
     expect(covOf(r, "antigravity.ide")).toMatchObject({ status: "drift", skipped: { "empty-session": 2 }, unknownTypes: { "trajectorySummaries:no-steps": 1 } });
   });
 
-  test("shapes: an empty value is empty; a value that is not the topic is drift; an entry that does not decode is drift, the others map", async () => {
+  test("shapes: an empty or NULL value is empty; a value that is not the topic is drift; an entry that does not decode is drift, the others map", async () => {
     const at = t0();
     store([[TRAJ_KEY, ""]]);
     let r = await run([agIde]);
     expect(covOf(r, "antigravity.ide")).toMatchObject({ status: "empty", files: 1, unknownTypes: {} });
+    h.cleanup();
+    h = fakeHome();
+    store([[TRAJ_KEY, null]]);
+    r = await run([agIde]);
+    expect(covOf(r, "antigravity.ide")).toMatchObject({ status: "empty", files: 1, records: 0, unknownTypes: {} });
 
     // text that is not protobuf (its first byte names wire type 6), JSON, a message without topic entries
     for (const bad of [Buffer.from(`not protobuf ${CANARY.secret}`).toString("base64"), "{}", Buffer.from(pbEncode([[3, 7]])).toString("base64")]) {
@@ -722,6 +821,10 @@ describe("antigravity brain: plan artifacts", () => {
 });
 
 describe("antigravity plugins", () => {
+  test("TRAJ_FIELDS: the program's CascadeTrajectorySummary field numbers (trajectory_id, step_count, created_time, last_modified_time, workspaces)", () => {
+    expect(TRAJ_FIELDS).toEqual({ id: 4, steps: 2, created: 7, updated: 3, workspace: 9 });
+  });
+
   test("ids, tiers and beta flags; registered; what is never read", () => {
     expect(ALL.map((p) => [p.tool, p.id, p.tier, p.beta])).toEqual([
       ["antigravity", "antigravity.cli", "P0", false], ["antigravity", "antigravity.ide", "P0", false], ["antigravity", "antigravity.brain", "P0", false],

@@ -95,12 +95,13 @@ function entry(f: PbField, ctx: ScanCtx, tally: Tally): Entry {
 }
 
 /**
- * The trajectory summaries value: base64 text of a unified-state-sync `Topic`, its `data` (1) the entries. Empty text is no
- * conversation yet. A value that does not decode to entries is drift `trajectorySummaries:shape`; an entry that does not
+ * The trajectory summaries value: base64 text of a unified-state-sync `Topic`, its `data` (1) the entries. NULL or empty text is
+ * no conversation yet. A value that does not decode to entries is drift `trajectorySummaries:shape`; an entry that does not
  * decode, drift `trajectorySummaries.entry:shape`; when every entry that decodes has no steps, the step count has moved:
  * drift `trajectorySummaries:no-steps`.
  */
 function readTopic(v: unknown, ctx: ScanCtx, tally: Tally): void {
+  if (v === null || v === undefined) return;
   const t = text(v);
   if (t !== undefined && t.trim() === "") return;
   const entries = t === undefined ? undefined : pbTryNested(b64ToBytes(t))?.get(1);

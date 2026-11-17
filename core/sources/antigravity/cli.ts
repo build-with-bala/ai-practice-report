@@ -8,7 +8,7 @@ import { pbTryNested, type PbField } from "../../io/protobuf";
 import { isBusyError, openRo, type RoDb } from "../../io/sqlite";
 import { localDay, toEpochMs } from "../../io/time";
 import type { Ev, MarkerEv, PromptEv, SessionEv, ToolEv, UsageEv } from "../../model/events";
-import { sid, type MarkerKind, type ToolCategory } from "../../model/ids";
+import { sid, type MarkerKind, type Origin, type ToolCategory } from "../../model/ids";
 import { classifyCommand } from "../../text/commands";
 import { classifyIntent } from "../../text/intent";
 import { promptFeatures } from "../../text/structure";
@@ -22,9 +22,16 @@ export const CLI_SOURCE = "antigravity.cli";
 /** Events of the CLI's prompt log carry their own source, so they are never mistaken for (or summed with) the transcripts'. */
 export const HISTORY_SOURCE = "antigravity.history";
 const TASK_GAP_MS = 30 * 60_000;
-/** Rows per query; step rows carry a metadata blob each, so their pages are smaller. */
+/** Summary rows per query. */
 const SUMMARY_PAGE = 1_000;
-const STEP_PAGE = 256;
+/**
+ * Blobs above this never leave SQLite: a step's metadata (it holds every call's arguments, whole files among them) and a run
+ * command's payload (its output). Of an oversize metadata blob only its first HEAD_BYTES are read, for the step's time.
+ */
+const BLOB_CAP = 1_048_576;
+const HEAD_BYTES = 64;
+/** Step rows per query: with both blobs at the cap, a page stays near 64 MiB. */
+const STEP_PAGE = 32;
 /** Per-session state of the prompt log (last prompt time and text) is kept for the most recent sessions only. */
 const SESSION_WINDOW = 256;
 const WITHOUT_ROWID = /\bWITHOUT\s+ROWID\b/i;
@@ -51,6 +58,18 @@ export function pbStr(f: PbField | undefined): string | undefined {
 
 /** A varint field as a number; undefined when absent or of another wire type. */
 export const pbNum = (f: PbField | undefined): number | undefined => (f?.wire === 0 ? Number(f.v) : undefined);
+
+/**
+ * The complete leading fields of a blob's first bytes (cut short inside SQL). Decoding runs from the start, so the longest
+ * prefix that decodes ends exactly at a field boundary; null when not even the first field is complete.
+ */
+function leadingFields(head: Uint8Array): ReadonlyMap<number, PbField[]> | null {
+  for (let end = head.length; end > 0; end--) {
+    const fields = pbTryNested(head.subarray(0, end));
+    if (fields) return fields;
+  }
+  return null;
+}
 
 /** A `google.protobuf.Timestamp` field (`seconds` = 1, `nanos` = 2) as epoch ms; undefined when absent, malformed or implausible. */
 export function pbTime(f: PbField | undefined, now: number): number | undefined {
@@ -91,14 +110,14 @@ const STEP_NAMES: ReadonlySet<string> = new Set(STEP_TYPES.values());
 const RUN_COMMAND = 21;
 
 /**
- * Steps that are not tool calls: the person's input (prompts come from the transcript), the model's replies, checkpoints,
- * system, context and memory messages, choices between proposals.
+ * Steps that are not tool calls: the person's input (prompts come from the transcript), the model's replies, questions and
+ * notices to the person, the end of a turn, checkpoints, system, context and memory messages, choices between proposals.
  */
 const NOT_TOOLS: ReadonlySet<string> = new Set([
   "UNSPECIFIED", "DUMMY", "FINISH", "PLAN_INPUT", "USER_INPUT", "PLANNER_RESPONSE", "ERROR_MESSAGE", "CHECKPOINT", "SUGGESTED_RESPONSES",
   "RETRIEVE_MEMORY", "MANAGER_FEEDBACK", "TOOL_CALL_PROPOSAL", "TOOL_CALL_CHOICE", "TRAJECTORY_CHOICE", "BRAIN_UPDATE", "PROPOSAL_FEEDBACK",
   "CODE_ACKNOWLEDGEMENT", "KNOWLEDGE_GENERATION", "EPHEMERAL_MESSAGE", "CONVERSATION_HISTORY", "KNOWLEDGE_ARTIFACTS", "SYSTEM_MESSAGE",
-  "CIDER_AGENT_DUMMY", "KI_INSERTION", "DIRECTORY_RULES",
+  "CIDER_AGENT_DUMMY", "KI_INSERTION", "DIRECTORY_RULES", "NOTIFY_USER", "ASK_QUESTION",
 ]);
 const byCategory = (category: ToolCategory, names: string[]): [string, ToolCategory][] => names.map((n) => [n, category]);
 /** Tool steps by category; every step type whose name holds `BROWSER` is browser work; any other tool step is `other`. */
@@ -138,10 +157,11 @@ const GENERIC_TOOLS: ReadonlyMap<string, ToolCategory> = new Map([
   ...byCategory("mcp", ["list_resources", "read_resource"]),
   ...byCategory("delegate", ["invoke_subagent", "define_subagent", "manage_subagents", "send_message"]),
   ...byCategory("schedule", ["schedule", "wait", "wait_5_seconds"]),
-  ...byCategory("other", ["generate_image", "ask_question", "ask_permission", "ask_custom_permission", "notify_user", "finish", "manage_inbox",
-    "update_focus", "list_permissions", "list_plugin_accounts", "search_marketplace"]),
+  ...byCategory("other", ["generate_image", "manage_inbox", "update_focus", "list_permissions", "list_plugin_accounts", "search_marketplace"]),
   ["manage_task", "todo"], ["task_boundary", "plan"], ["run_workflow", "workflow"],
 ]);
+/** Built-in calls that are no tool use (as NOT_TOOLS for step types): questions, permission requests and notices to the person, the end of a turn. */
+const NOT_A_TOOL: ReadonlySet<string> = new Set(["ask_question", "ask_permission", "ask_custom_permission", "notify_user", "finish"]);
 /** Tools of MCP servers: names that start with `mcp_` or `mcp-` (the server's name sits inside, so it is never parsed out). */
 const MCP_PREFIX = /^mcp[_-]/i;
 
@@ -153,9 +173,13 @@ const toolCall = (meta: Fields): Fields | null => {
   return f ? pbTryNested(f.v) : null;
 };
 
-/** The tool a generic step's call names: a built-in name with its category, an MCP tool as `mcp`, anything else (or no call) `generic`. */
-function genericTool(call: Fields | null): { name: string; category: ToolCategory } {
+/**
+ * The tool a generic step's call names: a built-in name with its category, an MCP tool as `mcp`, anything else (or no call)
+ * `generic`; undefined for a built-in call that is no tool use.
+ */
+function genericTool(call: Fields | null): { name: string; category: ToolCategory } | undefined {
   const raw = call ? pbStr(call.get(2)?.[0]) : undefined;
+  if (raw !== undefined && NOT_A_TOOL.has(raw)) return undefined;
   const category = raw === undefined ? undefined : GENERIC_TOOLS.get(raw);
   if (category !== undefined) return { name: raw!, category };
   if (raw !== undefined && MCP_PREFIX.test(raw)) return { name: "mcp", category: "mcp" };
@@ -281,17 +305,40 @@ function each(map: () => void, tally: Tally): void {
 
 // ---- conversation_summaries.db ----
 
-/** What the summaries say about a conversation, kept for its steps and transcript. */
-interface Conv { subagent: boolean; surface: "cli" | "battle" }
+/** What the summaries say about a conversation, kept for its steps and transcript: its origin, surface, and whether it is a losing battle fork. */
+interface Conv { origin: Origin; surface: "cli" | "battle"; battleCopy: boolean }
 
 /**
- * Columns read; each one missing is drift. Never selected: `title`, `preview`, `raw_summary` (the summary message, its title
- * inside), `agent_name`, `status`, `source`, `project_id`, `app_data_dir`, `group_id`, `winning_conversation_id`,
- * `not_fully_idle`, `last_user_input_step_index` — and the battle id, tested for presence inside SQL only.
+ * Columns selected; each one missing is drift. Never selected: `title`, `preview`, `raw_summary` (the summary message, its title
+ * inside), `agent_name`, `status`, `project_id`, `app_data_dir`, `group_id`, `not_fully_idle`, `last_user_input_step_index` —
+ * nor the columns used only inside SQL (TESTED_COLUMNS).
  */
 const SUMMARY_COLUMNS = ["conversation_id", "step_count", "last_modified_time", "last_user_input_time", "workspace_uris", "parent_conversation_id",
   "nesting_depth", "killed"] as const;
-const BATTLE = "battle_id";
+/** Used inside SQL only: the battle id and the winning fork's id are tested for presence, the source mapped to a code (SOURCE_SQL). */
+const TESTED_COLUMNS = ["battle_id", "winning_conversation_id", "source"] as const;
+
+const ENUM_LITERAL = /^[A-Z_]*$/;
+const lit = (name: string): string => {
+  if (!ENUM_LITERAL.test(name)) throw new Error("source names in SQL must be enum names");
+  return `'${name}'`;
+};
+/** The code SOURCE_SQL returns for an unset source (human), and for a value outside the program's enum (system, drift). */
+type SourceCode = Origin | "none" | "other";
+const SRC = "CORTEX_TRAJECTORY_SOURCE_";
+/**
+ * The program's `CortexTrajectorySource` names → the origin of the conversations they start: the CLI, the IDE's chat and its
+ * actions, and the app are the person (`human`); the SDK, evals, the async jobs and replays are `scripted`; the Agent API (the
+ * tool other agents and plugins drive Antigravity through) is `peer`; a subagent is `subagent`.
+ */
+const SOURCE_CODES: readonly (readonly [string, SourceCode])[] = [
+  ["", "none"], [`${SRC}UNSPECIFIED`, "none"],
+  ...["CLI", "CASCADE_CLIENT", "INTERACTIVE_CASCADE", "JETBOX", "EXPLAIN_PROBLEM", "REFACTOR_FUNCTION"].map((n): [string, SourceCode] => [`${SRC}${n}`, "human"]),
+  ...["SDK", "EVAL", "EVAL_TASK", "ASYNC_PRR", "ASYNC_CF", "ASYNC_SL", "ASYNC_PRD", "ASYNC_CM", "REPLAY"].map((n): [string, SourceCode] => [`${SRC}${n}`, "scripted"]),
+  [`${SRC}AGENT_API`, "peer"], [`${SRC}SUBAGENT`, "subagent"],
+];
+/** The source mapped inside SQL by a fixed `CASE`: its value never leaves SQLite, only the code does. */
+const SOURCE_SQL = `CASE COALESCE(${q("source")}, '') ${SOURCE_CODES.map(([name, code]) => `WHEN ${lit(name)} THEN '${code}'`).join(" ")} ELSE 'other' END AS src`;
 
 /** The first workspace folder of `workspace_uris` (a JSON array of URIs) as a path; `null` or `[]` is none, another shape drift. */
 function firstWorkspace(v: unknown, ctx: ScanCtx, tally: Tally): string | undefined {
@@ -311,29 +358,40 @@ function firstWorkspace(v: unknown, ctx: ScanCtx, tally: Tally): string | undefi
   return uri === undefined ? undefined : uriToPath(uri, ctx.env.platform);
 }
 
+/** The origin a summary row's source code gives (SOURCE_SQL): unset or absent is the person; a value outside the enum is `system`, and drift. */
+function sourceOrigin(code: unknown, tally: Tally): Origin {
+  if (code === "scripted" || code === "peer" || code === "subagent") return code;
+  if (code !== "other") return "human";
+  tally.unknownKey("conversation_summaries.source:(other)");
+  return "system";
+}
+
 /**
  * One summary row → a lifetime SessionEv and, for a killed conversation, an interrupt. A conversation with a parent other than
- * itself, or nested below the top, is a subagent. The row's times are its last user input and last change: the earlier is the
- * start (the steps and transcript, merged in by id, reach further back).
+ * itself, nested below the top, or started as a subagent is a subagent (depth at least 1); else its source gives its origin. A
+ * losing battle fork (a winner other than itself) keeps its session but not its copied inputs. The row's times are its last
+ * user input and last change: the earlier is the start (the steps and transcript, merged in by id, reach further back).
  */
 function summary(r: Obj, convs: Map<string, Conv>, ctx: ScanCtx, tally: Tally): void {
   const raw = str(r.conversation_id);
   if (raw === undefined) return tally.skip("bad-row");
   const parent = str(r.parent_conversation_id);
+  const named = parent !== undefined && parent !== raw;
   const depth = num(r.nesting_depth);
-  const subagent = (parent !== undefined && parent !== raw) || (depth !== undefined && depth > 0);
-  const conv: Conv = { subagent, surface: r.battle === 1 ? "battle" : "cli" };
+  const fromSource = sourceOrigin(r.src, tally);
+  const subagent = named || (depth !== undefined && depth > 0) || fromSource === "subagent";
+  const conv: Conv = { origin: subagent ? "subagent" : fromSource, surface: r.battle === 1 ? "battle" : "cli", battleCopy: r.battle_loser === 1 };
   convs.set(raw, conv);
   if (r.step_count === 0) return tally.skip("empty-session");
   const times = [toEpochMs(r.last_user_input_time, ctx.now), toEpochMs(r.last_modified_time, ctx.now)].filter((t): t is number => t !== undefined);
   if (times.length === 0) return tally.skip("no-ts");
   const id = agSessionId(raw, ctx);
   const s: SessionEv = {
-    k: "session", tool: TOOL, source: CLI_SOURCE, id, window: "lifetime", origin: subagent ? "subagent" : "human", start: Math.min(...times),
-    end: Math.max(...times), models: [], surface: conv.surface,
+    k: "session", tool: TOOL, source: CLI_SOURCE, id, window: "lifetime", origin: conv.origin, start: Math.min(...times), end: Math.max(...times),
+    models: [], surface: conv.surface,
   };
-  if (subagent && parent !== undefined && parent !== raw) s.parentId = agSessionId(parent, ctx);
-  if (subagent && depth !== undefined && Number.isInteger(depth) && depth >= 0) s.spawnDepth = depth;
+  if (named) s.parentId = agSessionId(parent!, ctx);
+  if (subagent) s.spawnDepth = depth !== undefined && Number.isInteger(depth) && depth >= 1 ? depth : 1;
   const cwd = firstWorkspace(r.workspace_uris, ctx, tally);
   if (cwd !== undefined) s.projectKey = ctx.registerCwd(cwd);
   ctx.emit(s);
@@ -346,10 +404,14 @@ function summary(r: Obj, convs: Map<string, Conv>, ctx: ScanCtx, tally: Tally): 
 }
 
 function readSummaries(db: RoDb, tables: Set<string>, convs: Map<string, Conv>, ctx: ScanCtx, tally: Tally): void {
-  const have = pageable(db, tables, "conversation_summaries", [...SUMMARY_COLUMNS, BATTLE], tally);
+  const have = pageable(db, tables, "conversation_summaries", [...SUMMARY_COLUMNS, ...TESTED_COLUMNS], tally);
   if (!have?.has("conversation_id")) return;
   const select = SUMMARY_COLUMNS.filter((c) => have.has(c)).map(q);
-  if (have.has(BATTLE)) select.push(`(COALESCE(${q(BATTLE)}, '') <> '') AS battle`);
+  if (have.has("battle_id")) select.push(`(COALESCE(${q("battle_id")}, '') <> '') AS battle`);
+  if (have.has("winning_conversation_id")) {
+    select.push(`(COALESCE(${q("winning_conversation_id")}, '') NOT IN ('', ${q("conversation_id")})) AS battle_loser`);
+  }
+  if (have.has("source")) select.push(SOURCE_SQL);
   for (const rows of pages(db, "conversation_summaries", select, SUMMARY_PAGE, tally, ctx)) {
     for (const r of rows) each(() => summary(r, convs, ctx, tally), tally);
   }
@@ -415,24 +477,41 @@ class Conversation {
   readSteps(db: RoDb, tables: Set<string>): void {
     const have = pageable(db, tables, "steps", STEP_COLUMNS, this.tally);
     if (!have?.has("step_type")) return;
-    const select = (["step_type", "status", "metadata"] as const).filter((c) => have.has(c)).map(q);
+    const [type, meta, payload] = [q("step_type"), q("metadata"), q("step_payload")];
+    const select = (["step_type", "status"] as const).filter((c) => have.has(c)).map(q);
+    if (have.has("metadata")) {
+      select.push(`CASE WHEN length(${meta}) <= ${BLOB_CAP} THEN ${meta} END AS metadata`,
+        `CASE WHEN length(${meta}) > ${BLOB_CAP} THEN substr(${meta}, 1, ${HEAD_BYTES}) END AS mhead`);
+    }
     if (have.has("error_details")) select.push(`(${q("error_details")} IS NOT NULL AND length(${q("error_details")}) > 0) AS err`);
-    if (have.has("step_payload")) select.push(`CASE WHEN ${q("step_type")} = ${RUN_COMMAND} THEN ${q("step_payload")} END AS payload`);
+    if (have.has("step_payload")) {
+      select.push(`CASE WHEN ${type} = ${RUN_COMMAND} AND length(${payload}) <= ${BLOB_CAP} THEN ${payload} END AS payload`,
+        `(${type} = ${RUN_COMMAND} AND length(${payload}) > ${BLOB_CAP}) AS pbig`);
+    }
     for (const rows of pages(db, "steps", select, STEP_PAGE, this.tally, this.ctx)) {
       for (const r of rows) each(() => this.step(r), this.tally);
     }
   }
 
   /**
-   * A step's metadata (`CortexStepMetadata`, decoded in memory) and its time, `created_at` (1). Without a time the step is
-   * skipped `no-ts`; metadata that is not protobuf is drift `steps.metadata:shape`. An empty blob is an empty message.
+   * A step's metadata (`CortexStepMetadata`, decoded in memory) and its time, `created_at` (1). Metadata above BLOB_CAP never
+   * left SQLite: it is skipped `oversize`, and only the complete fields among its first bytes are used (the program writes
+   * fields in number order, so `created_at` comes first). Without a time the step is skipped `no-ts`; metadata that is not
+   * protobuf is drift `steps.metadata:shape`. An empty blob is an empty message.
    */
-  private stepMeta(meta: unknown): { ts: number; fields: Fields } | undefined {
-    const empty = meta === null || meta === undefined || (meta instanceof Uint8Array && meta.length === 0);
-    const fields = !empty && meta instanceof Uint8Array ? pbTryNested(meta) : null;
-    if (!empty && !fields) {
-      this.tally.unknownKey("steps.metadata:shape");
-      return undefined;
+  private stepMeta(r: Obj): { ts: number; fields: Fields } | undefined {
+    let fields: Fields | null;
+    if (r.mhead instanceof Uint8Array) {
+      this.tally.skip("oversize");
+      fields = leadingFields(r.mhead);
+    } else {
+      const meta = r.metadata;
+      const empty = meta === null || meta === undefined || (meta instanceof Uint8Array && meta.length === 0);
+      fields = !empty && meta instanceof Uint8Array ? pbTryNested(meta) : null;
+      if (!empty && !fields) {
+        this.tally.unknownKey("steps.metadata:shape");
+        return undefined;
+      }
     }
     const ts = fields ? pbTime(fields.get(1)?.[0], this.ctx.now) : undefined;
     if (ts === undefined || !fields) {
@@ -448,7 +527,8 @@ class Conversation {
    * of its command line. An unknown type is drift. Every timed step widens the conversation's span.
    */
   private step(r: Obj): void {
-    const meta = this.stepMeta(r.metadata);
+    if (r.pbig === 1) this.tally.skip("oversize"); // a run command's payload above BLOB_CAP never left SQLite
+    const meta = this.stepMeta(r);
     if (meta === undefined) return;
     const { ts } = meta;
     this.tick(ts);
@@ -462,6 +542,7 @@ class Conversation {
     if (NOT_TOOLS.has(name)) return;
     const call = toolCall(meta.fields);
     const kind = type === GENERIC ? genericTool(call) : { name: name.toLowerCase(), category: categoryOf(name) };
+    if (kind === undefined) return; // a generic call that is no tool use
     const ev: ToolEv = { k: "tool", tool: TOOL, source: CLI_SOURCE, ts, sessionId: this.id, ...kind };
     const status = num(r.status);
     const ok = status === undefined ? undefined : STATUS_OK.get(status);
@@ -496,13 +577,20 @@ class Conversation {
     if (ts !== undefined) this.tick(ts);
     const model = typeof v.model === "string" && v.model !== "" ? safeModel(v.model) : undefined;
     if (model !== undefined && !this.models.includes(model)) this.models.push(model);
-    if (v.type === "USER_INPUT" && v.source === "USER_EXPLICIT" && !this.conv?.subagent) this.prompt(v, ts);
+    if (v.type === "USER_INPUT" && v.source === "USER_EXPLICIT") this.prompt(v, ts);
     if (TOKEN_FIELDS.some((f) => tokens(v[f]) !== undefined)) this.usage(v, ts, model);
     if (ts !== undefined) this.lastTs = ts;
   }
 
-  /** The person's input, in memory only: intent, features, a keyed hash. An attached image is a paste. */
+  /**
+   * An explicit input, in memory only: intent, features, a keyed hash; its origin is its conversation's (the person, a script,
+   * a peer). A subagent's inputs are its parent's briefs, and a losing battle fork's are copies of the winner's (skipped
+   * `battle-copy`): neither is a prompt. An attached image is a paste.
+   */
   private prompt(v: Obj, ts: number | undefined): void {
+    const origin = this.conv?.origin ?? "human";
+    if (origin === "subagent") return;
+    if (this.conv?.battleCopy) return this.tally.skip("battle-copy");
     if (ts === undefined) return this.tally.skip("no-ts");
     const text = v.content;
     if (typeof text !== "string") return this.tally.unknownKey("transcript.content:missing");
@@ -510,7 +598,7 @@ class Conversation {
     const hasPaste = Array.isArray(v.media) && v.media.some((m) => isObj(m) && typeof m.mime_type === "string" && m.mime_type.startsWith("image/"));
     const isTaskStart = this.prompts === 0 || (this.lastTs !== undefined && ts - this.lastTs >= TASK_GAP_MS);
     const ev: PromptEv = {
-      k: "prompt", tool: TOOL, source: CLI_SOURCE, ts, sessionId: this.id, window: "detail", origin: "human", intent: classifyIntent(text),
+      k: "prompt", tool: TOOL, source: CLI_SOURCE, ts, sessionId: this.id, window: "detail", origin, intent: classifyIntent(text),
       features: promptFeatures(text, { hasPaste, isTaskStart, prevText: this.prevText }), textHash: this.ctx.hash(text.trim()),
     };
     if (hasPaste) ev.hasPaste = true;
@@ -532,7 +620,7 @@ class Conversation {
   finish(): void {
     if (this.start === undefined || this.end === undefined) return;
     const s: SessionEv = {
-      k: "session", tool: TOOL, source: CLI_SOURCE, id: this.id, window: "detail", origin: this.conv?.subagent ? "subagent" : "human",
+      k: "session", tool: TOOL, source: CLI_SOURCE, id: this.id, window: "detail", origin: this.conv?.origin ?? "human",
       start: this.start, end: this.end, models: [...this.models], surface: this.conv?.surface ?? "cli",
     };
     this.ctx.emit(s);
