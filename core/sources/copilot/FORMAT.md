@@ -44,7 +44,7 @@ VS Code's own reader):
 | 0 | `v` | initial entry: the session object becomes `v` (written first, and again whenever VS Code compacts the log) |
 | 1 | `k`, `v` | set `v` at path `k` |
 | 2 | `k`, `v?`, `i?` | push: the array at `k` (created when absent) is cut to length `i` when `i` is given, then the items of `v` are appended |
-| 3 | `k` | delete the value at `k` |
+| 3 | `k` | delete the value at `k` (an array item is set to undefined in place, as VS Code does) |
 
 `k` is an array of object keys (strings) and array indices (numbers), e.g. `["requests", <n>, "response"]`. VS Code
 writes a push with `i` when an array's tail changed (a request removed or re-sent), and `kind:1` for whole values whose
@@ -53,7 +53,10 @@ maps in the session), so they are never copied anywhere. Unknown kinds make VS C
 them as drift `journal-kind:<n>` and goes on. A record that is not an object, comes before the first initial entry, has a
 path that is not an array of keys and non-negative integers, leads through a missing value, pushes onto a non-array or
 pushes a non-array, or names `__proto__`, `constructor` or `prototype` anywhere in its path is skipped as `bad-record`.
-The replay walks own properties only, so no record can reach an object prototype.
+The replay walks own properties only, so no record can reach an object prototype. Inside an array a path may only name
+an item within it — a number, at most the array's length for a set or push (the item just past the end appends), below it
+for a delete — and a push's `i` must be within the array's length; anything else (a string index, `length`, an index far
+past the end) is a `bad-record`, so a corrupt record cannot grow a sparse array of billions of holes.
 
 The session object (version 3) — written by the journal serializer (VS Code program): `version` (number, 3),
 `creationDate` (epoch ms), `customTitle`, `initialLocation` (`panel`, `editor`, `terminal`, `notebook`), `inputState`

@@ -7,8 +7,10 @@ import { isObj, type Obj } from "../common/guards";
  * - `{kind:1, k, v}` — set `v` at path `k`;
  * - `{kind:2, k, v?, i?}` — push: the array at `k` (created when absent) is first cut to length `i` when `i` is given,
  *   then the items of `v` are appended;
- * - `{kind:3, k}` — delete the value at `k`.
- * A set or delete at an empty path changes nothing, as in VS Code.
+ * - `{kind:3, k}` — delete the value at `k` (an array item is cleared in place).
+ * A set or delete at an empty path changes nothing, as in VS Code. Inside an array a path may only name an item within
+ * it (a set or push at most one past the end, a delete of an existing item) and `i` must be within the array's length:
+ * a corrupt record cannot grow a sparse array of billions of holes for the mapping to walk.
  * `k` is an array of keys and array indices. See FORMAT.md.
  */
 
@@ -61,20 +63,30 @@ export class Journal {
     const parent = parentOf(this.root, k);
     if (parent === undefined) return this.issue("bad-record");
     const last = k[k.length - 1]!;
+    if (Array.isArray(parent)) {
+      // inside an array only an item is addressed, within the array: a set or push at most one past the end, a delete
+      // of an existing item. So a journal never makes a sparse array (an index of 4e9) or assigns `length`.
+      if (typeof last !== "number" || last > parent.length || (kind === 3 && last === parent.length)) return this.issue("bad-record");
+      if (kind === 1) parent[last] = rec.v;
+      else if (kind === 3) parent[last] = undefined; // as VS Code: the item is cleared in place, the array keeps its length
+      else this.push(parent as unknown as Record<string | number, unknown>, last, rec);
+      return;
+    }
     const target = parent as Record<string | number, unknown>;
     if (kind === 1) target[last] = rec.v;
     else if (kind === 3) delete target[last];
     else this.push(target, last, rec);
   }
 
+  /** Push onto the array at `target[last]`: cut it to `i` (within its length) when given, then append the items of `v`. */
   private push(target: Record<string | number, unknown>, last: string | number, rec: Obj): void {
     const cur = Object.hasOwn(target, last) ? target[last] : undefined;
     if (cur !== undefined && cur !== null && !Array.isArray(cur)) return this.issue("bad-record");
     if (rec.v !== undefined && !Array.isArray(rec.v)) return this.issue("bad-record");
-    const i = rec.i;
-    if (i !== undefined && !(typeof i === "number" && Number.isInteger(i) && i >= 0)) return this.issue("bad-record");
     const arr: unknown[] = Array.isArray(cur) ? cur : [];
-    if (typeof i === "number" && i < arr.length) arr.length = i;
+    const i = rec.i;
+    if (i !== undefined && !(typeof i === "number" && Number.isInteger(i) && i >= 0 && i <= arr.length)) return this.issue("bad-record");
+    if (typeof i === "number") arr.length = i;
     if (Array.isArray(rec.v)) for (const item of rec.v) arr.push(item);
     target[last] = arr;
   }

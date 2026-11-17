@@ -101,6 +101,32 @@ describe("replayJournal", () => {
     expect(issues).toEqual(["bad-record", "bad-record", "bad-record"]);
   });
 
+  test("array paths stay inside the array: huge indices, string indices and `length` are bad records, rejected at once", () => {
+    const issues: string[] = [];
+    const started = performance.now();
+    const root = replayJournal([
+      { kind: 0, v: { requests: [{ a: 1 }], o: {} } },
+      { kind: 1, k: ["requests", 4294967294], v: {} }, // would make a sparse array of ~4e9 holes
+      { kind: 1, k: ["requests", "length"], v: 4294967295 }, // likewise, through `length`
+      { kind: 1, k: ["requests", "0"], v: {} }, // a string index on an array
+      { kind: 2, k: ["requests", 7], v: [1] }, // a push that creates an array past the end
+      { kind: 2, k: ["requests"], v: [{ b: 2 }], i: 5 }, // truncation past the length
+      { kind: 3, k: ["requests", 1] }, // a delete past the end
+      { kind: 1, k: ["requests", 1], v: { c: 3 } }, // index == length appends
+      { kind: 1, k: ["o", "length"], v: 7 }, // on an object, `length` is a plain key
+    ], (key) => issues.push(key));
+    expect(issues).toEqual(Array(6).fill("bad-record"));
+    expect(performance.now() - started).toBeLessThan(1_000);
+    expect(root).toStrictEqual({ requests: [{ a: 1 }, { c: 3 }], o: { length: 7 } });
+  });
+
+  test("kind 3 on an array index clears that item in place (as VS Code sets it undefined); the array keeps its length", () => {
+    const issues: string[] = [];
+    const root = replayJournal([{ kind: 0, v: { list: [1, 2, 3] } }, { kind: 3, k: ["list", 1] }, { kind: 3, k: ["list", 3] }], (key) => issues.push(key));
+    expect(root).toStrictEqual({ list: [1, undefined, 3] });
+    expect(issues).toEqual(["bad-record"]);
+  });
+
   test("pure: the records passed in are not changed", () => {
     const records = [{ kind: 0, v: { list: [1] } }, { kind: 2, k: ["list"], v: [2] }, { kind: 1, k: ["x"], v: 1 }];
     const before = JSON.parse(JSON.stringify(records));
@@ -392,6 +418,22 @@ describe("copilot vscode: mapping rules", () => {
     expect(toolsOf(r, id).map((t) => t.name)).toEqual(["copilot_readFile"]);
     expect(r.warnings.some((w) => w.code === "drift" && w.source === "copilot.vscode")).toBe(true);
     expectNoCanaries([...allEvents(r), r.coverage, r.warnings]);
+  });
+
+  test("a corrupt journal index cannot stall the scan: the record is a bad record and the session still maps", async () => {
+    const id = cpSid("huge");
+    const at = t0();
+    writeJournal("w", id, [
+      { kind: 0, v: sessionRoot(id, [request({ ts: at, parts: [tool("copilot_readFile")] })]) },
+      { kind: 1, k: ["requests", 4294967294], v: request({ ts: at + MIN }) },
+      { kind: 1, k: ["requests", 0, "response", "length"], v: 4294967295 },
+    ]);
+    const started = performance.now();
+    const r = await run([cpVscode]);
+    expect(performance.now() - started).toBeLessThan(5_000);
+    expect(r.store.forSession(sidOf(id), "prompt")).toHaveLength(1);
+    expect(toolsOf(r, id).map((t) => t.name)).toEqual(["copilot_readFile"]);
+    expect(covOf(r, "copilot.vscode").skipped["bad-record"]).toBe(2);
   });
 
   test("invalid files and lines are counted, not fatal: a legacy file that does not parse, a broken journal line", async () => {
