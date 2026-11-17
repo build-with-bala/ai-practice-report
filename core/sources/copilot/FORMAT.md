@@ -216,7 +216,8 @@ other type is drift `event:<type>` (dotted lower-case tokens kept, else `(other)
   else `system`; the CLI's context blocks (`<reminder>`, `<attachments>`, `<context>`, `<current_datetime>`, …) are
   stripped first, as the extension does.
 - `assistant.turn_start` / `assistant.turn_end` {`turnId`} → TurnEv completed, `ms` between them; `abort` → MarkerEv
-  `interrupt`, ending the open turn as interrupted.
+  `interrupt`, ending the open turn as interrupted. A `turn_end` ends only a turn that is still open: one an abort
+  already ended, or one never started, ends nothing.
 - `tool.execution_start` {`toolCallId`, `toolName`, `arguments`, `mcpServerName`?, `mcpToolName`?, `parentToolCallId`?}
   and `tool.execution_complete` {`toolCallId`, `success`, `result` {`content`}, `error` {`code`, `message`}} → ToolEv
   (`CLI_TOOLS`): `bash`/`powershell` → `classifyCommand(arguments.command)`, `exit` from the result's trailing

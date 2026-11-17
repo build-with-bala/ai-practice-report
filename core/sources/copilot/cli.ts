@@ -188,8 +188,9 @@ class CliReader {
     if (this.turns.size > OPEN_TURNS) this.turns.delete(this.turns.keys().next().value!);
   }
 
+  /** Ends a turn that is still open; a turn already ended (e.g. by an abort) or never started ends nothing. */
   private turnEnd(id: string | undefined, ts: number, status: "completed" | "interrupted"): void {
-    if (id === undefined) return;
+    if (id === undefined || !(this.turns.has(id) || this.openTurn === id)) return;
     const started = this.turns.get(id);
     this.turns.delete(id);
     if (this.openTurn === id) this.openTurn = undefined;

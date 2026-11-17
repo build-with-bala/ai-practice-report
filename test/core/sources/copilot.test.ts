@@ -691,6 +691,23 @@ describe("copilot cli (session events and store, from the CLI's schema)", () => 
     expectNoCanaries([...allEvents(r), r.coverage]);
   });
 
+  test("a turn_end after an abort does not end the turn again; a turn_end for a turn never started ends nothing", async () => {
+    const at = t0();
+    const id = cpSid("cli3");
+    const e = new CliEvents(at)
+      .ev("session.start", { sessionId: id }, 0)
+      .ev("user.message", { content: "Run the migration" })
+      .ev("assistant.turn_start", { turnId: "7" })
+      .ev("abort", { reason: "user initiated" })
+      .ev("assistant.turn_end", { turnId: "7" })
+      .ev("assistant.turn_end", { turnId: "never-started" })
+      .ev("assistant.turn_end", {});
+    h.writeJsonl(path.join(".copilot", "session-state", id, "events.jsonl"), e.records);
+    const r = await run([cpCli]);
+    expect(r.store.forSession(sidOf(id), "turn").map((t) => [t.status, t.ms])).toEqual([["interrupted", 1_000]]);
+    expect(r.store.forSession(sidOf(id), "marker").map((m) => m.kind)).toEqual(["interrupt"]);
+  });
+
   test("no session-state and no store under ~/.copilot: absent", async () => {
     h.writeJson(path.join(".copilot", "config.json"), { banner: "never" });
     expect(cpCli.locate(h.env, [h.env.home])).toEqual([]);
