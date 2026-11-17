@@ -54,6 +54,25 @@ describe("localDay", () => {
     withTz("Pacific/Auckland", () => expect(localDay(ms)).toBe("2026-11-17"));
     withTz("UTC", () => expect(localDay(ms)).toBe("2026-11-16"));
   });
+  test("a zone's formatter is built once and reused; the process zone still follows TZ", () => {
+    const Real = Intl.DateTimeFormat;
+    let built = 0;
+    const Counting = function (this: unknown, ...args: ConstructorParameters<typeof Real>) {
+      built++;
+      return new Real(...args);
+    } as unknown as typeof Intl.DateTimeFormat;
+    Intl.DateTimeFormat = Counting;
+    try {
+      for (let i = 0; i < 100; i++) expect(localDay(ms + i, "Asia/Kathmandu")).toBe("2026-11-16");
+      expect(built).toBeLessThanOrEqual(1);
+      withTz("Pacific/Auckland", () => expect(localDay(ms)).toBe("2026-11-17"));
+      withTz("UTC", () => expect(localDay(ms)).toBe("2026-11-16"));
+      withTz("Pacific/Auckland", () => expect(localDay(ms)).toBe("2026-11-17"));
+      expect(built).toBeLessThanOrEqual(3); // Kathmandu once, the process zone once per TZ value
+    } finally {
+      Intl.DateTimeFormat = Real;
+    }
+  });
   test("after a test restored it, the zone is the starting one and later changes still apply", () => {
     expect(new Intl.DateTimeFormat().resolvedOptions().timeZone).toBe(startZone);
     withTz("Pacific/Auckland", () => expect(localDay(ms)).toBe("2026-11-17"));

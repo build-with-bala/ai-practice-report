@@ -22,12 +22,23 @@ function plausible(ms: number, now: number): number | undefined {
   return ms;
 }
 
+/**
+ * One formatter per zone: building an Intl.DateTimeFormat costs about 60× a format call. The process zone is keyed by
+ * the current `process.env.TZ` (a formatter fixes its zone when built), so changing TZ still changes the default zone.
+ */
+const DAY_FORMATS = new Map<string, Intl.DateTimeFormat>();
+
+function dayFormat(timeZone: string | undefined): Intl.DateTimeFormat {
+  const key = timeZone ?? `process:${process.env.TZ ?? ""}`;
+  let f = DAY_FORMATS.get(key);
+  if (!f) {
+    f = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" });
+    DAY_FORMATS.set(key, f);
+  }
+  return f;
+}
+
 /** "YYYY-MM-DD" in the given IANA zone (default: the process zone, honouring process.env.TZ). */
 export function localDay(ms: number, timeZone?: string): string {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(ms);
+  return dayFormat(timeZone).format(ms);
 }
