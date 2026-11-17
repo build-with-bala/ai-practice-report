@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { maybeYield } from "./yield";
 
 export const MAX_LINE_BYTES = 33_554_432;
 
@@ -43,6 +44,8 @@ export interface JsonlOpts {
  * Stream a JSONL file with bounded memory. Bad *content* never throws (malformed lines yield
  * `{skip:"parse"}`). A genuinely missing path yields nothing; any other I/O failure
  * (EACCES, EISDIR, mid-read errors) throws so callers can record a coverage error.
+ * Between chunks the stream lets the event loop run (`maybeYield`), so a signal or an abort is seen mid-file; once
+ * `signal` is aborted it ends early, and the caller must not count the file as fully read.
  */
 export async function* readJsonl(path: string, opts: JsonlOpts = {}): AsyncGenerator<JsonlItem> {
   if (!existsSync(path)) return;
@@ -85,6 +88,8 @@ export async function* readJsonlStream(
 
   try {
     for (;;) {
+      const pause = maybeYield();
+      if (pause) await pause;
       if (opts.signal?.aborted) return;
       const r = await reader.read();
       if (r.done) break;

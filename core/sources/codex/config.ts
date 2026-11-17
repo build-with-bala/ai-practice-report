@@ -2,6 +2,7 @@ import { realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import { safeStat } from "../../io/fs";
 import { MAX_LINE_BYTES } from "../../io/jsonl";
+import { maybeYield } from "../../io/yield";
 import type { ConfigEv } from "../../model/events";
 import { isTypeName, listDir, readSidecar, Tally } from "../common/coverage";
 import { isObj } from "../common/guards";
@@ -194,6 +195,8 @@ async function* textLines(file: string, signal: AbortSignal): AsyncGenerator<str
   let pending: string[] = []; // pieces of the current line, joined once its newline arrives
   let pendingLength = 0;
   for await (const chunk of Bun.file(file).stream()) {
+    const pause = maybeYield();
+    if (pause) await pause;
     if (signal.aborted) return;
     const text = decoder.decode(chunk, { stream: true });
     let start = 0;

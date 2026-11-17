@@ -4,6 +4,7 @@ import path from "node:path";
 import { detectEnv, type Env } from "./env/env";
 import { homesToScan } from "./env/paths";
 import { installSignalCleanup, TempRegistry } from "./io/temp";
+import { maybeYield } from "./io/yield";
 import type { CoverageEv, Ev } from "./model/events";
 import type { ToolId } from "./model/ids";
 import { EventStore } from "./model/store";
@@ -92,7 +93,10 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
       safe(() => opts.onProgress?.({ plugin: plugin.id, done, total }));
     };
     const worker = async () => {
-      while (!signal.aborted && next < jobs.length) {
+      while (next < jobs.length) {
+        const pause = maybeYield(); // a plugin that never awaits still lets signals and timers in between jobs
+        if (pause) await pause;
+        if (signal.aborted) break;
         const i = next++;
         started.add(i);
         try { await runJob(jobs[i]!); } catch { /* runJob should not throw; never reject a worker */ }

@@ -89,6 +89,8 @@ function readableColumns(db: RoDb, tables: Set<string>, table: string, wanted: r
  * on this table: drift `table-unreadable:<name>`. A busy store, or a later page that fails, is an io-error. Either ends
  * the table.
  */
+// TODO(Plan 2 Task 0): this pager is synchronous and never yields to the event loop, so a signal or an abort waits
+// for the whole table. Move it onto the shared async pager (common/sqlite.ts) that awaits maybeYield() between pages.
 function* pages(db: RoDb, table: string, select: string[], tally: Tally, ctx: ScanCtx): Generator<Obj[]> {
   const sql = `SELECT rowid AS rid, ${select.join(", ")} FROM ${q(table)} WHERE rowid > ? ORDER BY rowid LIMIT ?`;
   let after = Number.MIN_SAFE_INTEGER;

@@ -120,6 +120,8 @@ function keyIndexed(db: RoDb, table: string): boolean {
  * it can never work on this table: drift `table-unreadable:<table>`. A busy store, or any later failure, is an
  * io-error. Any failure ends the pass.
  */
+// TODO(Plan 2 Task 0): this pager is synchronous and never yields to the event loop, so a signal or an abort waits
+// for the whole table. Move it onto the shared async pager (common/sqlite.ts) that awaits maybeYield() between pages.
 export class Pass {
   private started = false;
   failed = false;

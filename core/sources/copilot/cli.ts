@@ -326,6 +326,8 @@ function storeColumns(db: RoDb, tables: Set<string>, table: string, wanted: read
 }
 
 /** Rows of `table` in rowid pages; a page that fails ends the table as an io-error (busy stores included). */
+// TODO(Plan 2 Task 0): this pager is synchronous and never yields to the event loop, so a signal or an abort waits
+// for the whole table. Move it onto the shared async pager (common/sqlite.ts) that awaits maybeYield() between pages.
 function* storePages(db: RoDb, table: string, cols: string[], tally: Tally, ctx: ScanCtx): Generator<Obj[]> {
   const sql = `SELECT rowid AS rid, ${cols.map(q).join(", ")} FROM ${q(table)} WHERE rowid > ? ORDER BY rowid LIMIT ?`;
   let after = Number.MIN_SAFE_INTEGER;
