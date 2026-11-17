@@ -82,7 +82,7 @@ export const cuIde: SourcePlugin = {
   describe: {
     reads: [
       "<Cursor user>/globalStorage/state.vscdb, table cursorDiskKV, keys composerData:* (by key range) — created and updated times, agent flag and mode, model setting, subagent marker and launch id, sub-composer ids, message counts, and the bubble ids it lists (its header list)",
-      "<Cursor user>/globalStorage/state.vscdb, table cursorDiskKV, keys bubbleId:<composer>:* of composers updated in the detail window (90 days, or since --since), by each composer's key range, only the bubbles its header list names — message type, time, model, thinking time, whether an error is recorded; for tools: name, numeric id, status, the person's decision, call id, and from the params only the command line, target file and MCP server, from the result only the exit code; the text of the person's messages",
+      "<Cursor user>/globalStorage/state.vscdb, table cursorDiskKV, keys bubbleId:<composer>:* of composers updated in the detail window (90 days, or since --since), by each composer's key range, only the bubbles its header list names — message type, time, model, whether an error is recorded; for tools: name, numeric id, status, the person's decision, call id, and from the params only the command line, target file and MCP server, from the result only the exit code; the text of the person's messages",
       "<Cursor user>/{globalStorage,workspaceStorage/*}/state.vscdb, table ItemTable — only aiService.prompts (presence), aiService.generations, composer.composerData and workbench.panel.aichat.view.aichat.chatdata, and only when cursorDiskKV holds no composer (older Cursor)",
     ],
     neverReads: [

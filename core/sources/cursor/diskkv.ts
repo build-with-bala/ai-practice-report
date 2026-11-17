@@ -1,7 +1,7 @@
 import { safeStat } from "../../io/fs";
 import { isBusyError, MAX_COPY_BYTES, openRo, type RoDb } from "../../io/sqlite";
 import { toEpochMs } from "../../io/time";
-import type { Ev, MarkerEv, PromptEv, SessionEv, ToolEv, TurnEv } from "../../model/events";
+import type { Ev, MarkerEv, PromptEv, SessionEv, ToolEv } from "../../model/events";
 import { sid, type MarkerKind, type Origin, type ToolCategory } from "../../model/ids";
 import { classifyCommand } from "../../text/commands";
 import { classifyIntent } from "../../text/intent";
@@ -217,8 +217,10 @@ const TOOL_NAMES: ReadonlyMap<string, ToolCategory> = new Map<string, ToolCatego
   ["create_plan", "plan"],
   ...MCP_NAMES.map((n) => [n, "mcp"] as const),
   ...(["computer_use", "record_screen", "Browser"] as const).map((n) => [n, "browser"] as const),
-  ...(["create_diagram", "knowledge_base", "fix_lints", "ask_question", "switch_mode", "generate_image", "report_bugfix_results", "ai_attribution",
-    "reflect", "await", "update_project", "update_memory", "unspecified"] as const).map((n) => [n, "other"] as const),
+  // bookkeeping and talk with the person: questions, mode switches, reflection, waiting, reports
+  ...(["ask_question", "switch_mode", "reflect", "await", "report_bugfix_results"] as const).map((n) => [n, "meta"] as const),
+  ...(["create_diagram", "knowledge_base", "fix_lints", "generate_image", "ai_attribution", "update_project", "update_memory", "unspecified"] as const)
+    .map((n) => [n, "other"] as const),
 ]);
 
 /** Cursor's numeric tool enum (`toolFormerData.tool`): used for a tool whose name is missing or unknown. */
@@ -236,8 +238,8 @@ const TOOL_IDS: ReadonlyMap<number, string> = new Map([
 const idsOf = (names: readonly string[]): number[] => [...TOOL_IDS].filter(([, n]) => names.includes(n)).map(([id]) => id);
 /** MCP tools of a server: names that start with `mcp_` or `mcp-` (the server's name sits inside, so it is never parsed out). */
 const MCP_PREFIX = /^mcp[_-]/i;
-/** `toolFormerData.status` of a tool that did not succeed. */
-const FAILED = new Set(["error", "cancelled", "aborted"]);
+/** `toolFormerData.status` of a tool that did not run to an end of its own: cancelled before it ran, or stopped while it ran. */
+const NOT_ENDED: ReadonlyMap<string, NonNullable<ToolEv["outcome"]>> = new Map([["cancelled", "cancelled"], ["aborted", "interrupted"]]);
 
 interface ToolKind { name: string; category: ToolCategory; terminal: boolean; path: boolean }
 
@@ -301,8 +303,8 @@ const COMPOSER_FIELDS = [
 /** Bubbles: scalar fields, the text of user bubbles (type 1) only, and — inside SQLite — a tool's params, raw arguments and result. */
 const BUBBLE_FIELDS = [
   field("json_extract", "$.type", "type"), field("json_extract", "$.createdAt", "created"),
-  field("json_extract", "$.modelInfo.modelName", "model"), field("json_extract", "$.thinkingDurationMs", "thinking"),
-  field("json_type", "$.errorDetails", "err"), field("json_type", "$.toolFormerData", "tfd"),
+  field("json_extract", "$.modelInfo.modelName", "model"), field("json_type", "$.errorDetails", "err"),
+  field("json_type", "$.toolFormerData", "tfd"),
   field("json_extract", "$.toolFormerData.name", "tname"), field("json_extract", "$.toolFormerData.tool", "tid"),
   field("json_extract", "$.toolFormerData.status", "tstatus"), field("json_extract", "$.toolFormerData.userDecision", "decision"),
   field("json_extract", "$.toolFormerData.toolCallId", "tcall"),
@@ -324,7 +326,7 @@ const LISTED_FIELDS = [
 const composerSql = (mode: Mode): string =>
   `SELECT ${head(mode)}, ${[...COMPOSER_FIELDS, ...(mode === "rowid" ? LISTED_FIELDS : [])].join(", ")} FROM (${family(mode, "composerData")}) ${order(mode)}`;
 const bubbleSql = (mode: Mode): string =>
-  `SELECT ${head(mode)}, type, created, model, thinking, err, tfd, tname, tid, tstatus, decision, tcall, text, ${TOOL_PARTS.join(", ")} `
+  `SELECT ${head(mode)}, type, created, model, err, tfd, tname, tid, tstatus, decision, tcall, text, ${TOOL_PARTS.join(", ")} `
   + `FROM (SELECT ${head(mode)}, ${BUBBLE_FIELDS.join(", ")} FROM (${family(mode, "bubbleId")})) ${order(mode)}`;
 const SQL: Record<Mode, { composers: string; bubbles: string }> = {
   key: { composers: composerSql("key"), bubbles: bubbleSql("key") },
@@ -535,13 +537,7 @@ export class DiskKv {
     this.span(c, ts);
     if (r.type === 1) this.prompt(c, r, ts);
     if (r.type === 2 && r.tfd === "object") this.tool(c, r, ts);
-    const thinking = num(r.thinking);
-    if (thinking !== undefined && thinking > 0) {
-      const ev: TurnEv = { k: "turn", tool: TOOL, source: IDE_SOURCE, ts, sessionId: c.id, window: "detail", ms: thinking };
-      const turnModel = model ?? c.model;
-      if (turnModel !== undefined) ev.model = turnModel;
-      this.out(c, ev);
-    }
+    // a bubble's thinkingDurationMs is time spent thinking, not a turn: the store marks no end of a turn, so no TurnEv
     if (r.err !== undefined && r.err !== null && r.err !== "null") this.marker(c, ts, "error");
   }
 
@@ -586,8 +582,9 @@ export class DiskKv {
 
   /**
    * One ToolEv per tool bubble. A terminal tool takes the category and checks of its command line and its exit code; a
-   * file-changing tool the extension of its file; an MCP tool its server. `ok` is false when the person rejected it,
-   * else `exit === 0` when an exit code is known, else from `status`. A rejection is also a denial marker.
+   * file-changing tool the extension of its file; an MCP tool its server. A tool the person rejected has outcome
+   * `denied` (and a denial marker), one `cancelled` or `aborted` the outcome `cancelled` or `interrupted` — none of them
+   * has ok or exit. Else `ok` = `exit === 0` when an exit code is known, else from `status` (`completed`, `error`).
    */
   private tool(c: Composer, r: Obj, ts: number): void {
     const kind = toolKind(str(r.tname), num(r.tid));
@@ -613,18 +610,21 @@ export class DiskKv {
       const ext = target === undefined ? undefined : extOfPath(target);
       if (ext !== undefined) ev.editExt = ext;
     }
-    const rejected = r.decision === "rejected";
     const status = typeof r.tstatus === "string" ? r.tstatus.toLowerCase() : undefined;
-    if (rejected) ev.ok = false;
-    else if (ev.exit !== undefined) ev.ok = ev.exit === 0;
+    const outcome = r.decision === "rejected" ? "denied" : status === undefined ? undefined : NOT_ENDED.get(status);
+    if (outcome !== undefined) {
+      ev.outcome = outcome;
+      delete ev.exit;
+    } else if (ev.exit !== undefined) ev.ok = ev.exit === 0;
     else if (status === "completed") ev.ok = true;
-    else if (status !== undefined && FAILED.has(status)) ev.ok = false;
+    else if (status === "error") ev.ok = false;
     this.out(c, ev);
-    if (rejected) this.marker(c, ts, "denial");
+    if (outcome === "denied") this.marker(c, ts, "denial", "user");
   }
 
-  private marker(c: Composer, ts: number, kind: MarkerKind): void {
+  private marker(c: Composer, ts: number, kind: MarkerKind, detail?: string): void {
     const m: MarkerEv = { k: "marker", tool: TOOL, source: IDE_SOURCE, ts, sessionId: c.id, kind };
+    if (detail !== undefined) m.detail = detail;
     this.out(c, m);
   }
 
@@ -673,7 +673,7 @@ export class DiskKv {
     if (c.start === undefined || c.end === undefined) return this.tally.skip("no-ts");
     const s: SessionEv = {
       k: "session", tool: TOOL, source: IDE_SOURCE, id: c.id, window: c.detail ? "detail" : "lifetime", origin: c.origin, start: c.start,
-      end: c.end, models: [...c.models], surface: c.agent ? "agent" : "chat",
+      end: c.end, models: [...c.models], surface: "ide", mode: c.agent ? "agent" : "chat",
     };
     const parent = this.parents.get(c.raw);
     if (parent !== undefined && parent !== c.id) s.parentId = parent;

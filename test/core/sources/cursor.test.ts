@@ -61,7 +61,7 @@ const observe = () => {
 const KV_PATHS = new Set([
   "$.createdAt", "$.lastUpdatedAt", "$.isAgentic", "$.unifiedMode", "$.modelConfig.modelName", "$.subagentInfo", "$.subagentInfo.toolCallId",
   "$.subComposerIds", "$.subagentComposerIds", "$.fullConversationHeadersOnly", "$.conversation", "$.bubbleId",
-  "$.type", "$.text", "$.modelInfo.modelName", "$.thinkingDurationMs", "$.errorDetails", "$.toolFormerData", "$.toolFormerData.name",
+  "$.type", "$.text", "$.modelInfo.modelName", "$.errorDetails", "$.toolFormerData", "$.toolFormerData.name",
   "$.toolFormerData.tool", "$.toolFormerData.status", "$.toolFormerData.userDecision", "$.toolFormerData.toolCallId",
   "$.toolFormerData.params", "$.toolFormerData.rawArgs", "$.toolFormerData.result",
   "$.command", "$.targetFile", "$.target_file", "$.relativeWorkspacePath", "$.relative_workspace_path", "$.filePath", "$.file_path", "$.path",
@@ -138,8 +138,8 @@ describe("cursor: Task 14 scenario", () => {
 
     const sessions = r.store.all("session");
     expect(sessions.map((s) => s.id).sort()).toEqual([sidOf(A), sidOf(B)].sort());
-    expect(r.store.session(sidOf(A))!.surface).toBe("agent");
-    expect(r.store.session(sidOf(B))!.surface).toBe("chat");
+    expect(r.store.session(sidOf(A))).toMatchObject({ surface: "ide", mode: "agent" });
+    expect(r.store.session(sidOf(B))).toMatchObject({ surface: "ide", mode: "chat" });
     const prompts = r.store.all("prompt");
     expect(prompts).toHaveLength(3);
     expect(prompts.every((p) => p.origin === "human" && p.window === "detail")).toBe(true);
@@ -148,7 +148,7 @@ describe("cursor: Task 14 scenario", () => {
     expect(tools.every((t) => t.category === "test" && JSON.stringify(t.checks) === JSON.stringify(["test"]))).toBe(true);
     expect(r.store.all("marker").filter((m) => m.kind === "denial")).toHaveLength(1);
     expect(r.store.all("marker").filter((m) => m.kind === "error")).toHaveLength(1);
-    expect(r.store.all("turn").filter((t) => t.ms === 900)).toHaveLength(1);
+    expect(r.store.all("turn")).toEqual([]); // thinking time is no turn: Cursor's store marks no end of a turn
     expect(r.store.all("commit")).toHaveLength(2);
     expect(covOf(r, "cursor.agent-cli").status).toBe("absent");
     expectNoCanaries([...allEvents(r), r.coverage, r.warnings]);
@@ -159,10 +159,10 @@ describe("cursor: Task 14 scenario", () => {
     const fx = buildCursor(h);
     const r = await run([cuIde]);
     expect(r.store.session(sidOf(A))).toMatchObject({
-      tool: "cursor", source: "cursor.ide", window: "detail", origin: "human", surface: "agent", start: fx.t0, end: fx.t0 + 9 * MIN,
+      tool: "cursor", source: "cursor.ide", window: "detail", origin: "human", surface: "ide", mode: "agent", start: fx.t0, end: fx.t0 + 9 * MIN,
       models: [CU_SONNET, CU_GPT],
     });
-    expect(r.store.session(sidOf(B))).toMatchObject({ origin: "human", surface: "chat", start: fx.t0 + 19 * MIN, end: fx.t0 + 21 * MIN, models: [] });
+    expect(r.store.session(sidOf(B))).toMatchObject({ origin: "human", surface: "ide", mode: "chat", start: fx.t0 + 19 * MIN, end: fx.t0 + 21 * MIN, models: [] });
     expect(r.store.session(sidOf(A))!.projectKey).toBeUndefined();
   });
 
@@ -178,20 +178,18 @@ describe("cursor: Task 14 scenario", () => {
     expect(prompts.every((p) => p.tool === "cursor" && p.source === "cursor.ide")).toBe(true);
   });
 
-  test("tools, markers, turn: command checks, exit codes, decisions; denial and error markers; thinking time", async () => {
+  test("tools and markers: command checks, exit codes, decisions; denial and error markers; thinking time is no turn", async () => {
     const fx = buildCursor(h);
     const r = await run([cuIde]);
     const tools = [...toolsOf(r, A)].sort((a, b) => a.ts - b.ts);
-    expect(tools.map((t) => [t.ts - fx.t0, t.name, t.category, t.checks, t.ok, t.exit])).toEqual([
-      [2 * MIN, "run_terminal_cmd", "test", ["test"], true, 0],
-      [3 * MIN, "run_terminal_cmd", "test", ["test"], false, 1],
-      [6 * MIN, "run_terminal_cmd", "test", ["test"], false, undefined],
+    expect(tools.map((t) => [t.ts - fx.t0, t.name, t.category, t.checks, t.ok, t.outcome, t.exit])).toEqual([
+      [2 * MIN, "run_terminal_cmd", "test", ["test"], true, undefined, 0],
+      [3 * MIN, "run_terminal_cmd", "test", ["test"], false, undefined, 1],
+      [6 * MIN, "run_terminal_cmd", "test", ["test"], undefined, "denied", undefined], // a rejected test is no failing check
     ]);
     expect(tools[0]!.callId).toBe(keyedHash(r.salt, `call_t1_${CANARY.secret}`));
-    expect(r.store.forSession(sidOf(A), "marker").map((m) => [m.kind, m.ts - fx.t0]).sort()).toEqual([["denial", 6 * MIN], ["error", 3 * MIN]]);
-    expect(r.store.all("turn")).toEqual([
-      { k: "turn", tool: "cursor", source: "cursor.ide", ts: fx.t0 + 2 * MIN, sessionId: sidOf(A), window: "detail", model: CU_GPT, ms: 900 },
-    ]);
+    expect(r.store.forSession(sidOf(A), "marker").map((m) => [m.kind, m.detail, m.ts - fx.t0]).sort()).toEqual([["denial", "user", 6 * MIN], ["error", undefined, 3 * MIN]]);
+    expect(r.store.all("turn")).toEqual([]);
   });
 
   test("coverage: the store, its composer and bubble rows, the event span", async () => {
@@ -256,7 +254,7 @@ describe("cursor ide: bubbles and tools", () => {
     expectNoCanaries([...allEvents(r), r.coverage], { allow: ["mcp"] });
   });
 
-  test("ok: rejected or failed tools are not ok; a completed tool is; an exit code decides for commands; running tools have no outcome", async () => {
+  test("ok: failed tools are not ok, a completed tool is, an exit code decides for commands; rejected, cancelled and aborted tools did not end; running tools say nothing", async () => {
     const c = cuSid("ok");
     const at = t0();
     let n = 0;
@@ -271,11 +269,12 @@ describe("cursor ide: bubbles and tools", () => {
       t(cmd(`${CANARY.secret} not json`, "error")), t(cmd(undefined, undefined, "accepted")),
     ]);
     const r = await run([cuIde]);
-    expect(byTime(toolsOf(r, c)).map((x) => [x.ok, x.exit])).toEqual([
-      [true, undefined], [false, undefined], [false, undefined], [undefined, undefined], [undefined, undefined], [false, undefined],
-      [true, 0], [false, 2], [true, undefined], [true, 0], [false, undefined], [undefined, undefined],
+    expect(byTime(toolsOf(r, c)).map((x) => [x.ok, x.outcome, x.exit])).toEqual([
+      [true, undefined, undefined], [false, undefined, undefined], [undefined, "cancelled", undefined], [undefined, undefined, undefined],
+      [undefined, undefined, undefined], [undefined, "denied", undefined],
+      [true, undefined, 0], [false, undefined, 2], [true, undefined, undefined], [true, undefined, 0], [false, undefined, undefined], [undefined, undefined, undefined],
     ]);
-    expect(r.store.all("marker").map((m) => m.kind)).toEqual(["denial"]);
+    expect(r.store.all("marker").map((m) => [m.kind, m.detail])).toEqual([["denial", "user"]]);
   });
 
   test("bubbles: times as ISO or epoch ms; without a time, invalid JSON or a blank message skipped and counted; keys outside the composer's range never read", async () => {
@@ -358,7 +357,7 @@ describe("cursor ide: bubbles and tools", () => {
     expectNoCanaries([...allEvents(r), r.coverage]);
   });
 
-  test("only assistant bubbles make tool events; a thinking time of 0 is no turn", async () => {
+  test("only assistant bubbles make tool events; a thinking time is never a turn; bookkeeping tools are meta", async () => {
     const c = cuSid("kinds");
     const at = t0();
     writeStateDb(h, globalRel(h), [
@@ -366,10 +365,13 @@ describe("cursor ide: bubbles and tools", () => {
       [`bubbleId:${c}:${cuSid("u")}`, bubble(cuSid("u"), { type: 1, ts: at, text: "Run it", tool: { name: "run_terminal_cmd", params: { command: "pytest" } } })],
       toolRow(c, "z", at + 1_000, { name: "read_file" }, { thinkingMs: 0 }),
       toolRow(c, "t", at + 2_000, { name: "read_file" }, { thinkingMs: 1_250 }),
+      toolRow(c, "q", at + 3_000, { name: "ask_question" }), toolRow(c, "w", at + 4_000, { tool: 52 }), // switch_mode by its numeric id
     ]);
     const r = await run([cuIde]);
-    expect(byTime(toolsOf(r, c)).map((t) => [t.name, t.ts - at])).toEqual([["read_file", 1_000], ["read_file", 2_000]]);
-    expect(r.store.all("turn").map((t) => [t.ts - at, t.ms])).toEqual([[2_000, 1_250]]);
+    expect(byTime(toolsOf(r, c)).map((t) => [t.name, t.category, t.ts - at])).toEqual([
+      ["read_file", "read", 1_000], ["read_file", "read", 2_000], ["ask_question", "meta", 3_000], ["switch_mode", "meta", 4_000],
+    ]);
+    expect(r.store.all("turn")).toEqual([]);
     expect(r.store.all("prompt")).toHaveLength(1);
   });
 
@@ -389,7 +391,7 @@ describe("cursor ide: bubbles and tools", () => {
     await bothModes(rows, (r, mode) => {
       expect([mode, r.store.forSession(sidOf(c), "prompt").length]).toEqual([mode, 1]);
       expect(byTime(toolsOf(r, c)).map((t) => t.callId)).toEqual(["listed-2", "listed-3"].map((x) => keyedHash(r.salt, x)));
-      expect(r.store.forSession(sidOf(c), "turn").map((t) => t.ms)).toEqual([300]);
+      expect(r.store.forSession(sidOf(c), "turn")).toEqual([]);
       expect(r.store.forSession(sidOf(c), "marker").map((m) => m.kind)).toEqual(["denial"]);
       expect(covOf(r, "cursor.ide").skipped).toEqual({ unlisted: 5 });
       expectNoCanaries([...allEvents(r), r.coverage]);
@@ -556,7 +558,7 @@ describe("cursor ide: bubbles and tools", () => {
       toolRow(kid, "k", at + 1_000, { name: "read_file" }),
     ]);
     const r = await run([cuIde]);
-    expect([cuSid("mode"), cuSid("flag"), cuSid("none")].map((id) => r.store.session(sidOf(id))!.surface)).toEqual(["agent", "agent", "chat"]);
+    expect([cuSid("mode"), cuSid("flag"), cuSid("none")].map((id) => r.store.session(sidOf(id))!.mode)).toEqual(["agent", "agent", "chat"]);
     expect(r.store.session(sidOf(kid))).toMatchObject({ origin: "subagent", parentId: sidOf(parent) });
     expect(r.store.session(sidOf(parent))!.parentId).toBeUndefined();
   });
@@ -662,7 +664,7 @@ describe("cursor ide: the detail window (bubbles of composers updated in the las
     const r = await run([cuIde]);
     __observeQueries(undefined);
     expect(r.store.session(sidOf(OLD))).toMatchObject({
-      window: "lifetime", origin: "human", surface: "agent", start: old - MIN, end: old, models: [CU_SONNET],
+      window: "lifetime", origin: "human", surface: "ide", mode: "agent", start: old - MIN, end: old, models: [CU_SONNET],
     });
     for (const k of ["prompt", "tool", "turn", "marker"] as const) expect(r.store.forSession(sidOf(OLD), k)).toEqual([]);
     expect(r.store.session(sidOf(NEW))).toMatchObject({ window: "detail", start: recent, end: recent + MIN, models: [CU_SONNET, CU_GPT] });
@@ -680,7 +682,7 @@ describe("cursor ide: the detail window (bubbles of composers updated in the las
     let r = await scan({ env: h.env, plugins: [cuIde], since: old - 10 * DAY });
     expect([r.store.session(sidOf(OLD))!.window, r.store.session(sidOf(NEW))!.window]).toEqual(["detail", "detail"]);
     expect(r.store.forSession(sidOf(OLD), "prompt")).toHaveLength(1);
-    expect(r.store.forSession(sidOf(OLD), "turn").map((t) => t.ms)).toEqual([400]);
+    expect(toolsOf(r, OLD)).toHaveLength(1);
     expect(covOf(r, "cursor.ide").skipped).toEqual({ "empty-session": 1 });
     r = await scan({ env: h.env, plugins: [cuIde], since: Date.now() - DAY });
     expect([r.store.session(sidOf(OLD))!.window, r.store.session(sidOf(NEW))!.window]).toEqual(["lifetime", "lifetime"]);
@@ -751,7 +753,7 @@ describe("cursor ide: legacy ItemTable fallback", () => {
     ]);
     expect(prompts.map((p) => p.features.isTaskStart)).toEqual([true, false, true, true]);
     expect(prompts[1]!.textHash).toBe(keyedHash(r.salt, "Now add tests for it"));
-    expect(r.store.all("session").map((s) => [s.id, s.surface, s.start - at, s.end - at]).sort()).toEqual([
+    expect(r.store.all("session").map((s) => [s.id, s.mode, s.start - at, s.end - at]).sort()).toEqual([
       [sidOf(cuSid("C")), "agent", 0, 10 * MIN], [sidOf(cuSid("E")), "chat", MIN, 2 * MIN],
       [sidOf(cuSid("T1")), "chat", 30 * MIN, 30 * MIN], [sidOf(cuSid("T2")), "chat", 61 * MIN, 61 * MIN],
     ].sort());
@@ -805,7 +807,7 @@ describe("cursor ide: legacy ItemTable fallback", () => {
       { composerId: cuSid("L2"), createdAt: at + MIN, lastUpdatedAt: at + 2 * MIN, isAgentic: false, modelConfig: { modelName: CU_GPT } },
     ]]], { kv: false });
     const r = await run([cuIde]);
-    expect(r.store.all("session").map((s) => [s.id, s.surface, s.start - at, s.end - at, s.models]).sort()).toEqual([
+    expect(r.store.all("session").map((s) => [s.id, s.mode, s.start - at, s.end - at, s.models]).sort()).toEqual([
       [sidOf(cuSid("L1")), "agent", 0, MIN, []], [sidOf(cuSid("L2")), "chat", MIN, 2 * MIN, [CU_GPT]],
     ].sort());
     expectNoCanaries([...allEvents(r), r.coverage]);
@@ -876,9 +878,9 @@ describe("cursor ide: stores that cannot be read", () => {
       const kv = kvQueries(sql);
       expect([variant, kv.length]).toEqual([variant, 2]);
       for (const s of kv) expect(s).toMatch(/ FROM cursorDiskKV WHERE key LIKE '(composerData|bubbleId):%' AND rowid > \? ORDER BY rowid LIMIT \?\)/);
-      expect(r.store.all("session").map((s) => [s.id, s.window, s.surface]).sort()).toEqual([[sidOf(A), "detail", "agent"], [sidOf(B), "lifetime", "chat"]].sort());
+      expect(r.store.all("session").map((s) => [s.id, s.window, s.mode]).sort()).toEqual([[sidOf(A), "detail", "agent"], [sidOf(B), "lifetime", "chat"]].sort());
       expect(byTime(r.store.all("prompt")).map((p) => [p.ts - at, p.features.isTaskStart])).toEqual([[1_000, true], [3_000, false]]);
-      expect(r.store.all("tool").map((t) => [t.category, t.ok])).toEqual([["test", false]]);
+      expect(r.store.all("tool").map((t) => [t.category, t.ok, t.outcome])).toEqual([["test", undefined, "denied"]]);
       expect(r.store.all("marker").map((m) => m.kind)).toEqual(["denial"]);
       const cov = covOf(r, "cursor.ide");
       expect([cov.status, cov.unknownTypes, cov.skipped]).toEqual(["drift", { "no-key-index:cursorDiskKV": 1 }, { orphan: 1, "bad-record": 1, "outside-window": 1 }]);

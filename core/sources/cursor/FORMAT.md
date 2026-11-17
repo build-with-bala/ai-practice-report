@@ -73,7 +73,7 @@ Composer and bubble ids are UUIDs; subagent composers can carry a `task-` prefix
 - `type` (number: 1 user, 2 assistant), `bubbleId`, `createdAt` (ISO-8601 string; on most bubbles), `text` (string:
   the message; for type 2 the assistant's text), `richText`, `requestId`, `isAgentic`, `capabilityType` (number),
   `modelInfo` {`modelName`} (assistant bubbles), `tokenCount` {`inputTokens`, `outputTokens`} (zero on current versions),
-  `thinkingDurationMs` (number), `allThinkingBlocks[]`/`thinking` (text), `errorDetails` (object, when the request
+  `thinkingDurationMs` (number; not read), `allThinkingBlocks[]`/`thinking` (text), `errorDetails` (object, when the request
   failed), `pullRequests[]`, `commits[]`, `codeBlocks[]`, `relevantFiles[]`, `recentlyViewedFiles[]`, `context`,
   `toolResults` (empty), and `toolFormerData` on tool bubbles. An assistant turn is split into several bubbles:
   thinking, one per tool call, the reply.
@@ -146,8 +146,8 @@ conversations live in `cursorDiskKV`.
 - **Composers → SessionEv**, one per composer, emitted after the bubbles: window `detail` inside the window,
   `lifetime` outside it; id `cursor:<composerId>` (the id from the key, verbatim when UUID-shaped, else its keyed
   hash); `start`/`end` = earliest/latest of `createdAt`, `lastUpdatedAt` and (inside the window) the composer's bubble
-  times; `surface: "agent"` when `isAgentic` or `unifiedMode` is `agent`,
-  else `"chat"`; `models` = `modelConfig.modelName`, then each bubble's `modelInfo.modelName` in order of first use
+  times; `surface: "ide"`; `mode: "agent"` when `isAgentic` or `unifiedMode` is `agent`, else `"chat"`; `models` =
+  `modelConfig.modelName`, then each bubble's `modelInfo.modelName` in order of first use
   (the shared model-id guard: `other` when not id-shaped); origin `human`, or `subagent` when the composer has a
   `subagentInfo` object; `parentId` = the session of the composer whose `subComposerIds`/`subagentComposerIds`
   lists it. A copy of a subagent launch already read (same `subagentInfo.toolCallId`) is skipped `duplicate`, and its
@@ -185,20 +185,22 @@ conversations live in `cursorDiskKV`.
     `result.exitCode`. File tools (`edit_file`, `edit_file_v2`, `search_replace`, `write`, `delete_file`, `reapply`,
     `StrReplace`, `Write`, `Delete`) take `editExt` from the target file (extension only; the path never leaves memory);
     deleting a file is an `edit`. MCP tools: `name: "mcp"`, `mcpServer` = `server` from the params or arguments (raw,
-    export-allowlisted later), else none — never parsed out of a tool name. `ok`: false when `userDecision` is
-    `rejected`; else `exit === 0` when an exit code is known; else true for `status` `completed`, false for `error`,
-    `cancelled`, `aborted`; else absent.
-  - **MarkerEv** `denial` per rejected tool; `error` per bubble with a non-null `errorDetails`.
-  - **TurnEv** per bubble with a `thinkingDurationMs` above 0: `ms` = that thinking time, `model` = the bubble's model,
-    else the composer's; no status (the store records none).
+    export-allowlisted later), else none — never parsed out of a tool name. A tool that did not run to an end of its
+    own has an `outcome` and no `ok` or `exit`: `denied` when `userDecision` is `rejected`, `cancelled` for `status`
+    `cancelled`, `interrupted` for `aborted`. Else `ok` = `exit === 0` when an exit code is known; else true for
+    `status` `completed`, false for `error`; else absent. `ask_question`, `switch_mode`, `reflect`, `await` and
+    `report_bugfix_results` are `meta`.
+  - **MarkerEv** `denial` per rejected tool (`detail: "user"`); `error` per bubble with a non-null `errorDetails`.
+  - **No TurnEv**: the store marks no end of a turn, and `thinkingDurationMs` is time spent thinking, not a turn (it
+    is not read).
 - **Legacy fallback.** Only when the global store has no `cursorDiskKV` or it holds no composer row (and could be
   read), the four legacy keys are read — by exact key, parameterized (`WHERE key = ?`), from the global store's
   `ItemTable` and then each workspace store's. A value longer than 64 Mi characters is never loaded: skipped
   `too-large` (`note: "too-large"`). `aiService.prompts` is checked for presence only. `aiService.generations` → a
   PromptEv per entry with a time and text (`textDescription`, else `text`; no session; a `generationUUID` seen in an
   earlier store is skipped `duplicate`), in time order per store for `isTaskStart`/`simToPrev`. `composer.composerData`
-  → a SessionEv per entry (`createdAt`/`lastUpdatedAt`, agent surface as above, `modelConfig.modelName`; drafts
-  skipped `draft`; inline messages counted `inline-message`). `chatdata` → a chat SessionEv per tab with messages at
+  → a SessionEv per entry (`createdAt`/`lastUpdatedAt`, `surface: "ide"` and `mode` as above, `modelConfig.modelName`; drafts
+  skipped `draft`; inline messages counted `inline-message`). `chatdata` → a SessionEv (`mode: "chat"`) per tab with messages at
   its `lastSendTime` (tabs without messages `empty-session`; their messages `inline-message`). A value of another shape
   is drift `<key>:shape`; one that is not JSON `parse`.
 - **Coverage**: `files`/`bytes` = stores whose tables were listed (main file size); `records` = composer and bubble
@@ -268,7 +270,7 @@ strings are both accepted). One machine reported every line column of `scored_co
   conversation already read — is missed. In the rowid fallback, a rewritten row moves to a new rowid, so it can be read
   twice or missed.
 - Bubbles are read only for composers updated inside the detail window (90 days, or since `since`): older
-  conversations count as lifetime sessions without prompts, tools or turns. A composer whose own times are old is
+  conversations count as lifetime sessions without prompts or tools. A composer whose own times are old is
   outside the window even if a bubble of it is newer.
 - Transcript copies a composer does not list are skipped (`unlisted`), and copies of one subagent launch are read
   once; but a forked subagent whose own list names its parent's messages counts the parent's tool calls once more.

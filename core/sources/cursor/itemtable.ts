@@ -170,7 +170,7 @@ export class LegacyKeys {
     const end = Math.max(start, updated ?? start);
     const s: SessionEv = {
       k: "session", tool: TOOL, source: IDE_SOURCE, id: cuSessionId(raw, this.ctx), window: "detail", origin: "human", start, end, models,
-      surface: agent ? "agent" : "chat",
+      surface: "ide", mode: agent ? "agent" : "chat",
     };
     this.ctx.emit(s);
     this.tally.span(start);
