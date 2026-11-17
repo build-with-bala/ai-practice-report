@@ -38,7 +38,7 @@ export const cxThreads: SourcePlugin = {
   beta: false,
   describe: {
     reads: [
-      "<codex>/state_<N>.sqlite (highest N) — threads: id, source, originator, model, approval mode, sandbox policy type, created/updated times, CLI version, cwd, and whether the git columns are set; thread_spawn_edges: parent and child thread ids",
+      "<codex>/state_<N>.sqlite (highest N) — threads: id, source, originator, model, reasoning effort, approval mode, sandbox policy type, token total, created/updated times, CLI version, cwd, and whether the git columns are set; thread_spawn_edges: parent and child thread ids",
       "<codex>/thread_history_<N>.sqlite (highest N) — thread_turns: thread id, status, start and end time, duration",
     ],
     neverReads: [

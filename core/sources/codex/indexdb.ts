@@ -6,6 +6,7 @@ import type { SessionEv, ThreadRowEv, TurnEv } from "../../model/events";
 import { listDir, Tally } from "../common/coverage";
 import { isObj, num, safeModel, str, TOKEN, VERSION, type Obj } from "../common/guards";
 import type { Candidate, ScanCtx } from "../types";
+import { cxEffort } from "./effort";
 import { cxSource, cxThreadId } from "./origin";
 
 export const THREADS_SOURCE = "codex.threads";
@@ -21,8 +22,8 @@ const TURNS_DB = /^thread_history_(\d{1,9})\.sqlite$/;
  * first user message, title, preview, name, agent nickname and path, rollout path and creator ids.
  */
 const THREAD_COLUMNS = [
-  "id", "source", "originator", "model", "approval_mode", "sandbox_policy", "created_at", "created_at_ms", "updated_at", "updated_at_ms",
-  "cli_version", "cwd",
+  "id", "source", "originator", "model", "reasoning_effort", "approval_mode", "sandbox_policy", "tokens_used", "created_at", "created_at_ms",
+  "updated_at", "updated_at_ms", "cli_version", "cwd",
 ] as const;
 /** Tested for presence inside SQL only: commit, branch and remote values never leave SQLite. */
 const GIT_COLUMNS = ["git_sha", "git_branch", "git_origin_url"] as const;
@@ -123,7 +124,15 @@ function sandboxType(v: unknown, tally: Tally): string | undefined {
   return TOKEN.test(type) ? type : "other";
 }
 
-/** One `threads` row: a ThreadRowEv, and a lifetime SessionEv when the thread has a creation time. */
+/** The CLI's running token total of a thread (`tokens_used`): one TotalsEv per row that has one; a value that is not a count is drift. */
+function totals(r: Obj, id: string, ctx: ScanCtx, tally: Tally): void {
+  if (r.tokens_used === undefined || r.tokens_used === null) return;
+  const tokens = num(r.tokens_used);
+  if (tokens === undefined || tokens < 0) return tally.unknownKey("threads.tokens_used:shape");
+  ctx.emit({ k: "totals", tool: TOOL, source: THREADS_SOURCE, sessionId: id, tokens });
+}
+
+/** One `threads` row: a ThreadRowEv and its token total, and a lifetime SessionEv when the thread has a creation time. */
 function thread(r: Obj, ctx: ScanCtx, tally: Tally): void {
   const raw = str(r.id);
   if (raw === undefined) return tally.skip("bad-row");
@@ -132,6 +141,7 @@ function thread(r: Obj, ctx: ScanCtx, tally: Tally): void {
   const row: ThreadRowEv = { k: "codex-thread-row", tool: TOOL, source: THREADS_SOURCE, threadId: id };
   if (start !== undefined) row.createdAt = start;
   ctx.emit(row);
+  totals(r, id, ctx, tally);
   if (start === undefined) return tally.skip("no-ts");
 
   const updated = toEpochMs(r.updated_at_ms, ctx.now) ?? toEpochMs(r.updated_at, ctx.now);
@@ -151,6 +161,8 @@ function thread(r: Obj, ctx: ScanCtx, tally: Tally): void {
   const cwd = str(r.cwd);
   if (cwd !== undefined) s.projectKey = ctx.registerCwd(cwd);
   if (r.in_repo !== undefined) s.inRepo = r.in_repo === 1;
+  const effort = cxEffort(str(r.reasoning_effort));
+  if (effort !== undefined) s.effort = effort;
   const approval = str(r.approval_mode);
   if (approval !== undefined) s.approval = TOKEN.test(approval) ? approval : "other";
   const sandbox = sandboxType(r.sandbox_policy, tally);

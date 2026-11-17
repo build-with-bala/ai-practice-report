@@ -7,7 +7,8 @@ export interface PromptFeatures { words: number; lenBucket: 0 | 1 | 2 | 3 | 4; h
 interface Base { tool: ToolId; source: string }   // source = plugin id
 export interface SessionEv extends Base { k: "session"; id: string; window: Window; origin: Origin; start: number; end: number; models: string[];
   parentId?: string; projectKey?: string; surface?: string; version?: string; spawnDepth?: number; agentType?: string;
-  background?: boolean; workflowId?: string; inRepo?: boolean; approval?: string; sandbox?: string }
+  background?: boolean; workflowId?: string; inRepo?: boolean; approval?: string; sandbox?: string;
+  effort?: string }   // the session's reasoning effort level, when the tool records one per session (shape-guarded)
 export interface PromptEv extends Base { k: "prompt"; ts: number; sessionId?: string; window: Window; origin: Origin; intent: Intent;
   features: PromptFeatures; textHash: string; hasPaste?: boolean }
 export interface ToolEv extends Base { k: "tool"; ts: number; sessionId: string; callId?: string; name: string; category: ToolCategory;
@@ -16,7 +17,8 @@ export interface ToolEv extends Base { k: "tool"; ts: number; sessionId: string;
 export interface TurnEv extends Base { k: "turn"; ts: number; sessionId: string; window: Window; model?: string; effort?: string;
   status?: "completed" | "failed" | "interrupted"; ms?: number }
 export interface UsageEv extends Base { k: "usage"; ts: number; sessionId: string; model: string; inTok: number; outTok: number; cacheR: number; cacheW: number; usd?: number }
-export interface TotalsEv extends Base { k: "totals"; sessionId: string; linesAdded?: number; linesRemoved?: number; usd?: number; ms?: number }
+export interface TotalsEv extends Base { k: "totals"; sessionId: string; linesAdded?: number; linesRemoved?: number; usd?: number; ms?: number;
+  tokens?: number }   // the tool's own running token total for the session
 export interface MarkerEv extends Base { k: "marker"; ts: number; sessionId?: string; kind: MarkerKind; detail?: string; n?: number }
 export interface ConfigEv extends Base { k: "config"; kind: "skill" | "command" | "agent" | "plugin" | "hook" | "mcp-server" | "memory-file" | "instruction-file" | "profile";
   name?: string; provenance: "authored" | "installed" | "bundled" | "unknown"; uses?: number; lastUsed?: number; checks?: CheckKind[] }

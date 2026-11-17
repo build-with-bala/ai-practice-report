@@ -8,8 +8,9 @@ import { sid, type MarkerKind, type Origin } from "../../model/ids";
 import { classifyIntent } from "../../text/intent";
 import { promptFeatures } from "../../text/structure";
 import { listDir, Tally, typeKey } from "../common/coverage";
-import { isObj, num, oneOf, safeModel, str, VERSION, type Obj } from "../common/guards";
+import { isObj, num, safeModel, str, VERSION, type Obj } from "../common/guards";
 import type { Candidate, ScanCtx } from "../types";
+import { cxEffort } from "./effort";
 import { cxSource, cxThreadId } from "./origin";
 import { cxOutcome, cxToolCalls, type CxOutcome, type CxToolCall } from "./tools";
 import { uuidV7Ms } from "./uuid";
@@ -102,8 +103,6 @@ const FILE_TS = /^rollout-(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})/;
 const FILE_ID = /-([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\.jsonl$/;
 /** A rate-limit bucket id (`rate_limits.limit_id`) is kept when it has this shape, else it becomes `other`. */
 const BUCKET = /^[a-z][a-z0-9_-]{0,31}$/;
-/** The CLI's reasoning effort levels (ReasoningEffort, 0.169). */
-const EFFORTS: ReadonlySet<string> = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
 const ABORT_REASONS: ReadonlySet<string> = new Set(["interrupted", "replaced", "review_ended", "budget_limited"]);
 const MIN_RESET_MS = Date.UTC(2015, 0, 1);
 const MAX_RESET_AHEAD_MS = 400 * 86_400_000;
@@ -295,7 +294,7 @@ class RolloutReader {
       this.model = safeModel(raw);
       if (!this.models.includes(this.model)) this.models.push(this.model);
     }
-    this.effort = oneOf(str(p.effort), EFFORTS); // models without reasoning have no effort
+    this.effort = cxEffort(str(p.effort)); // models without reasoning have no effort
     const id = str(p.turn_id);
     if (id !== undefined) this.turn(id, true);
   }

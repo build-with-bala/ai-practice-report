@@ -435,6 +435,9 @@ export interface CxIndexFixture {
   /** Creation and last-update times (epoch ms) per thread. */
   created: { cli: number; exec: number; sub: number };
   updated: { cli: number; exec: number; sub: number };
+  /** Each thread's reasoning effort and token total as the index stores them. */
+  effort: { cli: string; exec: string; sub: string };
+  tokens: { cli: number; exec: number; sub: number };
   /** The four turns, in table order: thread key, status, completion time (ms) and duration. */
   turns: { thread: "cli" | "exec" | "sub"; status: "completed" | "failed" | "interrupted"; ts: number; ms: number }[];
   /** Times (ms) of the history lines in file order, and prompts per local day. */
@@ -459,12 +462,15 @@ export function buildCodexIndex(h: FakeHome): CxIndexFixture {
   const updated = { cli: t0 + 40 * 60_000 + 321, exec: t0 + 62 * 60_000 + 654, sub: t0 + 15 * 60_000 + 987 };
   const ids = { cli: uuidV7(created.cli - 1000, 0xa1), exec: uuidV7(created.exec - 1000, 0xa2), sub: uuidV7(created.sub - 1000, 0xa3) };
   const spawn = { subagent: { thread_spawn: { parent_thread_id: ids.cli, depth: 1, agent_path: "/root/explorer_1", agent_nickname: CANARY.project, agent_role: "explorer" } } };
-  const at = (k: keyof typeof ids, extra: ThreadRow) => threadRow(ids[k], created[k], { updated_at: secs(updated[k]), updated_at_ms: updated[k], ...extra });
+  const effort = { cli: "high", exec: "low", sub: "ultra" };
+  const tokens = { cli: 123_456, exec: 4_200, sub: 0 };
+  const at = (k: keyof typeof ids, extra: ThreadRow) =>
+    threadRow(ids[k], created[k], { updated_at: secs(updated[k]), updated_at_ms: updated[k], reasoning_effort: effort[k], tokens_used: tokens[k], ...extra });
   const state = writeStateDb(h, ".codex/state_5.sqlite", [
     at("cli", {}),
     at("exec", {
       source: "exec", originator: "codex_exec", cwd: "/work/projB", git_sha: null, git_branch: null, git_origin_url: null, model: CX_MINI,
-      reasoning_effort: "low", approval_mode: "never", sandbox_policy: JSON.stringify({ type: "disabled" }), cli_version: "0.168.0",
+      approval_mode: "never", sandbox_policy: JSON.stringify({ type: "disabled" }), cli_version: "0.168.0",
     }),
     at("sub", { source: JSON.stringify(spawn), thread_source: "subagent", agent_nickname: CANARY.project, agent_role: "explorer", agent_path: CANARY.path }),
   ], [[ids.cli, ids.sub, "open"]]);
@@ -530,7 +536,7 @@ export function buildCodexIndex(h: FakeHome): CxIndexFixture {
   h.write(".codex/memories/memory_summary.md", `${CANARY.email} ${CANARY.code}\n`);
 
   return {
-    ids, created, updated, turns, historyTs,
+    ids, created, updated, effort, tokens, turns, historyTs,
     days: [[day(historyTs[0]!), 2], [day(historyTs[2]!), 3]],
     files: { state, turns: turnsFile, history, config },
   };

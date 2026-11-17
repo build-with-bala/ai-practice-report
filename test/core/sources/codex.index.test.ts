@@ -64,6 +64,8 @@ describe("codex lifetime: Task 12 scenario", () => {
     expect(configs(r, "skill")).toHaveLength(1);
     expect(configs(r, "memory-file")).toHaveLength(2);
     expect(r.store.all("codex-thread-row")).toHaveLength(3);
+    expect(r.store.all("totals").map((t) => t.tokens)).toEqual([123_456, 4_200, 0]);
+    expect(r.store.all("session").map((s) => s.effort)).toEqual(["high", "low", "ultra"]);
     expect(r.coverage.map((c) => [c.source, c.window, c.status]).sort()).toEqual([
       ["codex.config", "lifetime", "ok"], ["codex.history", "lifetime", "ok"], ["codex.threads", "lifetime", "ok"],
     ]);
@@ -85,18 +87,32 @@ describe("codex threads: thread index and turn history", () => {
     const base = { k: "session", tool: "codex", source: "codex.threads", window: "lifetime" } as const;
     expect(r.store.session(sidOf(fx.ids.cli))).toEqual({
       ...base, id: sidOf(fx.ids.cli), origin: "human", start: fx.created.cli, end: fx.updated.cli, models: [CX_MAX], surface: "cli",
-      version: "0.169.0", projectKey: keyedHash(r.salt, CANARY.path), inRepo: true, approval: "on-request", sandbox: "managed",
+      version: "0.169.0", projectKey: keyedHash(r.salt, CANARY.path), inRepo: true, approval: "on-request", sandbox: "managed", effort: "high",
     });
     expect(r.cwds.get(keyedHash(r.salt, CANARY.path))).toBe(CANARY.path);
     expect(r.store.session(sidOf(fx.ids.exec))).toEqual({
       ...base, id: sidOf(fx.ids.exec), origin: "scripted", start: fx.created.exec, end: fx.updated.exec, models: [CX_MINI], surface: "exec",
-      version: "0.168.0", projectKey: keyedHash(r.salt, "/work/projB"), inRepo: false, approval: "never", sandbox: "disabled",
+      version: "0.168.0", projectKey: keyedHash(r.salt, "/work/projB"), inRepo: false, approval: "never", sandbox: "disabled", effort: "low",
     });
     expect(r.store.session(sidOf(fx.ids.sub))).toEqual({
       ...base, id: sidOf(fx.ids.sub), origin: "subagent", start: fx.created.sub, end: fx.updated.sub, models: [CX_MAX], surface: "subagent",
       parentId: sidOf(fx.ids.cli), spawnDepth: 1, agentType: "explorer", version: "0.169.0", projectKey: keyedHash(r.salt, CANARY.path),
-      inRepo: true, approval: "on-request", sandbox: "managed",
+      inRepo: true, approval: "on-request", sandbox: "managed", effort: "ultra",
     });
+  });
+
+  test("effort by the CLI's levels (else other); one totals event per row with a token count, drift when not a count", async () => {
+    const at = fixtureStart();
+    const ids = Array.from({ length: 7 }, (_, i) => uuidV7(at - 1000, 0x70 + i));
+    const efforts: unknown[] = ["ultra", "none", "minimal", "max", CANARY.prompt, null, ""];
+    const tokens: unknown[] = [10, 0, null, -1, "lots", 2.5e6, 7];
+    writeStateDb(h, ".codex/state_5.sqlite", ids.map((id, i) => threadRow(id, at + i * MIN, { reasoning_effort: efforts[i], tokens_used: tokens[i] })));
+    const r = await run([cxThreads]);
+    expect(ids.map((id) => r.store.session(sidOf(id))!.effort)).toEqual(["ultra", "none", "minimal", "max", "other", undefined, undefined]);
+    expect(r.store.all("totals")).toEqual([[0, 10], [1, 0], [5, 2_500_000], [6, 7]].map(([i, n]) => (
+      { k: "totals", tool: "codex", source: "codex.threads", sessionId: sidOf(ids[i!]!), tokens: n })));
+    expect(covOf(r, "codex.threads").unknownTypes).toEqual({ "threads.tokens_used:shape": 2 });
+    expectNoCanaries([r.store, r.coverage, r.warnings]);
   });
 
   test("thread rows, turns and coverage", async () => {
@@ -104,6 +120,8 @@ describe("codex threads: thread index and turn history", () => {
     const r = await run([cxThreads]);
     expect(r.store.all("codex-thread-row")).toEqual((["cli", "exec", "sub"] as const).map((k) => (
       { k: "codex-thread-row", tool: "codex", source: "codex.threads", threadId: sidOf(fx.ids[k]), createdAt: fx.created[k] })));
+    expect(r.store.all("totals")).toEqual((["cli", "exec", "sub"] as const).map((k) => (
+      { k: "totals", tool: "codex", source: "codex.threads", sessionId: sidOf(fx.ids[k]), tokens: fx.tokens[k] })));
     expect(r.store.all("turn")).toEqual(fx.turns.map((t) => (
       { k: "turn", tool: "codex", source: "codex.threads", ts: t.ts, sessionId: sidOf(fx.ids[t.thread]), window: "lifetime", status: t.status, ms: t.ms })));
     expect(covOf(r, "codex.threads")).toEqual({
@@ -208,7 +226,7 @@ describe("codex threads: thread index and turn history", () => {
   test("missing allowlisted columns and tables are drift; the rest is still read, times from the seconds columns", async () => {
     const at = fixtureStart();
     const id = uuidV7(at - 1000, 0xb1);
-    const gone = ["originator", "model", "cli_version", "created_at_ms", "updated_at_ms", "git_origin_url"];
+    const gone = ["originator", "model", "reasoning_effort", "cli_version", "created_at_ms", "updated_at_ms", "git_origin_url"];
     writeStateDb(h, ".codex/state_5.sqlite", [threadRow(id, at, { source: "exec" })], [], { columns: THREAD_COLUMNS.filter((c) => !gone.includes(c)), noEdgesTable: true });
     writeTurnsDb(h, ".codex/thread_history_1.sqlite", [turnRow(id, "t1", "completed", secs(at), secs(at + 1_000), 1_000)], { columns: ["thread_id", "turn_id", "status", "started_at"] });
     const r = await run([cxThreads]);
@@ -219,7 +237,7 @@ describe("codex threads: thread index and turn history", () => {
     const cov = covOf(r, "codex.threads");
     expect(cov.status).toBe("drift");
     expect(cov.unknownTypes).toEqual({
-      "missing-column:originator": 1, "missing-column:model": 1, "missing-column:cli_version": 1, "missing-column:created_at_ms": 1,
+      "missing-column:originator": 1, "missing-column:model": 1, "missing-column:reasoning_effort": 1, "missing-column:cli_version": 1, "missing-column:created_at_ms": 1,
       "missing-column:updated_at_ms": 1, "missing-column:git_origin_url": 1, "missing-table:thread_spawn_edges": 1,
       "missing-column:completed_at": 1, "missing-column:duration_ms": 1,
     });
@@ -240,6 +258,7 @@ describe("codex threads: thread index and turn history", () => {
     r = await run([cxThreads]);
     expect(r.store.all("session")).toEqual([]);
     expect(r.store.all("codex-thread-row")).toEqual([{ k: "codex-thread-row", tool: "codex", source: "codex.threads", threadId: sidOf(id) }]);
+    expect(r.store.all("totals")).toEqual([{ k: "totals", tool: "codex", source: "codex.threads", sessionId: sidOf(id), tokens: 123_456 }]);
     expect(covOf(r, "codex.threads")).toMatchObject({ status: "ok", records: 1, skipped: { "no-ts": 1 } });
   });
 

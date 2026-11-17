@@ -1,6 +1,6 @@
 # Codex — rollouts; lifetime layer and configuration
 
-Readers: `codex.rollouts` (`rollouts.ts`, `tools.ts`, `uuid.ts`, `origin.ts`); the lifetime layer (thread index, turn
+Readers: `codex.rollouts` (`rollouts.ts`, `tools.ts`, `uuid.ts`, `origin.ts`, `effort.ts`); the lifetime layer (thread index, turn
 history, prompt history, configuration) is documented in the second half of this file.
 
 Evidence: **(verified locally)** = the type or field was confirmed on this machine with the structure probe
@@ -349,10 +349,9 @@ The SQL names only the columns below, validated against `pragma_table_info` firs
 
 - `threads`: `first_user_message`, `title`, `preview`, `name` (the name a person gives a thread), `agent_nickname`,
   `agent_path`, `rollout_path`, `creator_user_id`, `creator_account_id`; the values of `git_sha`, `git_branch`,
-  `git_origin_url` (only tested for presence inside SQL, `COALESCE(<col>, '') <> ''`); and `model_provider`,
-  `tokens_used`, `reasoning_effort`, `agent_role`, `memory_mode`, `thread_source`, `history_mode`, `recency_*`,
-  `archived*`, `is_pinned`, `section*`, `project_id`, `daybreak_enabled`, `attached_thread_parent_id`, `has_user_event`
-  (not needed; `tokens_used` and `reasoning_effort` have no event field to go to).
+  `git_origin_url` (only tested for presence inside SQL, `COALESCE(<col>, '') <> ''`); and, not needed,
+  `model_provider`, `agent_role`, `memory_mode`, `thread_source`, `history_mode`, `recency_*`, `archived*`,
+  `is_pinned`, `section*`, `project_id`, `daybreak_enabled`, `attached_thread_parent_id`, `has_user_event`.
 - `thread_spawn_edges.status`; `thread_turns`: `error_json`, `first_user_item_id`, `final_agent_item_id`, the rollout
   offsets.
 - Never read at all: `thread_items`, `thread_realtime_items`, `thread_history_projection_state`,
@@ -363,8 +362,9 @@ The SQL names only the columns below, validated against `pragma_table_info` firs
 
 ## What the thread reader emits (`codex.threads`, `indexdb.ts`)
 
-- **Columns read**: `threads`: `id`, `source`, `originator`, `model`, `approval_mode`, `sandbox_policy`, `created_at`,
-  `created_at_ms`, `updated_at`, `updated_at_ms`, `cli_version`, `cwd`, and git presence; `thread_spawn_edges`:
+- **Columns read**: `threads`: `id`, `source`, `originator`, `model`, `reasoning_effort`, `approval_mode`,
+  `sandbox_policy`, `tokens_used`, `created_at`, `created_at_ms`, `updated_at`, `updated_at_ms`, `cli_version`, `cwd`,
+  and git presence; `thread_spawn_edges`:
   `parent_thread_id`, `child_thread_id`; `thread_turns`: `thread_id`, `status`, `started_at`, `completed_at`,
   `duration_ms`. Each one missing is drift `missing-column:<name>` and the rest is still read; a missing table is drift
   `missing-table:<name>`. Without `threads.id`, `thread_turns.thread_id`/`status` or either edge column that table is
@@ -374,12 +374,18 @@ The SQL names only the columns below, validated against `pragma_table_info` firs
   start = earliest, end = latest, models = union, a non-human origin wins (subagent > peer > scripted > scheduled >
   system > human), window `detail` when the rollout's session is one; other fields keep the first value that arrived.
 - **ThreadRowEv** per `threads` row: `threadId`, `createdAt` = `created_at_ms`, else `created_at`.
+- **TotalsEv** per `threads` row with a `tokens_used` count (≥ 0, zero included): `sessionId`, `tokens` = the CLI's
+  running token total for the thread — the only token figure for threads whose rollout is gone. Where a rollout
+  remains, its UsageEvs carry the per-response detail of the same tokens: never add the two. A value that is not a
+  count is drift `threads.tokens_used:shape`; null emits nothing.
 - **SessionEv** (window `lifetime`) per thread with a creation time (else skipped `no-ts`): `start` = created,
   `end` = updated (never before `start`); origin, `surface`, `parentId`, `spawnDepth`, `agentType` from `source` and
   `originator` by the rollouts' rules (`origin.ts`: `exec` → scripted, `mcp` → peer, a subagent source → subagent,
   `originator` exactly `Claude Code` → peer unless the source is a subagent one, else human). `source` text that starts
   with `{`, `[` or `"` is parsed as JSON; JSON that does not parse, or a source that is neither a string nor a subagent
   object, is drift `threads.source:shape` (surface `other`). `models` = [`model`] (model-id-shaped, else `other`);
+  `effort` = `reasoning_effort` by the CLI's levels (`effort.ts`, shared with the rollouts' turns: `none`, `minimal`,
+  `low`, `medium`, `high`, `xhigh`, `max`, `ultra`; any other string → `other`; null → none);
   `version` = `cli_version` (version-shaped); `projectKey` from `cwd`; `inRepo` = any git column set; `approval` =
   `approval_mode` and `sandbox` = the policy's `type` when token-shaped (`^[a-z][a-z0-9_-]{0,31}$`), else `other` — a
   policy that is neither such a token nor JSON with a string `type` is drift `threads.sandbox_policy:shape`. The policy
@@ -447,7 +453,9 @@ such as `.env`, `.tools.<tool>`), `[model_providers.<id>]`, and more.
 
 ## Limits (lifetime layer)
 
-- An index row holds a thread's latest state (model, approval, sandbox, last update); earlier settings are not kept.
+- An index row holds a thread's latest state (model, effort, approval, sandbox, last update, token total); earlier
+  settings are not kept, so a thread whose effort changed between turns shows its last one (the rollouts' TurnEvs keep
+  each turn's).
   Older rows have no `originator`: a rollout of the same thread driven by Claude Code says `peer` where the index says
   `human`; the merged session is `peer` (a non-human origin wins), but an index-only thread of that kind stays `human`.
   Merged fields other than origin, window, times and models keep the first value that arrived.
