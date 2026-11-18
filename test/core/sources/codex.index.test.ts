@@ -177,7 +177,7 @@ describe("codex threads: thread index and turn history", () => {
     expect(r.store.all("turn").map((t) => [t.sessionId, t.status])).toEqual([[sidOf(cur), "completed"]]);
   });
 
-  test("turn statuses: unfinished turns are skipped, other values are drift (shape-checked); times and durations", async () => {
+  test("turn statuses: unfinished turns are skipped, other values are drift (never echoed); times and durations", async () => {
     const at = fixtureStart();
     const id = uuidV7(at - 1000, 0xc1);
     writeStateDb(h, ".codex/state_5.sqlite", [threadRow(id, at)]);
@@ -203,7 +203,7 @@ describe("codex threads: thread index and turn history", () => {
     ]);
     const cov = covOf(r, "codex.threads");
     expect([cov.status, cov.records, cov.skipped]).toEqual(["drift", 1 + 10, { "in-progress": 1, "no-ts": 1 }]);
-    expect(cov.unknownTypes).toEqual({ "turn-status:cancelled": 1, "turn-status:timedOut": 1, "turn-status:(other)": 1 });
+    expect(cov.unknownTypes).toEqual({ "turn-status:(other)": 3 });
     expectNoCanaries([r.store, r.coverage, r.warnings]);
   });
 
@@ -235,7 +235,7 @@ describe("codex threads: thread index and turn history", () => {
     expectNoCanaries([r.store, r.coverage, r.warnings]);
   });
 
-  test("ids that are not UUIDs are hashed in sessions, rows, edges and turns; approval and sandbox are shape-checked", async () => {
+  test("ids that are not UUIDs are hashed in sessions, rows, edges and turns; approval and sandbox are allowlisted", async () => {
     const at = fixtureStart();
     const odd = `${CANARY.project}-thread`;
     const [child, other] = [uuidV7(at - 1000, 0xe1), uuidV7(at - 1000, 0xe2)];

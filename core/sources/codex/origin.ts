@@ -1,6 +1,9 @@
 import { sid, type Origin } from "../../model/ids";
-import { idPart, isObj, num, str, TOKEN, UUID } from "../common/guards";
+import { idPart, isObj, num, str, UUID } from "../common/guards";
 import type { ScanCtx } from "../types";
+
+/** Session sources the CLI writes (`SessionSource`, CLI program), but for the subagent object. */
+const SOURCES: ReadonlySet<string> = new Set(["cli", "vscode", "exec", "mcp", "custom", "internal", "unknown"]);
 
 /** Agent roles the CLI ships; any other role is a config name and is kept only as a keyed hash. */
 const BUILTIN_ROLES: ReadonlySet<string> = new Set(["default", "explorer", "awaiter"]);
@@ -13,7 +16,7 @@ export interface CxSource {
   origin: Origin;
   /** The source is a subagent one, whatever the final origin. */
   subagent: boolean;
-  /** The source string when token-shaped, else `other`; `subagent` for subagent sources; absent without a source. */
+  /** The source string when the CLI writes it (`SOURCES`), else `other`; `subagent` for subagent sources; absent without a source. */
   surface?: string;
   parentId?: string;
   spawnDepth?: number;
@@ -33,7 +36,7 @@ export function cxSource(source: unknown, originator: unknown, ctx: ScanCtx, par
   const s: CxSource = { origin: "human", subagent: false, unknownShape: false };
   if (typeof source === "string") {
     s.origin = source === "exec" ? "scripted" : source === "mcp" ? "peer" : "human";
-    s.surface = TOKEN.test(source) ? source : "other";
+    s.surface = SOURCES.has(source) ? source : "other";
   } else if (isObj(source) && "subagent" in source) {
     s.origin = "subagent";
     s.subagent = true;

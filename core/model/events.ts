@@ -42,8 +42,9 @@ interface Base { tool: ToolId; source: string }   // source = plugin id
  * One session (a transcript, rollout, chat session, composer or conversation). When several readers report one session
  * id the store merges them (store.ts): the detail-window report decides the fields below, the other fills the gaps.
  * - `surface`: the client the session ran in, as the tool names it — Claude Code's `entrypoint` (`cli`, `sdk-cli`, …),
- *   Codex's `source` (`cli`, `exec`, `vscode`, `mcp`, `subagent`, else `other`), `cli`/`ide`/`battle` (Antigravity),
- *   `vscode`/`cli` (Copilot), `ide` (Cursor).
+ *   Codex's `source` (`cli`, `vscode`, `exec`, `mcp`, `custom`, `internal`, `unknown`, `subagent`, else `other`),
+ *   `cli`/`ide`/`battle` (Antigravity), `vscode`/`cli` (Copilot; its session stores' `host_type`, `vscode` or `github`,
+ *   else `other`), `ide` (Cursor). Every value but Claude Code's comes from an allowlist.
  * - `mode`: the interaction mode, for tools whose sessions are either an autonomous agent run or a chat (Copilot VS
  *   Code, Cursor): `agent` when any request of the session ran in agent mode, else `chat`. Absent where a tool has one
  *   mode only (Claude Code, Codex, the CLIs: agent runs).

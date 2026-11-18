@@ -589,7 +589,7 @@ describe("antigravity cli: transcript.jsonl", () => {
     expectNoCanaries([...allEvents(r), r.coverage]);
   });
 
-  test("record types and sources: unknown ones are drift, enum-shaped names kept; usage from records with token counts, a model when named", async () => {
+  test("record types and sources: unknown ones are drift, their names never echoed; usage from records with token counts, a model when named", async () => {
     const at = t0();
     h.writeJsonl(transcriptRel(P), [
       modelReply(0, at, { input: 10, output: 20, cacheRead: 30 }),
@@ -611,7 +611,7 @@ describe("antigravity cli: transcript.jsonl", () => {
     expect(r.store.session(sidOf(P))!.models).toEqual(["gemini-3-pro", "other"]);
     const cov = covOf(r, "antigravity.cli");
     expect(cov.unknownTypes).toEqual({
-      "transcript.type:NEW_STEP_KIND": 1, "transcript.type:(other)": 1, "transcript.source:NEW_SOURCE": 1, "transcript.type:(none)": 1, "transcript:not-object": 1,
+      "transcript.type:(other)": 2, "transcript.source:(other)": 1, "transcript.type:(none)": 1, "transcript:not-object": 1,
     });
     expect([cov.records, cov.skipped]).toEqual([10, { "no-ts": 1 }]);
     expectNoCanaries([...allEvents(r), r.coverage]);
@@ -662,7 +662,7 @@ describe("antigravity history: history.jsonl (its own lifetime source)", () => {
     expect(r.store.all("session")).toEqual([]);
     const cov = covOf(r, "antigravity.history");
     expect(cov).toMatchObject({ window: "lifetime", status: "drift", files: 1, records: 10, skipped: { empty: 1, "bad-ts": 1 } });
-    expect(cov.unknownTypes).toEqual({ "history.type:voice_note": 1, "history.display:missing": 1, "history.timestamp:missing": 1, "history:not-object": 1 });
+    expect(cov.unknownTypes).toEqual({ "history.type:(other)": 1, "history.display:missing": 1, "history.timestamp:missing": 1, "history:not-object": 1 });
     expectNoCanaries([...allEvents(r), r.coverage]);
   });
 });

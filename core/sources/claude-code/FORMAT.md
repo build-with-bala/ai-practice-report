@@ -37,7 +37,8 @@ not read: <sid>/tool-results/, <sid>/workflows/scripts/, subagents/workflows/wf_
 
 ## Record types
 
-JSONL, one object per line, discriminated by `type` (string). Unknown `type` → coverage drift.
+JSONL, one object per line, discriminated by `type` (string). Unknown `type` → coverage drift `(other)` (`(none)`
+without a string `type`); the name itself is never kept.
 
 | group | types | handling |
 |---|---|---|
@@ -152,7 +153,7 @@ manual), preTokens, postTokens, durationMs, preservedSegment, …}`, `logicalPar
   built-in list) and a keyed hash for custom ones. A model string that is not id-shaped becomes `other`.
 - `PromptEv` only from top-level files, per `ccPromptOrigin` (origin.ts): any `sdk*` entrypoint → scripted; a
   `turnOrigin`/`promptSource` value the mapping does not know → system, and counted in coverage `unknownTypes` as
-  `turnOrigin:<value>` / `promptSource:<value>` (`…:<other>` when the value is not token-shaped); the text is
+  `turnOrigin:<other>` / `promptSource:<other>` (the value itself is never kept); the text is
   consulted only when both fields are absent. Slash-command and bash-mode markup is turned back into `/name args` /
   `!command` before intent, features and the text hash.
 - `ToolEv` per `tool_use` (deduplicated by id), closed by its `tool_result`; MCP tools get `name:"mcp"` and the server in

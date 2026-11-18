@@ -8,13 +8,24 @@ export const CANARY = {
   prompt: "CANARY_PROMPT the zebra eats seventeen lanterns",
   code: "function canarySecretFn() { return 42 }",
   mcp: "acme-internal-mcp",
+  /** Token-shaped like a schema name, so only an allowlist (never a shape guard) keeps it out. */
+  slug: "quill-harbor-ops",
 } as const;
 
 export type CanaryKey = keyof typeof CANARY;
 const KEYS = Object.keys(CANARY) as CanaryKey[];
 const dec = new TextDecoder();
 
-function collect(value: unknown, out: string[], seen: WeakSet<object>): void {
+/**
+ * The two fields that hold raw config names by design (global constraints): `ConfigEv.name` and `ToolEv.mcpServer`.
+ * Their strings are collected apart, so that an allowed canary may sit there and nowhere else.
+ */
+const isExempt = (owner: object, key: string): boolean => {
+  const k = (owner as { k?: unknown }).k;
+  return (k === "config" && key === "name") || (k === "tool" && key === "mcpServer");
+};
+
+function collect(value: unknown, out: string[], seen: WeakSet<object>, exempt: string[] = out): void {
   if (typeof value === "string") {
     out.push(value);
     return;
@@ -33,15 +44,15 @@ function collect(value: unknown, out: string[], seen: WeakSet<object>): void {
   }
   if (value instanceof Error) {
     out.push(value.name, value.message, value.stack ?? "");
-    collect((value as { cause?: unknown }).cause, out, seen);
+    collect((value as { cause?: unknown }).cause, out, seen, exempt);
   }
   if (value instanceof Map) {
     for (const [k, v] of value) {
-      collect(k, out, seen);
-      collect(v, out, seen);
+      collect(k, out, seen, exempt);
+      collect(v, out, seen, exempt);
     }
   } else if (value instanceof Set || Array.isArray(value)) {
-    for (const v of value) collect(v, out, seen);
+    for (const v of value) collect(v, out, seen, exempt);
   }
   for (const k of Reflect.ownKeys(value)) {
     if (typeof k === "symbol") out.push(k.description ?? "");
@@ -52,7 +63,8 @@ function collect(value: unknown, out: string[], seen: WeakSet<object>): void {
     } catch {
       continue; // throwing getter
     }
-    collect(v, out, seen);
+    if (typeof k === "string" && isExempt(value, k)) collect(v, exempt, seen, exempt);
+    else collect(v, out, seen, exempt);
   }
   // class getters on the prototype chain
   for (let proto = Object.getPrototypeOf(value); proto && proto !== Object.prototype && proto !== Array.prototype && proto !== Map.prototype && proto !== Set.prototype && proto !== Error.prototype; proto = Object.getPrototypeOf(proto)) {
@@ -60,7 +72,7 @@ function collect(value: unknown, out: string[], seen: WeakSet<object>): void {
       const d = Object.getOwnPropertyDescriptor(proto, k);
       if (!d?.get) continue;
       try {
-        collect(d.get.call(value), out, seen);
+        collect(d.get.call(value), out, seen, exempt);
       } catch {
         /* ignore */
       }
@@ -68,12 +80,17 @@ function collect(value: unknown, out: string[], seen: WeakSet<object>): void {
   }
 }
 
-/** Canary keys whose value occurs as an exact substring anywhere in `value` (keys included). */
+/**
+ * Canary keys whose value occurs as an exact substring anywhere in `value` (keys included). An `allow`ed canary may
+ * occur in the exempt fields (`ConfigEv.name`, `ToolEv.mcpServer`) only: anywhere else it is still a hit.
+ */
 export function findCanaries(value: unknown, o: { allow?: CanaryKey[] } = {}): string[] {
   const strings: string[] = [];
-  collect(value, strings, new WeakSet());
+  const exempt: string[] = [];
+  collect(value, strings, new WeakSet(), exempt);
   const allow = new Set<string>(o.allow ?? []);
-  return KEYS.filter((k) => !allow.has(k) && strings.some((s) => s.includes(CANARY[k])));
+  const hit = (k: CanaryKey, list: string[]) => list.some((s) => s.includes(CANARY[k]));
+  return KEYS.filter((k) => hit(k, strings) || (!allow.has(k) && hit(k, exempt)));
 }
 
 export function expectNoCanaries(value: unknown, o: { allow?: CanaryKey[] } = {}): void {

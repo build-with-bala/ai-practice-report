@@ -12,7 +12,7 @@ import { classifyCommand } from "../../text/commands";
 import { classifyIntent } from "../../text/intent";
 import { promptFeatures } from "../../text/structure";
 import { listDir, Tally } from "../common/coverage";
-import { extOfPath, isObj, str, TOKEN, VERSION, type Obj } from "../common/guards";
+import { extOfPath, isObj, str, VERSION, type Obj } from "../common/guards";
 import type { Candidate, PluginCoverage, ScanCtx } from "../types";
 import { cpModel, cpSessionId, TASK_GAP_MS, TOOL } from "./map";
 
@@ -35,8 +35,13 @@ const KNOWN_EVENTS: ReadonlySet<string> = new Set([
   "skill.invoked", "permission.requested", "exit_plan_mode.requested",
 ]);
 /** An event type as a drift key: dotted lower-case schema tokens are kept, anything else is `(other)` / `(none)`. */
-const EVENT_TYPE = /^[a-z][a-z0-9_]{0,31}(?:\.[a-z][a-z0-9_]{0,31}){0,3}$/;
-const eventKey = (t: unknown): string => `event:${typeof t !== "string" ? "(none)" : EVENT_TYPE.test(t) ? t : "(other)"}`;
+/** An event type the reader does not know, as a drift key: never echoed. */
+const eventKey = (t: unknown): string => `event:${typeof t !== "string" ? "(none)" : "(other)"}`;
+/**
+ * `host_type` values the programs write: `vscode` (the extension's copy of the store) and `github` (the CLI's store,
+ * where it names the repository's host). Anything else is `other`.
+ */
+const HOST_TYPES: ReadonlySet<string> = new Set(["vscode", "github"]);
 
 /** The CLI's built-in tools (the tool table the VS Code extension renders CLI sessions with, 0.66). */
 const CLI_TOOLS: ReadonlyMap<string, ToolCategory> = new Map<string, ToolCategory>([
@@ -389,7 +394,7 @@ function storeSession(r: Obj, source: string, ctx: ScanCtx, tally: Tally): void 
   const end = Math.max(start, toEpochMs(r.updated_at, ctx.now) ?? start);
   const s: SessionEv = { k: "session", tool: TOOL, source, id: cpSessionId(raw, ctx), window: "lifetime", origin: "human", start, end, models: [] };
   const host = str(r.host_type);
-  if (host !== undefined) s.surface = TOKEN.test(host) ? host : "other";
+  if (host !== undefined) s.surface = HOST_TYPES.has(host) ? host : "other";
   const cwd = str(r.cwd);
   if (cwd !== undefined) s.projectKey = ctx.registerCwd(cwd);
   ctx.emit(s);

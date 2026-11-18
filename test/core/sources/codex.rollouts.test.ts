@@ -158,7 +158,7 @@ describe("codex rollouts: Task 11 scenario", () => {
     expect(cov).toMatchObject({
       tool: "codex", source: "codex.rollouts", window: "detail", beta: false, status: "drift",
       files: 4, bytes: fx.files.reduce((s, f) => s + statSync(f).size, 0), records: fx.lines - fx.heavy,
-      skipped: { sniffed: fx.heavy }, unknownTypes: { "event_msg:brand_new_event": 1 }, versions: ["0.168.0", "0.169.0"],
+      skipped: { sniffed: fx.heavy }, unknownTypes: { "event_msg:(other)": 1 }, versions: ["0.168.0", "0.169.0"],
     });
     const sessions = r.store.all("session");
     expect(cov.from).toBe(Math.min(...sessions.map((s) => s.start)));
@@ -537,7 +537,7 @@ describe("codex rollouts: forks and rate-limit buckets", () => {
     expectNoCanaries(allEvents(r));
   });
 
-  test("rate limits carry their bucket (limit_id, shape-checked) and are deduplicated per bucket and window", async () => {
+  test("rate limits carry their bucket (a keyed hash of limit_id) and are deduplicated per bucket and window", async () => {
     const at = fixtureStart();
     const limits = (bucket: unknown, primary: number) => ({ ...rateLimits(at, primary), limit_id: bucket });
     const x = rollout((r) => {
@@ -550,13 +550,13 @@ describe("codex rollouts: forks and rate-limit buckets", () => {
     }, {}, at);
     x.write(h);
     const r = await run();
-    expect(r.store.all("ratelimit").map((l) => [l.bucket, l.usedPercent])).toEqual([["codex", 10], ["codex_mini", 3], ["other", 7], [undefined, 8]]);
+    expect(r.store.all("ratelimit").map((l) => [l.bucket, l.usedPercent])).toEqual([[keyedHash(r.salt, "codex"), 10], [keyedHash(r.salt, "codex_mini"), 3], [keyedHash(r.salt, CANARY.prompt), 7], [undefined, 8]]);
     expectNoCanaries(allEvents(r));
   });
 });
 
 describe("codex rollouts: drift, ids, locate, errors", () => {
-  test("unknown record, payload and item types are drift; names that are not schema tokens (and all item names) are bucketed", async () => {
+  test("unknown record, payload and item types are drift; their names are never echoed", async () => {
     const r1 = rollout((r) => {
       r.rec("brand-new-record", { x: CANARY.token })
         .rec(CANARY.prompt, {})
@@ -571,7 +571,7 @@ describe("codex rollouts: drift, ids, locate, errors", () => {
     const r = await run();
     expect(r.coverage[0]).toMatchObject({
       status: "drift",
-      unknownTypes: { "brand-new-record": 1, "(other)": 1, "(none)": 1, "response_item:hologram_call": 1, "item:(other)": 2 },
+      unknownTypes: { "(other)": 2, "(none)": 1, "response_item:(other)": 1, "item:(other)": 2 },
     });
     expect(r.store.all("turn")).toHaveLength(1);
     expect(r.store.all("session")).toHaveLength(1);

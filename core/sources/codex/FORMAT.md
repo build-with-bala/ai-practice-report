@@ -44,8 +44,8 @@ JSONL; every line is `{timestamp (ISO string), ordinal (number), type (string), 
 | `inter_agent_communication_metadata` | verified locally | ignored |
 | `inter_agent_communication`, `dynamic_tools_updated`, `retained_context`, `security_risk_score`, `realtime_item` | CLI program | ignored |
 
-Any other `type` is drift (coverage `unknownTypes`, keyed by the type name when it is a lower-case schema token, else
-`(other)`/`(none)`).
+Any other `type` is drift (coverage `unknownTypes`, keyed `(other)`, or `(none)` without a string `type`; an unknown
+name is never kept).
 
 ### `session_meta.payload`
 
@@ -89,7 +89,7 @@ without ordinals, else `paginated` (verified locally).
 | `function_call_output`, `custom_tool_call_output`, `reasoning`, `agent_message` {`author`, `recipient`, `content`}, `additional_tools`, `tool_search_output` | verified locally / CLI program | dropped before parsing |
 | `configuration_update`, `tool_search_call`, `image_generation_call`, `compaction`, `context_compaction`, `other` | verified locally / CLI program | ignored |
 
-Other payload types are drift: `response_item:<type>`.
+Other payload types are drift: `response_item:(other)`.
 
 **User message content** parts: `{type: "input_text", text}`, `{type: "input_image", image_url}`. The CLI writes
 context and notices as user-role messages of their own (verified locally unless marked):
@@ -177,7 +177,7 @@ Mapped (verified locally):
 Known, not mapped: `thread_settings_applied`, `user_message`, `agent_message`, `image_generation_end`,
 `patch_apply_end`, `web_search_end`, `context_compacted`, `thread_goal_updated` (verified locally), and the rest of the
 CLI's EventMsg tags (`exec_command_end`, `mcp_tool_call_end`, `collab_*`, `realtime_*`, deltas, …; CLI program — see
-`EVENT_TYPES`). Other payload types are drift (`event_msg:<type>`); unknown item types are drift as `item:(other)`
+`EVENT_TYPES`). Other payload types are drift (`event_msg:(other)`); unknown item types are drift as `item:(other)`
 (item tags are PascalCase, so they are never copied into coverage).
 
 ## What the reader emits
@@ -192,7 +192,8 @@ CLI's EventMsg tags (`exec_command_end`, `mcp_tool_call_end`, `collab_*`, `realt
   `thread_spawn.parent_thread_id`, else `parent_thread_id`; `spawnDepth` = `depth`; `agentType` = the role when
   built in, else its keyed hash); any other string, or no source → human; `originator` exactly `Claude Code` → peer,
   whatever the string source (a subagent source wins: its subagents inherit the originator and stay subagents).
-  `surface` = the source string (lower-case token, else `other`) or `subagent`; `version` = `cli_version`;
+  `surface` = the source when the CLI writes it (`cli`, `vscode`, `exec`, `mcp`, `custom`, `internal`, `unknown`; CLI
+  program), else `other`, or `subagent`; `version` = `cli_version`;
   `projectKey` from `cwd`; `inRepo` = `git` present; `models` = distinct `turn_context` models; `start`/`end` =
   first/last own line time. A source object without `subagent` is drift `session_meta.source:shape`.
 - **Copied history is skipped**: lines with `ordinal` below `subagent_history_start_ordinal` — whatever the source —
@@ -242,8 +243,8 @@ CLI's EventMsg tags (`exec_command_end`, `mcp_tool_call_end`, `collab_*`, `realt
 - **UsageEv** per `token_count` whose `total_token_usage` changed since the previous one, from `last_token_usage`:
   `inTok` = input − cached, `cacheR` = cached, `cacheW` = cache-write, `outTok` = output; model = the turn's.
 - **RateLimitEv** per window (`primary`, `secondary`) present with a numeric `used_percent`: `windowMinutes`,
-  `resetsAt` (`resets_at` in s or ms, else line time + `resets_in_seconds`), `bucket` = `limit_id` when it matches
-  `^[a-z][a-z0-9_-]{0,31}$`, else `other` (absent without one); a snapshot equal to the previous one of its bucket and
+  `resetsAt` (`resets_at` in s or ms, else line time + `resets_in_seconds`), `bucket` = the keyed hash of `limit_id`
+  (a server-issued id, never kept raw; absent without one); a snapshot equal to the previous one of its bucket and
   window in the same rollout is not repeated. Rate limits belong to the account: the event has no session.
 - **MarkerEv**: `interrupt` per `turn_aborted`, `detail` by its `reason` — the person's: `interrupted` → `user`,
   `replaced` → `replaced` (new input replaced the turn); the tool's own: `review_ended` → `review-ended`,
@@ -414,15 +415,17 @@ The SQL names only the columns below, validated against `pragma_table_info` firs
   `effort` = `reasoning_effort` by the CLI's levels (`effort.ts`, shared with the rollouts' turns: `none`, `minimal`,
   `low`, `medium`, `high`, `xhigh`, `max`, `ultra`; any other string → `other`; null → none);
   `version` = `cli_version` (version-shaped); `projectKey` from `cwd`; `inRepo` = any git column set; `approval` =
-  `approval_mode` and `sandbox` = the policy's `type` when token-shaped (`^[a-z][a-z0-9_-]{0,31}$`), else `other` — a
-  policy that is neither such a token nor JSON with a string `type` is drift `threads.sandbox_policy:shape`. The policy
+  `approval_mode` when a policy the CLI knows (`untrusted`, `on-failure`, `on-request`, `granular`, `never`), and
+  `sandbox` = the policy's `type` (or a bare mode) when a mode the CLI or this store knows (`read-only`,
+  `workspace-write`, `danger-full-access`, `external-sandbox`, `disabled`, `managed`); anything else `other` — a policy
+  that is neither a lower-case token nor JSON with a string `type` is drift `threads.sandbox_policy:shape`. The policy
   is parsed in memory; its paths are never kept.
 - **EdgeEv** per `thread_spawn_edges` row: `parentId`, `childId` (ids as above); an empty id is skipped `bad-row`.
 - **TurnEv** (window `lifetime`) per finished turn: `status` = `completed`, `failed` or `interrupted`; `ts` =
   `completed_at`, else `started_at` (neither → skipped `no-ts`); `ms` = `duration_ms` when ≥ 0, else
   `completed_at − started_at`; no model or effort (the table has none). `inProgress` turns have not ended: skipped
-  `in-progress`, not drift. Any other status is drift `turn-status:<value>` (kept when camelCase letters, else
-  `(other)`; not a string → `(none)`).
+  `in-progress`, not drift. Any other status is drift `turn-status:(other)` (not a string: `(none)`; the value is
+  never kept).
 - **Coverage**: `files`/`bytes` = stores read (main file size); `records` = rows read; skipped `no-ts`,
   `in-progress`, `bad-row`, `bad-record` (a row the mapping failed on; warn log `cx.bad-record` once with the count),
   `io-error` (a store that cannot be opened — warn `cx.db-unopenable` — or fails while read, a busy page, a later page

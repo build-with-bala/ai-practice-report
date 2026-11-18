@@ -20,8 +20,6 @@ afterEach(() => h.cleanup());
 const LIFETIME = [ccHistory, ccStats, ccConfig];
 const run = (plugins: SourcePlugin[] = LIFETIME) => scan({ env: h.env, plugins });
 type Result = Awaited<ReturnType<typeof run>>;
-const allEvents = (r: Result) =>
-  (["session", "prompt", "tool", "turn", "usage", "totals", "marker", "anchor", "identity", "file", "config", "daily"] as const).flatMap((k) => [...r.store.all(k)]);
 /** Plugins run concurrently, so coverage arrives in completion order; compare it sorted by source. */
 const covSummary = (r: Result) => r.coverage.map((c) => [c.source, c.window, c.status]).sort();
 const configs = (r: Result, kind: ConfigEv["kind"]) => r.store.all("config").filter((c) => c.kind === kind);
@@ -81,7 +79,7 @@ describe("claude-code lifetime: Task 10 scenario", () => {
     expect(covSummary(r)).toEqual([
       ["claude-code.config", "lifetime", "ok"], ["claude-code.history", "lifetime", "ok"], ["claude-code.stats", "lifetime", "ok"],
     ]);
-    expectNoCanaries([...allEvents(r), r.coverage, r.warnings], { allow: ["mcp"] });
+    expectNoCanaries([r.store, r.coverage, r.warnings], { allow: ["mcp"] });
   });
 
   test("history days follow the process time zone", () => {
@@ -209,7 +207,7 @@ describe("claude-code history: local slash commands", () => {
       ["effort-switch", "other", t0 + 3_000, `claude-code:${CC_H1}`],
     ]);
     expect(r.store.all("prompt").map((p) => p.intent)).toEqual(["command", "command", "command", "command"]);
-    expectNoCanaries([...allEvents(r), r.coverage]);
+    expectNoCanaries([r.store, r.coverage]);
   });
 });
 
@@ -225,7 +223,7 @@ describe("claude-code history: mapping", () => {
     ]);
     const r = await run([ccHistory]);
     expect(r.store.all("prompt").map((p) => p.sessionId)).toEqual([`claude-code:${CC_H1}`, `claude-code:${keyedHash(r.salt, odd)}`, undefined, undefined]);
-    expectNoCanaries([...allEvents(r), r.coverage]);
+    expectNoCanaries([r.store, r.coverage]);
   });
 
   test("task starts and similarity follow each session's own prompts, even when sessions interleave", async () => {
@@ -257,7 +255,7 @@ describe("claude-code history: mapping", () => {
     const r = await run([ccHistory]);
     expect(r.store.all("prompt").map((p) => p.hasPaste)).toEqual([true, true, true, false, false]);
     expect(r.coverage[0]).toMatchObject({ status: "ok", unknownTypes: {} });
-    expectNoCanaries([...allEvents(r), r.coverage]);
+    expectNoCanaries([r.store, r.coverage]);
   });
 
   test("lines without display or timestamp are drift; implausible times and bad lines are skipped; the rest still maps", async () => {
@@ -279,7 +277,7 @@ describe("claude-code history: mapping", () => {
       unknownTypes: { "display:missing": 1, "timestamp:missing": 1, "line:not-object": 1 },
       skipped: { "bad-ts": 1, empty: 1, parse: 1 },
     });
-    expectNoCanaries([...allEvents(r), r.coverage, r.warnings]);
+    expectNoCanaries([r.store, r.coverage, r.warnings]);
   });
 
   test("no history file: empty coverage, no events", async () => {
@@ -289,7 +287,7 @@ describe("claude-code history: mapping", () => {
       k: "coverage", tool: "claude-code", source: "claude-code.history", window: "lifetime", status: "empty", beta: false,
       files: 0, bytes: 0, records: 0, skipped: {}, unknownTypes: {}, versions: [],
     }]);
-    expect(allEvents(r)).toEqual([]);
+    expect(r.store.count()).toEqual({ coverage: 1 }); // no event of any other kind
   });
 
   test.skipIf(skipChmod)("an unreadable history file counts as io-error", async () => {
@@ -320,7 +318,7 @@ describe("claude-code stats-cache: mapping", () => {
     });
     const r = await run([ccStats]);
     expect(r.store.all("daily").map((d) => d.models)).toEqual([{ [CC_OPUS]: 12, other: 12, constructor: 1 }]);
-    expectNoCanaries([...allEvents(r), r.coverage]);
+    expectNoCanaries([r.store, r.coverage]);
   });
 
   test("a newer cache version and malformed entries are drift; well-formed days still map", async () => {
@@ -389,7 +387,7 @@ describe("claude-code config: mapping", () => {
       ["plug:helper", "installed", 6, nzdt("2026-02-01", "12:00")],
     ]);
     expect(configs(r, "command").map((c) => [c.name, c.provenance, c.uses, c.lastUsed])).toEqual([["cmd-used", "authored", 2, nzdt("2026-02-01", "11:00")]]);
-    expectNoCanaries([...allEvents(r), r.coverage]);
+    expectNoCanaries([r.store, r.coverage]);
   });
 
   test("without a readable ~/.claude.json the inventory carries no usage, and no identity or markers are emitted", async () => {
@@ -425,7 +423,7 @@ describe("claude-code config: mapping", () => {
     const r = await run([ccConfig]);
     expect(configs(r, "mcp-server").map((c) => c.name)).toEqual([CANARY.mcp, "proj-only"]);
     expect(r.store.all("identity")).toEqual([]);                        // no accountUuid: nothing else in oauthAccount is used
-    expectNoCanaries([...allEvents(r), r.coverage], { allow: ["mcp"] });
+    expectNoCanaries([r.store, r.coverage], { allow: ["mcp"] });
   });
 
   test("hooks: event names shape-checked, every hook entry classified, command text never kept", async () => {
@@ -440,7 +438,7 @@ describe("claude-code config: mapping", () => {
     expect(configs(r, "hook").map((c) => [c.name, c.provenance, c.checks])).toEqual([
       ["PreToolUse", "authored", ["lint", "typecheck"]], ["PreToolUse", "authored", []], ["other", "authored", ["test"]], ["UserPromptSubmit", "authored", undefined],
     ]);
-    expectNoCanaries([...allEvents(r), r.coverage]);
+    expectNoCanaries([r.store, r.coverage]);
   });
 
   test("CLAUDE_CONFIG_DIR: the global config is the one inside that directory", async () => {
@@ -479,7 +477,7 @@ describe("claude-code config: mapping", () => {
       },
     });
     expect(r.store.all("identity")).toHaveLength(1);
-    expectNoCanaries([...allEvents(r), r.coverage], { allow: ["mcp"] });
+    expectNoCanaries([r.store, r.coverage], { allow: ["mcp"] });
   });
 
   test("an unreadable skill lock leaves skill folders with unknown provenance", async () => {
@@ -526,7 +524,7 @@ describe("claude-code config: mapping", () => {
     h.write(".claude/projects/-work-c/s1.jsonl", "");
     const r = await run([ccConfig]);
     expect(configs(r, "memory-file")).toEqual(Array(3).fill({ k: "config", tool: "claude-code", source: "claude-code.config", kind: "memory-file", provenance: "authored" }));
-    expectNoCanaries([...allEvents(r), r.coverage]);
+    expectNoCanaries([r.store, r.coverage]);
   });
 });
 

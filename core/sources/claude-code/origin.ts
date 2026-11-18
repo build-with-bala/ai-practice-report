@@ -13,20 +13,19 @@ const TURN_ORIGINS: ReadonlyMap<string, Origin> = new Map<string, Origin>([
 const PROMPT_SOURCES: ReadonlyMap<string, Origin> = new Map<string, Origin>([
   ["typed", "human"], ["queued", "human"], ["suggestion_accepted", "human"], ["sdk", "scripted"], ["system", "system"],
 ]);
-const VALUE_TOKEN = /^[a-z][a-z0-9_-]{0,31}$/;
 
 const known = (map: ReadonlyMap<string, Origin>, v: unknown): Origin | undefined => (typeof v === "string" ? map.get(v) : undefined);
 
 /**
  * Provenance values present on a record that the mapping does not know, as coverage keys:
- * `turnOrigin:<value>` / `promptSource:<value>` when the value is token-shaped, else `…:<other>`.
+ * `turnOrigin:<other>` / `promptSource:<other>` — the value itself is never echoed.
  */
 export function unknownProvenance(rec: Obj): string[] {
   const out: string[] = [];
   for (const [field, map] of [["turnOrigin", TURN_ORIGINS], ["promptSource", PROMPT_SOURCES]] as const) {
     const v = rec[field];
     if (v === undefined || known(map, v) !== undefined) continue;
-    out.push(`${field}:${typeof v === "string" && VALUE_TOKEN.test(v) ? v : "<other>"}`);
+    out.push(`${field}:<other>`);
   }
   return out;
 }

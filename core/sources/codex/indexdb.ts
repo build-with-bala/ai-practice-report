@@ -34,7 +34,10 @@ const TURN_COLUMNS = ["thread_id", "status", "started_at", "completed_at", "dura
 const FINISHED: ReadonlyMap<string, NonNullable<TurnEv["status"]>> = new Map([["completed", "completed"], ["failed", "failed"], ["interrupted", "interrupted"]]);
 const IN_PROGRESS = "inProgress";
 /** An unknown status keeps its value in the drift key when it has the enum's shape (camelCase letters), else `(other)`. */
-const STATUS_SHAPE = /^[a-z][A-Za-z]{0,31}$/;
+/** Sandbox modes: the state DB's policy types (FORMAT) and the CLI's own sandbox modes (CLI program). */
+const SANDBOX_MODES: ReadonlySet<string> = new Set(["read-only", "workspace-write", "danger-full-access", "external-sandbox", "disabled", "managed"]);
+/** Approval policies (CLI program; `on-failure` from older versions). */
+const APPROVALS: ReadonlySet<string> = new Set(["untrusted", "on-failure", "on-request", "granular", "never"]);
 
 /** Rows are paged by rowid, which a table declared WITHOUT ROWID does not have. */
 const WITHOUT_ROWID = /\bWITHOUT\s+ROWID\b/i;
@@ -126,7 +129,7 @@ function sourceValue(v: unknown): unknown {
 function sandboxType(v: unknown, tally: Tally): string | undefined {
   const raw = str(v);
   if (raw === undefined) return undefined;
-  if (TOKEN.test(raw)) return raw;
+  if (TOKEN.test(raw)) return SANDBOX_MODES.has(raw) ? raw : "other";
   let type: unknown;
   try {
     const policy: unknown = JSON.parse(raw);
@@ -138,7 +141,7 @@ function sandboxType(v: unknown, tally: Tally): string | undefined {
     tally.unknownKey("threads.sandbox_policy:shape");
     return "other";
   }
-  return TOKEN.test(type) ? type : "other";
+  return SANDBOX_MODES.has(type) ? type : "other";
 }
 
 /** The CLI's running token total of a thread (`tokens_used`): one TotalsEv per row that has one; a value that is not a count is drift. */
@@ -181,7 +184,7 @@ function thread(r: Obj, ctx: ScanCtx, tally: Tally): void {
   const effort = cxEffort(str(r.reasoning_effort));
   if (effort !== undefined) s.effort = effort;
   const approval = str(r.approval_mode);
-  if (approval !== undefined) s.approval = TOKEN.test(approval) ? approval : "other";
+  if (approval !== undefined) s.approval = APPROVALS.has(approval) ? approval : "other";
   const sandbox = sandboxType(r.sandbox_policy, tally);
   if (sandbox !== undefined) s.sandbox = sandbox;
   ctx.emit(s);
@@ -231,7 +234,7 @@ function turn(r: Obj, ctx: ScanCtx, tally: Tally): void {
   const status = typeof raw === "string" ? FINISHED.get(raw) : undefined;
   if (status === undefined) {
     if (raw === IN_PROGRESS) return tally.skip("in-progress");
-    return tally.unknownKey(`turn-status:${typeof raw !== "string" ? "(none)" : STATUS_SHAPE.test(raw) ? raw : "(other)"}`);
+    return tally.unknownKey(`turn-status:${typeof raw !== "string" ? "(none)" : "(other)"}`);
   }
   const started = toEpochMs(r.started_at, ctx.now);
   const completed = toEpochMs(r.completed_at, ctx.now);

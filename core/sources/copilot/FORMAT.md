@@ -111,7 +111,7 @@ locally): `toolInvocationSerialized`, `prepareToolInvocation`, `textEditGroup`, 
 `extensions`, `planReview`, `autoModeResolution`, `clearToPreviousToolInvocation`, `systemNotification`, `pullRequest`,
 `questionCarousel`, `warning`, `info`, `treeData`, `disabledClaudeHooks`, and older `markdownContent`, `toolInvocation`,
 `elicitation`, `progressTask`, `codeCitation`, `mcpServersStartingSlow`, `mcpAuthenticationRequired`, `voiceProgress`.
-Any other kind is drift `part:<kind>` (kept only when a lower-case schema token, else `part:(other)`).
+Any other kind is drift `part:(other)` (the kind itself is never kept).
 
 - `toolInvocationSerialized` {`toolId`, `toolCallId`, `source` {`type` (`internal`, `extension`, `mcp`), `label`,
   `serverLabel` (MCP), …}, `isConfirmed` (`{type}`: 0 denied or not run, 1 no confirmation needed, 2–3 approved by a
@@ -187,7 +187,7 @@ Built-in tool ids (VS Code program and extension program): see `VSCODE_TOOLS` in
 - **Coverage**, one per window, each with `installed` = Copilot is installed (below):
   - `detail` (the chat sessions): `files`/`bytes` = session files fully read and `workspace.json` files; `records` =
     journal lines and legacy documents; `versions` = extension versions; `from`/`to` = first/last event time. Drift:
-    `journal-kind:<n>`, `part:<kind>`, `version:newer` (a session `version` above 3), `requests:missing`,
+    `journal-kind:<n>`, `part:(other)`, `version:newer` (a session `version` above 3), `requests:missing`,
     `request:not-object`, `session:not-object`, `modelState:<value>`, `request.message:shape` (a `message` that is neither a
     string nor {`text`}), `request.timestamp:shape` (a request whose `timestamp` is absent or not a time; its prompt
     and tools are skipped `no-ts`). A store whose session files are all empty (`empty-session`) is `empty`, not `ok`.
@@ -215,7 +215,8 @@ keeps a store of the same name. Tables: `sessions` (`id` TEXT primary key, `cwd`
   `summary`, `repository`, `branch`, the agent fields; never read: `checkpoints`, `session_files`, `session_refs`, the
   search index.
 - **SessionEv** (`lifetime`) per session row with a creation time: `start` = `created_at`, `end` = `updated_at` (never
-  before `start`), origin `human`, `surface` = `host_type` (lower-case token, else `other`), `projectKey` from `cwd`.
+  before `start`), origin `human`, `surface` = `host_type` when a value the programs write — `vscode` (the extension's copy)
+  or `github` (the CLI's store, where it names the repository's host) — else `other`, `projectKey` from `cwd`.
   **TurnEv** (`lifetime`) per turn row with a time, no status or duration.
 
 ## Copilot CLI (`copilot.cli`) (unverified)
@@ -231,7 +232,7 @@ program). Types known (`KNOWN_EVENTS` in `cli.ts`): `session.*` (`start`, `resum
 `user.message`, `assistant.*` (`turn_start`, `turn_end`, `message`, `message_delta`, `reasoning`, `intent`, `usage`, …),
 `tool.*` (`execution_start`, `execution_complete`, `execution_partial_result`, …), `subagent.*`, `hook.*`, `abort`,
 `permission.requested`, `exit_plan_mode.requested`, `pending_messages.modified`, `skill.invoked`, `system.message`. Any
-other type is drift `event:<type>` (dotted lower-case tokens kept, else `(other)`).
+other type is drift `event:(other)` (the type itself is never kept).
 
 - `session.start` {`sessionId`, `copilotVersion`, `startTime`, `context` {`cwd`, `gitRoot`, `branch`, …}, `selectedModel`}
   → `version`, `projectKey`, a model. `session.model_change` {`newModel`} and `assistant.usage` {`model`, token counts}

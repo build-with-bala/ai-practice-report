@@ -169,8 +169,8 @@ JSONL, one object per step: `step_index` (number), `type` (string: a `CortexStep
 - **UsageEv** per record with a token count: `inTok` = `input_tokens`, `outTok` = `output_tokens`, `cacheR` =
   `cache_read_tokens`, `cacheW` = `cache_write_tokens` (not seen locally), each 0 when absent; `model` = the record's
   `model` when it is model-id-shaped (else `other`; no model field: `other`). No time: skipped `no-ts`.
-- Drift: `transcript.type:<name>` and `transcript.source:<name>` for names outside the program's enums (kept when
-  upper-case enum-shaped, else `(other)`; missing `(none)`), `transcript:not-object`. Every other known record is counted and
+- Drift: `transcript.type:(other)` and `transcript.source:(other)` for names outside the program's enums (the name is
+  never kept; missing: `(none)`), `transcript:not-object`. Every other known record is counted and
   dropped; model replies, thinking, tool calls, errors and media are never kept.
 
 ## history.jsonl (`antigravity.history`; verified locally)
@@ -185,7 +185,7 @@ on every line), `workspace` (string), `type` (`slash_command` on slash commands,
   `workspace` is never kept.
 - **DailyEv** (source `antigravity.history`, `zone: "local"`, `unit: "prompts"`) per local day, `count` = its
   prompts and slash commands.
-- Drift: `history:not-object`, `history.type:<type>`, `history.display:missing`, `history.timestamp:missing`,
+- Drift: `history:not-object`, `history.type:(other)` (the type is never kept), `history.display:missing`, `history.timestamp:missing`,
   `history.timestamp:shape` (a `timestamp` that is not a time). Skipped: `bad-ts` (a well-formed time outside the
   plausible range), `empty`, `parse`, `oversize`, `io-error`, `bad-record`.
 - **Coverage** (window `lifetime`): `files`/`bytes` = the file read to its end, `records` = its lines, `from`/`to` =

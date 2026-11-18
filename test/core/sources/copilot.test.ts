@@ -437,7 +437,7 @@ describe("copilot vscode: mapping rules", () => {
     const r = await run([cpVscode]);
     const c = covOf(r, "copilot.vscode");
     expect(c.status).toBe("drift");
-    expect(c.unknownTypes).toEqual({ "part:hologram": 1, "part:(other)": 1, "journal-kind:9": 1, "version:newer": 1 });
+    expect(c.unknownTypes).toEqual({ "part:(other)": 2, "journal-kind:9": 1, "version:newer": 1 });
     expect(c.skipped["bad-record"]).toBe(1);
     expect(toolsOf(r, id).map((t) => t.name)).toEqual(["copilot_readFile"]);
     expect(r.warnings.some((w) => w.code === "drift" && w.source === "copilot.vscode")).toBe(true);
@@ -693,7 +693,7 @@ describe("copilot cli (session events and store, from the CLI's schema)", () => 
     expect(r.store.forSession(sidOf(cliSid), "turn").map((t) => [t.status, t.ms])).toEqual([["completed", 14_000], ["interrupted", 2_000]]);
     expect(r.store.forSession(sidOf(cliSid), "marker").map((m) => [m.kind, m.detail])).toEqual([["interrupt", "user"]]);
     const c = covOf(r, "copilot.cli");
-    expect(c).toMatchObject({ status: "drift", unknownTypes: { "event:session.wormhole": 1 }, versions: ["1.0.4"], files: 1, records: e.records.length });
+    expect(c).toMatchObject({ status: "drift", unknownTypes: { "event:(other)": 1 }, versions: ["1.0.4"], files: 1, records: e.records.length });
     expectNoCanaries([...allEvents(r), r.coverage, r.warnings], { allow: ["mcp"] });
   });
 
@@ -706,8 +706,8 @@ describe("copilot cli (session events and store, from the CLI's schema)", () => 
       "CREATE TABLE session_files (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, file_path TEXT, tool_name TEXT, turn_index INTEGER, first_seen_at TEXT)",
     ], {
       sessions: [
-        [cliSid, CANARY.path, CANARY.project, "cli", "main", CANARY.prompt, CANARY.project, CANARY.prompt, iso(at), iso(at + 9 * MIN)],
-        ["not-a-uuid", null, null, CANARY.host, null, null, null, null, iso(at), null],
+        [cliSid, CANARY.path, CANARY.project, "github", "main", CANARY.prompt, CANARY.project, CANARY.prompt, iso(at), iso(at + 9 * MIN)],
+        ["not-a-uuid", null, null, CANARY.slug, null, null, null, null, iso(at), null],
       ],
       turns: [[1, cliSid, 0, CANARY.prompt, CANARY.code, iso(at + MIN)], [2, cliSid, 1, CANARY.prompt, CANARY.code, iso(at + 2 * MIN)]],
       session_files: [[1, cliSid, `${CANARY.path}/x.ts`, "edit", 0, iso(at)]],
@@ -716,7 +716,7 @@ describe("copilot cli (session events and store, from the CLI's schema)", () => 
     __observeQueries((s) => sql.push(s));
     const r = await run([cpCli]);
     __observeQueries(undefined);
-    expect(r.store.session(sidOf(cliSid))).toMatchObject({ window: "lifetime", origin: "human", surface: "cli", start: at, end: at + 9 * MIN, projectKey: keyedHash(r.salt, normalizePath(CANARY.path)) });
+    expect(r.store.session(sidOf(cliSid))).toMatchObject({ window: "lifetime", origin: "human", surface: "github", start: at, end: at + 9 * MIN, projectKey: keyedHash(r.salt, normalizePath(CANARY.path)) });
     expect(r.store.session(sidOf(keyedHash(r.salt, "not-a-uuid")))).toMatchObject({ surface: "other", start: at, end: at });
     expect(r.store.forSession(sidOf(cliSid), "turn").map((t) => [t.window, t.ts - at])).toEqual([["lifetime", MIN], ["lifetime", 2 * MIN]]);
     const selects = sql.filter((s) => /^\s*SELECT/i.test(s) && !/sqlite_master|pragma_table_info/.test(s));

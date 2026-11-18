@@ -8,11 +8,14 @@ import { isObj, type Obj } from "./guards";
 const TYPE_NAME = /^[a-z][a-z0-9_-]{0,47}$/;
 const SIDECAR_MAX = 8 * 1024 * 1024;
 
-/** A string shaped like a schema type name (lower-case token), the shape drift keys keep verbatim. */
+/** A string shaped like a schema type name (lower-case token). */
 export const isTypeName = (s: string): boolean => TYPE_NAME.test(s);
 
-/** A record or payload type as a drift key: the name when it looks like a schema token, else `(other)` / `(none)`. */
-export const typeKey = (type: unknown): string => (typeof type !== "string" ? "(none)" : isTypeName(type) ? type : "(other)");
+/**
+ * An unknown record or payload type as a drift key: `(other)`, or `(none)` when it is not a string. A value outside the
+ * reader's vocabulary is never echoed, however token-shaped: drift keys are enums, like every other event string.
+ */
+export const typeKey = (type: unknown): string => (typeof type !== "string" ? "(none)" : "(other)");
 
 /** Coverage counters for one candidate of one source; `coverage()` builds the source's single CoverageEv. */
 export class Tally {

@@ -13,9 +13,17 @@ describe("canary harness", () => {
     expect(findCanaries(`prefix ${CANARY.code} suffix`)).toEqual(["code"]);
     expect(findCanaries({ n: 42, ok: true, s: "nothing here", z: null })).toEqual([]);
   });
-  test("allow exempts keys", () => {
-    expectNoCanaries({ name: CANARY.mcp }, { allow: ["mcp"] });
-    expect(() => expectNoCanaries({ name: CANARY.mcp })).toThrow();
+  test("allow covers the two exempt fields only: ConfigEv.name and ToolEv.mcpServer", () => {
+    expectNoCanaries([{ k: "config", name: CANARY.mcp }, { k: "tool", mcpServer: CANARY.slug }], { allow: ["mcp", "slug"] });
+    // the same value anywhere else is still a hit, allowed or not
+    expect(findCanaries({ k: "config", name: CANARY.mcp, kind: CANARY.mcp }, { allow: ["mcp"] })).toEqual(["mcp"]);
+    expect(findCanaries({ k: "tool", name: CANARY.slug }, { allow: ["slug"] })).toEqual(["slug"]);
+    expect(findCanaries({ k: "session", name: CANARY.mcp }, { allow: ["mcp"] })).toEqual(["mcp"]);
+    expect(findCanaries({ name: CANARY.mcp }, { allow: ["mcp"] })).toEqual(["mcp"]);
+    expect(findCanaries(new Map([[CANARY.slug, { k: "config", name: CANARY.slug }]]), { allow: ["slug"] })).toEqual(["slug"]); // a Map key
+    expect(findCanaries({ unknownTypes: { [`event:${CANARY.slug}`]: 1 } }, { allow: ["slug"] })).toEqual(["slug"]); // a drift key
+    // not allowed: a hit in an exempt field too
+    expect(findCanaries({ k: "config", name: CANARY.mcp })).toEqual(["mcp"]);
   });
   test("handles cycles", () => {
     const a: Record<string, unknown> = {};

@@ -31,9 +31,8 @@ const HEAD_BYTES = 64;
 /** Step rows per query: with both blobs at the cap, a page stays near 64 MiB. */
 const STEP_PAGE = 32;
 const WITHOUT_ROWID = /\bWITHOUT\s+ROWID\b/i;
-/** An enum value name as the transcript writes them (`USER_INPUT`, `MODEL`): kept verbatim in drift keys, anything else `(other)`. */
-const ENUM_NAME = /^[A-Z][A-Z0-9_]{0,47}$/;
-const enumKey = (v: unknown): string => (typeof v !== "string" ? "(none)" : ENUM_NAME.test(v) ? v : "(other)");
+/** An enum name the program does not know, as a drift key: never echoed. */
+const enumKey = (v: unknown): string => (typeof v !== "string" ? "(none)" : "(other)");
 
 /** An Antigravity session id, `antigravity:<id>`: the conversation's own id verbatim when UUID-shaped, else its keyed hash. */
 export const agSessionId = (raw: string, ctx: ScanCtx): string => sid(TOOL, idPart(raw, UUID, ctx));

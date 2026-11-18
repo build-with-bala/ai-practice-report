@@ -105,8 +105,6 @@ const MAX_DEPTH = 6;
 const ROLLOUT_FILE = /^rollout-.*\.jsonl$/;
 const FILE_TS = /^rollout-(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})/;
 const FILE_ID = /-([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\.jsonl$/;
-/** A rate-limit bucket id (`rate_limits.limit_id`) is kept when it has this shape, else it becomes `other`. */
-const BUCKET = /^[a-z][a-z0-9_-]{0,31}$/;
 /**
  * `turn_aborted.reason` (the CLI's TurnAbortReason) → the interrupt marker's detail: the person interrupted (`user`) or
  * sent input that replaced the turn (`replaced`); the review it ran ended, or a budget ran out — not the person.
@@ -534,7 +532,7 @@ class RolloutReader {
     const limits = isObj(p.rate_limits) ? p.rate_limits : undefined;
     if (!limits) return;
     const id = str(limits.limit_id);
-    const bucket = id === undefined ? undefined : BUCKET.test(id) ? id : "other";
+    const bucket = id === undefined ? undefined : this.ctx.hash(id); // a server-issued id: keyed hash, never raw
     for (const window of ["primary", "secondary"] as const) this.rateLimit(bucket, window, limits[window], ts, emit);
   }
 

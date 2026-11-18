@@ -53,7 +53,7 @@ describe("claude-code transcripts: Task 9 scenario", () => {
     expect(r.store.all("totals").find(t => t.usd === 1.5)).toMatchObject({ linesAdded: 10, linesRemoved: 2 });
     expect(r.store.all("anchor").length).toBeGreaterThan(0);
     const cov = r.coverage[0];
-    expect(cov).toMatchObject({ status: "drift", unknownTypes: { "brand-new-type": 1 } });
+    expect(cov).toMatchObject({ status: "drift", unknownTypes: { "(other)": 1 } }); // an unknown type is never echoed
     expect(cov.skipped.sniffed).toBe(2);
     expectNoCanaries([...r.store.all("session"), ...r.store.all("prompt"), ...r.store.all("tool"), ...r.store.all("marker"), r.coverage]);
   });
@@ -285,7 +285,7 @@ describe("claude-code transcripts: record mapping", () => {
     const r = await run();
     expect(r.store.all("prompt").map(p => p.origin)).toEqual(["system", "system", "scripted", "scripted", "human"]);
     expect(r.coverage[0]!.status).toBe("drift");
-    expect(r.coverage[0]!.unknownTypes).toEqual({ "turnOrigin:unknown": 1, "promptSource:<other>": 1 });
+    expect(r.coverage[0]!.unknownTypes).toEqual({ "turnOrigin:<other>": 1, "promptSource:<other>": 1 });
   });
 
   test("denial, plan-mode and commit markers", async () => {
@@ -463,7 +463,7 @@ describe("claude-code transcripts: record mapping", () => {
     expect(events.filter(e => e.k === "prompt")).toHaveLength(1);       // "fine" still mapped after the failure
   });
 
-  test("record type names that are not schema-like are bucketed, never copied", async () => {
+  test("record type names the reader does not know are bucketed, never copied", async () => {
     const t = top("P10").prompt("hi");
     t.raw({ type: CANARY.prompt }).raw({ type: 42 }).raw({ noType: true });
     t.write(h, topFile("P10"));
@@ -650,8 +650,8 @@ describe("ccPromptOrigin", () => {
   ];
   for (const [name, rec, want] of cases) test(name, () => expect(ccPromptOrigin(rec)).toBe(want as never));
 
-  test("unknownProvenance: shape-checked coverage keys for values the mapping does not know", () => {
-    expect(unknownProvenance({ turnOrigin: "unknown", promptSource: "typed" })).toEqual(["turnOrigin:unknown"]);
+  test("unknownProvenance: coverage keys for values the mapping does not know, never echoing them", () => {
+    expect(unknownProvenance({ turnOrigin: "unknown", promptSource: "typed" })).toEqual(["turnOrigin:<other>"]);
     expect(unknownProvenance({ turnOrigin: CANARY.prompt, promptSource: 7 })).toEqual(["turnOrigin:<other>", "promptSource:<other>"]);
     expect(unknownProvenance({ turnOrigin: "human", promptSource: "queued" })).toEqual([]);
     expect(unknownProvenance({})).toEqual([]);
