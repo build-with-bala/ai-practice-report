@@ -1,5 +1,4 @@
-import { safeStat } from "../../io/fs";
-import { isBusyError, MAX_COPY_BYTES, openRo, type RoDb } from "../../io/sqlite";
+import type { RoDb } from "../../io/sqlite";
 import { toEpochMs } from "../../io/time";
 import type { Ev, MarkerEv, PromptEv, SessionEv, ToolEv } from "../../model/events";
 import { sid, type MarkerKind, type Origin, type ToolCategory } from "../../model/ids";
@@ -8,187 +7,19 @@ import { classifyIntent } from "../../text/intent";
 import { promptFeatures } from "../../text/structure";
 import type { Tally } from "../common/coverage";
 import { extOfPath, idPart, num, safeModel, str, UUID, type Obj } from "../common/guards";
+import { eachRow, keyIndexed, Pass, rowidPageable, tableColumns } from "../common/sqlite";
 import type { ScanCtx } from "../types";
 
 export const TOOL = "cursor";
 export const IDE_SOURCE = "cursor.ide";
-/** Rows per query: every table is read in pages, so memory stays bounded however large the store grows. */
-export const PAGE = 2_000;
 /** A message this long after the session's previous activity starts a new task. */
 export const TASK_GAP_MS = 30 * 60_000;
 /** The detail window: bubbles are read only for composers updated in the last 90 days (or since `ctx.since`). */
 const DETAIL_MS = 90 * 86_400_000;
-const WITHOUT_ROWID = /\bWITHOUT\s+ROWID\b/i;
 const KV = "cursorDiskKV";
-
-export const q = (name: string): string => `"${name}"`;
 
 /** A Cursor session id, `cursor:<id>`: the composer's own id verbatim when UUID-shaped, else its keyed hash. */
 export const cuSessionId = (raw: string, ctx: ScanCtx): string => sid(TOOL, idPart(raw, UUID, ctx));
-
-// ---- stores, tables and pages (shared by the Cursor readers) ----
-
-/**
- * Opens and reads one store on its own; it counts as read once its tables are listed, and is always closed. A store
- * that cannot be opened is an io-error (warn `cu.db-unopenable`) — or, above MAX_COPY_BYTES, a locked store that is
- * never copied: skipped `too-large`, coverage `note: "too-large"`. A store that fails while it is read is an io-error
- * (warn `cu.db-unreadable`). True when its tables were listed.
- */
-export function readStore(file: string, ctx: ScanCtx, tally: Tally, body: (db: RoDb, tables: Set<string>) => void): boolean {
-  const db = openRo(file, ctx.temp);
-  if (!db) {
-    if ((safeStat(file)?.size ?? 0) > MAX_COPY_BYTES) {
-      tally.note = "too-large";
-      tally.skip("too-large");
-    } else {
-      tally.skip("io-error");
-      ctx.log("warn", "cu.db-unopenable");
-    }
-    return false;
-  }
-  let listed = false;
-  try {
-    const tables = new Set(db.tables());
-    listed = true;
-    tally.files++;
-    tally.bytes += safeStat(file)?.size ?? 0;
-    body(db, tables);
-  } catch {
-    tally.skip("io-error");
-    ctx.log("warn", "cu.db-unreadable");
-  } finally {
-    db.close();
-  }
-  return listed;
-}
-
-/**
- * The columns of `table`; each one of `wanted` missing is drift `missing-column:<name>`. Undefined when the table is
- * missing (drift `missing-table:<name>`) or its schema cannot be read (io-error).
- */
-export function tableColumns(db: RoDb, tables: ReadonlySet<string>, table: string, wanted: readonly string[], tally: Tally): Set<string> | undefined {
-  if (!tables.has(table)) {
-    tally.unknownKey(`missing-table:${table}`);
-    return undefined;
-  }
-  let have: Set<string>;
-  try {
-    have = new Set(db.columns(table));
-  } catch {
-    tally.skip("io-error");
-    return undefined;
-  }
-  for (const c of wanted) if (!have.has(c)) tally.unknownKey(`missing-column:${c}`);
-  return have;
-}
-
-/** Whether `table` has a rowid to page by; a table declared WITHOUT ROWID has none: drift `table-unreadable:<name>`. */
-function rowidPageable(db: RoDb, table: string, tally: Tally): boolean {
-  const ddl = db.get<{ sql: unknown }>("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", table)?.sql;
-  if (typeof ddl !== "string" || !WITHOUT_ROWID.test(ddl)) return true;
-  tally.unknownKey(`table-unreadable:${table}`);
-  return false;
-}
-
-/** The columns of a table the reader can page by rowid (see `tableColumns`); undefined, and drift, for a table without rowids. */
-export function pageableColumns(db: RoDb, tables: ReadonlySet<string>, table: string, wanted: readonly string[], tally: Tally): Set<string> | undefined {
-  const have = tableColumns(db, tables, table, wanted, tally);
-  if (have === undefined) return undefined;
-  try {
-    return rowidPageable(db, table, tally) ? have : undefined;
-  } catch {
-    tally.skip("io-error");
-    return undefined;
-  }
-}
-
-/**
- * Whether `table` has an index the reader can page by key: unique, not partial, on `key` alone in binary order —
- * Cursor's `key TEXT UNIQUE`, or a WITHOUT ROWID table's primary key `key`.
- */
-function keyIndexed(db: RoDb, table: string): boolean {
-  for (const ix of db.all<Obj>('SELECT name, "unique" AS u, partial FROM pragma_index_list(?)', table)) {
-    if (ix.u !== 1 || ix.partial === 1 || typeof ix.name !== "string") continue;
-    const cols = db.all<Obj>("SELECT name, coll FROM pragma_index_xinfo(?) WHERE key = 1", ix.name);
-    if (cols.length === 1 && cols[0]!.name === "key" && String(cols[0]!.coll).toUpperCase() === "BINARY") return true;
-  }
-  return false;
-}
-
-/**
- * The queries of one pass over a table, PAGE rows each. The first query of the pass that fails other than busy means
- * it can never work on this table: drift `table-unreadable:<table>`. A busy store, or any later failure, is an
- * io-error. Any failure ends the pass.
- */
-// TODO(Plan 2 Task 0): this pager is synchronous and never yields to the event loop, so a signal or an abort waits
-// for the whole table. Move it onto the shared async pager (common/sqlite.ts) that awaits maybeYield() between pages.
-export class Pass {
-  private started = false;
-  failed = false;
-  unreadable = false;
-
-  constructor(private readonly db: RoDb, private readonly table: string, private readonly tally: Tally, private readonly ctx: ScanCtx) {}
-
-  private page(sql: string, params: unknown[], rows = true): Obj[] | undefined {
-    if (this.failed || this.ctx.signal.aborted) return undefined;
-    const first = !this.started;
-    this.started = true;
-    try {
-      const got = this.db.all<Obj>(sql, ...params);
-      if (rows) this.tally.records += got.length;
-      return got;
-    } catch (e) {
-      this.failed = true;
-      if (first && !isBusyError(e)) {
-        this.tally.unknownKey(`table-unreadable:${this.table}`);
-        this.unreadable = true;
-      } else this.tally.skip("io-error");
-      this.ctx.log("warn", "cu.db-query");
-      return undefined;
-    }
-  }
-
-  /**
-   * The rows whose key lies strictly between `lo` and `hi`, in key order, each page resuming after the last key read
-   * (`sql` binds the start key, `hi` and the page size). True when every page was read.
-   */
-  byKey(sql: string, lo: string, hi: string, each: (rows: Obj[]) => void): boolean {
-    for (let after = lo; ;) {
-      const rows = this.page(sql, [after, hi, PAGE]);
-      if (rows === undefined) return false;
-      if (rows.length > 0) each(rows);
-      if (rows.length < PAGE) return true;
-      const last = rows[rows.length - 1]!.key;
-      if (typeof last !== "string") return false; // keys inside a text range are text
-      after = last;
-    }
-  }
-
-  /** One lookup within the pass (it is not counted as rows read): its first row; undefined when it has none, or when it failed (`failed`). */
-  lookup(sql: string, params: unknown[]): Obj | undefined {
-    return this.page(sql, params, false)?.[0];
-  }
-
-  /** The rows of `sql` in rowid order (it selects the rowid as `rid` and binds the last rowid read and the page size). True when every page was read. */
-  byRowid(sql: string, each: (rows: Obj[]) => void): boolean {
-    for (let after = Number.MIN_SAFE_INTEGER; ;) {
-      const rows = this.page(sql, [after, PAGE]);
-      if (rows === undefined) return false;
-      if (rows.length > 0) each(rows);
-      if (rows.length < PAGE) return true;
-      after = rows[rows.length - 1]!.rid as number;
-    }
-  }
-}
-
-/** Maps one row; a row the mapping fails on is skipped as bad-record and the others go on. */
-export function eachRow(map: () => void, tally: Tally): void {
-  try {
-    map();
-  } catch {
-    tally.skip("bad-record");
-  }
-}
 
 // ---- tools ----
 
@@ -426,7 +257,7 @@ export class DiskKv {
     this.windowStart = ctx.since ?? ctx.now - DETAIL_MS;
   }
 
-  read(tables: ReadonlySet<string>): KvRead {
+  async read(tables: ReadonlySet<string>): Promise<KvRead> {
     const have = tableColumns(this.db, tables, KV, ["key", "value"], this.tally);
     if (!have?.has("key") || !have.has("value")) return { readable: false, composers: 0 };
     let mode: Mode;
@@ -440,13 +271,13 @@ export class DiskKv {
       this.tally.skip("io-error");
       return { readable: false, composers: 0 };
     }
-    const pass = new Pass(this.db, KV, this.life, this.ctx);
+    const pass = new Pass(this.db, KV, this.life, this.ctx, "cu.db-query");
     const rows = (list: Obj[]) => { for (const r of list) eachRow(() => this.composer(r), this.life); };
-    const done = mode === "key" ? pass.byKey(SQL.key.composers, "composerData:", "composerData;", rows) : pass.byRowid(SQL.rowid.composers, rows);
+    const done = mode === "key" ? await pass.byKey(SQL.key.composers, "composerData:", "composerData;", rows) : await pass.byRowid(SQL.rowid.composers, rows);
     if (pass.unreadable) return { readable: false, composers: 0 };
     if (this.composers.size === 0) return { readable: done, composers: 0 };
-    if (mode === "key") this.bubblesByComposer();
-    else this.bubblesByScan();
+    if (mode === "key") await this.bubblesByComposer();
+    else await this.bubblesByScan();
     this.sessions();
     return { readable: true, composers: this.composers.size };
   }
@@ -479,8 +310,8 @@ export class DiskKv {
   }
 
   /** Key index: each composer's bubbles are its own key range — only composers inside the window, never a copy. */
-  private bubblesByComposer(): void {
-    const pass = new Pass(this.db, KV, this.tally, this.ctx);
+  private async bubblesByComposer(): Promise<void> {
+    const pass = new Pass(this.db, KV, this.tally, this.ctx, "cu.db-query");
     for (const c of this.composers.values()) {
       if (c.dup || !c.detail) continue;
       if (pass.failed || this.ctx.signal.aborted) break;
@@ -490,7 +321,7 @@ export class DiskKv {
         c.ids = listed(row?.hids, row?.iids);
       }
       const lo = `bubbleId:${c.raw}:`;
-      c.bubblesRead = pass.byKey(SQL.key.bubbles, lo, `bubbleId:${c.raw};`, (rows) => {
+      c.bubblesRead = await pass.byKey(SQL.key.bubbles, lo, `bubbleId:${c.raw};`, (rows) => {
         for (const r of rows) eachRow(() => this.inRange(c, lo, r), this.tally);
       });
       this.flush(c);
@@ -498,9 +329,9 @@ export class DiskKv {
   }
 
   /** No key index: one rowid scan of every bubble, each matched to its composer by its key; bubbles outside the window are not mapped. */
-  private bubblesByScan(): void {
-    const pass = new Pass(this.db, KV, this.tally, this.ctx);
-    const done = pass.byRowid(SQL.rowid.bubbles, (rows) => {
+  private async bubblesByScan(): Promise<void> {
+    const pass = new Pass(this.db, KV, this.tally, this.ctx, "cu.db-query");
+    const done = await pass.byRowid(SQL.rowid.bubbles, (rows) => {
       for (const r of rows) eachRow(() => this.scanned(r), this.tally);
     });
     for (const c of this.composers.values()) {

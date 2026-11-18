@@ -4,9 +4,10 @@ import type { Env } from "../../env/env";
 import { vscodeUser } from "../../env/paths";
 import { safeStat } from "../../io/fs";
 import { listDir, Tally } from "../common/coverage";
+import { readStore } from "../common/sqlite";
 import type { Candidate, ScanCtx, SourcePlugin } from "../types";
 import { AGENT_CLI_SOURCE, agentCliRoots, scanAgentCli } from "./agentcli";
-import { DiskKv, IDE_SOURCE, readStore, TOOL } from "./diskkv";
+import { DiskKv, IDE_SOURCE, TOOL } from "./diskkv";
 import { LegacyKeys } from "./itemtable";
 import { scanTracking, TRACKING_SOURCE, trackingRoots } from "./tracking";
 
@@ -63,8 +64,8 @@ async function scanIde(c: Candidate, ctx: ScanCtx): Promise<void> {
   if (safeStat(globalStore)?.isFile()) {
     present++;
     fallback = false;
-    const ok = readStore(globalStore, ctx, tally, (db, tables) => {
-      const kv = tables.has("cursorDiskKV") ? new DiskKv(db, ctx, tally, life).read(tables) : { readable: true, composers: 0 };
+    const ok = await readStore(globalStore, ctx, tally, "cu", async (db, tables) => {
+      const kv = tables.has("cursorDiskKV") ? await new DiskKv(db, ctx, tally, life).read(tables) : { readable: true, composers: 0 };
       if (!kv.readable || kv.composers > 0 || ctx.signal.aborted) return;
       fallback = true;
       legacy.read(db, tables);
@@ -82,7 +83,7 @@ async function scanIde(c: Candidate, ctx: ScanCtx): Promise<void> {
     for (const file of workspaceStores(c.root, tally)) {
       if (ctx.signal.aborted) break;
       present++;
-      if (readStore(file, ctx, tally, (db, tables) => legacy.read(db, tables))) read++;
+      if (await readStore(file, ctx, tally, "cu", (db, tables) => legacy.read(db, tables))) read++;
     }
   }
   if (present > 0 && read === 0 && tally.note !== "too-large") throw new StoresUnreadable("no Cursor store could be read");

@@ -114,15 +114,33 @@ function walMode(file: string): boolean {
   }
 }
 
+/** A file's size, following symlinks as a copy does; 0 when it is not there. */
+function sizeOf(file: string): number {
+  try {
+    return statSync(file).size;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * The bytes a private copy of a store takes: the store and its `-wal`, which holds a live writer's uncheckpointed work and
+ * can outgrow the store itself. (The `-shm`, an index of the `-wal`, is copied too but is a small fraction of it.)
+ */
+export function copyBytes(file: string): number {
+  return sizeOf(file) + sizeOf(file + "-wal");
+}
+
 /**
  * Opens a store read-only; null when it cannot be opened. How is decided before opening, from the file itself:
  * - a WAL store (by its header) without a `-wal` — its writer closed it — opens with `immutable=1`: there is no WAL
  *   content to miss, and an immutable open never writes `-wal`/`-shm` beside the store, which a plain read-only open
  *   does on some SQLite builds (others refuse to open such a store at all). If a `-wal` appears while it opens (a writer
  *   started), the store is reopened as below;
- * - any other store opens with `mode=ro`, and a busy one falls back to a private copy.
+ * - any other store opens with `mode=ro`, and a busy one falls back to a private copy — unless the copy would take more
+ *   than `o.maxCopyBytes` (default MAX_COPY_BYTES; `copyBytes`: the store and its `-wal`), when it is null.
  */
-export function openRo(file: string, temp: TempDirs, opener: (uri: string) => Database = defaultOpener): RoDb | null {
+export function openRo(file: string, temp: TempDirs, opener: (uri: string) => Database = defaultOpener, o?: { maxCopyBytes?: number }): RoDb | null {
   if (!existsSync(file)) return null;
   if (walMode(file) && !existsSync(file + "-wal")) {
     let db: Database;
@@ -140,7 +158,7 @@ export function openRo(file: string, temp: TempDirs, opener: (uri: string) => Da
     if (!isBusyError(e)) return null;
   }
   try {
-    if (statSync(file).size > MAX_COPY_BYTES) return null;
+    if (copyBytes(file) > (o?.maxCopyBytes ?? MAX_COPY_BYTES)) return null;
     const dir = temp.dir();
     const dest = path.join(dir, path.basename(file));
     for (const suffix of ["", "-wal", "-shm"]) {

@@ -4,7 +4,7 @@ import type { Env } from "../../env/env";
 import { joinFor } from "../../env/paths";
 import { safeStat } from "../../io/fs";
 import { readJsonl } from "../../io/jsonl";
-import { isBusyError, openRo, type RoDb } from "../../io/sqlite";
+import type { RoDb } from "../../io/sqlite";
 import { toEpochMs } from "../../io/time";
 import type { Ev, MarkerEv, PromptEv, SessionEv, ToolEv, TurnEv } from "../../model/events";
 import type { Origin, ToolCategory } from "../../model/ids";
@@ -13,6 +13,7 @@ import { classifyIntent } from "../../text/intent";
 import { promptFeatures } from "../../text/structure";
 import { listDir, Tally } from "../common/coverage";
 import { extOfPath, isObj, str, VERSION, type Obj } from "../common/guards";
+import { eachRow, Pass, q, readStore } from "../common/sqlite";
 import type { Candidate, PluginCoverage, ScanCtx } from "../types";
 import { cpModel, cpSessionId, TASK_GAP_MS, TOOL } from "./map";
 
@@ -349,8 +350,7 @@ async function scanEvents(file: string, sessionId: string, ctx: ScanCtx, tally: 
 /** Columns read; every other column is never selected (turn texts, summaries, repository, branch, agent names). */
 const STORE_SESSION_COLUMNS = ["id", "cwd", "host_type", "created_at", "updated_at"] as const;
 const STORE_TURN_COLUMNS = ["session_id", "timestamp"] as const;
-const PAGE = 5_000;
-const q = (name: string): string => `"${name}"`;
+const STORE_PAGE = 5_000;
 
 /** The allowlisted columns of `table` present in the store; a missing table or column is drift. */
 function storeColumns(db: RoDb, tables: Set<string>, table: string, wanted: readonly string[], tally: Tally): string[] | undefined {
@@ -363,27 +363,17 @@ function storeColumns(db: RoDb, tables: Set<string>, table: string, wanted: read
   return wanted.filter((c) => have.has(c));
 }
 
-/** Rows of `table` in rowid pages; a page that fails ends the table as an io-error (busy stores included). */
-// TODO(Plan 2 Task 0): this pager is synchronous and never yields to the event loop, so a signal or an abort waits
-// for the whole table. Move it onto the shared async pager (common/sqlite.ts) that awaits maybeYield() between pages.
-function* storePages(db: RoDb, table: string, cols: string[], tally: Tally, ctx: ScanCtx): Generator<Obj[]> {
+/**
+ * Maps every row of `table` in rowid pages, on the shared pager (`Pass`): a first page that fails other than busy is
+ * drift `table-unreadable:<table>`; a busy store, or a later page that fails, is an io-error; either ends the table, with
+ * warn `cp.db-busy` for a busy store and `cp.db-query` for any other failure. A row the mapping fails on is skipped as
+ * bad-record and the others go on.
+ */
+async function eachStoreRow(db: RoDb, table: string, cols: string[], map: (r: Obj) => void, ctx: ScanCtx, tally: Tally): Promise<void> {
   const sql = `SELECT rowid AS rid, ${cols.map(q).join(", ")} FROM ${q(table)} WHERE rowid > ? ORDER BY rowid LIMIT ?`;
-  let after = Number.MIN_SAFE_INTEGER;
-  for (;;) {
-    if (ctx.signal.aborted) return;
-    let rows: Obj[];
-    try {
-      rows = db.all<Obj>(sql, after, PAGE);
-    } catch (e) {
-      tally.skip("io-error");
-      ctx.log("warn", isBusyError(e) ? "cp.db-busy" : "cp.db-query");
-      return;
-    }
-    tally.records += rows.length;
-    if (rows.length > 0) yield rows;
-    if (rows.length < PAGE) return;
-    after = rows[rows.length - 1]!.rid as number;
-  }
+  await new Pass(db, table, tally, ctx, "cp.db-query", { page: STORE_PAGE, busyLogCode: "cp.db-busy" }).byRowid(sql, (rows) => {
+    for (const r of rows) eachRow(() => map(r), tally);
+  });
 }
 
 function storeSession(r: Obj, source: string, ctx: ScanCtx, tally: Tally): void {
@@ -413,45 +403,16 @@ function storeTurn(r: Obj, source: string, ctx: ScanCtx, tally: Tally): void {
 
 /**
  * The session store (`session-store.db`): a lifetime SessionEv per `sessions` row and a lifetime TurnEv per `turns` row,
- * from the allowlisted columns only. A store that cannot be opened or read is an io-error; it is always closed. True when
- * its tables could be listed.
+ * from the allowlisted columns only. A store that cannot be opened or read is an io-error (warn `cp.db-unopenable`,
+ * `cp.db-unreadable`); it is always closed. True when its tables could be listed.
  */
-export function readSessionStore(file: string, source: string, ctx: ScanCtx, tally: Tally): boolean {
-  const db = openRo(file, ctx.temp);
-  if (!db) {
-    tally.skip("io-error");
-    ctx.log("warn", "cp.db-unopenable");
-    return false;
-  }
-  let listed = false;
-  try {
-    const tables = new Set(db.tables());
-    listed = true;
-    tally.files++;
-    tally.bytes += safeStat(file)?.size ?? 0;
+export function readSessionStore(file: string, source: string, ctx: ScanCtx, tally: Tally): Promise<boolean> {
+  return readStore(file, ctx, tally, "cp", async (db, tables) => {
     const sCols = storeColumns(db, tables, "sessions", STORE_SESSION_COLUMNS, tally);
-    if (sCols?.includes("id")) {
-      for (const rows of storePages(db, "sessions", sCols, tally, ctx)) for (const r of rows) eachRow(() => storeSession(r, source, ctx, tally), tally);
-    }
+    if (sCols?.includes("id")) await eachStoreRow(db, "sessions", sCols, (r) => storeSession(r, source, ctx, tally), ctx, tally);
     const tCols = storeColumns(db, tables, "turns", STORE_TURN_COLUMNS, tally);
-    if (tCols?.includes("session_id")) {
-      for (const rows of storePages(db, "turns", tCols, tally, ctx)) for (const r of rows) eachRow(() => storeTurn(r, source, ctx, tally), tally);
-    }
-  } catch {
-    tally.skip("io-error");
-    ctx.log("warn", "cp.db-unreadable");
-  } finally {
-    db.close();
-  }
-  return listed;
-}
-
-function eachRow(map: () => void, tally: Tally): void {
-  try {
-    map();
-  } catch {
-    tally.skip("bad-record");
-  }
+    if (tCols?.includes("session_id")) await eachStoreRow(db, "turns", tCols, (r) => storeTurn(r, source, ctx, tally), ctx, tally);
+  });
 }
 
 /**
@@ -477,7 +438,7 @@ export async function scanCli(c: Candidate, ctx: ScanCtx): Promise<void> {
   if (isDir(path.join(c.root, OLD_STATE_DIR))) tally.unknownKey(`layout:${OLD_STATE_DIR}`); // the older CLI layout, not read
   const store = path.join(c.root, "session-store.db");
   const hasStore = safeStat(store)?.isFile() ?? false;
-  const storeRead = !ctx.signal.aborted && hasStore && readSessionStore(store, CLI_SOURCE, ctx, life);
+  const storeRead = !ctx.signal.aborted && hasStore && (await readSessionStore(store, CLI_SOURCE, ctx, life));
   const bad = (tally.skipped["bad-record"] ?? 0) + (life.skipped["bad-record"] ?? 0);
   if (bad > 0) ctx.log("warn", "cp.bad-record", bad);
   const hasOld = isDir(path.join(c.root, OLD_STATE_DIR));

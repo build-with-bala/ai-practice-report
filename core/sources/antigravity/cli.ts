@@ -5,7 +5,7 @@ import { joinFor } from "../../env/paths";
 import { safeStat } from "../../io/fs";
 import { readJsonl } from "../../io/jsonl";
 import { pbTryNested, type PbField } from "../../io/protobuf";
-import { isBusyError, openRo, type RoDb } from "../../io/sqlite";
+import type { RoDb } from "../../io/sqlite";
 import { toEpochMs } from "../../io/time";
 import type { Ev, MarkerEv, PromptEv, SessionEv, ToolEv, UsageEv } from "../../model/events";
 import { sid, type MarkerKind, type Origin, type ToolCategory } from "../../model/ids";
@@ -14,6 +14,7 @@ import { classifyIntent } from "../../text/intent";
 import { promptFeatures } from "../../text/structure";
 import { listDir, Tally } from "../common/coverage";
 import { idPart, isObj, num, safeModel, str, UUID, type Obj } from "../common/guards";
+import { eachRow, Pass, q, readStore } from "../common/sqlite";
 import { uriToPath } from "../copilot/map";
 import type { Candidate, ScanCtx } from "../types";
 
@@ -197,7 +198,6 @@ function callCommand(call: Fields | null): string | undefined {
 
 class CliStoresUnreadable extends Error {}
 
-const q = (name: string): string => `"${name}"`;
 const isDir = (p: string): boolean => {
   try {
     return statSync(p).isDirectory(); // follows a symlinked folder
@@ -215,33 +215,6 @@ export function cliRoots(env: Env, homes: string[]): Candidate[] {
     if (isDir(root)) out.push({ root, home, wsl: home !== env.home });
   }
   return out;
-}
-
-/**
- * Opens and reads one store on its own; it counts as read once its tables are listed, and is always closed. A store that
- * cannot be opened (warn `ag.db-unopenable`), or fails while read (warn `ag.db-unreadable`), is an io-error. True when listed.
- */
-function readStore(file: string, ctx: ScanCtx, tally: Tally, body: (db: RoDb, tables: Set<string>) => void): boolean {
-  const db = openRo(file, ctx.temp);
-  if (!db) {
-    tally.skip("io-error");
-    ctx.log("warn", "ag.db-unopenable");
-    return false;
-  }
-  let listed = false;
-  try {
-    const tables = new Set(db.tables());
-    listed = true;
-    tally.files++;
-    tally.bytes += safeStat(file)?.size ?? 0;
-    body(db, tables);
-  } catch {
-    tally.skip("io-error");
-    ctx.log("warn", "ag.db-unreadable");
-  } finally {
-    db.close();
-  }
-  return listed;
 }
 
 /**
@@ -264,39 +237,15 @@ function pageable(db: RoDb, tables: ReadonlySet<string>, table: string, wanted: 
 }
 
 /**
- * Rows of `table` in rowid order, `page` per query. A first page that fails other than busy means the query can never work
- * on this table: drift `table-unreadable:<name>`. A busy store, or a later page that fails, is an io-error. Either ends the table.
+ * Maps every row of `table` in rowid order, `page` per query, on the shared pager (`Pass`): a first page that fails other
+ * than busy is drift `table-unreadable:<name>`; a busy store, or a later page that fails, is an io-error; either ends the
+ * table. A row the mapping fails on is a bad-record and the others go on.
  */
-// TODO(Plan 2 Task 0): this pager is synchronous and never yields to the event loop, so a signal or an abort waits
-// for the whole table. Move it onto the shared async pager (common/sqlite.ts) that awaits maybeYield() between pages.
-function* pages(db: RoDb, table: string, select: string[], page: number, tally: Tally, ctx: ScanCtx): Generator<Obj[]> {
+async function eachPagedRow(db: RoDb, table: string, select: string[], page: number, map: (r: Obj) => void, ctx: ScanCtx, tally: Tally): Promise<void> {
   const sql = `SELECT rowid AS rid, ${select.join(", ")} FROM ${q(table)} WHERE rowid > ? ORDER BY rowid LIMIT ?`;
-  let after = Number.MIN_SAFE_INTEGER;
-  for (let first = true; ; first = false) {
-    if (ctx.signal.aborted) return;
-    let rows: Obj[];
-    try {
-      rows = db.all<Obj>(sql, after, page);
-    } catch (e) {
-      if (first && !isBusyError(e)) tally.unknownKey(`table-unreadable:${table}`);
-      else tally.skip("io-error");
-      ctx.log("warn", "ag.db-query");
-      return;
-    }
-    tally.records += rows.length;
-    if (rows.length > 0) yield rows;
-    if (rows.length < page) return;
-    after = rows[rows.length - 1]!.rid as number;
-  }
-}
-
-/** Maps one row or record; one the mapping fails on is a bad-record and the others go on. */
-export function each(map: () => void, tally: Tally): void {
-  try {
-    map();
-  } catch {
-    tally.skip("bad-record");
-  }
+  await new Pass(db, table, tally, ctx, "ag.db-query", { page }).byRowid(sql, (rows) => {
+    for (const r of rows) eachRow(() => map(r), tally);
+  });
 }
 
 // ---- conversation_summaries.db ----
@@ -400,7 +349,7 @@ function summary(r: Obj, convs: Map<string, Conv>, ctx: ScanCtx, tally: Tally): 
   }
 }
 
-function readSummaries(db: RoDb, tables: Set<string>, convs: Map<string, Conv>, ctx: ScanCtx, tally: Tally): void {
+async function readSummaries(db: RoDb, tables: Set<string>, convs: Map<string, Conv>, ctx: ScanCtx, tally: Tally): Promise<void> {
   const have = pageable(db, tables, "conversation_summaries", [...SUMMARY_COLUMNS, ...TESTED_COLUMNS], tally);
   if (!have?.has("conversation_id")) return;
   const select = SUMMARY_COLUMNS.filter((c) => have.has(c)).map(q);
@@ -409,9 +358,7 @@ function readSummaries(db: RoDb, tables: Set<string>, convs: Map<string, Conv>, 
     select.push(`(COALESCE(${q("winning_conversation_id")}, '') NOT IN ('', ${q("conversation_id")})) AS battle_loser`);
   }
   if (have.has("source")) select.push(SOURCE_SQL);
-  for (const rows of pages(db, "conversation_summaries", select, SUMMARY_PAGE, tally, ctx)) {
-    for (const r of rows) each(() => summary(r, convs, ctx, tally), tally);
-  }
+  await eachPagedRow(db, "conversation_summaries", select, SUMMARY_PAGE, (r) => summary(r, convs, ctx, tally), ctx, tally);
 }
 
 // ---- one conversation: conversations/<id>.db and its transcript ----
@@ -474,7 +421,7 @@ class Conversation {
     this.out(m);
   }
 
-  readSteps(db: RoDb, tables: Set<string>): void {
+  async readSteps(db: RoDb, tables: Set<string>): Promise<void> {
     const have = pageable(db, tables, "steps", STEP_COLUMNS, this.tally);
     if (!have?.has("step_type")) return;
     const [type, meta, payload] = [q("step_type"), q("metadata"), q("step_payload")];
@@ -488,9 +435,7 @@ class Conversation {
       select.push(`CASE WHEN ${type} = ${RUN_COMMAND} AND length(${payload}) <= ${BLOB_CAP} THEN ${payload} END AS payload`,
         `(${type} = ${RUN_COMMAND} AND length(${payload}) > ${BLOB_CAP}) AS pbig`);
     }
-    for (const rows of pages(db, "steps", select, STEP_PAGE, this.tally, this.ctx)) {
-      for (const r of rows) each(() => this.step(r), this.tally);
-    }
+    await eachPagedRow(db, "steps", select, STEP_PAGE, (r) => this.step(r), this.ctx, this.tally);
   }
 
   /**
@@ -655,7 +600,7 @@ export async function readLines(file: string, ctx: ScanCtx, tally: Tally, line: 
         continue;
       }
       tally.records++;
-      each(() => line(item.value), tally);
+      eachRow(() => line(item.value), tally);
     }
   } catch {
     tally.skip("io-error");
@@ -688,7 +633,7 @@ export async function scanCli(c: Candidate, ctx: ScanCtx): Promise<void> {
   let summariesRead = false;
   if (hasSummaries) {
     present++;
-    summariesRead = readStore(summaries, ctx, life, (db, tables) => readSummaries(db, tables, convs, ctx, life));
+    summariesRead = await readStore(summaries, ctx, life, "ag", (db, tables) => readSummaries(db, tables, convs, ctx, life));
     if (summariesRead) read++;
   }
   let conversations = 0;
@@ -704,7 +649,7 @@ export async function scanCli(c: Candidate, ctx: ScanCtx): Promise<void> {
     if (isFile(db)) {
       present++;
       conversations++;
-      if (readStore(db, ctx, tally, (d, tables) => conv.readSteps(d, tables))) conversationsRead++;
+      if (await readStore(db, ctx, tally, "ag", (d, tables) => conv.readSteps(d, tables))) conversationsRead++;
     }
     const transcript = path.join(brainDir, raw, ".system_generated", "logs", "transcript.jsonl");
     if (isFile(transcript)) {
@@ -712,7 +657,7 @@ export async function scanCli(c: Candidate, ctx: ScanCtx): Promise<void> {
       conversations++;
       if (await readLines(transcript, ctx, tally, (v) => conv.record(v))) conversationsRead++;
     }
-    each(() => conv.finish(), tally);
+    eachRow(() => conv.finish(), tally);
   }
   read += conversationsRead;
   if (present > 0 && read === 0) throw new CliStoresUnreadable("no Antigravity CLI store could be read");

@@ -18,8 +18,8 @@ export interface ScanOptions { env?: Env; plugins?: SourcePlugin[]; tools?: Tool
   concurrency?: number;
   onProgress?: (p: { plugin: string; done: number; total: number }) => void;
   /**
-   * Aborts the scan. Plugins stop at their next check (JSONL readers within about 25 ms; a synchronous SQLite pass at
-   * its next page); the scan cleans up its temp files and resolves with what was read: every coverage a plugin emits
+   * Aborts the scan. Plugins stop at their next check (JSONL readers within about 25 ms; an SQLite pass at its next
+   * page); the scan cleans up its temp files and resolves with what was read: every coverage a plugin emits
    * after the abort says `status: "error", note: "aborted"` (its counts and the events before it are kept, but the
    * source was not read to its end), and plugins that never started get the same coverage, empty.
    */

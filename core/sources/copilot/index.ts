@@ -205,7 +205,7 @@ async function scanVscode(c: Candidate, ctx: ScanCtx): Promise<void> {
   }
   const store = path.join(c.root, "globalStorage", "github.copilot-chat", "session-store.db");
   const hasStore = safeStat(store)?.isFile() ?? false;
-  const storeRead = !ctx.signal.aborted && hasStore && readSessionStore(store, VSCODE_SOURCE, ctx, life);
+  const storeRead = !ctx.signal.aborted && hasStore && (await readSessionStore(store, VSCODE_SOURCE, ctx, life));
   const bad = (tally.skipped["bad-record"] ?? 0) + (life.skipped["bad-record"] ?? 0);
   if (bad > 0) ctx.log("warn", "cp.bad-record", bad); // a mapping bug must not look like a healthy source
   const installed = copilotInstalled(installDirs(ctx.env, appOf(ctx.env, c.root)));

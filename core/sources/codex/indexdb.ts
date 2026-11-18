@@ -1,10 +1,11 @@
 import path from "node:path";
 import { safeStat } from "../../io/fs";
-import { isBusyError, openRo, type RoDb } from "../../io/sqlite";
+import type { RoDb } from "../../io/sqlite";
 import { toEpochMs } from "../../io/time";
 import type { SessionEv, ThreadRowEv, TurnEv } from "../../model/events";
 import { listDir, Tally } from "../common/coverage";
 import { isObj, num, safeModel, str, TOKEN, VERSION, type Obj } from "../common/guards";
+import { eachRow, Pass, q, readStore } from "../common/sqlite";
 import type { Candidate, ScanCtx } from "../types";
 import { cxEffort } from "./effort";
 import { cxSource, cxThreadId } from "./origin";
@@ -12,7 +13,7 @@ import { cxSource, cxThreadId } from "./origin";
 export const THREADS_SOURCE = "codex.threads";
 const TOOL = "codex";
 /** Rows per query: tables are read in rowid pages, so memory stays bounded however many threads a store holds. */
-const PAGE = 5_000;
+const THREAD_PAGE = 5_000;
 /** The CLI numbers its stores and bumps the number on a breaking migration; the highest one is current. */
 const STATE_DB = /^state_(\d{1,9})\.sqlite$/;
 const TURNS_DB = /^thread_history_(\d{1,9})\.sqlite$/;
@@ -44,8 +45,6 @@ const WITHOUT_ROWID = /\bWITHOUT\s+ROWID\b/i;
 
 /** Every thread store present failed to open or read: the source has nothing to say. */
 class ThreadStoresUnreadable extends Error {}
-
-const q = (name: string): string => `"${name}"`;
 
 /** The `<prefix>_<N>.sqlite` regular file with the highest N among `names`. */
 function newest(root: string, names: string[], re: RegExp): string | undefined {
@@ -88,31 +87,15 @@ function readableColumns(db: RoDb, tables: Set<string>, table: string, wanted: r
 }
 
 /**
- * Rows of `table` in rowid order, PAGE per query. A first page that fails other than busy means the query can never work
- * on this table: drift `table-unreadable:<name>`. A busy store, or a later page that fails, is an io-error. Either ends
- * the table.
+ * Maps every row of `table` in rowid order, THREAD_PAGE per query, on the shared pager (`Pass`): a first page that fails
+ * other than busy is drift `table-unreadable:<name>`; a busy store, or a later page that fails, is an io-error; either
+ * ends the table. A row the mapping fails on is skipped as bad-record and the others go on.
  */
-// TODO(Plan 2 Task 0): this pager is synchronous and never yields to the event loop, so a signal or an abort waits
-// for the whole table. Move it onto the shared async pager (common/sqlite.ts) that awaits maybeYield() between pages.
-function* pages(db: RoDb, table: string, select: string[], tally: Tally, ctx: ScanCtx): Generator<Obj[]> {
+async function eachPagedRow(db: RoDb, table: string, select: string[], map: (r: Obj) => void, ctx: ScanCtx, tally: Tally): Promise<void> {
   const sql = `SELECT rowid AS rid, ${select.join(", ")} FROM ${q(table)} WHERE rowid > ? ORDER BY rowid LIMIT ?`;
-  let after = Number.MIN_SAFE_INTEGER;
-  for (let first = true; ; first = false) {
-    if (ctx.signal.aborted) return;
-    let rows: Obj[];
-    try {
-      rows = db.all<Obj>(sql, after, PAGE);
-    } catch (e) {
-      if (first && !isBusyError(e)) tally.unknownKey(`table-unreadable:${table}`);
-      else tally.skip("io-error");
-      ctx.log("warn", "cx.db-query");
-      return;
-    }
-    tally.records += rows.length;
-    if (rows.length > 0) yield rows;
-    if (rows.length < PAGE) return;
-    after = rows[rows.length - 1]!.rid as number;
-  }
+  await new Pass(db, table, tally, ctx, "cx.db-query", { page: THREAD_PAGE }).byRowid(sql, (rows) => {
+    for (const r of rows) eachRow(() => map(r), tally);
+  });
 }
 
 /** `threads.source` as the rollouts carry it: a plain string, or the JSON of an object (`{"subagent": …}`); unparsable JSON is null. */
@@ -192,24 +175,13 @@ function thread(r: Obj, ctx: ScanCtx, tally: Tally): void {
   tally.span(end);
 }
 
-/** Maps each row; a row the mapping fails on is skipped as bad-record (logged once per scan) and the others go on. */
-function eachRow(rows: Obj[], map: (r: Obj) => void, tally: Tally): void {
-  for (const r of rows) {
-    try {
-      map(r);
-    } catch {
-      tally.skip("bad-record");
-    }
-  }
-}
-
-function readThreads(db: RoDb, tables: Set<string>, ctx: ScanCtx, tally: Tally): void {
+async function readThreads(db: RoDb, tables: Set<string>, ctx: ScanCtx, tally: Tally): Promise<void> {
   const have = readableColumns(db, tables, "threads", [...THREAD_COLUMNS, ...GIT_COLUMNS], tally);
   if (!have?.has("id")) return;
   const select = THREAD_COLUMNS.filter((c) => have.has(c)).map(q);
   const git = GIT_COLUMNS.filter((c) => have.has(c));
   if (git.length > 0) select.push(`(${git.map((c) => `COALESCE(${q(c)}, '') <> ''`).join(" OR ")}) AS in_repo`);
-  for (const rows of pages(db, "threads", select, tally, ctx)) eachRow(rows, (r) => thread(r, ctx, tally), tally);
+  await eachPagedRow(db, "threads", select, (r) => thread(r, ctx, tally), ctx, tally);
 }
 
 /** One `thread_spawn_edges` row: an EdgeEv; an empty id is a bad row. */
@@ -220,10 +192,10 @@ function edge(r: Obj, ctx: ScanCtx, tally: Tally): void {
   ctx.emit({ k: "edge", tool: TOOL, source: THREADS_SOURCE, parentId: cxThreadId(parent, ctx), childId: cxThreadId(child, ctx) });
 }
 
-function readEdges(db: RoDb, tables: Set<string>, ctx: ScanCtx, tally: Tally): void {
+async function readEdges(db: RoDb, tables: Set<string>, ctx: ScanCtx, tally: Tally): Promise<void> {
   const have = readableColumns(db, tables, "thread_spawn_edges", EDGE_COLUMNS, tally);
   if (!have || !EDGE_COLUMNS.every((c) => have.has(c))) return;
-  for (const rows of pages(db, "thread_spawn_edges", EDGE_COLUMNS.map(q), tally, ctx)) eachRow(rows, (r) => edge(r, ctx, tally), tally);
+  await eachPagedRow(db, "thread_spawn_edges", EDGE_COLUMNS.map(q), (r) => edge(r, ctx, tally), ctx, tally);
 }
 
 /** One `thread_turns` row: a lifetime TurnEv for a finished turn, timed at its end (else its start). */
@@ -248,53 +220,25 @@ function turn(r: Obj, ctx: ScanCtx, tally: Tally): void {
   tally.span(ts);
 }
 
-function readTurns(db: RoDb, tables: Set<string>, ctx: ScanCtx, tally: Tally): void {
+async function readTurns(db: RoDb, tables: Set<string>, ctx: ScanCtx, tally: Tally): Promise<void> {
   const have = readableColumns(db, tables, "thread_turns", TURN_COLUMNS, tally);
   if (!have?.has("thread_id") || !have.has("status")) return;
   const select = TURN_COLUMNS.filter((c) => have.has(c)).map(q);
-  for (const rows of pages(db, "thread_turns", select, tally, ctx)) eachRow(rows, (r) => turn(r, ctx, tally), tally);
-}
-
-/**
- * Opens and reads one store on its own; it counts as read once its tables are listed, and is always closed. A store
- * that cannot be opened (warn `cx.db-unopenable`), or that fails while it is read (warn `cx.db-unreadable`), is an
- * io-error. True when its tables were listed.
- */
-function readStore(file: string, ctx: ScanCtx, tally: Tally, body: (db: RoDb, tables: Set<string>) => void): boolean {
-  const db = openRo(file, ctx.temp);
-  if (!db) {
-    tally.skip("io-error");
-    ctx.log("warn", "cx.db-unopenable");
-    return false;
-  }
-  let listed = false;
-  try {
-    const tables = new Set(db.tables());
-    listed = true;
-    tally.files++;
-    tally.bytes += safeStat(file)?.size ?? 0;
-    body(db, tables);
-  } catch {
-    tally.skip("io-error");
-    ctx.log("warn", "cx.db-unreadable");
-  } finally {
-    db.close();
-  }
-  return listed;
+  await eachPagedRow(db, "thread_turns", select, (r) => turn(r, ctx, tally), ctx, tally);
 }
 
 /**
  * Scan the newest thread index (`state_<N>.sqlite`: threads, spawn edges) and turn history (`thread_history_<N>.sqlite`:
- * turns) under a Codex home; one CoverageEv, last. Each store is read on its own, so one that fails does not stop the
- * other; only when every store present fails is the source an error.
+ * turns) under a Codex home; one CoverageEv, last. Each store is read on its own (`readStore`, warn `cx.db-*`), so one
+ * that fails does not stop the other; only when every store present fails is the source an error.
  */
 export async function scanThreads(c: Candidate, ctx: ScanCtx): Promise<void> {
   const tally = new Tally(TOOL, THREADS_SOURCE, "lifetime");
   const names = listDir(c.root, tally);
-  const stores: [string | undefined, (db: RoDb, tables: Set<string>) => void][] = [
-    [newest(c.root, names, STATE_DB), (db, tables) => {
-      readThreads(db, tables, ctx, tally);
-      readEdges(db, tables, ctx, tally);
+  const stores: [string | undefined, (db: RoDb, tables: Set<string>) => Promise<void>][] = [
+    [newest(c.root, names, STATE_DB), async (db, tables) => {
+      await readThreads(db, tables, ctx, tally);
+      await readEdges(db, tables, ctx, tally);
     }],
     [newest(c.root, names, TURNS_DB), (db, tables) => readTurns(db, tables, ctx, tally)],
   ];
@@ -303,7 +247,7 @@ export async function scanThreads(c: Candidate, ctx: ScanCtx): Promise<void> {
   for (const [file, body] of stores) {
     if (file === undefined || ctx.signal.aborted) continue;
     present++;
-    if (readStore(file, ctx, tally, body)) read++;
+    if (await readStore(file, ctx, tally, "cx", body)) read++;
   }
   if (present > 0 && read === 0) throw new ThreadStoresUnreadable("no Codex thread store could be read");
   const bad = tally.skipped["bad-record"] ?? 0;

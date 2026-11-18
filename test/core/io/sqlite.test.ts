@@ -1,6 +1,6 @@
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { __observeQueries, MAX_COPY_BYTES, openRo, openUriReadOnly, sqliteUri } from "../../../core/io/sqlite";
@@ -185,6 +185,31 @@ describe("openRo", () => {
     t.disposeAll();
     expect(t.active).toBe(0);
     w.close();
+  });
+  test("the copy limit counts the -wal: a busy store whose store and -wal exceed it is never copied", () => {
+    const f = path.join(root, "limit", "s.db");
+    mkdirSync(path.dirname(f), { recursive: true });
+    const w = kept(new Database(f));
+    w.exec("PRAGMA page_size=4096");
+    w.exec("PRAGMA user_version=7"); // the header page only
+    w.close();
+    writeFileSync(f + "-wal", new Uint8Array(8_192));
+    expect([statSync(f).size, statSync(f + "-wal").size]).toEqual([4_096, 8_192]);
+    const busyFirst = () => {
+      let calls = 0;
+      return (uri: string) => {
+        if (calls++ === 0) throw new Error("SQLITE_BUSY: database is locked");
+        return openUriReadOnly(uri);
+      };
+    };
+    const t = new TempRegistry(root);
+    // the store alone is under the limit, the store and its -wal are over it
+    expect(openRo(f, t, busyFirst(), { maxCopyBytes: 8_192 })).toBeNull();
+    expect(t.active).toBe(0);
+    const db = kept(openRo(f, t, busyFirst(), { maxCopyBytes: 16_384 }))!;
+    expect(db.copied).toBe(true);
+    db.close();
+    t.disposeAll();
   });
   test("busy at schema_version also falls back; other errors -> null", () => {
     const f = path.join(root, "busy2", "b.db");

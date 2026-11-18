@@ -4,10 +4,10 @@ import type { Env } from "../../env/env";
 import { vscodeUser } from "../../env/paths";
 import { safeStat } from "../../io/fs";
 import { b64ToBytes, pbTryNested, type PbField } from "../../io/protobuf";
-import { MAX_COPY_BYTES, openRo } from "../../io/sqlite";
 import type { SessionEv } from "../../model/events";
 import { Tally } from "../common/coverage";
 import { str } from "../common/guards";
+import { readStore } from "../common/sqlite";
 import { uriToPath } from "../copilot/map";
 import type { Candidate, ScanCtx } from "../types";
 import { agSessionId, pbNum, pbStr, pbTime, TOOL } from "./cli";
@@ -134,34 +134,14 @@ export async function scanIde(c: Candidate, ctx: ScanCtx): Promise<void> {
   const tally = new Tally(TOOL, IDE_SOURCE, "lifetime");
   const file = path.join(c.root, "globalStorage", "state.vscdb");
   if (safeStat(file)?.isFile()) {
-    const db = openRo(file, ctx.temp);
-    if (!db && (safeStat(file)?.size ?? 0) > MAX_COPY_BYTES) {
-      tally.note = "too-large";
-      tally.skip("too-large");
-    } else if (!db) {
-      throw new IdeStoreUnreadable("the Antigravity store could not be opened");
-    } else {
-      let listed = false;
-      try {
-        const tables = new Set(db.tables());
-        listed = true;
-        tally.files++;
-        tally.bytes += safeStat(file)?.size ?? 0;
-        if (!tables.has("ItemTable")) tally.unknownKey("missing-table:ItemTable");
-        else {
-          const have = new Set(db.columns("ItemTable"));
-          for (const col of ["key", "value"]) if (!have.has(col)) tally.unknownKey(`missing-column:${col}`);
-          const row = have.has("key") && have.has("value") ? db.get<{ value: unknown }>(VALUE_SQL, TRAJ_KEY) : undefined;
-          if (row !== undefined) readTopic(row.value, ctx, tally);
-        }
-      } catch {
-        tally.skip("io-error");
-        ctx.log("warn", "ag.db-unreadable");
-      } finally {
-        db.close();
-      }
-      if (!listed) throw new IdeStoreUnreadable("the Antigravity store could not be read");
-    }
+    const read = await readStore(file, ctx, tally, "ag", (db, tables) => {
+      if (!tables.has("ItemTable")) return tally.unknownKey("missing-table:ItemTable");
+      const have = new Set(db.columns("ItemTable"));
+      for (const col of ["key", "value"]) if (!have.has(col)) tally.unknownKey(`missing-column:${col}`);
+      const row = have.has("key") && have.has("value") ? db.get<{ value: unknown }>(VALUE_SQL, TRAJ_KEY) : undefined;
+      if (row !== undefined) readTopic(row.value, ctx, tally);
+    });
+    if (!read && tally.note !== "too-large") throw new IdeStoreUnreadable("the Antigravity store could not be read");
   }
   const bad = tally.skipped["bad-record"] ?? 0;
   if (bad > 0) ctx.log("warn", "ag.bad-record", bad);

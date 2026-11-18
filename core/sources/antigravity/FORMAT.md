@@ -197,12 +197,14 @@ present fails is the source an error; a window whose stores are all unreadable i
 one without any store `absent`.
 
 - `lifetime` — the conversation index (`conversation_summaries.db`): `files`/`bytes` = the store, `records` = summary
-  rows, `from`/`to` = the span of its sessions. Skipped: `empty-session`, `no-ts`, `bad-row`, `io-error`, `bad-record`.
+  rows, `from`/`to` = the span of its sessions. Skipped: `empty-session`, `no-ts`, `bad-row`, `io-error`, `too-large`,
+  `bad-record`.
 - `detail` — the step stores and transcripts: `files`/`bytes` = stores whose tables were listed and JSONL files read to
   their end; `records` = step rows and transcript records; `from`/`to` = first/last time of its events and detail
   sessions. Skipped: `no-ts`, `empty`, `battle-copy`, `parse`, `oversize` (a JSONL line above 32 MiB, or a step blob
   above 1 MiB), `io-error` (a store that cannot be opened — warn `ag.db-unopenable` — or read, a busy or failing later
-  page, a JSONL read error), `bad-record` (a row or record the mapping failed on; warn `ag.bad-record` with the count,
+  page, a JSONL read error), `too-large` (a locked store whose private copy — the store and its `-wal` — would exceed
+  `MAX_COPY_BYTES`: never copied), `bad-record` (a row or record the mapping failed on; warn `ag.bad-record` with the count,
   both windows').
 
 ## state.vscdb (`antigravity.ide`)

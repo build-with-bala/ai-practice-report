@@ -194,8 +194,11 @@ Built-in tool ids (VS Code program and extension program): see `VSCODE_TOOLS` in
     Skipped: `no-ts`, `bad-ts`, `duplicate`, `empty-session`,
     `bad-record`, `parse`, `oversize`, `too-large`, `io-error`.
   - `lifetime` (the session store): `files`/`bytes` = the store; `records` = its rows; `from`/`to` = its sessions and
-    turns. Drift: `store.missing-table:<t>`, `store.missing-column:<c>`. Skipped: `bad-row`, `no-ts`, `io-error`,
-    `bad-record`. `absent` without a store; `error` (`note: "unreadable"`) when the store is there but cannot be read.
+    turns. Drift: `store.missing-table:<t>`, `store.missing-column:<c>`, `table-unreadable:<t>` (a table whose first
+    page fails other than busy). Skipped: `bad-row`, `no-ts`, `io-error` (a busy page, a later page that fails),
+    `too-large` (a locked store whose private copy — the store and its `-wal` — would exceed `MAX_COPY_BYTES`: never
+    copied), `bad-record`. `absent` without a store; `error` (`note: "unreadable"`) when the store is there but cannot
+    be read.
 
 **Install detection** (`install.ts`, names only): a bundled `copilot*` extension — macOS `/Applications/<app>.app/Contents/
 Resources/app/extensions` and `~/Applications/…`, Windows `%LOCALAPPDATA%\Programs\Microsoft VS Code[ Insiders]\resources\

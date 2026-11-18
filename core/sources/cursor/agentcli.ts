@@ -5,8 +5,9 @@ import { safeList, safeStat, walk } from "../../io/fs";
 import { readJsonl } from "../../io/jsonl";
 import type { RoDb } from "../../io/sqlite";
 import { Tally } from "../common/coverage";
+import { q, readStore } from "../common/sqlite";
 import type { Candidate, ScanCtx } from "../types";
-import { q, readStore, TOOL } from "./diskkv";
+import { TOOL } from "./diskkv";
 
 export const AGENT_CLI_SOURCE = "cursor.agent-cli";
 /** Transcripts: `<id>/<id>.jsonl` by session (and `<id>/subagents/*.jsonl`), or one older plain-text file per session. */
@@ -90,7 +91,7 @@ export async function scanAgentCli(c: Candidate, ctx: ScanCtx): Promise<void> {
   }
   for (const file of chatStores(ctx.env, c.home, c.root)) {
     if (ctx.signal.aborted) break;
-    readStore(file, ctx, tally, (db, tables) => countBlobs(db, tables, tally));
+    await readStore(file, ctx, tally, "cu", (db, tables) => countBlobs(db, tables, tally));
   }
   const cov = tally.coverage();
   cov.status = "present-undecodable";
