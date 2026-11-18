@@ -71,28 +71,49 @@ onmessage = () => { clearInterval(timer); tick(); postMessage({ peak, samples })
 
 interface Samples { peak: number; samples: number }
 
-/** Starts the sampler; the function returned stops it and gives the peak it saw. */
-function startSampler(): () => Promise<Samples> {
+interface Sampler {
+  /** Stops the sampler and gives the peak it saw. */
+  stop(): Promise<Samples>;
+  /** Ends the worker without a reading; a no-op once stopped. */
+  kill(): void;
+}
+
+/** Starts the sampler. Its worker keeps the process alive until `stop` or `kill`. */
+function startSampler(): Sampler {
   const worker = new Worker(URL.createObjectURL(new Blob([SAMPLER], { type: "application/javascript" })));
-  return () => new Promise<Samples>((resolve) => {
+  let ended = false;
+  const kill = (): void => {
+    if (ended) return;
+    ended = true;
+    worker.terminate();
+  };
+  const stop = (): Promise<Samples> => new Promise<Samples>((resolve) => {
     worker.onmessage = (e: MessageEvent<Samples>) => {
-      worker.terminate();
+      kill();
       resolve(e.data);
     };
     worker.postMessage("stop");
   });
+  return { stop, kill };
 }
 
 interface Run { r: ScanResult; seconds: number; peakRss: number; samples: number; osPeakRss?: number; logs: Map<string, number>; before: number; after: number }
 
 async function run(env: Env, concurrency: number | undefined): Promise<Run> {
   const before = tempLeftovers(env);
-  const stopSampler = startSampler();
+  const sampler = startSampler();
   const logs = new Map<string, number>();
   const started = performance.now();
-  const r = await scan({ env, wsl: false, concurrency, onLog: (level, c, n) => tally(logs, `${level} ${code(c)}`, n ?? 1) });
-  const seconds = (performance.now() - started) / 1000;
-  const sampled = await stopSampler();
+  let r: ScanResult;
+  let sampled: Samples;
+  let seconds: number;
+  try {
+    r = await scan({ env, wsl: false, concurrency, onLog: (level, c, n) => tally(logs, `${level} ${code(c)}`, n ?? 1) });
+    seconds = (performance.now() - started) / 1000;
+    sampled = await sampler.stop();
+  } finally {
+    sampler.kill(); // a scan that throws must not leave the worker holding the process open
+  }
   const peakRss = Math.max(sampled.peak, process.memoryUsage().rss);
   // getrusage's high-water mark — bytes on macOS, KiB on Linux (Bun passes it through) — cross-checks the samples
   const maxRss = process.resourceUsage().maxRSS;
@@ -162,11 +183,20 @@ export async function main(argv: string[]): Promise<number> {
   return failures.length === 0 ? 0 : 1;
 }
 
+/** An error's class name only: its message or stack could carry a path or text from a trace. */
+const errorClass = (e: unknown): string => (e instanceof Error ? e.constructor.name : typeof e);
+
 if (import.meta.main) {
+  for (const event of ["unhandledRejection", "uncaughtException"] as const) {
+    process.on(event, (e: unknown) => {
+      console.log(`error: ${errorClass(e)}`);
+      process.exit(1);
+    });
+  }
   try {
     process.exitCode = await main(process.argv.slice(2));
   } catch (e) {
-    console.log(`error: ${(e as Error)?.constructor?.name ?? "Error"}`);
+    console.log(`error: ${errorClass(e)}`);
     process.exitCode = 1;
   }
 }
