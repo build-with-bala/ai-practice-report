@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { detectEnv } from "../../../core/env/env";
@@ -166,6 +166,26 @@ describe("readStore", () => {
       throw new Error("a read failed");
     })).toBe(true);
     expect([tables, t2.files, t2.skipped, logs]).toEqual([["t"], 1, { "io-error": 1 }, ["zz.db-unreadable"]]);
+  });
+
+  test("a linked store counts the bytes of its target, not of the link", async () => {
+    const root = scratch();
+    const target = path.join(root, "real", "store.db");
+    mkdirSync(path.dirname(target));
+    const w = new Database(target);
+    w.exec("CREATE TABLE t (a INTEGER)");
+    w.close();
+    const link = path.join(root, "store.db");
+    try {
+      symlinkSync(target, link);
+    } catch (e) {
+      if (process.platform !== "win32") throw e;
+      return; // where no link can be made there is no linked store
+    }
+    expect(lstatSync(link).size).not.toBe(statSync(target).size); // so the count below tells them apart
+    const tally = tallyOf();
+    expect(await readStore(link, ctxFor({ tmp: root }), tally, "zz", () => {})).toBe(true);
+    expect([tally.files, tally.bytes]).toEqual([1, statSync(target).size]);
   });
 });
 

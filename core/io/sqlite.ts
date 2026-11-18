@@ -1,5 +1,5 @@
 import { constants, Database } from "bun:sqlite";
-import { closeSync, copyFileSync, existsSync, openSync, readSync, statSync } from "node:fs";
+import { closeSync, copyFileSync, existsSync, lstatSync, openSync, readSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import type { TempDirs } from "../sources/types";
 
@@ -124,15 +124,38 @@ function sizeOf(file: string): number {
 }
 
 /**
+ * The path a store is read by: the one its `-wal` and `-shm` sit beside. For a link that is its target, resolved once:
+ * SQLite on unix resolves a linked store itself and keeps them there, even for a writer that opened the link. Only when
+ * the `-wal` sits beside the link and not beside the target (a writer whose SQLite names it after the path as given) is
+ * the link read as it is. Any other path is read as given: through linked folders, `<path>-wal` already names the store's
+ * own. Null when nothing is there.
+ */
+export function storePath(file: string): string | null {
+  try {
+    if (!lstatSync(file).isSymbolicLink()) return file;
+    const target = realpathSync(file);
+    return existsSync(file + "-wal") && !existsSync(target + "-wal") ? file : target;
+  } catch {
+    return null;
+  }
+}
+
+/** The bytes a private copy of a store's own file takes (see `copyBytes`). */
+const storeBytes = (store: string): number => sizeOf(store) + sizeOf(store + "-wal");
+
+/**
  * The bytes a private copy of a store takes: the store and its `-wal`, which holds a live writer's uncheckpointed work and
- * can outgrow the store itself. (The `-shm`, an index of the `-wal`, is copied too but is a small fraction of it.)
+ * can outgrow the store itself. (The `-shm`, an index of the `-wal`, is copied too but is a small fraction of it.) A
+ * linked store's `-wal` is the one beside the path it is read by (`storePath`).
  */
 export function copyBytes(file: string): number {
-  return sizeOf(file) + sizeOf(file + "-wal");
+  return storeBytes(storePath(file) ?? file);
 }
 
 /**
- * Opens a store read-only; null when it cannot be opened. How is decided before opening, from the file itself:
+ * Opens a store read-only; null when it cannot be opened. A linked store is read by the path its `-wal` and `-shm` sit
+ * beside, its target as a rule (`storePath`): every check, the open and a copy below use that one path. How is decided
+ * before opening, from the file itself:
  * - a WAL store (by its header) without a `-wal` — its writer closed it — opens with `immutable=1`: there is no WAL
  *   content to miss, and an immutable open never writes `-wal`/`-shm` beside the store, which a plain read-only open
  *   does on some SQLite builds (others refuse to open such a store at all). If a `-wal` appears while it opens (a writer
@@ -141,28 +164,29 @@ export function copyBytes(file: string): number {
  *   than `o.maxCopyBytes` (default MAX_COPY_BYTES; `copyBytes`: the store and its `-wal`), when it is null.
  */
 export function openRo(file: string, temp: TempDirs, opener: (uri: string) => Database = defaultOpener, o?: { maxCopyBytes?: number }): RoDb | null {
-  if (!existsSync(file)) return null;
-  if (walMode(file) && !existsSync(file + "-wal")) {
+  const store = storePath(file);
+  if (store === null) return null;
+  if (walMode(store) && !existsSync(store + "-wal")) {
     let db: Database;
     try {
-      db = tryOpen(file, opener, "mode=ro&immutable=1");
+      db = tryOpen(store, opener, "mode=ro&immutable=1");
     } catch {
       return null;
     }
-    if (!existsSync(file + "-wal")) return new Handle(db, false, true);
+    if (!existsSync(store + "-wal")) return new Handle(db, false, true);
     closeQuietly(db);
   }
   try {
-    return new Handle(tryOpen(file, opener), false);
+    return new Handle(tryOpen(store, opener), false);
   } catch (e) {
     if (!isBusyError(e)) return null;
   }
   try {
-    if (copyBytes(file) > (o?.maxCopyBytes ?? MAX_COPY_BYTES)) return null;
+    if (storeBytes(store) > (o?.maxCopyBytes ?? MAX_COPY_BYTES)) return null;
     const dir = temp.dir();
-    const dest = path.join(dir, path.basename(file));
+    const dest = path.join(dir, path.basename(store));
     for (const suffix of ["", "-wal", "-shm"]) {
-      if (existsSync(file + suffix)) copyFileSync(file + suffix, dest + suffix);
+      if (existsSync(store + suffix)) copyFileSync(store + suffix, dest + suffix);
     }
     return new Handle(tryOpen(dest, opener), true);
   } catch {

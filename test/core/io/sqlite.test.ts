@@ -1,9 +1,9 @@
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { __observeQueries, MAX_COPY_BYTES, openRo, openUriReadOnly, sqliteUri } from "../../../core/io/sqlite";
+import { __observeQueries, copyBytes, MAX_COPY_BYTES, openRo, openUriReadOnly, sqliteUri, storePath } from "../../../core/io/sqlite";
 import { TempRegistry } from "../../../core/io/temp";
 
 const root = mkdtempSync(path.join(os.tmpdir(), "sqlite-test-"));
@@ -56,6 +56,40 @@ const recording = (into: string[]) => (uri: string) => {
   into.push(uri);
   return openUriReadOnly(uri);
 };
+
+/** A link at `at` to the file `target`; false on Windows when the account may not create one (no symlink privilege). */
+function linkFile(target: string, at: string): boolean {
+  mkdirSync(path.dirname(at), { recursive: true });
+  try {
+    symlinkSync(target, at);
+    return true;
+  } catch (e) {
+    if (process.platform !== "win32") throw e;
+    return false;
+  }
+}
+
+/**
+ * A store under `segments` and a link to it in another folder (false on Windows when no link can be made), with a live
+ * WAL writer that opened `writerOpens` — the store itself, or the link, as a tool does that opens its own path: table `t`
+ * is checkpointed into the store file, table `t2` lives only in the `-wal` (automatic checkpoints off).
+ */
+function linkedLiveWal(writerOpens: "target" | "link", ...segments: string[]): { target: string; link: string } | false {
+  const target = path.join(root, ...segments, "real", "store.db");
+  const link = path.join(root, ...segments, "linked", "store.db");
+  mkdirSync(path.dirname(target), { recursive: true });
+  writeFileSync(target, "");
+  if (!linkFile(target, link)) return false;
+  const w = kept(new Database(writerOpens === "target" ? target : link));
+  w.exec("PRAGMA journal_mode=WAL");
+  w.exec("CREATE TABLE t (id INTEGER, name TEXT)");
+  w.exec("INSERT INTO t VALUES (1, 'a')");
+  w.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+  w.exec("PRAGMA wal_autocheckpoint=0");
+  w.exec("CREATE TABLE t2 (x INTEGER)");
+  w.exec("INSERT INTO t2 VALUES (1)");
+  return { target, link };
+}
 
 describe("sqliteUri", () => {
   test("windows drive path", () => {
@@ -127,6 +161,54 @@ describe("openRo", () => {
     db = kept(openRo(rollback, new TempRegistry(root), recording(uris)))!;
     expect([uris, db.immutable]).toEqual([[`${sqliteUri(rollback)}?mode=ro`], false]);
     db.close();
+  });
+  test("storePath: a link opens at its target, unless only the link has a -wal beside it; any other path as given; null when nothing is there", () => {
+    const target = closedWal("store-path", "real", "s.db"); // no -wal anywhere
+    const link = path.join(root, "store-path", "linked", "s.db");
+    expect(storePath(target)).toBe(target);
+    expect(storePath(path.join(root, "store-path", "nope.db"))).toBeNull();
+    if (!linkFile(target, link)) return;
+    expect(storePath(link)).toBe(realpathSync(target));
+    writeFileSync(link + "-wal", ""); // a writer whose SQLite build names the -wal after the link (it does not resolve links)
+    expect(storePath(link)).toBe(link);
+    writeFileSync(target + "-wal", ""); // a -wal on both sides: the target's, where a build that resolves links keeps it
+    expect(storePath(link)).toBe(realpathSync(target));
+    const dangling = path.join(root, "store-path", "linked", "gone.db");
+    if (linkFile(path.join(root, "store-path", "real", "gone.db"), dangling)) expect(storePath(dangling)).toBeNull();
+  });
+  test("a linked store opens at its target, where SQLite keeps its -wal: a live writer's rows are seen, never immutable", () => {
+    const s = linkedLiveWal("target", "linked-live");
+    if (!s) return; // where no link can be made there is no linked store
+    expect([existsSync(s.target + "-wal"), existsSync(s.link + "-wal")]).toEqual([true, false]); // the -wal is beside the target only
+    const db = kept(openRo(s.link, new TempRegistry(root), recording(uris)))!;
+    expect([db.immutable, db.copied]).toEqual([false, false]);
+    expect(db.tables()).toEqual(["t", "t2"]); // t2 lives only in the -wal
+    expect(uris).toEqual([`${sqliteUri(realpathSync(s.target))}?mode=ro`]);
+    db.close();
+  });
+  test("a writer that opened the store through the link: its -wal is found on whichever side this SQLite build keeps it", () => {
+    const s = linkedLiveWal("link", "linked-writer");
+    if (!s) return;
+    expect(existsSync(s.target + "-wal")).not.toBe(existsSync(s.link + "-wal")); // one -wal, beside the target or the link
+    const db = kept(openRo(s.link, new TempRegistry(root)))!;
+    expect([db.immutable, db.copied]).toEqual([false, false]);
+    expect(db.tables()).toEqual(["t", "t2"]);
+    db.close();
+  });
+  test("a busy linked store is copied from its target: the store with its -wal and -shm; the copy limit counts that -wal", () => {
+    const s = linkedLiveWal("target", "linked-busy");
+    if (!s) return;
+    expect(copyBytes(s.link)).toBe(statSync(s.target).size + statSync(s.target + "-wal").size);
+    const t = new TempRegistry(root);
+    let calls = 0;
+    const db = kept(openRo(s.link, t, (uri) => {
+      if (calls++ === 0) throw new Error("SQLITE_BUSY: database is locked");
+      return openUriReadOnly(uri);
+    }))!;
+    expect([db.copied, db.immutable]).toEqual([true, false]);
+    expect(db.tables()).toEqual(["t", "t2"]); // the copy took the -wal from beside the target
+    db.close();
+    t.disposeAll();
   });
   test("cannot-open is like any other failure that is not busy: null, no retry", () => {
     const f = path.join(root, "cant", "c.db");

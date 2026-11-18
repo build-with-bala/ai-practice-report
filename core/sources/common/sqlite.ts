@@ -1,4 +1,4 @@
-import { safeStat } from "../../io/fs";
+import { statPath } from "../../io/fs";
 import { copyBytes, isBusyError, MAX_COPY_BYTES, openRo, type RoDb } from "../../io/sqlite";
 import { maybeYield } from "../../io/yield";
 import type { ScanCtx } from "../types";
@@ -17,7 +17,8 @@ export const q = (ident: string): string => `"${ident.replace(/"/g, '""')}"`;
  * has finished (an async body is awaited). A store that cannot be opened is an io-error (warn
  * `<logPrefix>.db-unopenable`) — or, when a private copy of it would take more than MAX_COPY_BYTES (`copyBytes`: the
  * store and its `-wal`), a locked store that is never copied: skipped `too-large`, coverage `note: "too-large"`. A store
- * that fails while it is read is an io-error (warn `<logPrefix>.db-unreadable`). True when its tables were listed.
+ * that fails while it is read is an io-error (warn `<logPrefix>.db-unreadable`). True when its tables were listed. A
+ * linked store counts the bytes of its target, the store's own file (links followed), not the link's.
  */
 export async function readStore(file: string, ctx: ScanCtx, tally: Tally, logPrefix: string,
   body: (db: RoDb, tables: Set<string>) => void | Promise<void>): Promise<boolean> {
@@ -37,7 +38,8 @@ export async function readStore(file: string, ctx: ScanCtx, tally: Tally, logPre
     const tables = new Set(db.tables());
     listed = true;
     tally.files++;
-    tally.bytes += safeStat(file)?.size ?? 0;
+    const st = statPath(file);
+    tally.bytes += "stat" in st ? st.stat.size : 0;
     await body(db, tables);
   } catch {
     tally.skip("io-error");
