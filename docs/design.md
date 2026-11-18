@@ -2,7 +2,7 @@
 
 **Date:** 2026-11-17 · **Status:** draft, awaiting approval · **Owner:** Balaji (CTO & co-founder, Neosophical Labs)
 **Products:** A = `build-with-bala/ai-candidate-profiler` v2.0.0 (hiring) · B = `build-with-bala/ai-practice-report` v1.0.0 (developer-first, hosts the shared core)
-**Inputs:** v1.5.0 source; five parallel brainstorm reports (trace sources, scoring, trust/privacy, hiring workflow + market, report design). Their measurements on real traces from this machine are cited as "[measured]".
+**Inputs:** v1.5.0 source; five parallel brainstorm reports (trace sources, scoring, trust/privacy, hiring workflow + market, report design). Their measurements on real traces are cited as "[measured]"; the figures themselves, which describe the author's own machine, are not reproduced here.
 
 ---
 
@@ -22,7 +22,7 @@
                  └─────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-- v1 cannot be patched: on current tool versions most of its numbers are wrong (it misses 54% of Claude Code tool calls, all Copilot chats since Feb 2026, ~98% of Codex shell commands, and counts machine-inserted text as the candidate's prompts). Scores saturate (this machine: 94, three axes at 100). The report is editable and leaks hostname/email/project names.
+- v1 cannot be patched: on current tool versions most of its numbers are wrong (it misses a large share of Claude Code tool calls, all Copilot chats since Feb 2026, nearly all Codex shell commands, and counts machine-inserted text as the candidate's prompts). Scores saturate: a heavy user pins several axes at 100 [measured]. The report is editable and leaks hostname/email/project names.
 - v2 rebuilds the engine once (in B), measures **how well** people work with agents (7 dimensions with confidence intervals, no ceiling), is **private by construction**, and gives A a **trust stack** (signed, invite-bound, forensically checked bundles that the recruiter verifies and renders with their own viewer).
 - Both products are fully offline by default, ship as single-file executables for 5 OS/arch targets, and produce single self-contained HTML reports.
 
@@ -49,7 +49,7 @@ The owner hires engineers who are expected to work AI-natively. Interviews and t
 5. **(A) Decision support:** role-fit against a role profile, an interview kit generated from gaps, a live pairing-session recorder, an offline compare console, and a calibration loop.
 6. **(B) A report worth keeping:** trajectory, month-over-month diffs, concrete upgrade recipes, an opt-in coach that uses the developer's own agent CLI, a share card, and an employer export.
 7. **Awwwards-tier reports:** the "assay certificate" visual system, light/dark, real print-to-PDF, accessible, mobile-correct.
-8. **Fast and bounded:** streaming everywhere; a full scan of this machine (2.4 GB Claude Code + 5.4 GB Codex) in ≤ 60 s cold, peak RSS ≤ 1 GB.
+8. **Fast and bounded:** streaming everywhere; a full scan of a heavy user's machine (several GB of Claude Code and Codex traces) in ≤ 60 s cold, peak RSS ≤ 1 GB.
 
 **Non-goals (this round)**
 - A hosted hiring platform, accounts, or uploads (a zero-knowledge drop-box is a stretch item, §11 P6).
@@ -89,7 +89,7 @@ The owner hires engineers who are expected to work AI-natively. Interviews and t
 |---|---|---|---|
 | Direction | A hiring-grade · B developer-first · C hosted hiring console | **A + B, both "very advanced"** (owner) | A fixes the fatal flaw for hiring; B gives candidates a reason to run it and is the public brand face. C makes the owner custodian of candidate data with legal exposure, premature at 2 downloads. |
 | Repos | one repo · separate repos | **Separate** (owner) | Different audiences, release cadences, and brands. |
-| Shared core | inside B · third repo · copy in each | **Inside B** (owner) | Two repos only; the open core lets candidates audit what is read; format fixes land once (Claude Code alone shipped 33 versions in 75 days on this machine [measured]). Cost: A pins B's tag and bumps it per fix. |
+| Shared core | inside B · third repo · copy in each | **Inside B** (owner) | Two repos only; the open core lets candidates audit what is read; format fixes land once (Claude Code alone ships a new version every few days [measured]). Cost: A pins B's tag and bumps it per fix. |
 | Repo homes | A here + B new · A private in company org · this repo becomes B | **A here, B new** (owner) | Candidates must be able to download A's releases; private-repo releases aren't downloadable. |
 | Engine shape | patch v1 · rewrite as plugin engine | **Rewrite** (builder rec.) | v1's single-pass scanners can't express origin, subagent attribution, two time layers, or drift detection. |
 | Trust | none · signature only · layered (sign + bind + forensics + live) | **Layered** | Signature alone stops edits, not fabrication; forensics anchored to server-minted IDs are feasible [measured]; the live step is the only person-binding. |
@@ -250,16 +250,16 @@ Rules every plugin follows:
 
 ### 6.6 Forensics and integrity (core; A shows it as Integrity, B as "Data health")
 
-| Check | Rule | Measured baseline on genuine data |
+| Check | Rule | Baseline on genuine data [measured] |
 |---|---|---|
-| C1 CC `req_`/`msg_` IDs linear in time (base58 after 4-char prefix) | > 1% of messages off by > 10 min → fail; scheme change → "n/a" | R² 1.000000 over 4,652 IDs; residual p99 63 s |
-| C2 ID order vs time order | Spearman < 0.99 → fail | 1.0 over 10,680 |
-| C3 history.jsonl vs transcripts vs stats-cache | < 75% match → warn; transcript days missing from stats-cache → fail | 94% match; 184/186 shared days |
-| C4 session `accountUuid` vs `~/.claude.json` (compared as keyed hashes) | 0% match → fail; > 1 account → note | 1,227/1,227 |
+| C1 CC `req_`/`msg_` IDs linear in time (base58 after 4-char prefix) | > 1% of messages off by > 10 min → fail; scheme change → "n/a" | linear; residuals within about a minute |
+| C2 ID order vs time order | Spearman < 0.99 → fail | 1.0 |
+| C3 history.jsonl vs transcripts vs stats-cache | < 75% match → warn; transcript days missing from stats-cache → fail | most prompts match; nearly every shared day |
+| C4 session `accountUuid` vs `~/.claude.json` (compared as keyed hashes) | 0% match → fail; > 1 account → note | all |
 | C5 file times | mtime < last event or ctime ≫ mtime → fail; ≥ 80% of files born in one 10-min window spanning > 7 days of events → "copied/restored on DATE — ask about it" | clean |
-| C6 every Codex rollout has a `threads` row | missing → fail | 1,173/1,173 |
+| C6 every Codex rollout has a `threads` row | missing → fail | all |
 | C7 Codex UUIDv7 time ≤ filename time | later → fail | never later |
-| C8 Codex rate-limit ledger monotone within windows | contradictions → fail (spliced traces) | 99.88% non-decreasing |
+| C8 Codex rate-limit ledger monotone within windows | contradictions → fail (spliced traces) | nearly always non-decreasing |
 | C9 tool versions / models vs release dates (dated table shipped per release) | used before release → fail | — |
 | C10 provenance fields (`promptSource`, `turnOrigin`, `entrypoint`, `originator`) | classify only | — |
 | Soft flags | prompt-rhythm regularity, ≥ 200-char prompts repeated ≥ 5×, activity share in the 14 days before the scan, `tool_use` without `tool_result`, config created < 7 days before scan | — |
@@ -538,7 +538,7 @@ P0 Foundations ──► P1 P0 sources ──► P2 Analysis ──┬──► 
 
 Acceptance per phase:
 - **P0:** B's public repo exists, builds and tests on 3 OSes in CI; streaming reader handles a synthetic 600 MB file in bounded memory; canary harness fails on a planted leak.
-- **P1:** each P0 source passes its fixture suite; on this Mac, Claude Code subagent/workflow files are read (≈ 270+ files), Copilot `.jsonl` sessions after 2026-02-23 appear, Codex exec commands are classified, Antigravity counts trajectories from summaries; no temp files remain.
+- **P1:** each P0 source passes its fixture suite; on this Mac, every Claude Code subagent/workflow file is read, Copilot `.jsonl` sessions after 2026-02-23 appear, Codex exec commands are classified, Antigravity counts trajectories from summaries; no temp files remain.
 - **P2:** the 7 dimensions + exposure + forensics run on fixtures and on this Mac; this Mac is not saturated (no dimension pinned at 100 without an open-tail mark); every metric carries window + n; canary tests pass.
 - **P3 (B):** report renders offline in both themes, prints to a clean PDF, passes the DOM/payload budgets, and shows upgrades with exhibit citations.
 - **P3' (A):** invite → candidate run → consent → `.aiprof` → verify → dossier works end to end; tampering with any byte fails verification; sealed bundles open only with the company key; compare console renders 5 bundles.
