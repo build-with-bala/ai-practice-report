@@ -8,7 +8,7 @@ import { Tally } from "../common/coverage";
 import { num, str, type Obj } from "../common/guards";
 import { eachRow, pageableColumns, Pass, q, readStore } from "../common/sqlite";
 import type { Candidate, ScanCtx } from "../types";
-import { TOOL } from "./diskkv";
+import { TOOL } from "./ids";
 
 export const TRACKING_SOURCE = "cursor.tracking";
 const DB_NAME = "ai-code-tracking.db";

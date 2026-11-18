@@ -1,25 +1,16 @@
-import { statSync } from "node:fs";
 import path from "node:path";
 import type { Env } from "../../env/env";
 import { joinFor } from "../../env/paths";
-import { safeStat } from "../../io/fs";
+import { isDir, safeStat } from "../../io/fs";
 import { toEpochMs } from "../../io/time";
 import type { MarkerEv } from "../../model/events";
 import { listDir, Tally } from "../common/coverage";
 import type { Candidate, ScanCtx } from "../types";
-import { agSessionId, TOOL } from "./cli";
+import { agSessionId, TOOL } from "./ids";
 
 export const BRAIN_SOURCE = "antigravity.brain";
 /** The plan artifacts the agent keeps in a conversation's brain folder, `<name>.md`: checked for existence, never opened. */
 export const ARTIFACTS = ["task", "implementation_plan", "walkthrough"] as const;
-
-const isDir = (p: string): boolean => {
-  try {
-    return statSync(p).isDirectory(); // follows a symlinked folder
-  } catch {
-    return false;
-  }
-};
 
 /** The IDE's `<home>/.gemini/antigravity/brain` and the CLI's `<home>/.gemini/antigravity-cli/brain`, per home (WSL homes included). */
 export function brainRoots(env: Env, homes: string[]): Candidate[] {

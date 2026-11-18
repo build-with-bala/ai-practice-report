@@ -1,26 +1,25 @@
-import { statSync } from "node:fs";
 import path from "node:path";
 import type { Env } from "../../env/env";
 import { joinFor } from "../../env/paths";
-import { safeStat } from "../../io/fs";
-import { readJsonl } from "../../io/jsonl";
-import { pbTryNested, type PbField } from "../../io/protobuf";
+import { isDir, isFile } from "../../io/fs";
+import { pbStr, pbTime, pbTryNested, type PbField } from "../../io/protobuf";
 import type { RoDb } from "../../io/sqlite";
 import { toEpochMs } from "../../io/time";
+import { TASK_GAP_MS } from "../../model/constants";
 import type { Ev, MarkerEv, PromptEv, SessionEv, ToolEv, UsageEv } from "../../model/events";
-import { sid, type MarkerKind, type Origin, type ToolCategory } from "../../model/ids";
+import type { MarkerKind, Origin, ToolCategory } from "../../model/ids";
 import { classifyCommand } from "../../text/commands";
 import { classifyIntent } from "../../text/intent";
 import { promptFeatures } from "../../text/structure";
 import { listDir, Tally } from "../common/coverage";
-import { idPart, isObj, num, safeModel, str, UUID, type Obj } from "../common/guards";
+import { isObj, num, safeModel, str, type Obj } from "../common/guards";
 import { eachRow, Pass, q, readStore } from "../common/sqlite";
-import { uriToPath } from "../copilot/map";
+import { streamJsonlFile } from "../common/stream";
+import { uriToPath } from "../common/uri";
 import type { Candidate, ScanCtx } from "../types";
+import { agSessionId, TOOL } from "./ids";
 
-export const TOOL = "antigravity";
 export const CLI_SOURCE = "antigravity.cli";
-export const TASK_GAP_MS = 30 * 60_000;
 /** Summary rows per query. */
 const SUMMARY_PAGE = 1_000;
 /**
@@ -35,25 +34,7 @@ const WITHOUT_ROWID = /\bWITHOUT\s+ROWID\b/i;
 /** An enum name the program does not know, as a drift key: never echoed. */
 const enumKey = (v: unknown): string => (typeof v !== "string" ? "(none)" : "(other)");
 
-/** An Antigravity session id, `antigravity:<id>`: the conversation's own id verbatim when UUID-shaped, else its keyed hash. */
-export const agSessionId = (raw: string, ctx: ScanCtx): string => sid(TOOL, idPart(raw, UUID, ctx));
-
 // ---- protobuf fields ----
-
-const utf8 = new TextDecoder("utf-8", { fatal: true });
-
-/** A length-delimited field as UTF-8 text; undefined when absent, of another wire type, or not valid UTF-8. */
-export function pbStr(f: PbField | undefined): string | undefined {
-  if (f?.wire !== 2) return undefined;
-  try {
-    return utf8.decode(f.v);
-  } catch {
-    return undefined;
-  }
-}
-
-/** A varint field as a number; undefined when absent or of another wire type. */
-export const pbNum = (f: PbField | undefined): number | undefined => (f?.wire === 0 ? Number(f.v) : undefined);
 
 /**
  * The complete leading fields of a blob's first bytes (cut short inside SQL). Decoding runs from the start, so the longest
@@ -65,15 +46,6 @@ function leadingFields(head: Uint8Array): ReadonlyMap<number, PbField[]> | null 
     if (fields) return fields;
   }
   return null;
-}
-
-/** A `google.protobuf.Timestamp` field (`seconds` = 1, `nanos` = 2) as epoch ms; undefined when absent, malformed or implausible. */
-export function pbTime(f: PbField | undefined, now: number): number | undefined {
-  if (f?.wire !== 2) return undefined;
-  const t = pbTryNested(f.v);
-  const seconds = pbNum(t?.get(1)?.[0]);
-  if (seconds === undefined) return undefined;
-  return toEpochMs(seconds * 1000 + Math.floor((pbNum(t!.get(2)?.[0]) ?? 0) / 1e6), now);
 }
 
 // ---- step types (the CLI program's `CortexStepType`, also the transcript's `type` names) ----
@@ -197,15 +169,6 @@ function callCommand(call: Fields | null): string | undefined {
 // ---- stores and pages ----
 
 class CliStoresUnreadable extends Error {}
-
-const isDir = (p: string): boolean => {
-  try {
-    return statSync(p).isDirectory(); // follows a symlinked folder
-  } catch {
-    return false;
-  }
-};
-const isFile = (p: string): boolean => safeStat(p)?.isFile() ?? false;
 
 /** `<home>/.gemini/antigravity-cli` per home (WSL homes included) when it exists. */
 export function cliRoots(env: Env, homes: string[]): Candidate[] {
@@ -589,30 +552,6 @@ const tokens = (v: unknown): number | undefined => {
   return n !== undefined && n >= 0 ? n : undefined;
 };
 
-/** Streams a JSONL file into `line`; counted as read (files, bytes) only when read to its end. True when it was. */
-export async function readLines(file: string, ctx: ScanCtx, tally: Tally, line: (v: unknown) => void): Promise<boolean> {
-  const st = safeStat(file);
-  if (!st?.isFile()) return false;
-  try {
-    for await (const item of readJsonl(file, { signal: ctx.signal })) {
-      if ("skip" in item) {
-        tally.skip(item.skip);
-        continue;
-      }
-      tally.records++;
-      eachRow(() => line(item.value), tally);
-    }
-  } catch {
-    tally.skip("io-error");
-    ctx.log("warn", "ag.io-error");
-    return false;
-  }
-  if (ctx.signal.aborted) return false;
-  tally.files++;
-  tally.bytes += st.size;
-  return true;
-}
-
 // ---- the CLI store ----
 
 /**
@@ -655,7 +594,7 @@ export async function scanCli(c: Candidate, ctx: ScanCtx): Promise<void> {
     if (isFile(transcript)) {
       present++;
       conversations++;
-      if (await readLines(transcript, ctx, tally, (v) => conv.record(v))) conversationsRead++;
+      if ((await streamJsonlFile(transcript, ctx, tally, (v) => conv.record(v), { ioLog: "ag.io-error" })).read) conversationsRead++;
     }
     eachRow(() => conv.finish(), tally);
   }

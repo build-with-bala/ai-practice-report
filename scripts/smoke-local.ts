@@ -8,6 +8,7 @@ import { homesToScan } from "../core/env/paths";
 import { registry, scan, type CoverageEv, type ScanResult } from "../core/index";
 import { safeList, walk } from "../core/io/fs";
 import { ccTranscripts } from "../core/sources/claude-code";
+import { SHELL_TOOLS } from "../core/sources/codex/tools";
 
 const MiB = 1024 * 1024;
 const BUDGET_SECONDS = 60;
@@ -16,8 +17,6 @@ const MIN_EXTRACTED_SHARE = 0.9;
 /** VS Code writes chat sessions as journals from 2026-02-23 on (the legacy JSON files end that day). */
 const COPILOT_JOURNAL_SINCE = Date.UTC(2026, 1, 23);
 const DAY_MS = 86_400_000;
-/** Codex's shell-command tools (built-in names). */
-const CODEX_COMMAND_TOOLS = new Set(["exec_command", "shell", "shell_command", "container.exec", "local_shell"]);
 /** Skip reasons and log codes are fixed tokens; anything else is printed as `other`. */
 const CODE = /^[a-z][a-z0-9_.:-]{0,47}$/;
 
@@ -155,7 +154,7 @@ export async function main(argv: string[]): Promise<number> {
   out.push(`codex command events with a command line=${extracted} without=${missing} extracted share=${share(extracted, extracted + missing)} (gate >= ${MIN_EXTRACTED_SHARE})`);
   if (extracted + missing > 0 && extracted / (extracted + missing) < MIN_EXTRACTED_SHARE) failures.push("codex extracted-command share below the gate");
   const codexTools = r.store.all("tool").filter((t) => t.tool === "codex");
-  const codexCommands = codexTools.filter((t) => CODEX_COMMAND_TOOLS.has(t.name));
+  const codexCommands = codexTools.filter((t) => SHELL_TOOLS.has(t.name)); // Codex's shell-command tools
   const notShell = (list: typeof codexTools) => list.filter((t) => t.category !== "shell").length;
   out.push(`codex tool events=${codexTools.length} non-shell share=${share(notShell(codexTools), codexTools.length)}; command events=${codexCommands.length} non-shell share=${share(notShell(codexCommands), codexCommands.length)}`);
   const copilotSince = (ms: number) => sessions.filter((s) => s.tool === "copilot" && s.start >= ms).length;

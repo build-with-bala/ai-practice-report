@@ -1,14 +1,15 @@
 import { readdirSync, type Stats } from "node:fs";
 import path from "node:path";
 import { safeStat } from "../../io/fs";
-import { readJsonl } from "../../io/jsonl";
 import { toEpochMs } from "../../io/time";
+import { TASK_GAP_MS } from "../../model/constants";
 import type { Ev, FileFactEv, MarkerEv, PromptEv, RateLimitEv, RolloutFactEv, SessionEv, ToolEv, TurnEv } from "../../model/events";
 import { sid, type MarkerKind, type Origin } from "../../model/ids";
 import { classifyIntent } from "../../text/intent";
 import { promptFeatures } from "../../text/structure";
 import { listDir, Tally, typeKey } from "../common/coverage";
 import { isObj, num, safeModel, str, VERSION, type Obj } from "../common/guards";
+import { streamJsonlFile } from "../common/stream";
 import type { Candidate, ScanCtx } from "../types";
 import { cxEffort } from "./effort";
 import { cxSource, cxThreadId } from "./origin";
@@ -92,7 +93,6 @@ export function sniffHeavy(head: string): boolean {
   return item !== null && (HEAVY_ITEMS.has(item[1]!) || (item[1] === "Extension" && item[2] === "image_gen.generation"));
 }
 
-const TASK_GAP_MS = 30 * 60_000;
 /** Line types whose payload the reader maps: one without an object payload has changed shape. */
 const MAPPED_RECORDS: ReadonlySet<string> = new Set(["session_meta", "turn_context", "response_item", "event_msg"]);
 /** Content part types of a user-role message (the CLI's ContentItem tags for input). */
@@ -616,40 +616,18 @@ class RolloutReader {
   }
 }
 
+/** One rollout: a thread already read from another rollout stops it (skipped `duplicate`); file facts only when read to its end. */
 async function scanFile(file: string, ctx: ScanCtx, tally: Tally, seen: Set<string>, commands: CommandCounts): Promise<void> {
-  const st = safeStat(file);
-  if (!st?.isFile()) return;
   const reader = new RolloutReader(file, fileTime(path.basename(file)), ctx, tally, seen, commands);
-  let complete = true;
-  try {
-    for await (const item of readJsonl(file, { sniffSkip: sniffHeavy, signal: ctx.signal })) {
-      if ("skip" in item) {
-        tally.skip(item.skip);
-        continue;
-      }
-      tally.records++;
-      try {
-        reader.record(item.value);
-      } catch {
-        tally.skip("bad-record");
-      }
-      if (reader.duplicate) break;
-    }
-  } catch {
-    complete = false;
-    tally.skip("io-error");
-    ctx.log("warn", "cx.io-error");
-  }
+  const r = await streamJsonlFile(file, ctx, tally, (v) => {
+    reader.record(v);
+    return reader.duplicate ? "stop" : undefined;
+  }, { sniffSkip: sniffHeavy, ioLog: "cx.io-error" });
   if (reader.duplicate) {
     tally.skip("duplicate");
     return;
   }
-  if (ctx.signal.aborted) complete = false;
-  if (complete) {
-    tally.files++;
-    tally.bytes += st.size;
-  }
-  reader.finish(complete ? st : undefined);
+  if (r.stat) reader.finish(r.read ? r.stat : undefined);
 }
 
 /**

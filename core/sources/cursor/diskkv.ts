@@ -1,25 +1,20 @@
 import type { RoDb } from "../../io/sqlite";
 import { toEpochMs } from "../../io/time";
+import { TASK_GAP_MS } from "../../model/constants";
 import type { Ev, MarkerEv, PromptEv, SessionEv, ToolEv } from "../../model/events";
-import { sid, type MarkerKind, type Origin, type ToolCategory } from "../../model/ids";
+import type { MarkerKind, Origin, ToolCategory } from "../../model/ids";
 import { classifyCommand } from "../../text/commands";
 import { classifyIntent } from "../../text/intent";
 import { promptFeatures } from "../../text/structure";
 import type { Tally } from "../common/coverage";
-import { extOfPath, idPart, num, safeModel, str, UUID, type Obj } from "../common/guards";
+import { extOfPath, num, safeModel, str, type Obj } from "../common/guards";
 import { eachRow, keyIndexed, Pass, rowidPageable, tableColumns } from "../common/sqlite";
 import type { ScanCtx } from "../types";
+import { cuSessionId, IDE_SOURCE, TOOL } from "./ids";
 
-export const TOOL = "cursor";
-export const IDE_SOURCE = "cursor.ide";
-/** A message this long after the session's previous activity starts a new task. */
-export const TASK_GAP_MS = 30 * 60_000;
 /** The detail window: bubbles are read only for composers updated in the last 90 days (or since `ctx.since`). */
 const DETAIL_MS = 90 * 86_400_000;
 const KV = "cursorDiskKV";
-
-/** A Cursor session id, `cursor:<id>`: the composer's own id verbatim when UUID-shaped, else its keyed hash. */
-export const cuSessionId = (raw: string, ctx: ScanCtx): string => sid(TOOL, idPart(raw, UUID, ctx));
 
 // ---- tools ----
 

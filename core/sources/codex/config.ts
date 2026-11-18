@@ -1,6 +1,6 @@
-import { realpathSync, statSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import path from "node:path";
-import { safeStat } from "../../io/fs";
+import { isDir, isFile, safeStat } from "../../io/fs";
 import { MAX_LINE_BYTES } from "../../io/jsonl";
 import { maybeYield } from "../../io/yield";
 import type { ConfigEv } from "../../model/events";
@@ -231,16 +231,6 @@ function resolved(p: string): string {
     return p;
   }
 }
-/** Follows symlinks: skill folders and marketplaces may be linked into place. */
-function statOf(p: string): ReturnType<typeof statSync> | undefined {
-  try {
-    return statSync(p);
-  } catch {
-    return undefined;
-  }
-}
-const isFile = (p: string): boolean => statOf(p)?.isFile() ?? false;
-const isDir = (p: string): boolean => statOf(p)?.isDirectory() ?? false;
 
 function cfg(kind: ConfigEv["kind"], provenance: ConfigEv["provenance"], name?: string): ConfigEv {
   const ev: ConfigEv = { k: "config", tool: TOOL, source: CONFIG_SOURCE, kind, provenance };

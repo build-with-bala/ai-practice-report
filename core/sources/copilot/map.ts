@@ -1,44 +1,20 @@
-import type { Platform } from "../../env/env";
 import { toEpochMs } from "../../io/time";
+import { TASK_GAP_MS } from "../../model/constants";
 import type { Ev, MarkerEv, PromptEv, SessionEv, ToolEv, TurnEv } from "../../model/events";
-import { sid, type CheckKind, type Origin, type ToolCategory } from "../../model/ids";
+import type { CheckKind, Origin, ToolCategory } from "../../model/ids";
 import { classifyCommand } from "../../text/commands";
 import { classifyIntent } from "../../text/intent";
 import { promptFeatures } from "../../text/structure";
 import { typeKey, type Tally } from "../common/coverage";
-import { extOfPath, idPart, isObj, num, safeModel, str, UUID, VERSION, type Obj } from "../common/guards";
+import { extOfPath, isObj, num, str, VERSION, type Obj } from "../common/guards";
+import { uriToPath } from "../common/uri";
 import type { ScanCtx } from "../types";
+import { cpModel, cpSessionId, TOOL } from "./ids";
+
+/** Re-exported for the Copilot tests, which import it from here; the readers take it from `common/uri`. */
+export { uriToPath };
 
 export const VSCODE_SOURCE = "copilot.vscode";
-export const TOOL = "copilot";
-export const TASK_GAP_MS = 30 * 60_000;
-
-/** A Copilot session id, `copilot:<id>`: the tool's own id verbatim when UUID-shaped, else its keyed hash. */
-export const cpSessionId = (raw: string, ctx: ScanCtx): string => sid(TOOL, idPart(raw, UUID, ctx));
-
-const VENDOR = /^[a-z][a-z0-9-]{0,31}\/(.+)$/;
-/** A model id as VS Code records it (`<vendor>/<id>`, e.g. `copilot/<id>`): the vendor prefix dropped, then the shared guard. */
-export function cpModel(raw: string | undefined): string | undefined {
-  return raw === undefined ? undefined : safeModel(VENDOR.exec(raw)?.[1] ?? raw);
-}
-
-/** The path of a `file:` or `vscode-remote:` URI (a Windows drive or UNC path on win32); undefined for other URIs. */
-export function uriToPath(uri: string, platform: Platform): string | undefined {
-  let u: URL;
-  let p: string;
-  try {
-    u = new URL(uri);
-    p = decodeURIComponent(u.pathname);
-  } catch {
-    return undefined;
-  }
-  if ((u.protocol !== "file:" && u.protocol !== "vscode-remote:") || p === "") return undefined;
-  if (u.protocol === "file:" && platform === "win32") {
-    p = u.host ? `//${u.host}${p}` : p.replace(/^\/([A-Za-z]:)/, "$1");
-    p = p.replace(/\//g, "\\");
-  }
-  return p;
-}
 
 /** Response part kinds VS Code writes (its serializer and response model, 1.138, plus kinds older versions wrote); any other kind is drift. */
 const PART_KINDS: ReadonlySet<string> = new Set([

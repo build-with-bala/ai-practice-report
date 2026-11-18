@@ -1,11 +1,10 @@
-import { statSync } from "node:fs";
 import path from "node:path";
 import type { Env } from "../../env/env";
 import { joinFor } from "../../env/paths";
-import { safeStat } from "../../io/fs";
-import { readJsonl } from "../../io/jsonl";
+import { isDir, safeStat } from "../../io/fs";
 import type { RoDb } from "../../io/sqlite";
 import { toEpochMs } from "../../io/time";
+import { TASK_GAP_MS } from "../../model/constants";
 import type { Ev, MarkerEv, PromptEv, SessionEv, ToolEv, TurnEv } from "../../model/events";
 import type { Origin, ToolCategory } from "../../model/ids";
 import { classifyCommand } from "../../text/commands";
@@ -14,8 +13,9 @@ import { promptFeatures } from "../../text/structure";
 import { listDir, Tally } from "../common/coverage";
 import { extOfPath, isObj, str, VERSION, type Obj } from "../common/guards";
 import { eachRow, Pass, q, readStore } from "../common/sqlite";
+import { streamJsonlFile } from "../common/stream";
 import type { Candidate, PluginCoverage, ScanCtx } from "../types";
-import { cpModel, cpSessionId, TASK_GAP_MS, TOOL } from "./map";
+import { cpModel, cpSessionId, TOOL } from "./ids";
 
 export const CLI_SOURCE = "copilot.cli";
 
@@ -74,14 +74,6 @@ const INJECTED = [/<reminder>[\s\S]*?<\/reminder>\s*/g, /<attachments>[\s\S]*?<\
 const userText = (content: string): string => INJECTED.reduce((t, re) => t.replace(re, ""), content).trim();
 /** Bounded per-file state: tool calls awaiting their completion. */
 const PENDING_TOOLS = 4096;
-
-const isDir = (p: string): boolean => {
-  try {
-    return statSync(p).isDirectory();
-  } catch {
-    return false;
-  }
-};
 
 /** The older CLIs' session folder (one JSON file per session): not read, but never a silent absence. */
 const OLD_STATE_DIR = "history-session-state";
@@ -314,35 +306,11 @@ class CliReader {
   }
 }
 
+/** Streams one session's `events.jsonl`; its SessionEv follows whenever the file was a regular file (read in full or in part). */
 async function scanEvents(file: string, sessionId: string, ctx: ScanCtx, tally: Tally): Promise<void> {
-  const st = safeStat(file);
-  if (!st?.isFile()) return;
   const reader = new CliReader(sessionId, ctx, tally);
-  let complete = true;
-  try {
-    for await (const item of readJsonl(file, { signal: ctx.signal })) {
-      if ("skip" in item) {
-        tally.skip(item.skip);
-        continue;
-      }
-      tally.records++;
-      try {
-        reader.record(item.value);
-      } catch {
-        tally.skip("bad-record");
-      }
-    }
-  } catch {
-    complete = false;
-    tally.skip("io-error");
-    ctx.log("warn", "cp.io-error");
-  }
-  if (ctx.signal.aborted) complete = false;
-  if (complete) {
-    tally.files++;
-    tally.bytes += st.size;
-  }
-  reader.finish();
+  const r = await streamJsonlFile(file, ctx, tally, (v) => reader.record(v), { ioLog: "cp.io-error" });
+  if (r.stat) reader.finish();
 }
 
 // ---- the session store (schema verified locally on the VS Code extension's copy; the CLI keeps one of the same name) ----

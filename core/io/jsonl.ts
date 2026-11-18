@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { fileState } from "./fs";
 import { maybeYield } from "./yield";
 
 export const MAX_LINE_BYTES = 33_554_432;
@@ -41,14 +41,17 @@ export interface JsonlOpts {
 }
 
 /**
- * Stream a JSONL file with bounded memory. Bad *content* never throws (malformed lines yield
- * `{skip:"parse"}`). A genuinely missing path yields nothing; any other I/O failure
- * (EACCES, EISDIR, mid-read errors) throws so callers can record a coverage error.
+ * Stream a JSONL file with bounded memory, links followed. Bad *content* never throws (malformed lines yield
+ * `{skip:"parse"}`). Only a missing path (`fileState` `missing`) yields nothing; any other path that is not a regular
+ * file (a folder, a device, a path that cannot be stat'ed: EACCES, ELOOP) and any I/O failure while reading throws, so
+ * callers can record a coverage error.
  * Between chunks the stream lets the event loop run (`maybeYield`), so a signal or an abort is seen mid-file; once
  * `signal` is aborted it ends early, and the caller must not count the file as fully read.
  */
 export async function* readJsonl(path: string, opts: JsonlOpts = {}): AsyncGenerator<JsonlItem> {
-  if (!existsSync(path)) return;
+  const state = fileState(path);
+  if (state === "missing") return;
+  if (state !== "file") throw new Error(state === "error" ? "the path cannot be stat'ed" : `not a regular file (${state})`);
   yield* readJsonlStream(Bun.file(path).stream() as ReadableStream<Uint8Array>, opts);
 }
 

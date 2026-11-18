@@ -1,14 +1,15 @@
 import { readdirSync, type Stats } from "node:fs";
 import path from "node:path";
 import { readJsonSmall, safeStat } from "../../io/fs";
-import { readJsonl } from "../../io/jsonl";
 import { toEpochMs } from "../../io/time";
+import { TASK_GAP_MS } from "../../model/constants";
 import type { Ev, FileFactEv, MarkerEv, SessionEv, ToolEv, TotalsEv, TurnEv } from "../../model/events";
 import { sid, type MarkerKind, type Origin } from "../../model/ids";
 import { classifyIntent } from "../../text/intent";
 import { promptFeatures } from "../../text/structure";
 import { listDir, readSidecar, Tally } from "../common/coverage";
 import { idPart, isObj, num, safeModel, str, UUID, VERSION, type Obj } from "../common/guards";
+import { streamJsonlFile } from "../common/stream";
 import type { Candidate, ScanCtx } from "../types";
 import { ccPromptOrigin, isInterrupt, typedText, unknownProvenance, userText } from "./origin";
 import { ccToolCategory, mcpServerOf, patchLines, SHELL } from "./tools";
@@ -42,7 +43,6 @@ const HEAVY = ['"type":"api-request-blob"', '"type":"api-request"', '"type":"fil
 export const sniffHeavy = (head: string): boolean => HEAVY.some((s) => head.includes(s));
 
 const SYNTHETIC_MODEL = "<synthetic>";
-const TASK_GAP_MS = 30 * 60_000;
 const DEFAULT_RETENTION_DAYS = 30;
 /** Bounded per-file state: API messages awaiting more block records, tool uses awaiting results, finished tool ids. */
 const MESSAGE_WINDOW = 256;
@@ -500,35 +500,11 @@ class TranscriptReader {
   }
 }
 
+/** One transcript: its session whenever the file was a regular file (read in full or in part), its file facts only when read to its end. */
 async function scanFile(spec: FileSpec, ctx: ScanCtx, tally: CcTally, delegations: ReadonlyMap<string, string>): Promise<void> {
-  const st = safeStat(spec.file);
-  if (!st?.isFile()) return;
   const reader = new TranscriptReader(spec, ctx, tally, delegations);
-  let complete = true;
-  try {
-    for await (const item of readJsonl(spec.file, { sniffSkip: sniffHeavy, signal: ctx.signal })) {
-      if ("skip" in item) {
-        tally.skip(item.skip);
-        continue;
-      }
-      tally.records++;
-      try {
-        reader.record(item.value);
-      } catch {
-        tally.skip("bad-record");
-      }
-    }
-  } catch {
-    complete = false;
-    tally.skip("io-error");
-    ctx.log("warn", "cc.io-error");
-  }
-  if (ctx.signal.aborted) complete = false;
-  if (complete) {
-    tally.files++;
-    tally.bytes += st.size;
-  }
-  reader.finish(complete ? st : undefined);
+  const r = await streamJsonlFile(spec.file, ctx, tally, (v) => reader.record(v), { sniffSkip: sniffHeavy, ioLog: "cc.io-error" });
+  if (r.stat) reader.finish(r.read ? r.stat : undefined);
 }
 
 const agentFiles = (dir: string, tally: Tally): string[] =>

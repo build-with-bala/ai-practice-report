@@ -2,13 +2,66 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { readJsonSmall, readJsonSmallResult, safeList, safeStat, walk } from "../../../core/io/fs";
+import { fileState, isDir, isFile, readJsonSmall, readJsonSmallResult, safeList, safeStat, walk } from "../../../core/io/fs";
 
 let root: string;
 beforeAll(() => {
   root = mkdtempSync(path.join(os.tmpdir(), "fs-test-"));
 });
 afterAll(() => rmSync(root, { recursive: true, force: true }));
+
+/** A link at `at` to the folder `target` (a junction on Windows: no privilege needed); false on Windows when none can be made. */
+function linkFolder(target: string, at: string): boolean {
+  try {
+    symlinkSync(target, at, process.platform === "win32" ? "junction" : undefined);
+    return true;
+  } catch (e) {
+    if (process.platform !== "win32") throw e;
+    return false;
+  }
+}
+
+describe("fileState, isDir, isFile", () => {
+  test("a file, a folder and a missing path; a path through a file is missing", () => {
+    const f = path.join(root, "st-file");
+    writeFileSync(f, "x");
+    const d = path.join(root, "st-dir");
+    mkdirSync(d);
+    expect(fileState(f)).toBe("file");
+    expect(fileState(d)).toBe("dir");
+    expect(fileState(path.join(root, "st-nope"))).toBe("missing");
+    expect(fileState(path.join(f, "inside"))).toBe("missing"); // ENOTDIR
+    expect([isFile(f), isDir(f), isFile(d), isDir(d), isFile(path.join(root, "st-nope"))]).toEqual([true, false, false, true, false]);
+  });
+  test("links are followed: a dangling link is missing, a link to a folder is a folder", () => {
+    const dangling = path.join(root, "st-dangling");
+    if (linkFolder(path.join(root, "st-gone"), dangling)) expect(fileState(dangling)).toBe("missing");
+    const target = path.join(root, "st-target");
+    mkdirSync(target);
+    const linked = path.join(root, "st-linked");
+    if (linkFolder(target, linked)) {
+      expect(fileState(linked)).toBe("dir");
+      expect(isDir(linked)).toBe(true);
+    }
+  });
+  const posixOnly = process.platform === "win32" || process.getuid?.() === 0;
+  test.skipIf(posixOnly)("a path inside a chmod 000 folder is an error, not missing", () => {
+    const d = path.join(root, "st-locked");
+    mkdirSync(d);
+    const f = path.join(d, "x");
+    writeFileSync(f, "");
+    chmodSync(d, 0o000);
+    try {
+      expect(fileState(f)).toBe("error");
+      expect(isFile(f)).toBe(false);
+    } finally {
+      chmodSync(d, 0o700);
+    }
+  });
+  test.skipIf(process.platform === "win32")("anything else that exists is other", () => {
+    expect(fileState("/dev/null")).toBe("other"); // a character device
+  });
+});
 
 describe("walk", () => {
   test("symlink loop terminates; respects maxDepth", () => {

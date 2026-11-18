@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync, createWriteStream } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, createWriteStream } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { once } from "node:events";
@@ -90,6 +90,18 @@ describe("readJsonl", () => {
       await expect(collect(p)).rejects.toThrow();
     } finally {
       chmodSync(p, 0o600);
+    }
+  });
+  test.skipIf(process.platform === "win32" || process.getuid?.() === 0)("a file inside an unreadable folder throws: it is not missing", async () => {
+    const locked = path.join(dir, "locked-dir");
+    mkdirSync(locked);
+    const p = path.join(locked, "x.jsonl");
+    writeFileSync(p, '{"a":1}\n');
+    chmodSync(locked, 0o000);
+    try {
+      await expect(collect(p)).rejects.toThrow();
+    } finally {
+      chmodSync(locked, 0o700);
     }
   });
 

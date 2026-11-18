@@ -32,8 +32,8 @@ const FIXED: ReadonlyMap<string, ToolCategory> = new Map<string, ToolCategory>([
 ]);
 /** Namespaces of the CLI's own tools; a tool in any other namespace is not a built-in, whatever its name. */
 const OWN_NAMESPACES = new Set(["collaboration", "clock", "image_gen", "web"]);
-/** Tools whose arguments carry a command line (`cmd`, or `command` as argv or string). */
-const SHELL_TOOLS = new Set(["exec_command", "shell", "shell_command", "container.exec", "local_shell"]);
+/** Tools whose arguments carry a command line (`cmd`, or `command` as argv or string): the CLI's shell-command tools. */
+export const SHELL_TOOLS: ReadonlySet<string> = new Set(["exec_command", "shell", "shell_command", "container.exec", "local_shell"]);
 /** Shells whose last argument after a `-c`-style flag is the script (`["/bin/zsh", "-lc", "<script>"]`). */
 const SHELLS = new Set(["bash", "zsh", "sh", "dash", "fish", "ksh", "pwsh", "powershell", "cmd"]);
 const SCRIPT_FLAG = /^(?:-[A-Za-z]*c|\/c|-Command)$/i;

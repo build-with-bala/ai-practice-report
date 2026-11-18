@@ -1,12 +1,13 @@
 import type { RoDb } from "../../io/sqlite";
 import { toEpochMs } from "../../io/time";
+import { TASK_GAP_MS } from "../../model/constants";
 import type { PromptEv, SessionEv } from "../../model/events";
 import { classifyIntent } from "../../text/intent";
 import { promptFeatures } from "../../text/structure";
 import type { Tally } from "../common/coverage";
 import { isObj, safeModel, str } from "../common/guards";
 import type { ScanCtx } from "../types";
-import { cuSessionId, IDE_SOURCE, TASK_GAP_MS, TOOL } from "./diskkv";
+import { cuSessionId, IDE_SOURCE, TOOL } from "./ids";
 
 /**
  * The only `ItemTable` keys ever read, each by exact key and only when `cursorDiskKV` holds no composers (older

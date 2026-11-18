@@ -1,7 +1,7 @@
-import { realpathSync, statSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import path from "node:path";
 import type { Env } from "../../env/env";
-import { readJsonSmallResult, safeStat } from "../../io/fs";
+import { isFile, readJsonSmallResult, safeStat } from "../../io/fs";
 import { toEpochMs } from "../../io/time";
 import type { ConfigEv, IdentityEv, MarkerEv } from "../../model/events";
 import { classifyCommand } from "../../text/commands";
@@ -23,13 +23,6 @@ interface GlobalUsage { skills: Map<string, Usage>; plugins: Map<string, number>
 
 const isNum = (x: unknown): x is number => typeof x === "number" && Number.isFinite(x);
 const isStr = (x: unknown): x is string => typeof x === "string";
-const isFile = (p: string): boolean => {
-  try {
-    return statSync(p).isFile(); // follows symlinks: installers link skill folders into place
-  } catch {
-    return false;
-  }
-};
 const realpathOf = (p: string): string | undefined => {
   try {
     return realpathSync(p);

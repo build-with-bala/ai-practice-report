@@ -1,16 +1,15 @@
-import { statSync } from "node:fs";
 import path from "node:path";
 import type { Env } from "../../env/env";
 import { vscodeUser } from "../../env/paths";
-import { safeStat } from "../../io/fs";
-import { b64ToBytes, pbTryNested, type PbField } from "../../io/protobuf";
+import { isDir, safeStat } from "../../io/fs";
+import { b64ToBytes, pbNum, pbStr, pbTime, pbTryNested, type PbField } from "../../io/protobuf";
 import type { SessionEv } from "../../model/events";
 import { Tally } from "../common/coverage";
 import { str } from "../common/guards";
 import { readStore } from "../common/sqlite";
-import { uriToPath } from "../copilot/map";
+import { uriToPath } from "../common/uri";
 import type { Candidate, ScanCtx } from "../types";
-import { agSessionId, pbNum, pbStr, pbTime, TOOL } from "./cli";
+import { agSessionId, TOOL } from "./ids";
 
 export const IDE_SOURCE = "antigravity.ide";
 /** The Antigravity apps whose user folders (`vscodeUser(env, app)`) keep a `globalStorage/state.vscdb`. */
@@ -35,14 +34,6 @@ const WORKSPACE_FOLDER = 1;
 
 /** The store exists but cannot be opened or read: the source has nothing to say. */
 class IdeStoreUnreadable extends Error {}
-
-const isDir = (p: string): boolean => {
-  try {
-    return statSync(p).isDirectory(); // follows a symlinked user folder
-  } catch {
-    return false;
-  }
-};
 
 /** The user folder of each Antigravity app that exists (the scanning user's only, as for VS Code). */
 export function ideRoots(env: Env): Candidate[] {
