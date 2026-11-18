@@ -156,7 +156,7 @@ describe("integration: every P0 source in one home", () => {
       expect(cands).toBeGreaterThan(0);
       expect([p.id, covs.map((c) => c.window).sort()]).toEqual([p.id, Array.from({ length: cands }, () => windowsOf(p.id)).flat().sort()]);
       for (const c of covs) {
-        expect([p.id, c.window, c.status === "absent" || c.status === "error"]).toEqual([p.id, c.window, false]);
+        expect(`${p.id} ${c.window} ${c.status}`).not.toMatch(/ (absent|empty|error)$/); // every store here holds data
         // every window read records — never a silent zero — but for the presence-only reader, which says so
         if (NO_RECORDS.has(p.id)) expect(`${p.id} ${c.status}`).toBe(`${p.id} ${NO_RECORDS.get(p.id)!}`);
         else expect(`${p.id} ${c.window} records>0:${c.records > 0}`).toBe(`${p.id} ${c.window} records>0:true`);
