@@ -1,4 +1,4 @@
-import { toEpochMs } from "../../io/time";
+import { timeIssue, toEpochMs } from "../../io/time";
 import { TASK_GAP_MS } from "../../model/constants";
 import type { Ev, MarkerEv, PromptEv, SessionEv, ToolEv, TurnEv } from "../../model/events";
 import type { CheckKind, Origin, ToolCategory } from "../../model/ids";
@@ -179,9 +179,11 @@ class SessionMapper {
       this.prompt(r, ts);
       this.tools(r, ts, cancelledRequest(r));
     } else {
-      // every request carries its time: without one the field moved, and its prompt and tools are dropped (counted)
+      // every request carries its time, and without a usable one its prompt and tools are dropped: a well-formed time
+      // outside the plausible range is bad data, counted once (`bad-ts`); a missing or shapeless one means the field
+      // moved, drift with the request skipped `no-ts`
       this.tally.badTime(r.timestamp, "request.timestamp");
-      this.tally.skip("no-ts");
+      if (timeIssue(r.timestamp) === "shape") this.tally.skip("no-ts");
     }
     const ended = this.turn(r, ts, model);
     const last = ended ?? ts;

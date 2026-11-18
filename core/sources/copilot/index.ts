@@ -171,7 +171,7 @@ async function scanVscode(c: Candidate, ctx: ScanCtx): Promise<void> {
   }
   const store = path.join(c.root, "globalStorage", "github.copilot-chat", "session-store.db");
   const hasStore = safeStat(store)?.isFile() ?? false;
-  const storeRead = !ctx.signal.aborted && hasStore && (await readSessionStore(store, VSCODE_SOURCE, ctx, life));
+  const storeRead = !ctx.signal.aborted && hasStore && (await readSessionStore(store, VSCODE_SOURCE, "vscode", ctx, life));
   const bad = (tally.skipped["bad-record"] ?? 0) + (life.skipped["bad-record"] ?? 0);
   if (bad > 0) ctx.log("warn", "cp.bad-record", bad); // a mapping bug must not look like a healthy source
   const installed = copilotInstalled(installDirs(ctx.env, appOf(ctx.env, c.root)));
@@ -245,7 +245,7 @@ export const cpVscode: SourcePlugin = {
       "<VS Code user>/workspaceStorage/*/chatSessions/*.json — older chat sessions, one JSON document each (up to 64 MiB)",
       "<VS Code user>/globalStorage/emptyWindowChatSessions/*.{jsonl,json} — chat sessions of windows without a folder",
       "<VS Code user>/workspaceStorage/*/workspace.json — the folder of the workspace, kept only as a keyed project hash",
-      "<VS Code user>/globalStorage/github.copilot-chat/session-store.db — sessions: id, cwd, host type, created and updated times; turns: session id and time",
+      "<VS Code user>/globalStorage/github.copilot-chat/session-store.db — sessions: id, cwd, created and updated times; turns: session id and time",
       "VS Code's bundled extensions/copilot* and ~/.vscode/extensions/github.copilot* — folder names only, to tell whether Copilot is installed",
     ],
     neverReads: [
@@ -270,7 +270,7 @@ export const cpCli: SourcePlugin = {
   describe: {
     reads: [
       "<home>/.copilot/session-state/*/events.jsonl — Copilot CLI session events: session start, user messages, turns, tool executions, aborts, models",
-      "<home>/.copilot/session-store.db — sessions: id, cwd, host type, created and updated times; turns: session id and time",
+      "<home>/.copilot/session-store.db — sessions: id, cwd, created and updated times; turns: session id and time",
     ],
     neverReads: [
       "message content, tool arguments and results are parsed in memory; only intent, features, a keyed hash, command categories, exit codes and file extensions are kept",

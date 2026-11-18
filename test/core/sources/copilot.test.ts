@@ -17,7 +17,7 @@ import { CANARY, expectNoCanaries } from "../../kit/canary";
 import { fakeHome, type FakeHome } from "../../kit/home";
 import {
   buildCopilot, CliEvents, CP_EXT_VERSION, cpSid, editGroup, fileUrl, jetbrainsRel, markdown, MIN, request, S_J, S_L, sessionRoot, terminal, tool,
-  userRel, type JournalRecord,
+  userRel, writeSessionStore, type JournalRecord,
 } from "../../fixtures/copilot";
 import { fixtureStart } from "../../fixtures/claude-code";
 
@@ -388,6 +388,31 @@ describe("copilot vscode: mapping rules", () => {
     expect([...r.store.forSession(sidOf(id), "prompt")].sort((a, b) => a.ts - b.ts).map((p) => p.origin)).toEqual(["human", "human", "human", "system", "human"]);
   });
 
+  test("a request whose time is well-formed but implausible counts once, as bad-ts: no no-ts, no drift", async () => {
+    const id = cpSid("oldts");
+    writeLegacy("w", sessionRoot(id, [request({ ts: 631152000000, text: "a request stamped 1990" }), request({ ts: t0(), text: "a request of today" })]));
+    const r = await run([cpVscode]);
+    const c = covOf(r, "copilot.vscode");
+    expect(c.skipped["bad-ts"]).toBe(1);
+    expect(c.skipped["no-ts"]).toBeUndefined();
+    expect(c.unknownTypes).toEqual({});
+    expect(r.store.forSession(sidOf(id), "prompt")).toHaveLength(1);
+  });
+
+  test("a request without a time is drift request.timestamp:shape, and is skipped no-ts once with its prompt and tools", async () => {
+    const id = cpSid("nots");
+    const timeless = request({ ts: t0(), text: "a request without its time", parts: [tool("copilot_readFile")] });
+    delete timeless.timestamp;
+    writeLegacy("w", sessionRoot(id, [timeless, request({ ts: t0() + MIN })]));
+    const r = await run([cpVscode]);
+    const c = covOf(r, "copilot.vscode");
+    expect(c.unknownTypes).toEqual({ "request.timestamp:shape": 1 });
+    expect(c.skipped["no-ts"]).toBe(1);
+    expect(c.skipped["bad-ts"]).toBeUndefined();
+    expect(toolsOf(r, id)).toEqual([]);
+    expect(r.store.forSession(sidOf(id), "prompt")).toHaveLength(1);
+  });
+
   test("model ids: vendor prefix dropped, then the shared shape guard", async () => {
     const id = cpSid("models");
     writeLegacy("w", sessionRoot(id, [
@@ -716,12 +741,13 @@ describe("copilot cli (session events and store, from the CLI's schema)", () => 
     __observeQueries((s) => sql.push(s));
     const r = await run([cpCli]);
     __observeQueries(undefined);
-    expect(r.store.session(sidOf(cliSid))).toMatchObject({ window: "lifetime", origin: "human", surface: "github", start: at, end: at + 9 * MIN, projectKey: keyedHash(r.salt, normalizePath(CANARY.path)) });
-    expect(r.store.session(sidOf(keyedHash(r.salt, "not-a-uuid")))).toMatchObject({ surface: "other", start: at, end: at });
+    // the CLI's own store: surface cli, whatever host_type names (the repository's host, not a client)
+    expect(r.store.session(sidOf(cliSid))).toMatchObject({ window: "lifetime", origin: "human", surface: "cli", start: at, end: at + 9 * MIN, projectKey: keyedHash(r.salt, normalizePath(CANARY.path)) });
+    expect(r.store.session(sidOf(keyedHash(r.salt, "not-a-uuid")))).toMatchObject({ surface: "cli", start: at, end: at });
     expect(r.store.forSession(sidOf(cliSid), "turn").map((t) => [t.window, t.ts - at])).toEqual([["lifetime", MIN], ["lifetime", 2 * MIN]]);
     const selects = sql.filter((s) => /^\s*SELECT/i.test(s) && !/sqlite_master|pragma_table_info/.test(s));
     expect(selects.length).toBeGreaterThan(0);
-    for (const s of selects) expect(s).not.toMatch(/user_message|assistant_response|summary|repository|branch|agent_name|agent_description|file_path|\*/);
+    for (const s of selects) expect(s).not.toMatch(/user_message|assistant_response|summary|repository|branch|agent_name|agent_description|file_path|host_type|\*/);
     expect(covOf(r, "copilot.cli", "lifetime")).toMatchObject({ status: "ok", files: 1, records: 4 }); // the store: the lifetime window
     expect(covOf(r, "copilot.cli")).toMatchObject({ status: "absent", files: 0, records: 0 }); // no session-state: no detail window
     expectNoCanaries([...allEvents(r), r.coverage, r.warnings]);
@@ -829,5 +855,15 @@ describe("copilot vscode: the extension's session store", () => {
     expect(r.store.forSession(sidOf(S_J), "turn").filter((t) => t.window === "lifetime")).toHaveLength(1);
     expect([covOf(r, "copilot.vscode").records, covOf(r, "copilot.vscode", "lifetime").records]).toEqual([4, 2]); // chat files; store rows
     expectNoCanaries([...allEvents(r), r.coverage, r.warnings]);
+  });
+
+  test("store sessions take the surface of the store they come from, never host_type: vscode in the extension's copy, cli in the CLI's", async () => {
+    const at = t0();
+    const vs = cpSid("vsrow");
+    const cli = cpSid("clirow");
+    writeSessionStore(h, path.join(user(), "globalStorage", "github.copilot-chat", "session-store.db"), { id: vs, host: "github", at });
+    writeSessionStore(h, path.join(".copilot", "session-store.db"), { id: cli, host: "github", at });
+    const r = await run([cpVscode, cpCli]);
+    expect([vs, cli].map((id) => [r.store.session(sidOf(id))?.window, r.store.session(sidOf(id))?.surface])).toEqual([["lifetime", "vscode"], ["lifetime", "cli"]]);
   });
 });

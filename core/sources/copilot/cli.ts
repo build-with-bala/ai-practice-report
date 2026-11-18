@@ -38,11 +38,6 @@ const KNOWN_EVENTS: ReadonlySet<string> = new Set([
 /** An event type as a drift key: dotted lower-case schema tokens are kept, anything else is `(other)` / `(none)`. */
 /** An event type the reader does not know, as a drift key: never echoed. */
 const eventKey = (t: unknown): string => `event:${typeof t !== "string" ? "(none)" : "(other)"}`;
-/**
- * `host_type` values the programs write: `vscode` (the extension's copy of the store) and `github` (the CLI's store,
- * where it names the repository's host). Anything else is `other`.
- */
-const HOST_TYPES: ReadonlySet<string> = new Set(["vscode", "github"]);
 
 /** The CLI's built-in tools (the tool table the VS Code extension renders CLI sessions with, 0.66). */
 const CLI_TOOLS: ReadonlyMap<string, ToolCategory> = new Map<string, ToolCategory>([
@@ -315,8 +310,11 @@ async function scanEvents(file: string, sessionId: string, ctx: ScanCtx, tally: 
 
 // ---- the session store (schema verified locally on the VS Code extension's copy; the CLI keeps one of the same name) ----
 
-/** Columns read; every other column is never selected (turn texts, summaries, repository, branch, agent names). */
-const STORE_SESSION_COLUMNS = ["id", "cwd", "host_type", "created_at", "updated_at"] as const;
+/**
+ * Columns read; every other column is never selected (turn texts, summaries, repository, branch, agent names, and
+ * `host_type`, which names the repository's host, not a client).
+ */
+const STORE_SESSION_COLUMNS = ["id", "cwd", "created_at", "updated_at"] as const;
 const STORE_TURN_COLUMNS = ["session_id", "timestamp"] as const;
 const STORE_PAGE = 5_000;
 
@@ -344,15 +342,16 @@ async function eachStoreRow(db: RoDb, table: string, cols: string[], map: (r: Ob
   });
 }
 
-function storeSession(r: Obj, source: string, ctx: ScanCtx, tally: Tally): void {
+/** The client whose session store it is: the VS Code extension's copy, or the CLI's own store. */
+export type StoreSurface = "vscode" | "cli";
+
+function storeSession(r: Obj, source: string, surface: StoreSurface, ctx: ScanCtx, tally: Tally): void {
   const raw = str(r.id);
   if (raw === undefined) return tally.skip("bad-row");
   const start = toEpochMs(r.created_at, ctx.now);
   if (start === undefined) return tally.skip("no-ts");
   const end = Math.max(start, toEpochMs(r.updated_at, ctx.now) ?? start);
-  const s: SessionEv = { k: "session", tool: TOOL, source, id: cpSessionId(raw, ctx), window: "lifetime", origin: "human", start, end, models: [] };
-  const host = str(r.host_type);
-  if (host !== undefined) s.surface = HOST_TYPES.has(host) ? host : "other";
+  const s: SessionEv = { k: "session", tool: TOOL, source, id: cpSessionId(raw, ctx), window: "lifetime", origin: "human", start, end, models: [], surface };
   const cwd = str(r.cwd);
   if (cwd !== undefined) s.projectKey = ctx.registerCwd(cwd);
   ctx.emit(s);
@@ -370,14 +369,14 @@ function storeTurn(r: Obj, source: string, ctx: ScanCtx, tally: Tally): void {
 }
 
 /**
- * The session store (`session-store.db`): a lifetime SessionEv per `sessions` row and a lifetime TurnEv per `turns` row,
- * from the allowlisted columns only. A store that cannot be opened or read is an io-error (warn `cp.db-unopenable`,
- * `cp.db-unreadable`); it is always closed. True when its tables could be listed.
+ * The session store (`session-store.db`): a lifetime SessionEv per `sessions` row — its surface the client whose store
+ * it is — and a lifetime TurnEv per `turns` row, from the allowlisted columns only. A store that cannot be opened or read
+ * is an io-error (warn `cp.db-unopenable`, `cp.db-unreadable`); it is always closed. True when its tables could be listed.
  */
-export function readSessionStore(file: string, source: string, ctx: ScanCtx, tally: Tally): Promise<boolean> {
+export function readSessionStore(file: string, source: string, surface: StoreSurface, ctx: ScanCtx, tally: Tally): Promise<boolean> {
   return readStore(file, ctx, tally, "cp", async (db, tables) => {
     const sCols = storeColumns(db, tables, "sessions", STORE_SESSION_COLUMNS, tally);
-    if (sCols?.includes("id")) await eachStoreRow(db, "sessions", sCols, (r) => storeSession(r, source, ctx, tally), ctx, tally);
+    if (sCols?.includes("id")) await eachStoreRow(db, "sessions", sCols, (r) => storeSession(r, source, surface, ctx, tally), ctx, tally);
     const tCols = storeColumns(db, tables, "turns", STORE_TURN_COLUMNS, tally);
     if (tCols?.includes("session_id")) await eachStoreRow(db, "turns", tCols, (r) => storeTurn(r, source, ctx, tally), ctx, tally);
   });
@@ -406,7 +405,7 @@ export async function scanCli(c: Candidate, ctx: ScanCtx): Promise<void> {
   if (isDir(path.join(c.root, OLD_STATE_DIR))) tally.unknownKey(`layout:${OLD_STATE_DIR}`); // the older CLI layout, not read
   const store = path.join(c.root, "session-store.db");
   const hasStore = safeStat(store)?.isFile() ?? false;
-  const storeRead = !ctx.signal.aborted && hasStore && (await readSessionStore(store, CLI_SOURCE, ctx, life));
+  const storeRead = !ctx.signal.aborted && hasStore && (await readSessionStore(store, CLI_SOURCE, "cli", ctx, life));
   const bad = (tally.skipped["bad-record"] ?? 0) + (life.skipped["bad-record"] ?? 0);
   if (bad > 0) ctx.log("warn", "cp.bad-record", bad);
   const hasOld = isDir(path.join(c.root, OLD_STATE_DIR));

@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, statSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import type { CoverageEv, Ev, ToolEv } from "../../../core/model/events";
 import { scan } from "../../../core/scan";
 import { ccTranscripts } from "../../../core/sources/claude-code";
 import { ccPromptOrigin, unknownProvenance } from "../../../core/sources/claude-code/origin";
-import { ccToolCategory } from "../../../core/sources/claude-code/tools";
+import { BUILTIN_AGENTS, CC_BUILTIN_TOOLS, ccToolCategory } from "../../../core/sources/claude-code/tools";
 import type { ScanCtx, PluginCoverage } from "../../../core/sources/types";
 import { keyedHash } from "../../../core/text/hash";
 import { classifyIntent } from "../../../core/text/intent";
@@ -309,6 +309,31 @@ describe("claude-code transcripts: record mapping", () => {
     expectNoCanaries(allEvents(r));
   });
 
+  test("a commit marker's detail keys the sha's first 7 hex digits, lower-cased; a sha without them gives none", async () => {
+    const t = top("P23").prompt("commit it");
+    const committed = (sha: string) => ({ stdout: "", stderr: "", interrupted: false, gitOperation: { commit: { sha, kind: "commit", branch: "main" } } });
+    t.tool("toolu_k1", "Bash", { command: "git commit -m one" }, { content: "[main ABC1234] one", toolUseResult: committed("ABC1234def") })
+      .tool("toolu_k2", "Bash", { command: "git commit -m two" }, { content: "[main] two", toolUseResult: committed(`${CANARY.project}`) });
+    t.write(h, topFile("P23"));
+    const r = await run();
+    // the key repo signals give the same commit: a 7-hex prefix, whatever length and case the CLI recorded
+    expect(r.store.all("marker").filter((m) => m.kind === "commit").map((m) => m.detail)).toEqual([keyedHash(r.salt, "abc1234"), undefined]);
+    expectNoCanaries(allEvents(r));
+  });
+
+  test("tool names: a built-in keeps its name, an MCP tool is mcp, any other name is other", async () => {
+    const t = top("P24").prompt("go");
+    t.tool("toolu_n1", CANARY.project, { x: 1 }, { content: "ok" })
+      .tool("toolu_n2", "Read", { file_path: "a.ts" }, { content: "ok" })
+      .tool("toolu_n3", "TaskStop", { task_id: "b1" }, { content: "ok" }) // a built-in without a category of its own
+      .tool("toolu_n4", `mcp__${CANARY.mcp}__lookup`, {}, { content: "ok" });
+    t.write(h, topFile("P24"));
+    const r = await run();
+    const tools = r.store.all("tool");
+    expect(tools.map((x) => [x.name, x.category])).toEqual([["other", "other"], ["Read", "read"], ["TaskStop", "other"], ["mcp", "mcp"]]);
+    expectNoCanaries(tools, { allow: ["mcp"] }); // the server name, in mcpServer only
+  });
+
   test("every toolDenialKind: refusals are denied with who refused; interrupted and cancelled calls are no denial", async () => {
     const t = top("P14").prompt("run it");
     const kinds = ["user-rejected", "permission-rule", "automode-blocked", "automode-unavailable", "automode-parsing-error", "interrupted", "cancelled", "voice-veto"];
@@ -541,6 +566,31 @@ describe("claude-code transcripts: subagents", () => {
     expectNoCanaries([...allEvents(r), r.coverage]);
   });
 
+  test("agent types: a built-in one is kept, any other is hashed — whatever the meta's isBuiltIn says", async () => {
+    parent("S4", "toolu_U").write(h, topFile("S4"));
+    child("S4", "x1").write(h, `${sessDir("S4")}/subagents/agent-x1.jsonl`);
+    h.writeJson(`${sessDir("S4")}/subagents/agent-x1.meta.json`, { agentType: CANARY.project, isBuiltIn: true, toolUseId: "toolu_U" });
+    child("S4", "x2").write(h, `${sessDir("S4")}/subagents/agent-x2.jsonl`);
+    h.writeJson(`${sessDir("S4")}/subagents/agent-x2.meta.json`, { agentType: "Explore", isBuiltIn: true });
+    const r = await run();
+    const custom = r.store.session(sidOf("S4", "agent-x1"))!.agentType;
+    expect(custom).toMatch(/^[0-9a-f]{16}$/);
+    expect(custom).toBe(keyedHash(r.salt, CANARY.project));
+    expect(r.store.session(sidOf("S4", "agent-x2"))!.agentType).toBe("Explore");
+    expectNoCanaries([...allEvents(r), r.coverage]);
+  });
+
+  test("the stopped-by-user interrupt stands at the session's last record: a stand-in time (proxyTs); a typed interrupt keeps its own", async () => {
+    parent("S3", "toolu_T").user({ message: { role: "user", content: [{ type: "text", text: "[Request interrupted by user]" }] } }).write(h, topFile("S3"));
+    child("S3", "w3").write(h, `${sessDir("S3")}/subagents/agent-w3.jsonl`);
+    h.writeJson(`${sessDir("S3")}/subagents/agent-w3.meta.json`, { agentType: "general-purpose", toolUseId: "toolu_T", stoppedByUser: true });
+    const r = await run();
+    const sub = r.store.session(sidOf("S3", "agent-w3"))!;
+    const interrupts = r.store.all("marker").filter((m) => m.kind === "interrupt");
+    expect(interrupts.map((m) => [m.sessionId, m.detail, m.proxyTs])).toEqual([[sidOf("S3"), "user", undefined], [sub.id, "stopped-by-user", true]]);
+    expect(interrupts[1]!.ts).toBe(sub.end);
+  });
+
   test("an invalid meta.json counts as parse; the subagent session is still read", async () => {
     parent("S6", "toolu_W").write(h, topFile("S6"));
     child("S6", "v1").write(h, `${sessDir("S6")}/subagents/agent-v1.jsonl`);
@@ -696,4 +746,11 @@ describe("ccToolCategory", () => {
     ["Read", null, { category: "read", checks: [] }],
   ];
   for (const [name, input, want] of cases) test(`${name} ${JSON.stringify(input)}`, () => expect(ccToolCategory(name, input)).toEqual(want as never));
+
+  test("every name it maps is a built-in name a tool event keeps; FORMAT.md lists every built-in tool and agent type", () => {
+    const mapped = cases.map(([name]) => name).filter((name) => !name.startsWith("mcp__") && name !== "BrandNewTool");
+    expect(mapped.filter((name) => !CC_BUILTIN_TOOLS.has(name))).toEqual([]);
+    const doc = readFileSync(path.join(import.meta.dir, "..", "..", "..", "core", "sources", "claude-code", "FORMAT.md"), "utf8");
+    expect([...CC_BUILTIN_TOOLS, ...BUILTIN_AGENTS].filter((name) => !doc.includes(`\`${name}\``))).toEqual([]);
+  });
 });

@@ -4,8 +4,8 @@ Readers: `copilot.vscode` (`index.ts`, `journal.ts`, `map.ts`, `install.ts`; the
 `copilot.cli` (`cli.ts`, beta: built from the CLI's documentation, no CLI store verified), `copilot.jetbrains`
 (`index.ts`, beta).
 
-Evidence: **(verified locally)** = confirmed on this machine with the structure probe (`scripts/probe.ts`) or with
-count-only checks run by the reader's author. **(VS Code program)** = read from VS Code 1.138's own workbench code (its
+Evidence: **(verified locally)** = confirmed against real stores with the structure probe (`scripts/probe.ts`, which
+prints names and value types, never values) or with count-only checks run by the reader's author. **(VS Code program)** = read from VS Code 1.138's own workbench code (its
 chat session serializer, journal reader and response model). **(extension program)** = read from the bundled GitHub
 Copilot Chat extension 0.66 (its `package.json` and code). **(unverified)** = from the extension's code and the CLI's
 published event list only, not verified against a real store. This file records names and value types only, never values.
@@ -189,10 +189,11 @@ Built-in tool ids (VS Code program and extension program): see `VSCODE_TOOLS` in
     journal lines and legacy documents; `versions` = extension versions; `from`/`to` = first/last event time. Drift:
     `journal-kind:<n>`, `part:(other)`, `version:newer` (a session `version` above 3), `requests:missing`,
     `request:not-object`, `session:not-object`, `modelState:<value>`, `request.message:shape` (a `message` that is neither a
-    string nor {`text`}), `request.timestamp:shape` (a request whose `timestamp` is absent or not a time; its prompt
-    and tools are skipped `no-ts`). A store whose session files are all empty (`empty-session`) is `empty`, not `ok`.
-    Skipped: `no-ts`, `bad-ts`, `duplicate`, `empty-session`,
-    `bad-record`, `parse`, `oversize`, `too-large`, `io-error`.
+    string nor {`text`}), `request.timestamp:shape` (a request whose `timestamp` is absent or not a time). A store whose
+    session files are all empty (`empty-session`) is `empty`, not `ok`. Skipped: `no-ts` (a request of
+    `request.timestamp:shape`: it is dropped with its prompt and tools), `bad-ts` (a request whose `timestamp` is a
+    well-formed time outside the plausible range: dropped with its prompt and tools, and counted once, never also
+    `no-ts`), `duplicate`, `empty-session`, `bad-record`, `parse`, `oversize`, `too-large`, `io-error`.
   - `lifetime` (the session store): `files`/`bytes` = the store; `records` = its rows; `from`/`to` = its sessions and
     turns. Drift: `store.missing-table:<t>`, `store.missing-column:<c>`, `table-unreadable:<t>` (a table whose first
     page fails other than busy). Skipped: `bad-row`, `no-ts`, `io-error` (a busy page, a later page that fails),
@@ -213,14 +214,14 @@ keeps a store of the same name. Tables: `sessions` (`id` TEXT primary key, `cwd`
 `turn_index`, `user_message`, `assistant_response`, `timestamp` TEXT ISO), `checkpoints`, `session_files` (`file_path`,
 `tool_name`, …), `session_refs` (`ref_type`, `ref_value`, …), `schema_version`, and an FTS5 `search_index`.
 
-- Columns read: `sessions.id`, `cwd`, `host_type`, `created_at`, `updated_at`; `turns.session_id`, `timestamp` — in rowid
-  pages, explicit column lists checked against the table first (a missing one is drift). Never selected: turn texts,
-  `summary`, `repository`, `branch`, the agent fields; never read: `checkpoints`, `session_files`, `session_refs`, the
-  search index.
+- Columns read: `sessions.id`, `cwd`, `created_at`, `updated_at`; `turns.session_id`, `timestamp` — in rowid pages,
+  explicit column lists checked against the table first (a missing one is drift). Never selected: turn texts, `summary`,
+  `repository`, `branch`, `host_type` (in the CLI's store it names the repository's host, not a client), the agent
+  fields; never read: `checkpoints`, `session_files`, `session_refs`, the search index.
 - **SessionEv** (`lifetime`) per session row with a creation time: `start` = `created_at`, `end` = `updated_at` (never
-  before `start`), origin `human`, `surface` = `host_type` when a value the programs write — `vscode` (the extension's copy)
-  or `github` (the CLI's store, where it names the repository's host) — else `other`, `projectKey` from `cwd`.
-  **TurnEv** (`lifetime`) per turn row with a time, no status or duration.
+  before `start`), origin `human`, `surface` = the client whose store it is — `vscode` for the extension's copy, `cli`
+  for the CLI's own store —, `projectKey` from `cwd`. **TurnEv** (`lifetime`) per turn row with a time, no status or
+  duration.
 
 ## Copilot CLI (`copilot.cli`) (unverified)
 

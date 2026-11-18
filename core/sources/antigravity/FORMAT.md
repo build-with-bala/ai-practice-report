@@ -3,11 +3,11 @@
 Readers: `antigravity.cli` (`cli.ts`), `antigravity.history` (`history.ts`), `antigravity.ide` (`ide.ts`),
 `antigravity.brain` (`brain.ts`); plugins in `index.ts`.
 
-Evidence: **(verified locally)** = seen on the machine these readers were written on with the structure probe
-(`scripts/probe.ts`: table and column names, declared types, JSON field names and value classes, protobuf field numbers and
-wire types), or confirmed by count-only smoke runs of the readers. **(program)** = read from the installed Antigravity
-programs' own type tables — the protobuf descriptors and database column tags built into the CLI and into the IDE's language
-server — not seen in data. This file records names and value types only, never values.
+Evidence: **(verified locally)** = confirmed against real stores with the structure probe (`scripts/probe.ts`: table and
+column names, declared types, JSON field names and value classes, protobuf field numbers and wire types — never values),
+or by count-only smoke runs of the readers. **(program)** = read from the Antigravity programs' own type tables — the
+protobuf descriptors and database column tags built into the CLI and into the IDE's language server — not confirmed in
+data. This file records names and value types only, never values.
 
 **Zero-yield.** A coverage window that read records but yielded none of its reader's primary events is drift
 `zero-yield` (set by the scan), so a renamed field never passes as a quiet store. Primary events: `antigravity.cli` (`detail`) — a session,
@@ -155,8 +155,8 @@ JSONL, one object per step: `step_index` (number), `type` (string: a `CortexStep
 `CortexStepSource` name — `MODEL`, `USER_IMPLICIT`, `USER_EXPLICIT`, `SYSTEM`, `SYSTEM_SDK`, `UNSPECIFIED`; program),
 `status` (string), `created_at` (string), `content` (string), `thinking` (string), `tool_calls[]` {`name`, `args` {…,
 `toolAction`, `toolSummary`}}, `input_tokens`, `output_tokens`, `cache_read_tokens` (numbers, on model records), `error`
-(string), `media[]` {`mime_type`, `uri`}, `truncated_fields[]` (strings: fields cut short). No model field was seen.
-`input_tokens` excludes cached tokens (a count-only check: it is below `cache_read_tokens` on most records).
+(string), `media[]` {`mime_type`, `uri`}, `truncated_fields[]` (strings: fields cut short). The records carry no model
+field (unverified). `input_tokens` excludes the cached tokens, which `cache_read_tokens` counts apart (unverified).
 
 - **PromptEv** (window `detail`) per `USER_INPUT` record from `USER_EXPLICIT`, its origin the conversation's (`human`,
   `scripted`, `peer` or `system`, from the summary row; `human` without one) — unless the conversation is a subagent's (its

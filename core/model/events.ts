@@ -43,8 +43,9 @@ interface Base { tool: ToolId; source: string }   // source = plugin id
  * id the store merges them (store.ts): the detail-window report decides the fields below, the other fills the gaps.
  * - `surface`: the client the session ran in, as the tool names it — Claude Code's `entrypoint` (`cli`, `sdk-cli`, …),
  *   Codex's `source` (`cli`, `vscode`, `exec`, `mcp`, `custom`, `internal`, `unknown`, `subagent`, else `other`),
- *   `cli`/`ide`/`battle` (Antigravity), `vscode`/`cli` (Copilot; its session stores' `host_type`, `vscode` or `github`,
- *   else `other`), `ide` (Cursor). Every value but Claude Code's comes from an allowlist.
+ *   `cli`/`ide`/`battle` (Antigravity), `vscode`/`cli` (Copilot: the client whose files or session store the session
+ *   comes from — the VS Code extension's or the CLI's), `ide` (Cursor). Every value but Claude Code's comes from an
+ *   allowlist.
  * - `mode`: the interaction mode, for tools whose sessions are either an autonomous agent run or a chat (Copilot VS
  *   Code, Cursor): `agent` when any request of the session ran in agent mode, else `chat`. Absent where a tool has one
  *   mode only (Claude Code, Codex, the CLIs: agent runs).
@@ -106,7 +107,8 @@ export interface TotalsEv extends Base { k: "totals"; sessionId: string; linesAd
  * | denial                                | who refused a tool call: `user`, `rule` (a permission rule), `auto` (an  |
  * |                                       | automatic permission check), `other`                                      |
  * | pr-link                               | keyed hash of the pull request (its URL, else repo#number)               |
- * | commit                                | keyed hash of the commit sha, when known                                 |
+ * | commit                                | keyed hash of the sha's first 7 hex digits, lower-cased (the key repo    |
+ * |                                       | signals give the same commit), when known                                 |
  * | plan-artifact                         | the artifact: `task`, `implementation_plan`, `walkthrough`               |
  * | model-switch                          | the family named: `opus`, `sonnet`, `haiku`, `fable`, `other`; none when |
  * |                                       | the picker was opened                                                     |
@@ -118,8 +120,9 @@ export interface TotalsEv extends Base { k: "totals"; sessionId: string; linesAd
  * | plan-enter, plan-exit, queue, error   |                                                                           |
  *
  * `queue` is one prompt the person queued while the agent worked (a lifetime count of queue use is a ConfigEv
- * `feature`). `proxyTs`: `ts` is a stand-in, not when the thing happened — a file's modification time (`plan-artifact`)
- * or the conversation's last change (Antigravity's `killed`): it places the marker, but never counts as activity.
+ * `feature`). `proxyTs`: `ts` is a stand-in, not when the thing happened — a file's modification time
+ * (`plan-artifact`), the conversation's last change (Antigravity's `killed`) or the session's last record (Claude
+ * Code's `stopped-by-user`): it places the marker, but never counts as activity.
  */
 export interface MarkerEv extends Base { k: "marker"; ts: number; sessionId?: string; kind: MarkerKind; detail?: string; proxyTs?: true }
 

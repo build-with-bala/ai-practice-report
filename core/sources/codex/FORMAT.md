@@ -3,9 +3,10 @@
 Readers: `codex.rollouts` (`rollouts.ts`, `tools.ts`, `uuid.ts`, `origin.ts`, `effort.ts`); the lifetime layer (thread
 index, turn history, prompt history, configuration) is documented in the second half of this file.
 
-Evidence: **(verified locally)** = the type or field was confirmed on this machine with the structure probe
-(`scripts/probe.ts`) or with count-only checks run by the reader's author. **(CLI program)** = read from the installed
-CLI program's own type tables (0.169.0), not seen locally. This file records names and value types only, never values.
+Evidence: **(verified locally)** = the type or field was confirmed against real rollouts and stores with the structure
+probe (`scripts/probe.ts`, which prints names and value types, never values) or with count-only checks run by the
+reader's author. **(CLI program)** = read from the CLI program's own type tables (0.169.0), not confirmed with the
+probe. This file records names and value types only, never values.
 
 **Zero-yield.** A coverage window that read records but yielded none of its reader's primary events is drift
 `zero-yield` (set by the scan), so a renamed field never passes as a quiet store. Primary events: `codex.rollouts` — a session, prompt or

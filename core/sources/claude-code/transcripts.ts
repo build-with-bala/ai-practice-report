@@ -12,7 +12,7 @@ import { idPart, isObj, num, safeModel, str, UUID, VERSION, type Obj } from "../
 import { streamJsonlFile } from "../common/stream";
 import type { Candidate, ScanCtx } from "../types";
 import { ccPromptOrigin, isInterrupt, typedText, unknownProvenance, userText } from "./origin";
-import { ccToolCategory, mcpServerOf, patchLines, SHELL } from "./tools";
+import { BUILTIN_AGENTS, CC_BUILTIN_TOOLS, ccToolCategory, mcpServerOf, patchLines, SHELL } from "./tools";
 
 export const TRANSCRIPTS_SOURCE = "claude-code.transcripts";
 const TOOL = "claude-code";
@@ -49,19 +49,20 @@ const MESSAGE_WINDOW = 256;
 const PENDING_TOOLS = 4096;
 const DONE_TOOLS = 4096;
 const PERMISSION_MODES = new Set(["default", "acceptEdits", "plan", "auto", "bypassPermissions"]);
-/** Agent types the CLI ships; any other agent type is a config name and is kept only as a keyed hash. */
-const BUILTIN_AGENTS = new Set([
-  "general-purpose", "Explore", "Plan", "claude", "fork", "statusline-setup", "output-style-setup", "claude-code-guide",
-  "comment-thread-analyst", "workflow-subagent",
-]);
 const SURFACE = /^[a-z][a-z0-9-]{0,31}$/;
-const TOOL_NAME = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
 const EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
+/** A commit's sha starts with at least 7 hex digits; those 7, lower-cased, are its key (`commitKey`). */
+const SHA_HEAD = /^[0-9a-f]{7}/i;
 /** Names the CLI gives its files and folders (sessions are UUID-named); any other name is hashed before it becomes part of an id. */
 const AGENT_STEM = /^agent-[A-Za-z0-9]+$/;
 const WORKFLOW_DIR = /^wf_[A-Za-z0-9_-]+$/;
 
 const safeEffort = (e: string | undefined): string | undefined => (e === undefined || EFFORTS.has(e) ? e : "other");
+/**
+ * The key of a commit: its sha's first 7 hex digits, lower-cased, whatever length and case the CLI recorded — the key
+ * repo signals give the same commit, so a commit seen in both is one. Undefined for a sha without them.
+ */
+const commitKey = (sha: string | undefined): string | undefined => (sha === undefined ? undefined : SHA_HEAD.exec(sha)?.[0].toLowerCase());
 
 /**
  * `toolDenialKind` of a tool reply (CLI program): the call did not run to an end of its own. Refusals are denials,
@@ -96,7 +97,7 @@ export class CcTally extends Tally {
 }
 
 /** The allowlisted part of `agent-*.meta.json`. */
-interface Meta { agentType?: string; isBuiltIn?: boolean; spawnDepth?: number; model?: string; toolUseId?: string; background?: boolean; stoppedByUser: boolean }
+interface Meta { agentType?: string; spawnDepth?: number; model?: string; toolUseId?: string; background?: boolean; stoppedByUser: boolean }
 
 /** `stem`: the raw file stem of a top-level transcript, compared with its records' `sessionId` (diagnostic only). */
 interface FileSpec { file: string; sessionId: string; sub: boolean; stem?: string; parentId?: string; meta?: Meta; workflowId?: string }
@@ -109,7 +110,6 @@ function readMeta(file: string, tally: Tally): Meta | undefined {
   const depth = num(v.spawnDepth);
   return {
     agentType: str(v.agentType),
-    isBuiltIn: typeof v.isBuiltIn === "boolean" ? v.isBuiltIn : undefined,
     spawnDepth: depth !== undefined && Number.isInteger(depth) && depth >= 0 ? depth : undefined,
     model: str(v.model),
     toolUseId: str(v.toolUseId),
@@ -313,7 +313,7 @@ class TranscriptReader {
     const { category, checks, editExt } = ccToolCategory(name, b.input);
     const ev: ToolEv = {
       k: "tool", tool: TOOL, source: TRANSCRIPTS_SOURCE, ts, sessionId: this.spec.sessionId, callId: id,
-      name: category === "mcp" ? "mcp" : TOOL_NAME.test(name) ? name : "other", category,
+      name: category === "mcp" ? "mcp" : CC_BUILTIN_TOOLS.has(name) ? name : "other", category,
     };
     if (checks.length > 0) ev.checks = checks;
     if (editExt !== undefined) ev.editExt = editExt;
@@ -376,8 +376,8 @@ class TranscriptReader {
       }
       const commit = isObj(r.gitOperation) && isObj(r.gitOperation.commit) ? r.gitOperation.commit : undefined;
       if (commit) {
-        const sha = str(commit.sha);
-        this.marker("commit", ts, sha === undefined ? undefined : this.ctx.hash(sha));
+        const key = commitKey(str(commit.sha));
+        this.marker("commit", ts, key === undefined ? undefined : this.ctx.hash(key));
       }
     }
     this.out(ev);
@@ -452,7 +452,10 @@ class TranscriptReader {
     this.messages.clear();
     if (this.cost) this.out(this.cost);
     if (this.start !== undefined && this.end !== undefined) {
-      if (this.spec.meta?.stoppedByUser) this.marker("interrupt", this.end, "stopped-by-user");
+      // the meta says the person stopped the subagent, not when: the session's last record stands in (proxyTs), never activity
+      if (this.spec.meta?.stoppedByUser) {
+        this.out({ k: "marker", tool: TOOL, source: TRANSCRIPTS_SOURCE, ts: this.end, sessionId: this.spec.sessionId, kind: "interrupt", detail: "stopped-by-user", proxyTs: true });
+      }
       this.out(this.session(this.start, this.end));
       this.tally.span(this.start);
       this.tally.span(this.end);
@@ -491,7 +494,7 @@ class TranscriptReader {
     const m = spec.meta;
     if (m) {
       if (m.spawnDepth !== undefined) s.spawnDepth = m.spawnDepth;
-      if (m.agentType !== undefined) s.agentType = (m.isBuiltIn ?? BUILTIN_AGENTS.has(m.agentType)) ? m.agentType : this.ctx.hash(m.agentType);
+      if (m.agentType !== undefined) s.agentType = BUILTIN_AGENTS.has(m.agentType) ? m.agentType : this.ctx.hash(m.agentType);
       if (m.background !== undefined) s.background = m.background;
       if (s.models.length === 0 && m.model !== undefined && m.model !== "inherit") s.models = [safeModel(m.model)];
     }

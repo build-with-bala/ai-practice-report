@@ -21,6 +21,27 @@ const FIXED = new Map<string, ToolCategory>([
 ]);
 /** Tools whose `input.command` is a shell command line (PowerShell is the Windows counterpart of Bash). */
 export const SHELL = new Set(["Bash", "PowerShell"]);
+/**
+ * The CLI's other built-in tools (CLI program: its own list of built-in tool names, and older names it still knows): no
+ * category of their own (`other`), but a built-in name, so a tool event keeps it. FORMAT.md lists them.
+ */
+const OTHER_BUILTINS = [
+  "Artifact", "ArtifactCheck", "ArtifactComments", "ArtifactData", "BashOutput", "ClaudeDesign", "CronDelete", "CronList",
+  "EndConversation", "EnterWorktree", "ExitWorktree", "ListAgents", "ListMcpResourcesTool", "LSP", "NotebookRead", "OfferChromeSetup",
+  "Projects", "propose_skills", "PushNotification", "ReadMcpResourceDirTool", "ReadMcpResourceTool", "ReadNotifications", "RemoteTrigger",
+  "ReportFindings", "SendFeedback", "SendMessage", "SendUserFile", "SendUserMessage", "SetGoal", "ShareOnboardingGuide",
+  "ShowOnboardingRolePicker", "SubagentHandback", "TaskGet", "TaskList", "TaskOutput", "TaskStop", "WaitForMcpServers",
+];
+/**
+ * The tool names a ToolEv keeps (any other name becomes `other`, so a name the person chose never leaves as a tool
+ * name): every name `ccToolCategory` maps, and the CLI's other built-in tools.
+ */
+export const CC_BUILTIN_TOOLS: ReadonlySet<string> = new Set([...FIXED.keys(), ...SHELL, ...OTHER_BUILTINS]);
+/** Agent types the CLI ships; any other agent type is a config name and is kept only as a keyed hash. */
+export const BUILTIN_AGENTS: ReadonlySet<string> = new Set([
+  "general-purpose", "Explore", "Plan", "claude", "fork", "statusline-setup", "output-style-setup", "claude-code-guide",
+  "comment-thread-analyst", "workflow-subagent",
+]);
 const MCP = /^mcp__(.+?)__(.+)$/;
 
 /** Server part of an `mcp__<server>__<tool>` name; undefined for any other tool. */

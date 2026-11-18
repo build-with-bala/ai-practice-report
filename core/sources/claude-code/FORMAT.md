@@ -131,8 +131,8 @@ manual), preTokens, postTokens, durationMs, preservedSegment, …}`, `logicalPar
   `toolUseId` (string — the parent's `tool_use.id`; not set for workflow agents, which no tool call starts), `model`
   (string), `requestShape` (`foreground` | `background`), `stoppedByUser` (bool), plus `description`, `name`,
   `workflowPhase` (text), `isFork`, `finished`, `requestNonInteractive`, `launchedWithDefaults`, `parentAgentId`,
-  `pickedEffortModel`, `spawnMode`. Read: `agentType`, `isBuiltIn`, `spawnDepth`, `model`, `toolUseId`,
-  `requestShape`, `stoppedByUser`.
+  `pickedEffortModel`, `spawnMode`. Read: `agentType`, `spawnDepth`, `model`, `toolUseId`, `requestShape`,
+  `stoppedByUser`.
 - `workflows/wf_<w>.json` (verified locally): `runId`, `taskId`, `status`, `agentCount`, `durationMs`, `totalToolCalls`,
   `totalTokens`, `startTime`, `timestamp`, `defaultModel`, `phases[]`, `workflowProgress[]`, `logs[]`, `args[]`,
   `result`, `summary`, `workflowName`, `script`, `scriptPath`. Read: `durationMs` only.
@@ -149,15 +149,33 @@ manual), preTokens, postTokens, durationMs, preservedSegment, …}`, `logicalPar
   renamed field) stays `human`; `subagent` for agent files, with `parentId` = the top-level session and, for workflow agents,
   `workflowId` = keyed hash of `wf_<w>`. `start`/`end` = min/max record timestamp, `models` = distinct
   non-synthetic assistant models (subagent fallback: meta `model`), `version` = last `version` seen, `projectKey` from
-  the first `cwd`, `surface` = first `entrypoint`, `agentType` raw for built-in agents (`isBuiltIn`, else the CLI's
-  built-in list) and a keyed hash for custom ones. A model string that is not id-shaped becomes `other`.
+  the first `cwd`, `surface` = first `entrypoint`, `agentType` = the meta's `agentType` when it is one of the CLI's
+  built-in agent types (`BUILTIN_AGENTS` in `tools.ts`: `general-purpose`, `Explore`, `Plan`, `claude`, `fork`,
+  `statusline-setup`, `output-style-setup`, `claude-code-guide`, `comment-thread-analyst`, `workflow-subagent`), else
+  its keyed hash — the meta's `isBuiltIn` does not decide, and is not read. A model string that is not id-shaped
+  becomes `other`.
 - `PromptEv` only from top-level files, per `ccPromptOrigin` (origin.ts): any `sdk*` entrypoint → scripted; a
   `turnOrigin`/`promptSource` value the mapping does not know → system, and counted in coverage `unknownTypes` as
   `turnOrigin:<other>` / `promptSource:<other>` (the value itself is never kept); the text is
   consulted only when both fields are absent. Slash-command and bash-mode markup is turned back into `/name args` /
   `!command` before intent, features and the text hash.
-- `ToolEv` per `tool_use` (deduplicated by id), closed by its `tool_result`; MCP tools get `name:"mcp"` and the server in
-  `mcpServer`; Agent/Task tools get `delegateTo` via meta `toolUseId`; `AskUserQuestion` and `ToolSearch` are `meta`.
+- `ToolEv` per `tool_use` (deduplicated by id), closed by its `tool_result`; `name` = the tool's name when it is a
+  built-in (below), `mcp` for MCP tools (the server in `mcpServer`), else `other`, so a name the person chose never
+  leaves as a tool name; Agent/Task tools get `delegateTo` via meta `toolUseId`; `AskUserQuestion` and `ToolSearch` are
+  `meta`.
+  - Built-in tools (`CC_BUILTIN_TOOLS` in `tools.ts`) with a category of their own: `Read` (read); `Grep`, `Glob`
+    (search); `Edit`, `MultiEdit`, `NotebookEdit` (edit); `Write` (write); `Agent`, `Task` (delegate); `Workflow`
+    (workflow); `TodoWrite`, `TaskCreate`, `TaskUpdate` (todo); `EnterPlanMode`, `ExitPlanMode` (plan); `WebFetch`,
+    `WebSearch` (web); `Skill` (skill); `Monitor` (monitor); `CronCreate`, `ScheduleWakeup` (schedule);
+    `AskUserQuestion`, `ToolSearch` (meta); `Bash`, `PowerShell` (by their command line).
+  - The CLI's other built-in tools, category `other` (CLI program, 2.1.327: its lists of built-in tool names, older
+    names included): `Artifact`, `ArtifactCheck`, `ArtifactComments`, `ArtifactData`, `BashOutput`, `ClaudeDesign`,
+    `CronDelete`, `CronList`, `EndConversation`, `EnterWorktree`, `ExitWorktree`, `ListAgents`, `ListMcpResourcesTool`,
+    `LSP`, `NotebookRead`, `OfferChromeSetup`, `Projects`, `propose_skills`, `PushNotification`,
+    `ReadMcpResourceDirTool`, `ReadMcpResourceTool`, `ReadNotifications`, `RemoteTrigger`, `ReportFindings`,
+    `SendFeedback`, `SendMessage`, `SendUserFile`, `SendUserMessage`, `SetGoal`, `ShareOnboardingGuide`,
+    `ShowOnboardingRolePicker`, `SubagentHandback`, `TaskGet`, `TaskList`, `TaskOutput`, `TaskStop`,
+    `WaitForMcpServers`.
   A reply with `toolDenialKind` did not run to an end of its own: `outcome` `denied` (`user-rejected`,
   `permission-rule`, `automode-blocked`, `automode-unavailable`, `automode-parsing-error`, and any other value — that
   one also drift `toolDenialKind:(other)`), `interrupted` or `cancelled`, as is a shell command whose `toolUseResult`
@@ -168,11 +186,14 @@ manual), preTokens, postTokens, durationMs, preservedSegment, …}`, `logicalPar
 - `TurnEv` per `turn_duration` (`effort` outside `low|medium|high|xhigh|max` becomes `other`); `TotalsEv` from the
   last `cost-state` and from each workflow summary (`claude-code:wf:<workflowId>`); `IdentityEv` per distinct
   `session-owner.accountUuid`; `FileFactEv` per fully read transcript.
-- `MarkerEv`: `interrupt` (`detail` `user` for the interrupt text, `stopped-by-user` for meta `stoppedByUser`),
+- `MarkerEv`: `interrupt` (`detail` `user` for the interrupt text; `stopped-by-user` for meta `stoppedByUser`, at the
+  session's last record with `proxyTs: true` — the meta says that the person stopped the subagent, not when),
   `compact-auto`/`compact-manual`, `permission-mode` (changes only), `pr-link` (one per PR, `detail` = keyed hash of the
   URL), `queue` (a human prompt with `promptSource:"queued"`), `denial` per refused call (`detail` = who refused:
   `user` for `user-rejected`, `rule` for `permission-rule`, `auto` for the `automode-*` kinds, `other`),
-  `plan-enter`/`plan-exit` (tools), `commit` (`toolUseResult.gitOperation.commit`, `detail` = keyed hash of the sha).
+  `plan-enter`/`plan-exit` (tools), `commit` (`toolUseResult.gitOperation.commit`; `detail` = keyed hash of the sha's
+  first 7 hex digits, lower-cased — the key repo signals give the same commit, so it is counted once; none when the
+  sha does not start with 7 hex digits).
 - `CoverageEv.skipped` reasons: `sniffed`, `oversize`, `parse`, `io-error`, `too-large`, `copied` (below),
   `bad-record` (a record the mapper could not handle; also logged once per root as `warn cc.bad-record`), `bad-ts` (a
   well-formed time outside the plausible range), `no-ts` (a prompt, reply, tool call or turn duration whose record has
