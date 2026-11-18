@@ -8,17 +8,25 @@ import path from "node:path";
  */
 export type OpenHow = "stream" | "read" | "sqlite" | "header" | "copy";
 
-/** Credential and token files, by name: Codex's `auth.json`, Claude Code's `.credentials.json`, Copilot's `apps.json` and `hosts.json`, SSH private keys. */
+/**
+ * Credential and token files, by name: Codex's `auth.json`, Claude Code's `.credentials.json`, Copilot's `apps.json` and
+ * `hosts.json`, SSH private keys; and the OAuth, account, token and secret files other AI CLIs and editors keep beside
+ * their data.
+ */
 const NEVER_OPENED_NAMES: ReadonlySet<string> = new Set([
   "auth.json", ".credentials.json", "apps.json", "hosts.json",
   "id_rsa", "id_dsa", "id_ecdsa", "id_ecdsa_sk", "id_ed25519", "id_ed25519_sk",
+  "oauth_creds.json", "google_accounts.json", "mcp-auth.json", "secrets.json", "credentials.toml", "sso_tokens.toml",
+  "kiro-auth-token.json", "oauth-keys.env", "secrets.yaml",
 ]);
-/** Key files and OS keychains, by ending. */
-const NEVER_OPENED_ENDINGS = [".key", ".keychain", ".keychain-db"];
+/** Key files, OS keychains and password databases (KeePass), by ending. */
+const NEVER_OPENED_ENDINGS = [".key", ".keychain", ".keychain-db", ".kdbx"];
+/** Names that vary: MCP OAuth token files (`mcp-oauth-tokens*.json`). */
+const NEVER_OPENED_PATTERNS = [/^mcp-oauth-tokens.*\.json$/];
 
 const neverOpenedName = (name: string): boolean => {
   const n = name.toLowerCase();
-  return NEVER_OPENED_NAMES.has(n) || NEVER_OPENED_ENDINGS.some((end) => n.endsWith(end));
+  return NEVER_OPENED_NAMES.has(n) || NEVER_OPENED_ENDINGS.some((end) => n.endsWith(end)) || NEVER_OPENED_PATTERNS.some((re) => re.test(n));
 };
 
 /**

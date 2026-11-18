@@ -200,6 +200,26 @@ describe("the refusal: no core/io primitive opens a never-opened file", () => {
     if (link(h.write(".codex/auth.json", "{}"), linked)) expect(isNeverOpened(linked)).toBe(true);
   });
 
+  /** The OAuth, token and secret files that AI CLIs and editors keep beside their data, by name (a pattern and an ending included). */
+  const AI_CREDENTIALS = [
+    "oauth_creds.json", "google_accounts.json", "mcp-oauth-tokens.json", "mcp-oauth-tokens-v2.json", "mcp-auth.json", "secrets.json",
+    "credentials.toml", "sso_tokens.toml", "kiro-auth-token.json", "oauth-keys.env", "secrets.yaml", "passwords.kdbx",
+  ];
+  for (const name of AI_CREDENTIALS) {
+    test(`${name}: never opened, in any case — the attempt is refused, and reads as unreadable`, async () => {
+      const file = h.write(path.join(".tool", name), JSON.stringify({ token: CANARY.secret }));
+      const upper = h.write(path.join(".tool", "upper", name.toUpperCase()), "{}");
+      expect([isNeverOpened(file), isNeverOpened(upper)]).toEqual([true, true]);
+      const opens = await recordOpens(() => expect(readJsonSmallResult(file)).toEqual({ ok: false, reason: "io-error" }));
+      expect(opens).toEqual([{ path: file, how: "read" }]); // attempted, and refused before anything was read
+    });
+  }
+
+  test("names near the credential ones are opened as usual", () => {
+    const near = ["oauth_creds.jsonl", "my-secrets.json", "secrets.json.example", "mcp-oauth-tokens.txt", "mcp-oauth.json", "credentials.toml.bak", "kdbx-notes.md", "sso_tokens.json"];
+    expect(near.filter((name) => isNeverOpened(path.join(h.env.home, ".tool", name)))).toEqual([]);
+  });
+
   test("each primitive reports the attempt and refuses it: JSONL and text lines throw, a small JSON read is unreadable, a store is null", async () => {
     const auth = h.write(".codex/auth.json", `${JSON.stringify({ token: CANARY.secret })}\n`);
     const key = h.write(".codex/x.key", "[x]\n");
