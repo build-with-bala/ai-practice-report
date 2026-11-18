@@ -1,6 +1,8 @@
 // Local acceptance run: scans this machine's real stores with every P0 plugin and prints COUNTS ONLY — never names,
-// paths, ids or text. Exit code 1 when a P0 plugin errors, the scan leaves temp files, a budget is exceeded, or too
-// few Codex command events had a command line to classify.
+// paths, ids or text, and no date finer than a month. Every `key=value` value is a number, a ratio, `n/a` or `-`, a
+// boolean, a month span or a short code (the grammar test/scripts/smoke.test.ts pins); a key holds no `=`. Exit code 1
+// when a P0 plugin errors, the scan leaves temp files, a budget is exceeded, or too few Codex command events had a
+// command line to classify.
 //   bun scripts/smoke-local.ts [--concurrency <n>]
 import path from "node:path";
 import { detectEnv, type Env } from "../core/env/env";
@@ -21,7 +23,10 @@ const DAY_MS = 86_400_000;
 const CODE = /^[a-z][a-z0-9_.:-]{0,47}$/;
 
 const code = (s: string): string => (CODE.test(s) ? s : "other");
-const month = (ms: number | undefined): string => (ms === undefined ? "-" : new Date(ms).toISOString().slice(0, 7));
+const month = (ms: number): string => new Date(ms).toISOString().slice(0, 7);
+/** A coverage span in months; `-..-` unless both ends are known. */
+const span = (from: number | undefined, to: number | undefined): string =>
+  from === undefined || to === undefined ? "-..-" : `${month(from)}..${month(to)}`;
 const share = (n: number, of: number): string => (of === 0 ? "n/a" : (n / of).toFixed(3));
 const mib = (bytes: number): string => `${Math.round(bytes / MiB)} MiB`;
 const tally = (into: Map<string, number>, key: string, n = 1): void => {
@@ -48,13 +53,13 @@ function subagentFiles(env: Env): number {
   return n;
 }
 
-function coverageLine(c: CoverageEv): string {
+export function coverageLine(c: CoverageEv): string {
   const skipped = new Map<string, number>();
   for (const [reason, n] of Object.entries(c.skipped)) tally(skipped, code(reason), n);
   const unknown = Object.values(c.unknownTypes);
   return [
     c.source.padEnd(24), c.window.padEnd(8), c.status.padEnd(19), `files=${c.files}`, `records=${c.records}`,
-    `unknown=${unknown.length}/${unknown.reduce((a, b) => a + b, 0)}`, `span=${month(c.from)}..${month(c.to)}`, `skipped: ${pairs(skipped)}`,
+    `unknown=${unknown.length}/${unknown.reduce((a, b) => a + b, 0)}`, `span=${span(c.from, c.to)}`, `skipped: ${pairs(skipped)}`,
   ].join(" ");
 }
 
@@ -151,14 +156,15 @@ export async function main(argv: string[]): Promise<number> {
   out.push(`claude-code subagent sessions=${subagentSessions} subagent files on disk=${onDisk} ${subagentSessions === onDisk ? "(equal)" : "(MISMATCH)"}`);
   const extracted = logs.get("debug codex.cmd-extracted") ?? 0;
   const missing = logs.get("debug codex.cmd-missing") ?? 0;
-  out.push(`codex command events with a command line=${extracted} without=${missing} extracted share=${share(extracted, extracted + missing)} (gate >= ${MIN_EXTRACTED_SHARE})`);
+  out.push(`codex command events with a command line=${extracted} without=${missing} extracted share=${share(extracted, extracted + missing)} (gate: at least ${MIN_EXTRACTED_SHARE})`);
   if (extracted + missing > 0 && extracted / (extracted + missing) < MIN_EXTRACTED_SHARE) failures.push("codex extracted-command share below the gate");
   const codexTools = r.store.all("tool").filter((t) => t.tool === "codex");
   const codexCommands = codexTools.filter((t) => SHELL_TOOLS.has(t.name)); // Codex's shell-command tools
   const notShell = (list: typeof codexTools) => list.filter((t) => t.category !== "shell").length;
-  out.push(`codex tool events=${codexTools.length} non-shell share=${share(notShell(codexTools), codexTools.length)}; command events=${codexCommands.length} non-shell share=${share(notShell(codexCommands), codexCommands.length)}`);
+  out.push(`codex tool events=${codexTools.length} non-shell share=${share(notShell(codexTools), codexTools.length)}`);
+  out.push(`codex command events=${codexCommands.length} non-shell share=${share(notShell(codexCommands), codexCommands.length)}`);
   const copilotSince = (ms: number) => sessions.filter((s) => s.tool === "copilot" && s.start >= ms).length;
-  out.push(`copilot sessions from 2026-02-23 (journal format)=${copilotSince(COPILOT_JOURNAL_SINCE)} from 2026-02-24=${copilotSince(COPILOT_JOURNAL_SINCE + DAY_MS)}`);
+  out.push(`copilot sessions since the journal format's first day=${copilotSince(COPILOT_JOURNAL_SINCE)} since its second day=${copilotSince(COPILOT_JOURNAL_SINCE + DAY_MS)}`);
   out.push(`antigravity IDE trajectories=${sessions.filter((s) => s.source === "antigravity.ide").length}`);
 
   out.push("== warnings and logs");

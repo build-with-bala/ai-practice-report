@@ -2,6 +2,7 @@ import { constants, Database } from "bun:sqlite";
 import { closeSync, copyFileSync, existsSync, lstatSync, openSync, readSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import type { TempDirs } from "../sources/types";
+import { noteOpen } from "./observe";
 
 export const MAX_COPY_BYTES = 2_147_483_648;
 
@@ -84,6 +85,7 @@ function closeQuietly(db: Database): void {
 }
 
 function tryOpen(file: string, opener: (uri: string) => Database, params = "mode=ro"): Database {
+  noteOpen(file, "sqlite");
   const db = opener(`${sqliteUri(file)}?${params}`);
   try {
     db.query("PRAGMA schema_version").get();
@@ -96,6 +98,7 @@ function tryOpen(file: string, opener: (uri: string) => Database, params = "mode
 
 /** The database header says WAL mode: its file format write and read versions (bytes 18 and 19) are both 2. */
 function walMode(file: string): boolean {
+  noteOpen(file, "header");
   let fd: number | undefined;
   try {
     fd = openSync(file, "r");
@@ -186,7 +189,9 @@ export function openRo(file: string, temp: TempDirs, opener: (uri: string) => Da
     const dir = temp.dir();
     const dest = path.join(dir, path.basename(store));
     for (const suffix of ["", "-wal", "-shm"]) {
-      if (existsSync(store + suffix)) copyFileSync(store + suffix, dest + suffix);
+      if (!existsSync(store + suffix)) continue;
+      noteOpen(store + suffix, "copy");
+      copyFileSync(store + suffix, dest + suffix);
     }
     return new Handle(tryOpen(dest, opener), true);
   } catch {

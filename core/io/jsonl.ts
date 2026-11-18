@@ -1,4 +1,5 @@
 import { fileState } from "./fs";
+import { noteOpen } from "./observe";
 import { maybeYield } from "./yield";
 
 export const MAX_LINE_BYTES = 33_554_432;
@@ -52,6 +53,7 @@ export async function* readJsonl(path: string, opts: JsonlOpts = {}): AsyncGener
   const state = fileState(path);
   if (state === "missing") return;
   if (state !== "file") throw new Error(state === "error" ? "the path cannot be stat'ed" : `not a regular file (${state})`);
+  noteOpen(path, "stream");
   yield* readJsonlStream(Bun.file(path).stream() as ReadableStream<Uint8Array>, opts);
 }
 

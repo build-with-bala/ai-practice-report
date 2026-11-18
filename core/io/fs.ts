@@ -1,5 +1,7 @@
 import { lstatSync, readdirSync, readFileSync, statSync, type Stats } from "node:fs";
 import path from "node:path";
+import { noteOpen } from "./observe";
+import { maybeYield } from "./yield";
 
 export function safeList(dir: string): string[] {
   try {
@@ -67,6 +69,7 @@ export function readJsonSmallResult(p: string, maxBytes: number = 8 * 1024 * 102
     return { ok: false, reason: (e as { code?: string }).code === "ENOENT" ? "missing" : "io-error" };
   }
   if (size > maxBytes) return { ok: false, reason: "too-large" };
+  noteOpen(p, "read");
   let text: string;
   try {
     text = readFileSync(p, "utf8");
@@ -84,6 +87,51 @@ export function readJsonSmallResult(p: string, maxBytes: number = 8 * 1024 * 102
 export function readJsonSmall(p: string, maxBytes: number = 8 * 1024 * 1024): unknown | undefined {
   const r = readJsonSmallResult(p, maxBytes);
   return r.ok ? r.value : undefined;
+}
+
+/**
+ * The lines of a text file, streamed with bounded memory, links followed: split at `\n` (a `\r` before it is kept), a
+ * leading UTF-8 BOM dropped, invalid UTF-8 replaced; a last line without a newline is yielded unless it is empty.
+ * `maxBytes` caps each line, never the file: a longer line ends the read with a RangeError. Between chunks the read lets
+ * the event loop run (`maybeYield`); once `signal` is aborted it ends early, and the caller must not count the file as
+ * fully read. Any I/O failure throws, a missing path included: callers stat the path first.
+ */
+export async function* readTextLines(p: string, o: { maxBytes: number; signal?: AbortSignal }): AsyncGenerator<string> {
+  noteOpen(p, "stream");
+  const decoder = new TextDecoder("utf-8", { ignoreBOM: true });
+  let parts: Uint8Array[] = []; // pieces of the current line, joined once its newline arrives
+  let carry = 0;
+  let first = true;
+  const take = (tail: Uint8Array): string => {
+    let line = parts.length === 0 ? tail : Buffer.concat([...parts, tail]);
+    parts = [];
+    carry = 0;
+    if (first) {
+      first = false;
+      if (line[0] === 0xef && line[1] === 0xbb && line[2] === 0xbf) line = line.subarray(3);
+    }
+    return decoder.decode(line);
+  };
+  for await (const chunk of Bun.file(p).stream()) {
+    const pause = maybeYield();
+    if (pause) await pause;
+    if (o.signal?.aborted) return;
+    for (let pos = 0; pos < chunk.length;) {
+      const nl = chunk.indexOf(10, pos);
+      const end = nl === -1 ? chunk.length : nl;
+      if (carry + end - pos > o.maxBytes) throw new RangeError("line too long");
+      if (nl === -1) {
+        parts.push(chunk.subarray(pos));
+        carry += end - pos;
+        break;
+      }
+      yield take(chunk.subarray(pos, nl));
+      pos = nl + 1;
+    }
+  }
+  if (carry === 0) return;
+  const last = take(new Uint8Array(0));
+  if (last !== "") yield last;
 }
 
 /**

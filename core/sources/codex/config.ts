@@ -1,8 +1,7 @@
 import { realpathSync } from "node:fs";
 import path from "node:path";
-import { isDir, isFile, safeStat } from "../../io/fs";
+import { isDir, isFile, readTextLines, safeStat } from "../../io/fs";
 import { MAX_LINE_BYTES } from "../../io/jsonl";
-import { maybeYield } from "../../io/yield";
 import type { ConfigEv } from "../../model/events";
 import { isTypeName, listDir, readSidecar, Tally } from "../common/coverage";
 import { isObj } from "../common/guards";
@@ -189,33 +188,6 @@ export class TomlHeaders {
   }
 }
 
-/** Lines of a text file, streamed; a line longer than MAX_LINE_BYTES characters ends the read with a RangeError. */
-async function* textLines(file: string, signal: AbortSignal): AsyncGenerator<string> {
-  const decoder = new TextDecoder();
-  let pending: string[] = []; // pieces of the current line, joined once its newline arrives
-  let pendingLength = 0;
-  for await (const chunk of Bun.file(file).stream()) {
-    const pause = maybeYield();
-    if (pause) await pause;
-    if (signal.aborted) return;
-    const text = decoder.decode(chunk, { stream: true });
-    let start = 0;
-    for (let nl = text.indexOf("\n"); nl >= 0; nl = text.indexOf("\n", start)) {
-      pending.push(text.slice(start, nl));
-      yield pending.join("");
-      pending = [];
-      pendingLength = 0;
-      start = nl + 1;
-    }
-    pending.push(text.slice(start));
-    pendingLength += text.length - start;
-    if (pendingLength > MAX_LINE_BYTES) throw new RangeError("line too long");
-  }
-  pending.push(decoder.decode());
-  const last = pending.join("");
-  if (last !== "") yield last;
-}
-
 // ---- configuration inventory ----
 
 type Out = (ev: ConfigEv) => void;
@@ -252,7 +224,7 @@ async function configTables(file: string, ctx: ScanCtx, tally: Tally): Promise<T
   }
   const toml = new TomlHeaders();
   try {
-    for await (const line of textLines(file, ctx.signal)) {
+    for await (const line of readTextLines(file, { maxBytes: MAX_LINE_BYTES, signal: ctx.signal })) {
       const [table, name] = toml.line(line)?.keys ?? [];
       if (name === undefined) continue;
       if (table === "profiles") found.profiles.add(name);

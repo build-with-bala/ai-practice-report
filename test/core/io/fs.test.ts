@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileState, isDir, isFile, readJsonSmall, readJsonSmallResult, safeList, safeStat, walk } from "../../../core/io/fs";
+import { fileState, isDir, isFile, readJsonSmall, readJsonSmallResult, readTextLines, safeList, safeStat, walk } from "../../../core/io/fs";
 
 let root: string;
 beforeAll(() => {
@@ -153,5 +153,45 @@ describe("readJsonSmallResult", () => {
     } finally {
       chmodSync(p, 0o600);
     }
+  });
+});
+
+describe("readTextLines", () => {
+  const lines = async (p: string, maxBytes: number, signal?: AbortSignal): Promise<string[]> => {
+    const out: string[] = [];
+    for await (const line of readTextLines(p, { maxBytes, signal })) out.push(line);
+    return out;
+  };
+
+  test("lines split at \\n, a \\r kept, a leading BOM dropped, characters split across read chunks intact; a last line without a newline", async () => {
+    const wide = "€".repeat(200_000); // 600 kB of 3-byte characters: read chunk ends fall inside some of them
+    const p = path.join(root, "t-lines.txt");
+    writeFileSync(p, `\uFEFF[ab]\r\n\uFEFFkeep\n\n${wide}\nlast`);
+    expect(await lines(p, 1_000_000)).toEqual(["[ab]\r", "\uFEFFkeep", "", wide, "last"]);
+    const ends = path.join(root, "t-ends.txt");
+    writeFileSync(ends, "a\nb\n");
+    expect(await lines(ends, 10)).toEqual(["a", "b"]);
+  });
+
+  test("maxBytes caps each line, never the file: a longer line, one read chunk or several, ends the read with a RangeError", async () => {
+    const p = path.join(root, "t-cap.txt");
+    writeFileSync(p, "aaaa\nbbbb\ncccc");
+    expect(await lines(p, 4)).toEqual(["aaaa", "bbbb", "cccc"]); // 14 bytes in all, 4 a line
+    writeFileSync(p, "aaaa\nbbbbb\ncccc\n");
+    await expect(lines(p, 4)).rejects.toBeInstanceOf(RangeError);
+    writeFileSync(p, `${"x".repeat(600_000)}\nok\n`);
+    expect(await lines(p, 600_000)).toEqual(["x".repeat(600_000), "ok"]);
+    await expect(lines(p, 599_999)).rejects.toBeInstanceOf(RangeError);
+    writeFileSync(p, "x".repeat(600_000));
+    await expect(lines(p, 599_999)).rejects.toBeInstanceOf(RangeError); // the last line too
+  });
+
+  test("an aborted read ends early; a missing path throws", async () => {
+    const p = path.join(root, "t-abort.txt");
+    writeFileSync(p, "a\nb\n");
+    const ac = new AbortController();
+    ac.abort();
+    expect(await lines(p, 10, ac.signal)).toEqual([]);
+    await expect(lines(path.join(root, "t-missing.txt"), 10)).rejects.toThrow();
   });
 });
