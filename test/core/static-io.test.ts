@@ -76,7 +76,10 @@ const RULES: readonly Rule[] = [
   { id: "dynamic-import", why: "it loads a module around the import rule", find: every(/\bimport\s*\(/) },
   { id: "require", why: "it loads a module around the import rule", find: every(/\brequire\s*\(/) },
   { id: "fetch", why: "core makes no network requests, and Bun's fetch reads file: URLs too", find: every(/\bfetch\s*\(/) },
-  { id: "indirection", why: "it reaches Bun, require or fetch around these rules", find: every(/\bglobalThis\b|\beval\s*\(|\bnew\s+Function\s*\(/) },
+  {
+    id: "indirection", why: "it reaches Bun, require, fetch or native code around these rules",
+    find: every(/\bglobalThis\b|\beval\s*\(|\bnew\s+Function\s*\(|\bprocess\s*\.\s*(?:binding|dlopen)\b/),
+  },
   bunMember("file", "it opens a file unrefused and unreported"),
   bunMember("mmap", "it maps a file unrefused and unreported"),
   bunMember("write", "it writes a file"),
@@ -87,6 +90,9 @@ const RULES: readonly Rule[] = [
   { id: "= Bun", why: "an alias or a destructuring of Bun reaches its members unseen", find: every(/=\s*Bun\b(?!\s*\??\.)/) },
   { id: "openInEditor", why: "it opens a file in an editor", find: every(/\bopenInEditor\b/) },
   { id: "openUriReadOnly", why: "it opens a store unrefused and unreported: readers use openRo", find: every(/\bopenUriReadOnly\b/) },
+  // the calls the first form of this rule named, wherever they stand, however they were reached
+  { id: "opener", why: "it opens, reads or copies a file", find: every(/\b(?:readFileSync|openSync|readSync|createReadStream|copyFileSync)\b|\bnew\s+Database\s*\(/) },
+  { id: "spawner", why: "it runs a program", find: every(/\bspawnSync\b|\bchild_process\b/) },
 ];
 
 /** `<file>: <rule>: <what matched>` for each rule a source text breaks; core/io, which holds the primitives, is not checked. */
@@ -144,7 +150,8 @@ describe("static I/O rule: deny by default", () => {
       ['Bun["file"](p)', "Bun[]"], ["const { file } = Bun;", "= Bun"], ["const B = Bun; B.file(p)", "= Bun"],
       ["openUriReadOnly(uri)", "openUriReadOnly"],
       ['await fetch("file:///etc/hosts")', "fetch"],
-      ["globalThis.Bun.file(p)", "indirection"],
+      ["globalThis.Bun.file(p)", "indirection"], ['process.binding("fs")', "indirection"], ['process.dlopen(m, "x.node")', "indirection"],
+      ["handle.readFileSync(p)", "opener"], ["new Database(p)", "opener"], ["cp.spawnSync('git')", "spawner"], ['const name = "child_process";', "spawner"],
     ];
     const missed = caught.filter(([text, rule]) => !violations("core/sources/x.ts", text).some((v) => v.startsWith(`core/sources/x.ts: ${rule}: `)));
     expect(missed).toEqual([]);
@@ -163,7 +170,7 @@ describe("static I/O rule: deny by default", () => {
   test("an exemption allows one rule in one file, nothing else; every exemption names a core file", () => {
     const runner: Exemption[] = [{ file: "core/git/run.ts", rule: "Bun.spawn", why: "the git runner" }];
     expect(violations("core/git/run.ts", "Bun.spawn(['git', 'log'])", runner)).toEqual([]);
-    expect(violations("core/git/run.ts", "Bun.spawnSync(['git'])", runner)).toEqual(["core/git/run.ts: Bun.spawnSync: Bun.spawnSync"]);
+    expect(violations("core/git/run.ts", "Bun.spawnSync(['git'])", runner)).toEqual(["core/git/run.ts: Bun.spawnSync: Bun.spawnSync", "core/git/run.ts: spawner: spawnSync"]);
     expect(violations("core/git/other.ts", "Bun.spawn(['git'])", runner)).toEqual(["core/git/other.ts: Bun.spawn: Bun.spawn"]);
     for (const e of EXEMPT) expect([e.file, FILES.includes(e.file), e.why !== ""]).toEqual([e.file, true, true]);
   });
