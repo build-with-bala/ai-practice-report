@@ -87,6 +87,9 @@ function rowsOf(file: string, sql: string): Record<string, unknown>[] {
 }
 
 describe("antigravity: Task 15 scenario", () => {
+  /** Each test builds and scans the whole scenario: on a stalled CI runner one has needed more than the default 5 s. */
+  const SCENARIO_TIMEOUT = 20_000;
+
   test("5 sessions (3 CLI, 2 IDE), a subagent with parent and depth, a kill, 5 tools by category, an error, 2 prompts, 2 usage, 2 plan artifacts; no canaries", async () => {
     const fx = buildAntigravity(h);
     const sql = observe();
@@ -112,7 +115,7 @@ describe("antigravity: Task 15 scenario", () => {
     expectNoCanaries([...allEvents(r), r.coverage, r.warnings]);
     expect(r.warnings).toEqual([]);
     expect(r.tempClean).toBe(true);
-  });
+  }, SCENARIO_TIMEOUT);
 
   test("CLI sessions: lifetime rows, the detail span of the steps and transcript merged in; the first workspace as the project", async () => {
     const fx = buildAntigravity(h);
@@ -128,7 +131,7 @@ describe("antigravity: Task 15 scenario", () => {
     expect(r.store.session(sidOf(P))!.parentId).toBeUndefined();
     expect(r.store.session(sidOf(P))!.spawnDepth).toBeUndefined();
     expect(markers(r, "interrupt").map((m) => [m.ts - fx.t0, m.detail, m.proxyTs])).toEqual([[31 * MIN, "killed", true]]); // stamped by the row's last change
-  });
+  }, SCENARIO_TIMEOUT);
 
   test("prompts and usage from the transcript: text in memory only (intent, features, keyed hash), token counts", async () => {
     const fx = buildAntigravity(h);
@@ -144,7 +147,7 @@ describe("antigravity: Task 15 scenario", () => {
       { k: "usage", tool: "antigravity", source: "antigravity.cli", ts: fx.t0 + MIN + 30_000, sessionId: sidOf(P), model: "other", inTok: 1200, outTok: 300, cacheR: 9000, cacheW: 0 },
       { k: "usage", tool: "antigravity", source: "antigravity.cli", ts: fx.t0 + 11 * MIN, sessionId: sidOf(P), model: "other", inTok: 800, outTok: 120, cacheR: 0, cacheW: 0 },
     ]);
-  });
+  }, SCENARIO_TIMEOUT);
 
   test("tools from the steps: step names, status as the outcome; the error marker for the step with error details", async () => {
     const fx = buildAntigravity(h);
@@ -156,7 +159,7 @@ describe("antigravity: Task 15 scenario", () => {
       [5 * MIN, sidOf(P), "grep_search", "search", false, undefined, undefined],
       [6 * MIN, sidOf(P), "open_browser_url", "browser", true, undefined, undefined],
     ]);
-  });
+  }, SCENARIO_TIMEOUT);
 
   test("IDE sessions and brain markers; coverage of every source", async () => {
     const fx = buildAntigravity(h);
@@ -185,7 +188,7 @@ describe("antigravity: Task 15 scenario", () => {
       window: "lifetime", status: "ok", files: 1, bytes: statSync(fx.ideFile).size, records: 2, from: fx.t0 + 40 * MIN, to: fx.t0 + 61 * MIN, skipped: {}, unknownTypes: {},
     });
     expect(covOf(r, "antigravity.brain")).toMatchObject({ window: "lifetime", status: "ok", files: 0, bytes: 0, records: 2, skipped: {}, unknownTypes: {} });
-  });
+  }, SCENARIO_TIMEOUT);
 });
 
 describe("antigravity cli: conversation_summaries.db", () => {

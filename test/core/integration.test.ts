@@ -187,7 +187,7 @@ describe("integration: every P0 source in one home", () => {
     expect(r.store.all("ratelimit").map((l) => l.bucket)).toContain(keyedHash(r.salt, CANARY.slug));
     expect(r.store.session(`codex:${planted.rollout}`)).toMatchObject({ surface: "other" });
     expect(r.store.session(`codex:${planted.thread}`)).toMatchObject({ surface: "other", approval: "other", sandbox: "other" });
-  });
+  }, 30_000); // a full scan of every fixture: on a stalled CI runner it has needed more than the default 5 s
 
   test("a busy store whose private copy fails mid-way: that source errors, the others go on, the temp folder is empty", async () => {
     buildAll();
