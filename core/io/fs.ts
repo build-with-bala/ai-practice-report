@@ -58,7 +58,10 @@ export type JsonSmallResult =
   | { ok: true; value: unknown }
   | { ok: false; reason: "missing" | "not-file" | "too-large" | "io-error" | "parse" };
 
-/** Parse a small JSON file, saying why it could not be used (missing, not a regular file, too large, unreadable, invalid). */
+/**
+ * Parse a small JSON file, saying why it could not be used (missing, not a regular file, too large, unreadable, invalid).
+ * A never-opened file (`noteOpen`) is refused unopened, and reads as unreadable.
+ */
 export function readJsonSmallResult(p: string, maxBytes: number = 8 * 1024 * 1024): JsonSmallResult {
   let size: number;
   try {
@@ -69,9 +72,9 @@ export function readJsonSmallResult(p: string, maxBytes: number = 8 * 1024 * 102
     return { ok: false, reason: (e as { code?: string }).code === "ENOENT" ? "missing" : "io-error" };
   }
   if (size > maxBytes) return { ok: false, reason: "too-large" };
-  noteOpen(p, "read");
   let text: string;
   try {
+    noteOpen(p, "read");
     text = readFileSync(p, "utf8");
   } catch {
     return { ok: false, reason: "io-error" };
@@ -94,7 +97,8 @@ export function readJsonSmall(p: string, maxBytes: number = 8 * 1024 * 1024): un
  * leading UTF-8 BOM dropped, invalid UTF-8 replaced; a last line without a newline is yielded unless it is empty.
  * `maxBytes` caps each line, never the file: a longer line ends the read with a RangeError. Between chunks the read lets
  * the event loop run (`maybeYield`); once `signal` is aborted it ends early, and the caller must not count the file as
- * fully read. Any I/O failure throws, a missing path included: callers stat the path first.
+ * fully read. Any I/O failure throws, a missing path included (callers stat the path first), and so does a never-opened
+ * file, refused unopened (`noteOpen`: NeverOpenedError).
  */
 export async function* readTextLines(p: string, o: { maxBytes: number; signal?: AbortSignal }): AsyncGenerator<string> {
   noteOpen(p, "stream");

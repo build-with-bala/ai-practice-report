@@ -6,6 +6,7 @@ import { noteOpen } from "./observe";
 
 export const MAX_COPY_BYTES = 2_147_483_648;
 
+/** A read-only store. `all` and `get` run reads only (`readOnly`): any other statement throws ReadOnlyQueryError. */
 export interface RoDb {
   all<T>(sql: string, ...p: unknown[]): T[];
   get<T>(sql: string, ...p: unknown[]): T | undefined;
@@ -43,14 +44,34 @@ export function isBusyError(e: unknown): boolean {
   return BUSY.test(String(err?.message ?? "")) || BUSY.test(String(err?.code ?? ""));
 }
 
+/** A statement an RoDb refused to run: only reads run on a store (`readOnly`). */
+export class ReadOnlyQueryError extends Error {}
+
+/** The PRAGMAs the readers query, in their read form `PRAGMA name(arg)` (inside a SELECT they run as `pragma_<name>(?)`). */
+const READ_PRAGMA = /^PRAGMA\s+(?:table_info|index_list|index_xinfo)\s*\([^;=()]*\)$/i;
+
+/**
+ * Only reads run on a store: one SELECT or WITH statement, or one of the readers' PRAGMAs (READ_PRAGMA), and no `;`, so
+ * never a second statement. Anything else throws ReadOnlyQueryError before it runs: ATTACH, which would open a file the
+ * open observer never sees; DETACH; VACUUM, whose INTO form writes a copy even through a read-only handle; writes, schema
+ * changes and every other PRAGMA.
+ */
+function readOnly(sql: string): void {
+  const s = sql.trim();
+  if (!s.includes(";") && (/^(?:SELECT|WITH)\b/i.test(s) || READ_PRAGMA.test(s))) return;
+  throw new ReadOnlyQueryError("only a read runs on a store");
+}
+
 class Handle implements RoDb {
   constructor(private db: Database, readonly copied: boolean, readonly immutable = false) {}
   all<T>(sql: string, ...p: unknown[]): T[] {
     observer?.(sql);
+    readOnly(sql);
     return this.db.query(sql).all(...(p as never[])) as T[];
   }
   get<T>(sql: string, ...p: unknown[]): T | undefined {
     observer?.(sql);
+    readOnly(sql);
     return (this.db.query(sql).get(...(p as never[])) ?? undefined) as T | undefined;
   }
   tables(): string[] {
@@ -165,11 +186,18 @@ export function copyBytes(file: string): number {
  *   started), the store is reopened as below;
  * - any other store opens with `mode=ro`, and a busy one falls back to a private copy — unless the copy would take more
  *   than `o.maxCopyBytes` (default MAX_COPY_BYTES; `copyBytes`: the store and its `-wal`), when it is null.
+ * A never-opened store (`noteOpen`) is refused at its first open, the header read: null, and nothing of it is read.
  */
 export function openRo(file: string, temp: TempDirs, opener: (uri: string) => Database = defaultOpener, o?: { maxCopyBytes?: number }): RoDb | null {
   const store = storePath(file);
   if (store === null) return null;
-  if (walMode(store) && !existsSync(store + "-wal")) {
+  let wal: boolean;
+  try {
+    wal = walMode(store);
+  } catch {
+    return null; // refused: a never-opened store
+  }
+  if (wal && !existsSync(store + "-wal")) {
     let db: Database;
     try {
       db = tryOpen(store, opener, "mode=ro&immutable=1");

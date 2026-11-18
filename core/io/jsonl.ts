@@ -45,7 +45,7 @@ export interface JsonlOpts {
  * Stream a JSONL file with bounded memory, links followed. Bad *content* never throws (malformed lines yield
  * `{skip:"parse"}`). Only a missing path (`fileState` `missing`) yields nothing; any other path that is not a regular
  * file (a folder, a device, a path that cannot be stat'ed: EACCES, ELOOP) and any I/O failure while reading throws, so
- * callers can record a coverage error.
+ * callers can record a coverage error; so does a never-opened file, refused unopened (`noteOpen`: NeverOpenedError).
  * Between chunks the stream lets the event loop run (`maybeYield`), so a signal or an abort is seen mid-file; once
  * `signal` is aborted it ends early, and the caller must not count the file as fully read.
  */

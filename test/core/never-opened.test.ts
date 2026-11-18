@@ -1,14 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import os from "node:os";
+import { mkdirSync, realpathSync, symlinkSync } from "node:fs";
 import path from "node:path";
 import { readJsonSmall, readJsonSmallResult, readTextLines } from "../../core/io/fs";
 import { readJsonl } from "../../core/io/jsonl";
-import { __observeOpens, type OpenHow } from "../../core/io/observe";
-import { openRo } from "../../core/io/sqlite";
+import { __observeOpens, isNeverOpened, NeverOpenedError, type OpenHow } from "../../core/io/observe";
+import { __observeQueries, openRo } from "../../core/io/sqlite";
 import { TempRegistry } from "../../core/io/temp";
-import { scan } from "../../core/scan";
+import { scan, type ScanOptions, type ScanResult } from "../../core/scan";
 import { registry } from "../../core/sources/registry";
 import { buildAntigravity } from "../fixtures/antigravity";
 import { buildCcLifetime, buildCcTranscripts } from "../fixtures/claude-code";
@@ -25,6 +24,8 @@ const PLANTED = [
 ];
 /** How the path of a never-opened file ends: no open may have it, by the path opened or by the file behind a link. */
 const NEVER_OPENED = ["auth.json", ".credentials.json", "apps.json", "hosts.json", "id_ed25519", ".key"];
+/** A table that holds credentials or accounts, by its name: no statement reads one. */
+const CREDENTIAL_TABLE = /account|credential|auth|token|oauth|secret/i;
 
 interface Open { path: string; how: OpenHow }
 
@@ -34,10 +35,11 @@ beforeEach(() => {
 });
 afterEach(() => {
   __observeOpens(undefined);
+  __observeQueries(undefined);
   h.cleanup();
 });
 
-/** The opens that `run` makes, in order, as the core/io primitives report them. */
+/** The opens that `run` attempts, in order, as the core/io primitives report them (a refused one included). */
 async function recordOpens(run: () => unknown): Promise<Open[]> {
   const opens: Open[] = [];
   __observeOpens((p, how) => opens.push({ path: p, how }));
@@ -47,6 +49,21 @@ async function recordOpens(run: () => unknown): Promise<Open[]> {
     __observeOpens(undefined);
   }
   return opens;
+}
+
+/** A scan, with the opens it attempts and the SQL statements it sends. */
+async function recordScan(o: ScanOptions): Promise<{ r: ScanResult; opens: Open[]; sql: string[] }> {
+  const sql: string[] = [];
+  __observeQueries((s) => sql.push(s));
+  try {
+    let r: ScanResult | undefined;
+    const opens = await recordOpens(async () => {
+      r = await scan(o);
+    });
+    return { r: r!, opens, sql };
+  } finally {
+    __observeQueries(undefined);
+  }
 }
 
 /** A file's real path, links resolved (on macOS the temp folder itself lies behind a link); the path itself when it cannot be resolved. */
@@ -59,20 +76,24 @@ function real(p: string): string {
 }
 
 /**
- * The opens that break the rules, as `<how> <path>: <rule>`: a path — as opened, or the file behind a link — that ends
- * like a never-opened file, or that lies outside the home's root.
+ * The opens that break the rules, as `<how> <path>: <rule>`: an open whose path — as opened, or the file behind a link —
+ * ends like a never-opened file, or lies outside the home's root.
  */
 function violations(opens: Open[], root: string): string[] {
   const roots = [root, real(root)].map((r) => r + path.sep);
   const found: string[] = [];
   for (const o of opens) {
-    for (const p of new Set([o.path, real(o.path)])) {
-      if (NEVER_OPENED.some((end) => p.endsWith(end))) found.push(`${o.how} ${p}: never opened`);
-      if (!roots.some((r) => p.startsWith(r))) found.push(`${o.how} ${p}: outside the home`);
-    }
+    const both = [o.path, real(o.path)];
+    if (both.some((p) => NEVER_OPENED.some((end) => p.endsWith(end)))) found.push(`${o.how} ${o.path}: never opened`);
+    if (!both.every((p) => roots.some((r) => p.startsWith(r)))) found.push(`${o.how} ${o.path}: outside the home`);
   }
   return found;
 }
+
+/** The tables a statement reads from: its FROM and JOIN targets, quoted names unquoted. */
+const tablesOf = (sql: string): string[] =>
+  [...sql.matchAll(/\b(?:FROM|JOIN)\s+(?:"((?:[^"]|"")+)"|`([^`]+)`|\[([^\]]+)\]|([A-Za-z_][\w$]*))/gi)]
+    .map((m) => m[1]?.replace(/""/g, '"') ?? m[2] ?? m[3] ?? m[4]!);
 
 /** A link at `at` to `target`; false where links cannot be made (Windows without the right to make them). */
 function link(target: string, at: string): boolean {
@@ -84,6 +105,10 @@ function link(target: string, at: string): boolean {
     if (process.platform !== "win32") throw e;
     return false;
   }
+}
+
+async function drain(lines: AsyncIterable<unknown>): Promise<void> {
+  for await (const _ of lines) { /* drain */ }
 }
 
 /** Every Plan 1 fixture in the home; per P0 tool, files that its readers read. */
@@ -106,39 +131,92 @@ function buildAll(): Record<string, string[]> {
 }
 
 describe("never-opened files", () => {
-  test("a scan of every P0 source opens no credential, token or key file, and nothing outside the home", async () => {
+  test("a scan of every P0 source opens no credential, token or key file, nothing outside the home, and reads no credential table", async () => {
     const read = buildAll();
     // the JetBrains plugin keeps its folder in LOCALAPPDATA on Windows, under .config elsewhere
     const jetbrains = ["apps.json", "hosts.json"].map((name) => path.join(jetbrainsRel(h), name));
     for (const rel of new Set([...PLANTED.map((p) => path.normalize(p)), ...jetbrains])) h.write(rel, CANARY.secret);
 
-    const opens = await recordOpens(() => scan({ env: h.env }));
+    const { opens, sql } = await recordScan({ env: h.env });
 
-    expect(violations(opens, h.root)).toEqual([]);
+    expect(violations(opens, h.root)).toEqual([]); // not even attempted: a refused open is reported too
     const tools = [...new Set(registry.filter((p) => p.tier === "P0").map((p) => p.tool))].sort();
     expect(Object.keys(read).sort()).toEqual(tools);
     const opened = new Set(opens.map((o) => real(o.path)));
     expect(tools.map((t) => [t, read[t]!.some((f) => opened.has(real(f)))])).toEqual(tools.map((t) => [t, true]));
+    // the SQL: no statement attaches another file, none reads a credential or account table
+    expect(sql.filter((s) => /\bATTACH\b/i.test(s))).toEqual([]);
+    const tables = new Set(sql.flatMap(tablesOf));
+    expect([...tables].filter((t) => CREDENTIAL_TABLE.test(t))).toEqual([]);
+    expect([...tables]).toEqual(expect.arrayContaining(["threads", "ItemTable", "scored_commits", "cursorDiskKV"])); // the check sees the readers' tables
   });
 
-  test("the check sees through links: a file read through a link counts as the file behind it", async () => {
+  test("a never-opened file that a reader reaches through a link is refused: attempted, never opened, counted unreadable", async () => {
     const auth = h.write(".codex/auth.json", `${JSON.stringify({ token: CANARY.secret })}\n`);
-    const outside = mkdtempSync(path.join(os.tmpdir(), "never-opened-outside-"));
-    try {
-      const elsewhere = path.join(outside, "history.jsonl");
-      writeFileSync(elsewhere, `${JSON.stringify({ display: "hi", timestamp: Date.now() - 60_000 })}\n`);
-      // links where the history readers look: one to a never-opened file, one to a file outside the home
-      if (!link(auth, path.join(h.env.home, ".codex", "history.jsonl"))) return;
-      if (!link(elsewhere, path.join(h.env.home, ".claude", "history.jsonl"))) return;
+    const credentials = h.writeJson(".claude/.credentials.json", { token: CANARY.secret });
+    const key = h.write(".codex/x.key", `[profiles.${CANARY.project}]\n`);
+    const store = h.sqlite(".cursor/secret.key", ["CREATE TABLE blobs (id TEXT, data BLOB)"], { blobs: [["1", CANARY.secret]] });
+    // links where the readers look: a prompt log (JSONL), settings (small JSON), config.toml (text lines), a chat store (SQLite)
+    const routes: [target: string, at: string, source: string][] = [
+      [auth, ".codex/history.jsonl", "codex.history"], [credentials, ".claude/settings.json", "claude-code.config"],
+      [key, ".codex/config.toml", "codex.config"], [store, ".cursor/chats/p1/a1/store.db", "cursor.agent-cli"],
+    ];
+    for (const [target, at] of routes) if (!link(target, path.join(h.env.home, at))) return;
 
-      const opens = await recordOpens(() => scan({ env: h.env, tools: ["codex", "claude-code"] }));
+    const { r, opens } = await recordScan({ env: h.env, tools: ["codex", "claude-code", "cursor"] });
 
-      const found = violations(opens, h.root);
-      expect(found).toContain(`stream ${real(auth)}: never opened`);
-      expect(found).toContain(`stream ${real(elsewhere)}: outside the home`);
-    } finally {
-      rmSync(outside, { recursive: true, force: true });
+    // each reader attempted its file — the observer saw it, and the file behind the link —, and each attempt was refused:
+    // the file counts as unreadable, and nothing was read from it
+    const attempted = new Set(opens.map((o) => real(o.path)));
+    expect(routes.map(([target, , source]) => [source, attempted.has(real(target))])).toEqual(routes.map(([, , source]) => [source, true]));
+    expect(routes.map(([, , source]) => [source, r.coverage.find((c) => c.source === source)?.skipped]))
+      .toEqual(routes.map(([, , source]) => [source, { "io-error": 1 }]));
+    expect(r.store.all("prompt")).toEqual([]);
+    expect(r.store.all("config").filter((c) => c.kind === "profile")).toEqual([]);
+  });
+
+  test("the check itself: an open by a never-opened name, through a link to one, or outside the home is a violation", () => {
+    const auth = h.write(".codex/auth.json", "{}");
+    const fine = h.write(".codex/history.jsonl", "");
+    const outside = path.join(path.dirname(h.root), "elsewhere.jsonl"); // need not exist
+    const opens: Open[] = [{ path: fine, how: "stream" }, { path: auth, how: "read" }, { path: outside, how: "stream" }];
+    const want = [`read ${auth}: never opened`, `stream ${outside}: outside the home`];
+    const linked = path.join(h.env.home, "linked.jsonl");
+    if (link(auth, linked)) {
+      opens.push({ path: linked, how: "stream" });
+      want.push(`stream ${linked}: never opened`);
     }
+    expect(violations(opens, h.root)).toEqual(want);
+  });
+});
+
+describe("the refusal: no core/io primitive opens a never-opened file", () => {
+  test("isNeverOpened: by name and by ending, in any case, and through a link by the file behind it; other files are not", () => {
+    const yes = [...PLANTED, ".ssh/id_rsa", "Library/Keychains/login.keychain-db", "x/AUTH.JSON", "certs/server.KEY"];
+    const no = [".codex/history.jsonl", ".claude/settings.json", ".codex/config.toml", "store.db", "keys.json", "monkey.txt", "x.keys", "authors.json"];
+    expect(yes.filter((rel) => !isNeverOpened(path.join(h.env.home, rel)))).toEqual([]);
+    expect(no.filter((rel) => isNeverOpened(path.join(h.env.home, rel)))).toEqual([]);
+    const linked = path.join(h.env.home, "innocent.jsonl");
+    if (link(h.write(".codex/auth.json", "{}"), linked)) expect(isNeverOpened(linked)).toBe(true);
+  });
+
+  test("each primitive reports the attempt and refuses it: JSONL and text lines throw, a small JSON read is unreadable, a store is null", async () => {
+    const auth = h.write(".codex/auth.json", `${JSON.stringify({ token: CANARY.secret })}\n`);
+    const key = h.write(".codex/x.key", "[x]\n");
+    const store = h.sqlite("secret.key", ["CREATE TABLE t (x)"], { t: [[CANARY.secret]] });
+    const temp = new TempRegistry(h.env.tmp);
+    const opens = await recordOpens(async () => {
+      await expect(drain(readJsonl(auth))).rejects.toBeInstanceOf(NeverOpenedError);
+      await expect(drain(readTextLines(key, { maxBytes: 1024 }))).rejects.toBeInstanceOf(NeverOpenedError);
+      expect(readJsonSmallResult(auth)).toEqual({ ok: false, reason: "io-error" });
+      expect(readJsonSmall(auth)).toBeUndefined();
+      expect(openRo(store, temp)).toBeNull();
+    });
+    // nothing past each attempt: no store opened by SQLite, no private copy made
+    expect(opens).toEqual([
+      { path: auth, how: "stream" }, { path: key, how: "stream" }, { path: auth, how: "read" }, { path: auth, how: "read" }, { path: store, how: "header" },
+    ]);
+    expect(temp.active).toBe(0);
   });
 });
 
@@ -149,12 +227,12 @@ describe("the open observer: every core/io primitive reports the file it opens",
     const toml = h.write("c.toml", "[x]\n");
     const missing = path.join(h.env.home, "missing.json");
     const opens = await recordOpens(async () => {
-      for await (const _ of readJsonl(jsonl)) { /* drain */ }
-      for await (const _ of readJsonl(missing)) { /* nothing there */ }
+      await drain(readJsonl(jsonl));
+      await drain(readJsonl(missing)); // nothing there
       readJsonSmall(json);
       readJsonSmallResult(missing);
       readJsonSmallResult(json, 1); // too large: refused before it is opened
-      for await (const _ of readTextLines(toml, { maxBytes: 1024 })) { /* drain */ }
+      await drain(readTextLines(toml, { maxBytes: 1024 }));
     });
     expect(opens).toEqual([{ path: jsonl, how: "stream" }, { path: json, how: "read" }, { path: toml, how: "stream" }]);
   });
@@ -193,7 +271,7 @@ describe("the open observer: every core/io primitive reports the file it opens",
     try {
       const opens = await recordOpens(async () => {
         openRo(linkedStore, temp)?.close();
-        for await (const _ of readJsonl(linkedJsonl)) { /* drain */ }
+        await drain(readJsonl(linkedJsonl));
       });
       expect(opens).toEqual([{ path: realpathSync(target), how: "header" }, { path: realpathSync(target), how: "sqlite" }, { path: linkedJsonl, how: "stream" }]);
     } finally {

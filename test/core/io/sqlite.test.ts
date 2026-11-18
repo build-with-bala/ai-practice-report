@@ -3,7 +3,7 @@ import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { __observeQueries, copyBytes, MAX_COPY_BYTES, openRo, openUriReadOnly, sqliteUri, storePath } from "../../../core/io/sqlite";
+import { __observeQueries, copyBytes, MAX_COPY_BYTES, openRo, openUriReadOnly, ReadOnlyQueryError, type RoDb, sqliteUri, storePath } from "../../../core/io/sqlite";
 import { TempRegistry } from "../../../core/io/temp";
 
 const root = mkdtempSync(path.join(os.tmpdir(), "sqlite-test-"));
@@ -329,5 +329,67 @@ describe("openRo", () => {
   test("MAX_COPY_BYTES", () => {
     expect(MAX_COPY_BYTES).toBe(2_147_483_648);
     expect(existsSync(root)).toBe(true);
+  });
+});
+
+describe("RoDb runs reads only", () => {
+  /** A rollback-journal store with table `t` (one row), opened read-only, beside a second store `secret.key` with a credential row. */
+  function stores(name: string): { db: RoDb; secret: string; dir: string } {
+    const dir = path.join(root, "reads-only", name);
+    mk(path.join(dir, "allowed.db"), false).close();
+    const secret = path.join(dir, "secret.key");
+    const s = kept(new Database(secret));
+    s.exec("CREATE TABLE creds (tok TEXT)");
+    s.exec("INSERT INTO creds VALUES ('synthetic-token')");
+    s.close();
+    return { db: kept(openRo(path.join(dir, "allowed.db"), new TempRegistry(root)))!, secret, dir };
+  }
+  const attached = (db: RoDb): string[] => db.all<{ name: string }>("SELECT name FROM pragma_database_list").map((r) => r.name);
+  /** The statements `run` did not refuse with ReadOnlyQueryError. */
+  const notRefused = (statements: string[], run: (sql: string) => unknown): string[] => statements.filter((sql) => {
+    try {
+      run(sql);
+      return true;
+    } catch (e) {
+      return !(e instanceof ReadOnlyQueryError);
+    }
+  });
+
+  test("ATTACH is refused before it runs, however it is written, a stacked one too: no other file is opened through SQL", () => {
+    const { db, secret } = stores("attach");
+    const seen: string[] = [];
+    __observeQueries((s) => seen.push(s));
+    const attach = ["ATTACH DATABASE ? AS x", "  attach ? as x", "/* x */ ATTACH DATABASE ? AS x", "SELECT 1; ATTACH DATABASE ? AS x"];
+    expect(notRefused(attach, (sql) => db.all(sql, secret))).toEqual([]);
+    expect(seen).toContain("ATTACH DATABASE ? AS x"); // the query observer still sees what was refused
+    expect(attached(db)).toEqual(["main"]);
+    expect(() => db.all("SELECT tok FROM x.creds")).toThrow(); // no such database: nothing was attached
+  });
+
+  test("VACUUM INTO is refused: it would write a copy of the store even through a read-only handle", () => {
+    const { db, dir } = stores("vacuum");
+    const copy = path.join(dir, "copy.db");
+    expect(() => db.get("VACUUM INTO ?", copy)).toThrow(ReadOnlyQueryError);
+    expect(existsSync(copy)).toBe(false);
+  });
+
+  test("every statement that is not a read is refused: DETACH, writes, schema changes, other PRAGMAs, a second statement", () => {
+    const { db } = stores("others");
+    const statements = [
+      "DETACH DATABASE x", "VACUUM", "INSERT INTO t VALUES (2, 'b')", "CREATE TEMP TABLE z (q)", "REINDEX", "ANALYZE",
+      "PRAGMA journal_mode=WAL", "PRAGMA writable_schema = 1", "PRAGMA database_list", "PRAGMA table_info(t); SELECT 1", "SELECT id FROM t;",
+    ];
+    expect(notRefused(statements, (sql) => db.all(sql))).toEqual([]);
+    expect(notRefused(statements, (sql) => db.get(sql))).toEqual([]);
+    expect(attached(db)).toEqual(["main"]);
+  });
+
+  test("reads run: SELECT and WITH in any case and spacing, and the readers' PRAGMAs in their read form", () => {
+    const { db } = stores("reads");
+    expect(db.all<{ id: number }>("select id from t")).toEqual([{ id: 1 }]);
+    expect(db.get<{ n: number }>("\n  WITH x AS (SELECT id AS n FROM t) SELECT n FROM x")).toEqual({ n: 1 });
+    expect(db.all<{ name: string }>("PRAGMA table_info(t)").map((r) => r.name)).toEqual(["id", "name"]);
+    expect(db.all("PRAGMA index_list(t)")).toEqual([]);
+    expect([db.tables(), db.columns("t")]).toEqual([["t"], ["id", "name"]]);
   });
 });
