@@ -49,7 +49,7 @@ The owner hires engineers who are expected to work AI-natively. Interviews and t
 5. **(A) Decision support:** role-fit against a role profile, an interview kit generated from gaps, a live pairing-session recorder, an offline compare console, and a calibration loop.
 6. **(B) A report worth keeping:** trajectory, month-over-month diffs, concrete upgrade recipes, an opt-in coach that uses the developer's own agent CLI, a share card, and an employer export.
 7. **Awwwards-tier reports:** the "assay certificate" visual system, light/dark, real print-to-PDF, accessible, mobile-correct.
-8. **Fast and bounded:** streaming everywhere; a full scan of a heavy user's machine (several GB of Claude Code and Codex traces) in ≤ 60 s cold, peak RSS ≤ 1 GB.
+8. **Fast and bounded:** streaming everywhere; a full scan of a heavy, multi-gigabyte Claude Code and Codex history in ≤ 60 s cold, peak RSS ≤ 1 GB.
 
 **Non-goals (this round)**
 - A hosted hiring platform, accounts, or uploads (a zero-knowledge drop-box is a stretch item, §11 P6).
@@ -74,12 +74,12 @@ The owner hires engineers who are expected to work AI-natively. Interviews and t
 - **Verified locally (2026-11-17):** `bun:sqlite` opens `file:<path>?mode=ro` URIs and reads uncheckpointed WAL data; `?immutable=1` does **not** see WAL data (use `mode=ro`). `node:crypto` Ed25519 sign/verify works in Bun.
 - **Data handling:** repos contain synthetic fixtures only — never real traces. Raw text exists only in memory inside a source plugin; events carry no free-text fields.
 - **Repos:** B is new (`build-with-bala/ai-practice-report`, name verified available) and **public from day one** (owner), so CI runs the full ubuntu/macos/windows matrix for free. A is the existing repo. A imports B's core **pinned by commit SHA** (the tag is recorded alongside for readability), so a moved tag can never swap the core underneath A; during local development A may point at B's checkout via a `file:` path, but A's CI always uses the pinned SHA from GitHub.
-- **GitHub account hygiene:** the owner confirmed on 2026-11-17 that the Aug 2026 build-with-bala token compromise is remediated (tokens rotated). Releases therefore build in GitHub Actions, but defensively: release jobs run only in a protected `release` environment that requires the owner's approval per run, `v*` tags are protected by a ruleset, workflows pin third-party actions by SHA, and every artifact gets a build-provenance attestation.
-- **Build-time inspection of real traces (my call):** while building, agents may inspect the *structure* of this machine's traces — keys, types, record-type histograms, protobuf field numbers/wire types, counts — exactly as the brainstorm did; never values, never content. Fixtures copy shapes, never data.
+- **GitHub account hygiene:** Releases build in GitHub Actions, but defensively: release jobs run only in a protected `release` environment that requires the owner's approval per run, `v*` tags are protected by a ruleset, workflows pin third-party actions by SHA, and every artifact gets a build-provenance attestation.
+- **Build-time inspection of real traces (my call):** while building, agents may inspect the *structure* of real local traces — keys, types, record-type histograms, protobuf field numbers/wire types, counts — exactly as the brainstorm did; never values, never content. Fixtures copy shapes, never data.
 - **Org rules (from workspace CLAUDE.md):** feature branches + PRs (Claude opens and merges); run the EtherHiding config scan before every push/pull/server start; commits end with the Co-Authored-By trailer; author identity = global git config.
 - **Legal posture:** evidence + human rubric; the tool never decides.
 - **Honest trust limits:** the candidate owns the machine; anything embedded in a client binary can be extracted. Signing gives tamper-*evidence*; forensics raise the cost of fabrication; only the live walkthrough/pairing ties evidence to a person. The product must say exactly this.
-- **Environments the builder cannot test locally:** Cursor, Windows, WSL, and all P2 tools — covered by synthetic fixtures built from public format docs, CI on all three OSes, and "beta" labelling until verified on real data.
+- **Environments verified without real data:** Cursor, Windows, WSL, and all P2 tools — covered by synthetic fixtures built from public format docs, CI on all three OSes, and "beta" labelling until verified on real data.
 
 ---
 
@@ -89,7 +89,7 @@ The owner hires engineers who are expected to work AI-natively. Interviews and t
 |---|---|---|---|
 | Direction | A hiring-grade · B developer-first · C hosted hiring console | **A + B, both "very advanced"** (owner) | A fixes the fatal flaw for hiring; B gives candidates a reason to run it and is the public brand face. C makes the owner custodian of candidate data with legal exposure, premature at 2 downloads. |
 | Repos | one repo · separate repos | **Separate** (owner) | Different audiences, release cadences, and brands. |
-| Shared core | inside B · third repo · copy in each | **Inside B** (owner) | Two repos only; the open core lets candidates audit what is read; format fixes land once (Claude Code alone ships a new version every few days [measured]). Cost: A pins B's tag and bumps it per fix. |
+| Shared core | inside B · third repo · copy in each | **Inside B** (owner) | Two repos only; the open core lets candidates audit what is read; format fixes land once (Claude Code ships new versions every few days [measured]). Cost: A pins B's tag and bumps it per fix. |
 | Repo homes | A here + B new · A private in company org · this repo becomes B | **A here, B new** (owner) | Candidates must be able to download A's releases; private-repo releases aren't downloadable. |
 | Engine shape | patch v1 · rewrite as plugin engine | **Rewrite** (builder rec.) | v1's single-pass scanners can't express origin, subagent attribution, two time layers, or drift detection. |
 | Trust | none · signature only · layered (sign + bind + forensics + live) | **Layered** | Signature alone stops edits, not fabrication; forensics anchored to server-minted IDs are feasible [measured]; the live step is the only person-binding. |
@@ -177,7 +177,7 @@ Rules every plugin follows:
 | **Claude Code** (`P0`) | `projects/<slug>/*.jsonl`, `<sid>/subagents/agent-*.jsonl` + `.meta.json`, `<sid>/subagents/workflows/wf_*/`, `<sid>/workflows/*.json`, `history.jsonl`, `stats-cache.json`, `~/.claude.json` (`skillUsage`, `pluginUsage`, `promptQueueUseCount`, `lastPlanModeUse`, `firstStartTime`), `plugins/installed_plugins.json`, `projects/*/memory/*.md` (count only), CLAUDE.md/AGENTS.md at session cwds (existence + git history only); `$CLAUDE_CONFIG_DIR` | recurse subagents/workflows (a large share of tool calls [measured]); human = `promptSource ∈ {typed, queued, suggestion_accepted}` or `turnOrigin = human`, excluding `isMeta`, `turnOrigin ∈ {task_notification, peer, scheduled, sdk, auto_continuation}`, `entrypoint = sdk-cli`; heuristic fallback only when fields are absent; read `cost-state`, `system:turn_duration`, `system:compact_boundary`, `permission-mode`, `toolDenialKind`, `effort`, `pr-link`, `queue-operation`, tools `TaskCreate/Workflow/Monitor/CronCreate/ExitPlanMode`; attribute subagent actions to the parent turn via `tool_use.id` → `.meta.json` `toolUseId` |
 | **Codex** (`P0`) | `sessions/**/rollout-*.jsonl`, `archived_sessions/`, `state_5.sqlite` (`threads`, `thread_spawn_edges`), `thread_history_1.sqlite` (`thread_turns`), `history.jsonl` (human prompts), `config.toml`, `skills/`, `plugins/`, `memories/`; `$CODEX_HOME` | shell calls are `custom_tool_call name:"exec"` (free-form string input) and `exec_command {cmd}` — use `item_completed`→`CommandExecution` (command, exit_code, duration); split by `session_meta.payload.source` (`exec`/`subagent`/`cli`/`vscode`); drop injected tag messages (`<recommended_plugins`, `<image`, `<codex_internal_context`, `<turn_aborted`, `# AGENTS.md`, `<skill>`); thread index is the durable lifetime layer (many threads have no rollout left [measured]); multi-agent calls `spawn_agent/send_message/wait_agent/followup_task/interrupt_agent`, `update_plan` |
 | **Copilot** (`P0`) | VS Code `workspaceStorage/*/chatSessions/*.jsonl` (journal) + legacy `.json`, `globalStorage/emptyWindowChatSessions/`, `globalStorage/github.copilot-chat/session-store.db`; Copilot CLI `~/.copilot/session-state/*/events.jsonl`, `~/.copilot/session-store.db`; JetBrains `github-copilot/<ide>/chat-*-sessions/*nitrite.db` (beta) | replay the journal (`kind:0` snapshot, `kind:1` set at path, `kind:2` append); dedupe by sessionId (`v1` is blind after `2026-02-23` [measured]); `agent.id = editsAgent` is agent mode (most requests are agentic [measured], and `v1` called them chat); install detection must include VS Code's bundled Copilot |
-| **Cursor** (P0, not installed here → fixtures from docs) | `globalStorage/state.vscdb` table `cursorDiskKV` (`composerData:*`, `bubbleId:*:*`), legacy `ItemTable` keys as fallback, `~/.cursor/ai-tracking/ai-code-tracking.db` (`scored_commits`: AI vs human committed lines), `~/.cursor/projects/*/agent-transcripts/`, `~/.cursor/chats/*/*/store.db` | query in place, prefix-filtered; tool decisions (`toolFormerData.userDecision`), `thinkingDurationMs`, `errorDetails`, PRs |
+| **Cursor** (P0, verified only against public docs and synthetic fixtures) | `globalStorage/state.vscdb` table `cursorDiskKV` (`composerData:*`, `bubbleId:*:*`), legacy `ItemTable` keys as fallback, `~/.cursor/ai-tracking/ai-code-tracking.db` (`scored_commits`: AI vs human committed lines), `~/.cursor/projects/*/agent-transcripts/`, `~/.cursor/chats/*/*/store.db` | query in place, prefix-filtered; tool decisions (`toolFormerData.userDecision`), `thinkingDurationMs`, `errorDetails`, PRs |
 | **Antigravity** (`P0`) | CLI `~/.gemini/antigravity-cli/{conversation_summaries.db, conversations/*.db (steps), brain/<id>/.system_generated/logs/transcript.jsonl, history.jsonl}`; IDE `antigravityUnifiedStateSync.trajectorySummaries` (`base64` protobuf) in both `Antigravity` and `Antigravity IDE` app dirs; older `~/.gemini/antigravity/brain/<id>/{task,implementation_plan,walkthrough}.md` (existence/count only) | replace notification-key counting (it overcounts real trajectories [measured]); never read `oauthToken` or the auth email; protobuf-lite decoder for summaries |
 | **Gemini CLI** (P1) | `~/.gemini/tmp/<project>/chats/session-*.jsonl` (`{kind}` header + `$set` lines; `.json` ≤ v0.38), `logs.json`, `projects.json` | new |
 | **OpenCode** (P1) | `~/.local/share/opencode/opencode.db` (older `storage/` JSON), `~/.local/state/opencode/prompt-history.jsonl` | new; sessions with `parent_id` → delegation |
@@ -242,7 +242,7 @@ Rules every plugin follows:
 - **Confidence:** Low / Medium / High = 1× / 3× / 10× the minimum **and** ≥ 1 / 3 / 6 distinct weeks. Below minimum → "insufficient (n=12, needs 50)", excluded from the overall, and turned into an interview probe (A) or a "not enough data yet" note (B).
 - **Shrinkage:** shown `z' = z·n/(n+n_min)`; **intervals:** session-level bootstrap (B=200) over per-session sufficient statistics → "71 [63–78]".
 - **Field gating:** each component declares the fields it needs per tool version; missing → fallback or "not measurable on this version", never 0.
-- **Reference table v0** (`core/scoring/reference/v0.json`, versioned, printed in Method): per component an expert-set p50/p90 on the transformed scale (μ = p50, σ = (p90 − p50)/1.2816) with a written rationale, sanity-checked against synthetic personas (novice → expert) and a local run on this machine (results never committed). v1 = empirical quantiles after ≥ 100 consented aggregate submissions, or per-employer "among your applicants".
+- **Reference table v0** (`core/scoring/reference/v0.json`, versioned, printed in Method): per component an expert-set p50/p90 on the transformed scale (μ = p50, σ = (p90 − p50)/1.2816) with a written rationale, sanity-checked against synthetic personas (novice → expert) and a local run on real data (results never committed). v1 = empirical quantiles after ≥ 100 consented aggregate submissions, or per-employer "among your applicants".
 - **Overall:** confidence-weighted mean of dimension z over dimensions at ≥ Medium confidence; weights Verification 0.20; Leverage, Orchestration, Steering, Context 0.15 each; Judgment, Delivery 0.10 each; displayed as band + interval + coverage ("6/7 dimensions"). Bands: Exceptional / Strong / Developing / Limited / Insufficient evidence.
 - **Unscored panels:** Exposure, Agent-touched stack (languages/toolchains — relabelled, not "knowledge"), Risk posture, Coverage.
 - **Personas:** top-3 role names derived from signal mix (no "% match"); B shows them as a playful identity layer, A as "reads as …".
@@ -250,19 +250,21 @@ Rules every plugin follows:
 
 ### 6.6 Forensics and integrity (core; A shows it as Integrity, B as "Data health")
 
-| Check | Rule | Baseline on genuine data [measured] |
-|---|---|---|
-| C1 CC `req_`/`msg_` IDs linear in time (base58 after 4-char prefix) | > 1% of messages off by > 10 min → fail; scheme change → "n/a" | linear; residuals within about a minute |
-| C2 ID order vs time order | Spearman < 0.99 → fail | 1.0 |
-| C3 history.jsonl vs transcripts vs stats-cache | < 75% match → warn; transcript days missing from stats-cache → fail | most prompts match; nearly every shared day |
-| C4 session `accountUuid` vs `~/.claude.json` (compared as keyed hashes) | 0% match → fail; > 1 account → note | all |
-| C5 file times | mtime < last event or ctime ≫ mtime → fail; ≥ 80% of files born in one 10-min window spanning > 7 days of events → "copied/restored on DATE — ask about it" | clean |
-| C6 every Codex rollout has a `threads` row | missing → fail | all |
-| C7 Codex UUIDv7 time ≤ filename time | later → fail | never later |
-| C8 Codex rate-limit ledger monotone within windows | contradictions → fail (spliced traces) | nearly always non-decreasing |
-| C9 tool versions / models vs release dates (dated table shipped per release) | used before release → fail | — |
-| C10 provenance fields (`promptSource`, `turnOrigin`, `entrypoint`, `originator`) | classify only | — |
-| Soft flags | prompt-rhythm regularity, ≥ 200-char prompts repeated ≥ 5×, activity share in the 14 days before the scan, `tool_use` without `tool_result`, config created < 7 days before scan | — |
+| Check | Rule |
+|---|---|
+| C1 CC `req_`/`msg_` IDs linear in time (base58 after 4-char prefix) | > 1% of messages off by > 10 min → fail; scheme change → "n/a" |
+| C2 ID order vs time order | Spearman < 0.99 → fail |
+| C3 history.jsonl vs transcripts vs stats-cache | < 75% match → warn; transcript days missing from stats-cache → fail |
+| C4 session `accountUuid` vs `~/.claude.json` (compared as keyed hashes) | 0% match → fail; > 1 account → note |
+| C5 file times | mtime < last event or ctime ≫ mtime → fail; ≥ 80% of files born in one 10-min window spanning > 7 days of events → "copied/restored on DATE — ask about it" |
+| C6 every Codex rollout has a `threads` row | missing → fail |
+| C7 Codex UUIDv7 time ≤ filename time | later → fail |
+| C8 Codex rate-limit ledger monotone within windows | contradictions → fail (spliced traces) |
+| C9 tool versions / models vs release dates (dated table shipped per release) | used before release → fail |
+| C10 provenance fields (`promptSource`, `turnOrigin`, `entrypoint`, `originator`) | classify only |
+| Soft flags | prompt-rhythm regularity, ≥ 200-char prompts repeated ≥ 5×, activity share in the 14 days before the scan, `tool_use` without `tool_result`, config created < 7 days before scan |
+
+Every threshold sits well outside what genuine local traces showed, where server ids track time almost exactly and the cross-checks match nearly every record [measured].
 
 Do **not** use (misfire on genuine data [measured]): monotonic timestamps within files, duplicate-prompt share, tokens vs cost ratios.
 Output: band **Consistent / Consistent with notes / Inconsistent / Unverifiable**, the share of scored activity backed by server-minted data, and per-check reasons with an "ask about" question. No automatic rejection. **Server-backed share is display-only (my call):** it never changes scores, evidence minimums, or confidence, because tool choice must not become a hiring factor. Tools with no server-minted IDs (Cursor, Copilot, Antigravity, all P2) are labelled "not anchorable" — neutral, not a penalty — and are corroborated in the walkthrough instead. Every check is public — the docs say plainly that forensics raise the cost of cheating; they don't prove honesty.
@@ -514,9 +516,9 @@ ai-practice-report/ (B)                         ai-candidate-profiler/ (A)
 ## 10. Engineering practices
 
 - **Tests (bun test):** synthetic fixtures per tool *and* format version (generated by scripts, committed); golden analysis snapshots; persona fixtures (novice → expert) asserting ordering and no saturation; canary privacy tests; forensic tamper suites (edited timestamps, copied dirs, spliced ledgers, LLM-style fabricated JSONL) that must flag; bundle sign/verify/seal/tamper round-trips; report render tests (DOM budget, no external URLs, CSP present); contrast-token tests.
-- **Real-machine smoke (local only, never committed):** run both apps on this Mac; compare against brainstorm measurements (e.g., subagent share, Copilot journal coverage, Codex exec parsing) and record pass/fail in the PR description without data values that identify the owner.
+- **Real-machine smoke (local only, never committed):** run both apps against real local data; compare against brainstorm measurements (e.g., subagent share, Copilot journal coverage, Codex exec parsing) and record pass/fail in the PR description without data values that identify the owner.
 - **Visual QA:** Playwright screenshots of both reports in dark/light, 1440 px and 390 px, and print-to-PDF; reviewed before declaring done.
-- **Performance budgets:** this machine full scan ≤ 60 s cold; peak RSS ≤ 1 GB; payload ≤ 300 KB; report < 5,000 DOM nodes.
+- **Performance budgets:** a full scan of a heavy history ≤ 60 s cold; peak RSS ≤ 1 GB; payload ≤ 300 KB; report < 5,000 DOM nodes.
 - **CI:** test matrix on ubuntu/macos/windows for both repos (B is public, so free); release on a protected `v*` tag → job in the `release` environment (owner approval) → 5 targets → `SHA256SUMS` → `actions/attest-build-provenance` → GitHub release; only A's release job sees the release signing key. Third-party actions pinned by SHA. An inline `security-guard.yml` (fake-font + loader-marker gate) as used in the owner's other repos.
 - **Versioning:** B `v1.0.0` (core API + app), A `v2.0.0` pinned to B's core by commit SHA.
 
@@ -538,8 +540,8 @@ P0 Foundations ──► P1 P0 sources ──► P2 Analysis ──┬──► 
 
 Acceptance per phase:
 - **P0:** B's public repo exists, builds and tests on 3 OSes in CI; streaming reader handles a synthetic 600 MB file in bounded memory; canary harness fails on a planted leak.
-- **P1:** each P0 source passes its fixture suite; on this Mac, every Claude Code subagent/workflow file is read, Copilot `.jsonl` sessions after 2026-02-23 appear, Codex exec commands are classified, Antigravity counts trajectories from summaries; no temp files remain.
-- **P2:** the 7 dimensions + exposure + forensics run on fixtures and on this Mac; this Mac is not saturated (no dimension pinned at 100 without an open-tail mark); every metric carries window + n; canary tests pass.
+- **P1:** each P0 source passes its fixture suite; on real local data, Claude Code subagent/workflow files are read (every subagent and workflow file on disk), Copilot `.jsonl` sessions after `2026-02-23` appear, Codex exec commands are classified, Antigravity counts trajectories from summaries; no temp files remain.
+- **P2:** the 7 dimensions + exposure + forensics run on fixtures and on real local data; a heavy user's real data does not saturate (no dimension pinned at 100 without an open-tail mark); every metric carries window + n; canary tests pass.
 - **P3 (B):** report renders offline in both themes, prints to a clean PDF, passes the DOM/payload budgets, and shows upgrades with exhibit citations.
 - **P3' (A):** invite → candidate run → consent → `.aiprof` → verify → dossier works end to end; tampering with any byte fails verification; sealed bundles open only with the company key; compare console renders 5 bundles.
 - **P4:** each added tool passes fixtures and is labelled beta where unverified; pairing recorder produces Exhibit P; TSA round-trip verified against a public TSA (manual, opt-in); coach runs with the local `claude` CLI on a digest containing no text.
@@ -551,7 +553,7 @@ Acceptance per phase:
 
 - Build **both** products, each "very advanced".
 - **Separate repos.** B = new public `build-with-bala/ai-practice-report`, which **hosts the shared core**; A = existing public `build-with-bala/ai-candidate-profiler`, which imports a pinned core.
-- **GitHub tokens are rotated** → releases build and sign in GitHub CI (protected environment + approval, tag ruleset, attestations).
+- **Releases build and sign in GitHub CI** (protected environment + approval, tag ruleset, attestations).
 - **Everything in one release** — P4 included; no early partial release.
 - **B is public from day one.**
 
@@ -566,9 +568,9 @@ Acceptance per phase:
 7. Release signing key embedded in binaries via CI secret, described honestly as tamper-evidence; provenance via GitHub attestations; notarization later.
 8. P2 tools ship as beta parsers built from public docs.
 9. Recruiter-side `--brief` (own LLM) allowed in A; candidate-side coach only in B, never scored.
-10. B lives locally at `~/Desktop/Personal/2.Code.nosync/ai-practice-report`; A stays at `~/Desktop/neosophical.nosync/tools/ai-candidate-profiler`.
+10. B and A live in separate local checkouts.
 11. Versions: B v1.0.0, A v2.0.0.
-12. Builders may inspect the *structure* (never values) of this Mac's real traces to learn formats (§3).
+12. Builders may inspect the *structure* (never values) of real local traces to learn formats (§3).
 13. Two read classes: credential files are never opened; mixed files are parsed in memory and only allowlisted fields are kept; the privacy statement says so (§6.1).
 14. Repo signals are read from an explicit allowlist of files in repos the sessions ran in, never source files, and can be switched off (§6.1).
 15. Server-backed evidence share is shown, never weighted into scores; tools without server IDs are "not anchorable", neutral, and can still earn the gold seal (§6.6, §8.4).
@@ -581,7 +583,7 @@ Exact constants and anchors (within the formulas above), lexicons for intent/cat
 
 ## 15. Open questions for the owner
 
-None open. The builder check (2026-11-17) raised seven; the owner answered three (GitHub tokens rotated → CI signing; everything in one release; B public from day one) and the rest are settled as my calls 12–17 in §13.
+None open. The builder check (2026-11-17) raised seven; the owner answered three (release signing in GitHub CI; everything in one release; B public from day one) and the rest are settled as my calls 12–17 in §13.
 
 ## 16. Risks
 
@@ -590,7 +592,7 @@ None open. The builder check (2026-11-17) raised seven; the owner answered three
 | Tool formats change monthly | drift warnings, field gating, per-version fixtures, open-source contributions to B |
 | Scale of the build (~20 sources, 2 apps) | phased plan; each phase shippable; parallel A/B after P2 |
 | Forensics depend on undocumented ID schemes | "n/a" fallback, never a fail on scheme change; versioned checks |
-| Untestable locally (Cursor, Windows, WSL, P2) | fixtures from docs, CI matrix, beta labels |
+| Verified without real data (Cursor, Windows, WSL, P2) | fixtures from docs, CI matrix, beta labels |
 | Legal (AEDT / EU AI Act) | evidence + human rubric, no ranking, no recommendation, documented method |
 | Candidates distrust running a binary | open-source core, `--explain`, attestations, SHA256SUMS, canonical URL, consent preview |
 | Reference anchors feel arbitrary | published rationale, versioning, intervals, "vs reference v0" labelling |
