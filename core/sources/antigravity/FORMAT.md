@@ -10,9 +10,14 @@ protobuf descriptors and database column tags built into the CLI and into the ID
 data. This file records names and value types only, never values.
 
 **Zero-yield.** A coverage window that read records but yielded none of its reader's primary events is drift
-`zero-yield` (set by the scan), so a renamed field never passes as a quiet store. Primary events: `antigravity.cli` (`detail`) — a session,
+`zero-yield` (set by the scan), except records skipped as `copied` or `empty`, and coverage stamped `aborted`, so a
+renamed field never passes as a quiet store. Primary events: `antigravity.cli` (`detail`) — a session,
 prompt or tool call (its `lifetime` window is checked by its columns); `antigravity.history` — a prompt;
 `antigravity.ide` — a session; `antigravity.brain` — a plan artifact's marker.
+
+**io-error.** A file or store that cannot be opened or read counts as skipped `io-error`, and so does a never-opened
+file — a credential, token or key file, by its name or by the name of the file behind a link (`core/io/observe.ts`):
+the engine refuses it before it is opened, so it reads as unreadable.
 
 ## Layout
 
