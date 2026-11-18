@@ -14,6 +14,9 @@ export const isTypeName = (s: string): boolean => TYPE_NAME.test(s);
 /**
  * Skip reasons of records read on purpose that yield nothing: a fork's copies of another session's records (`copied`)
  * and blank prompts (`empty`). The zero-yield guard leaves them out, so a store that holds only these is quiet, not drift.
+ * Contract: they are counted in the same units as `records`, one skip per record — a reader that skips such an item
+ * inside a larger record (an entry of a list held in one value) counts each item as a record too, or the guard would
+ * take more than it read off `records`.
  */
 export const INERT_SKIPS: readonly string[] = ["copied", "empty"];
 

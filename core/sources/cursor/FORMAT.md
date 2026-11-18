@@ -204,7 +204,8 @@ conversations live in `cursorDiskKV`.
   `ItemTable` and then each workspace store's. A value longer than 64 Mi characters is never loaded: skipped
   `too-large` (`note: "too-large"`). `aiService.prompts` is checked for presence only. `aiService.generations` → a
   PromptEv per entry with a time and text (`textDescription`, else `text`; no session; a `generationUUID` seen in an
-  earlier store is skipped `duplicate`), in time order per store for `isTaskStart`/`simToPrev`. `composer.composerData`
+  earlier store is skipped `duplicate`; an entry with neither text field is drift `missing-field:text`, one whose text
+  is blank is skipped `empty`), in time order per store for `isTaskStart`/`simToPrev`. `composer.composerData`
   → a SessionEv per entry (`createdAt`/`lastUpdatedAt`, `surface: "ide"` and `mode` as above, `modelConfig.modelName`; drafts
   skipped `draft`; inline messages counted `inline-message`). `chatdata` → a SessionEv (`mode: "chat"`) per tab with messages at
   its `lastSendTime` (tabs without messages `empty-session`; their messages `inline-message`). A value of another shape
@@ -216,11 +217,12 @@ conversations live in `cursorDiskKV`.
     `empty-session`, `no-ts`, `bad-record` (a session the mapping failed on), `io-error`, `too-large`. `absent` without
     a global store.
   - `detail` — the bubbles of the composers inside the window, and the legacy keys: `files`/`bytes` = stores whose tables
-    were listed (main file size); `records` = bubble rows read, plus legacy values; `from`/`to` = first/last time of its
-    events and detail sessions. Skipped: `parse`, `orphan`, `duplicate`, `unlisted`, `missing-bubbles`, `no-ts`,
-    `empty`, `empty-session`, `outside-window` (a composer whose bubbles are not read), `inline-message`, `draft`,
-    `bad-record` (a row or prompt the mapping failed on; the warn log `cu.bad-record` counts both windows'), `io-error`,
-    `too-large`. `absent` when there is no store at all.
+    were listed (main file size); `records` = bubble rows read, plus legacy values read (a generation list counts its
+    entries, one record each, in place of its value); `from`/`to` = first/last time of its events and detail sessions.
+    Skipped: `parse`, `orphan`, `duplicate`, `unlisted`, `missing-bubbles`, `no-ts`, `empty`, `empty-session`,
+    `outside-window` (a composer whose bubbles are not read), `inline-message`, `draft`, `bad-record` (a row or prompt
+    the mapping failed on; the warn log `cu.bad-record` counts both windows'), `io-error`, `too-large`. `absent` when
+    there is no store at all.
   - Drift of the store itself (`missing-column:<name>`, `missing-table:<name>`, `no-key-index:cursorDiskKV`,
     `table-unreadable:cursorDiskKV`) is in both windows; `missing-bubbles:cursorDiskKV`, `missing-field:text`,
     `bubble-type:<n>` and `<legacy key>:shape` in the detail window.
@@ -276,8 +278,9 @@ strings are both accepted). One machine reported every line column of `scored_co
 ## Limits
 
 - Nothing here was verified against a real Cursor store; field names follow public descriptions and can be wrong or
-  out of date. Unknown bubble types, schema changes and a renamed bubble `text` or `createdAt` surface as drift;
-  another renamed field surfaces only as missing data, unless nothing in the window is left to map (`zero-yield`).
+  out of date. Unknown bubble types, schema changes, a renamed bubble `text` or `createdAt` and a renamed generation
+  text surface as drift; another renamed field surfaces only as missing data, unless nothing in the window is left to
+  map (`zero-yield`).
 - The store is live while Cursor runs, and pages are read one query at a time. Read by key, a row is read at most
   once (a rewrite keeps its key), but a row written behind the read position during the scan — a new message in a
   conversation already read — is missed. In the rowid fallback, a rewritten row moves to a new rowid, so it can be read

@@ -768,7 +768,9 @@ describe("cursor ide: legacy ItemTable fallback", () => {
       [sidOf(cuSid("T1")), "chat", 30 * MIN, 30 * MIN], [sidOf(cuSid("T2")), "chat", 61 * MIN, 61 * MIN],
     ].sort());
     const cov = covOf(r, "cursor.ide");
-    expect(cov).toMatchObject({ status: "ok", files: 2, records: 4 + 2 });
+    // the global store: the prompt list's presence, 4 generations, the composer index, the chat tabs; the workspace
+    // store: 2 generations and its chat tabs
+    expect(cov).toMatchObject({ status: "ok", files: 2, records: 1 + 4 + 1 + 1 + 2 + 1 });
     expect(cov.skipped).toEqual({ duplicate: 1, "no-ts": 1, draft: 1, "inline-message": 4 });
     expectNoCanaries([...allEvents(r), r.coverage, r.warnings]);
   });
@@ -821,6 +823,36 @@ describe("cursor ide: legacy ItemTable fallback", () => {
       [sidOf(cuSid("L1")), "agent", 0, MIN, []], [sidOf(cuSid("L2")), "chat", MIN, 2 * MIN, [CU_GPT]],
     ].sort());
     expectNoCanaries([...allEvents(r), r.coverage]);
+  });
+
+  test("generations that all lack the text field are drift missing-field:text, and zero-yield: a renamed field never passes as a quiet store", async () => {
+    const at = t0();
+    writeStateDb(h, globalRel(h), [], [["aiService.generations", [
+      gen("g1", at, {}), gen("g2", at + MIN, { prompt: "Renamed field" }), gen("g3", at + 2 * MIN, { textDescription: null, text: 7 }),
+    ]]], { kv: false });
+    const r = await run([cuIde]);
+    const cov = covOf(r, "cursor.ide");
+    expect([cov.status, cov.records, cov.skipped, cov.unknownTypes]).toEqual(["drift", 3, {}, { "missing-field:text": 3, "zero-yield": 1 }]);
+    expect(r.store.all("prompt")).toEqual([]);
+    expect(r.warnings.filter((w) => w.code === "drift").map((w) => w.source)).toEqual(["cursor.ide"]);
+  });
+
+  test("generations whose text is all blank are quiet: each entry is one record, and a blank one is skipped empty", async () => {
+    const at = t0();
+    writeStateDb(h, globalRel(h), [], [["aiService.generations", [
+      gen("g1", at, { textDescription: "" }), gen("g2", at + MIN, { text: "   " }), gen("g3", at + 2 * MIN, { textDescription: "\n", text: "" }),
+    ]]], { kv: false });
+    let r = await run([cuIde]);
+    let cov = covOf(r, "cursor.ide");
+    expect([cov.status, cov.records, cov.skipped, cov.unknownTypes]).toEqual(["ok", 3, { empty: 3 }, {}]);
+    expect(r.warnings.filter((w) => w.code === "drift")).toEqual([]);
+    // an empty generation list holds no record at all
+    h.cleanup();
+    h = fakeHome();
+    writeStateDb(h, globalRel(h), [], [["aiService.generations", []]], { kv: false });
+    r = await run([cuIde]);
+    cov = covOf(r, "cursor.ide");
+    expect([cov.status, cov.records, cov.unknownTypes]).toEqual(["empty", 0, {}]);
   });
 
   test("legacy values of the wrong shape are drift; unparsable ones are counted", async () => {

@@ -41,34 +41,40 @@ export class LegacyKeys {
     if (db.get(PRESENCE_SQL, "aiService.prompts") !== undefined) this.tally.records++;
     for (const key of LEGACY_KEYS) {
       if (key === "aiService.prompts" || this.ctx.signal.aborted) continue;
-      const value = this.value(db, key);
-      if (value !== undefined) this.map(key, value);
+      const row = this.row(db, key);
+      if (row === undefined) continue;
+      // a value read is one record; the generation list's records are its entries, one per request, so that a blank
+      // entry (skipped `empty`) is counted in the same units as `records`
+      this.tally.records += key === "aiService.generations" && Array.isArray(row.value) ? row.value.length : 1;
+      if (row.value !== undefined) this.map(key, row.value);
     }
   }
 
-  /** The parsed value of `key`; undefined when absent, too large or not JSON (the last two counted). */
-  private value(db: RoDb, key: LegacyKey): unknown {
-    const row = db.get<{ n: unknown; value: unknown }>(VALUE_SQL, VALUE_MAX, key);
-    if (row === undefined) return undefined;
-    this.tally.records++;
-    const raw = row.value;
+  /**
+   * The row of `key`, undefined when absent; its `value` is the parsed JSON, undefined when too large or not JSON (both
+   * counted).
+   */
+  private row(db: RoDb, key: LegacyKey): { value: unknown } | undefined {
+    const got = db.get<{ n: unknown; value: unknown }>(VALUE_SQL, VALUE_MAX, key);
+    if (got === undefined) return undefined;
+    const raw = got.value;
     if (raw === null || raw === undefined) {
-      if (typeof row.n === "number" && row.n > VALUE_MAX) {
+      if (typeof got.n === "number" && got.n > VALUE_MAX) {
         this.tally.note = "too-large";
         this.tally.skip("too-large");
       }
-      return undefined;
+      return { value: undefined };
     }
     const text = typeof raw === "string" ? raw : raw instanceof Uint8Array ? dec.decode(raw) : undefined;
     if (text !== undefined) {
       try {
-        return JSON.parse(text);
+        return { value: JSON.parse(text) };
       } catch {
         /* counted below */
       }
     }
     this.tally.skip("parse");
-    return undefined;
+    return { value: undefined };
   }
 
   private map(key: LegacyKey, v: unknown): void {
@@ -87,6 +93,8 @@ export class LegacyKeys {
   /**
    * `aiService.generations`: one entry per request the person made ({`unixMs`, `generationUUID`, `type`,
    * `textDescription`, or `text` in some versions}) → a PromptEv (no session: the list does not link one), in time order.
+   * An entry with neither text field is drift `missing-field:text` (a renamed field, as for a bubble); one whose text is
+   * blank is skipped `empty`.
    */
   private prompts(list: unknown[]): void {
     const timed: { ts: number; text: string; id?: string }[] = [];
@@ -105,7 +113,12 @@ export class LegacyKeys {
         this.tally.skip("no-ts");
         continue;
       }
-      const text = [e.textDescription, e.text].find((x): x is string => typeof x === "string" && x.trim() !== "");
+      const texts = [e.textDescription, e.text].filter((x): x is string => typeof x === "string");
+      if (texts.length === 0) {
+        this.tally.unknownKey("missing-field:text");
+        continue;
+      }
+      const text = texts.find((x) => x.trim() !== "");
       if (text === undefined) {
         this.tally.skip("empty");
         continue;
