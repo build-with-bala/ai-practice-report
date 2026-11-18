@@ -34,7 +34,7 @@ afterAll(() => rmSync(root, { recursive: true, force: true }));
 
 /** `sinceSignal`: ms from the last signal sent to the child's exit. */
 interface Run { code: number; signal: string | number | null; out: string; sinceSignal: number; leftovers: string[] }
-type Mode = "default" | "owned" | "tail" | "overlap" | "overlap-listener" | "stubborn";
+type Mode = "default" | "owned" | "tail" | "overlap" | "overlap-listener" | "stubborn" | "late";
 
 /**
  * Runs the child (test/kit/scan-child.ts) in its own TMPDIR; once it prints `ready`, waits `after` ms (200 by default)
@@ -122,6 +122,16 @@ describe.skipIf(process.platform === "win32")("a signal during a scan (child pro
       expect([name, line === undefined ? undefined : JSON.parse(line.slice(`after-scan ${name} `.length))])
         .toEqual([name, { status: "error", note: "aborted", tempClean: true }]);
     }
+    expect(r.leftovers).toEqual([]);
+  }, 30_000);
+
+  test("a scan that enters while another unwinds from a SIGINT is aborted at once: never located, and the child ends by the signal", async () => {
+    const r = await runChild("late", "SIGINT", { after: 300 });
+    expect(r.out).toContain("copied A");
+    expect(r.out).toContain("entering B"); // scan B started while scan A was still inside the trap
+    expect(r.out).not.toContain("located B"); // aborted as it entered: its plugin was never located, let alone run
+    expect(r.out).not.toContain("after-scan");
+    expect(r.signal).toBe("SIGINT");
     expect(r.leftovers).toEqual([]);
   }, 30_000);
 

@@ -105,7 +105,7 @@ function onSignal(t: Shared, sig: TermSignal): void {
  * Enters the process-wide trap: one SIGINT/SIGTERM listener pair, installed by the first scan to enter and shared by
  * every scan that enters while it is installed. `abort` stops the scan (the first signal calls it); `closeSync` removes
  * its temp files synchronously (a second signal calls it, just before the process ends). A scan that enters after a
- * signal was caught is aborted at once: the process is about to end.
+ * signal was caught is aborted at once: the trap is stopping every scan in it.
  */
 export function enterScanTrap(o: { abort: () => void; closeSync: () => void }): ScanTrap {
   const t = (shared ??= open());
