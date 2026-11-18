@@ -283,21 +283,21 @@ CLI's EventMsg tags (`exec_command_end`, `mcp_tool_call_end`, `collab_*`, `realt
 - `<image`-led messages are prompts only through the wrapper shape above; any other `<image>`/`<image …` text is
   treated as injected.
 - Prompts in a thread imported from another agent (`<EXTERNAL SESSION IMPORTED>`) beyond its import notice would also
-  be prompts of that agent's own reader; none were seen locally.
+  be prompts of that agent's own reader (unverified).
 
 ---
 
 # Lifetime layer and configuration
 
 Rollouts are pruned and archived; these stores are not, so they carry the long view. The thread index outlives the
-rollouts: locally about half of its threads have no rollout left, while every rollout has an index row. All three
+rollouts: it keeps threads whose rollout is gone. All three
 readers report coverage with window `lifetime`.
 
 ## Layout
 
 ```
-<codex>/state_<N>.sqlite                codex.threads   thread index (the highest N; 5 locally)
-<codex>/thread_history_<N>.sqlite       codex.threads   per-turn status and timing (the highest N; 1 locally)
+<codex>/state_<N>.sqlite                codex.threads   thread index (the highest N)
+<codex>/thread_history_<N>.sqlite       codex.threads   per-turn status and timing (the highest N)
 <codex>/history.jsonl                   codex.history   one line per prompt typed in the CLI
 <codex>/config.toml                     codex.config    section headers only
 <codex>/plugins/cache/<marketplace>/<plugin>/<version>/.codex-plugin/plugin.json
@@ -436,8 +436,7 @@ The SQL names only the columns below, validated against `pragma_table_info` firs
 ## history.jsonl (verified locally)
 
 JSONL, one object per line, no `type` field: `session_id` (string — the thread id), `ts` (number, epoch s), `text`
-(string — the prompt as typed). Every line locally belongs to an interactive (`cli`, `vscode`) thread or to a thread
-the index no longer has; none to an `exec` or subagent thread.
+(string — the prompt as typed).
 
 - **PromptEv** per line: window `lifetime`, origin `human`, `sessionId` = `codex:<id>` (UUID verbatim, else keyed hash;
   omitted without a `session_id`), intent, features and `textHash` (keyed hash of the trimmed text) as for Claude
@@ -456,9 +455,9 @@ library): values are scanned only to know where they end — basic and literal s
 `'''`, closed by three to five quotes), arrays and inline tables spanning lines, comments — so a `[` inside a value is
 never a header; no value is kept. Lines are streamed (a line over 32 MiB ends the read: skipped `oversize`).
 
-Tables seen locally: `[features]`, `[tui]`, `[tui.<k>]`, `[notice.<k>]`, `[plugins."<plugin>@<marketplace>"]`,
-`[projects."<path>"]` (trust levels). The CLI also reads `[profiles.<name>]`, `[mcp_servers.<name>]` (with sub-tables
-such as `.env`, `.tools.<tool>`), `[model_providers.<id>]`, and more.
+Tables (CLI program): `[features]`, `[tui]`, `[tui.<k>]`, `[notice.<k>]`, `[plugins."<plugin>@<marketplace>"]`,
+`[projects."<path>"]` (trust levels), `[profiles.<name>]`, `[mcp_servers.<name>]` (with sub-tables such as `.env`,
+`.tools.<tool>`), `[model_providers.<id>]`, and more.
 
 - **profile**: one ConfigEv per distinct `profiles.<name>` (sub-tables count once); `name` kept only when shaped like a
   drift-key type name (`^[a-z][a-z0-9_-]{0,47}$`), else omitted; provenance `authored`.

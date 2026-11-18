@@ -8,7 +8,7 @@ Evidence: **(verified locally)** = confirmed on this machine with the structure 
 count-only checks run by the reader's author. **(VS Code program)** = read from VS Code 1.138's own workbench code (its
 chat session serializer, journal reader and response model). **(extension program)** = read from the bundled GitHub
 Copilot Chat extension 0.66 (its `package.json` and code). **(unverified)** = from the extension's code and the CLI's
-published event list only; no such store exists on this machine. This file records names and value types only, never values.
+published event list only, not verified against a real store. This file records names and value types only, never values.
 
 **Zero-yield.** A coverage window that read records but yielded none of its reader's primary events is drift
 `zero-yield` (set by the scan), so a renamed field never passes as a quiet store. Primary events: `copilot.vscode` and
@@ -282,5 +282,4 @@ they are never stat'ed, opened or returned by `locate()`. Coverage per config fo
 - Request token counts and credits (`promptTokens`, `completionTokens`, `copilotCredits`, `modelTotals`) are not mapped.
 - `externalEdit` and `workspaceEdit` parts (edits made by other agents in VS Code, file moves) are not counted as edits.
 - Sessions imported from a chat export (legacy `isImported: true`; the journal no longer records it) are read like any other.
-- The CLI mapping, the store's rows and the JetBrains layout come from program code and documentation, not from data on
-  this machine.
+- The CLI mapping, the store's rows and the JetBrains layout come from program code and documentation, not from a real store.

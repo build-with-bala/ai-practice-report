@@ -23,7 +23,7 @@ prompt or tool call (its `lifetime` window is checked by its columns); `antigrav
   brain/<conversation id>/.system_generated/logs/transcript.jsonl    one record per step
   history.jsonl                                                      antigravity.history: what was typed at the CLI prompt
   brain/<conversation id>/{task,implementation_plan,walkthrough}.md  antigravity.brain (existence only)
-<home>/.gemini/antigravity/brain/<conversation id>/<artifact>.md     antigravity.brain (the IDE's; not present locally)
+<home>/.gemini/antigravity/brain/<conversation id>/<artifact>.md     antigravity.brain (the IDE's; unverified)
 vscodeUser(env, "Antigravity")/globalStorage/state.vscdb             antigravity.ide
 vscodeUser(env, "Antigravity IDE")/globalStorage/state.vscdb         antigravity.ide (both app folders verified locally)
 not read: brain/<id>/.system_generated/logs/{transcript_full.jsonl, chunks/, media/}, brain/<id>/.system_generated/
@@ -60,8 +60,7 @@ when never set, which `toEpochMs` rejects as implausible). There is no creation 
 - **Never selected**: `title`, `preview`, `raw_summary` (the summary message, title inside), `agent_name`, `status`,
   `project_id`, `app_data_dir`, `group_id`, `not_fully_idle`, `last_user_input_step_index`, and the values of `battle_id`,
   `winning_conversation_id` and `source`.
-- **`source`** holds a `CortexTrajectorySource` name (program; verified locally by counts only: every row's value is empty or
-  one of the names below mapped to `human` — no row maps to `other`). Codes, from the program's enum: unset (`''`,
+- **`source`** holds a `CortexTrajectorySource` name (program). Codes, from the program's enum: unset (`''`,
   `CORTEX_TRAJECTORY_SOURCE_UNSPECIFIED`) → `none` (origin `human`); `…_CLI`, `…_CASCADE_CLIENT`, `…_INTERACTIVE_CASCADE`,
   `…_JETBOX` (the desktop app), `…_EXPLAIN_PROBLEM`, `…_REFACTOR_FUNCTION` (IDE actions the person starts) → `human`;
   `…_SDK`, `…_EVAL`, `…_EVAL_TASK`, `…_ASYNC_PRR`, `…_ASYNC_CF`, `…_ASYNC_SL`, `…_ASYNC_PRD`, `…_ASYNC_CM`, `…_REPLAY` →
@@ -102,8 +101,8 @@ message stored apart (program): `step_type` = `CortexStepType`, `status` = `Cort
   9, `tool_summary` 30, `tool_action` 31, and more.
 - `CortexStepRunCommand` (program): `command_line` 23, `command` 1, `cwd` 2, `exit_code` 6 (written for a 0 exit too:
   count-only check), `user_rejected` 14, output fields. A step message can wrap it as `run_command` 28 (beside its own
-  `type` 1); which of the two the payload holds was not verified locally, so both are read.
-- **GENERIC steps** (verified locally: most of the CLI's tool calls are recorded so): the CLI's own tools carry no step type
+  `type` 1); which of the two the payload holds is unverified, so both are read.
+- **GENERIC steps** (verified locally; the CLI records its own tool calls so): the CLI's own tools carry no step type
   of their own; the tool's name is the metadata's `tool_call.name`. Names per the program's tool registry and tool safety
   lists (`read_file`, `search_in_file`, `edit_file`, `write_file`, `run_command`, `manage_task`, `invoke_subagent`, …; the
   table in `cli.ts`); the run_command call's arguments carry `CommandLine` (program).
@@ -167,7 +166,7 @@ JSONL, one object per step: `step_index` (number), `type` (string: a `CortexStep
   previous prompt. No time: skipped `no-ts`; blank: `empty`; no string `content`: drift `transcript.content:missing`.
   Implicit inputs are not prompts.
 - **UsageEv** per record with a token count: `inTok` = `input_tokens`, `outTok` = `output_tokens`, `cacheR` =
-  `cache_read_tokens`, `cacheW` = `cache_write_tokens` (not seen locally), each 0 when absent; `model` = the record's
+  `cache_read_tokens`, `cacheW` = `cache_write_tokens` (unverified), each 0 when absent; `model` = the record's
   `model` when it is model-id-shaped (else `other`; no model field: `other`). No time: skipped `no-ts`.
 - Drift: `transcript.type:(other)` and `transcript.source:(other)` for names outside the program's enums (the name is
   never kept; missing: `(none)`), `transcript:not-object`. Every other known record is counted and
@@ -216,7 +215,7 @@ SQLite, VS Code's `ItemTable` (`key` TEXT, `value` BLOB; verified locally) — w
 - **Value**: base64 text of a unified-state-sync `Topic` (program): `data` 1, repeated entries {`key` 1 (string), `value` 2
   (`Row` {`value` 1 (string: base64 text of a `CascadeTrajectorySummary`), `e_tag` 2})}. The entry and row layout is verified
   locally (the probe shows entry fields 1 and 2 and a row field 1 that is not itself protobuf: base64 text); the summaries
-  decode in a count-only smoke run. Locally, the `Antigravity IDE` folder's store holds the key with an empty value.
+  decode in a count-only smoke run. The key can hold an empty value: no conversations.
 - `CascadeTrajectorySummary` (program): `summary` 1 (the title), `step_count` 2, `last_modified_time` 3, `trajectory_id` 4,
   `status` 5, `created_time` 7, `waiting_steps` 8, `workspaces` 9 (`CortexWorkspaceMetadata`: `workspace_folder_absolute_uri`
   1, `git_root_absolute_uri` 2, `repository` 3, `branch_name` 4), `last_user_input_time` 10, `latest_notify_user_step` 12,
@@ -237,7 +236,7 @@ SQLite, VS Code's `ItemTable` (`key` TEXT, `value` BLOB; verified locally) — w
 ## Brain artifacts (`antigravity.brain`)
 
 `<brain>/<conversation id>/task.md`, `implementation_plan.md`, `walkthrough.md` (the agent's plan artifacts; from the task
-brief — none present locally, in either brain folder). Each brain folder is its own candidate.
+brief; unverified). Each brain folder is its own candidate.
 
 - **MarkerEv** `plan-artifact` per regular file present (`lstat` only: never opened), `detail` = `task`,
   `implementation_plan` or `walkthrough`, `ts` = its last modification with `proxyTs: true` (a file time stands in for
@@ -272,7 +271,7 @@ brief — none present locally, in either brain folder). Each brain folder is it
 - A long input can be cut short in the transcript (`truncated_fields`); its features are computed on what is there.
 - The prompt log and the transcripts both yield prompts for the same inputs: they are told apart by `source` and `window`,
   never summed.
-- The IDE entry key is taken as the conversation id (unverified locally: no CLI conversation is also in the IDE here); the
+- The IDE entry key is taken as the conversation id (unverified); the
   summary's own `trajectory_id` is only the fallback.
 - Step types, statuses, sources and tool names follow the installed programs; a newer program's additions surface as drift
   (types, sources) or as `generic`/`other` (tool names).

@@ -3,7 +3,7 @@
 Readers (all three beta — built from public descriptions, not verified on a real store): `cursor.ide` (`index.ts`,
 `diskkv.ts`, `itemtable.ts`), `cursor.tracking` (`tracking.ts`), `cursor.agent-cli` (`agentcli.ts`).
 
-Evidence: Cursor is **not installed** on the machine these readers were written on, so nothing below was seen locally.
+Evidence: nothing below was verified against a real Cursor store.
 Every table, key, field and value type is **(from docs, unverified locally)**: public reverse-engineering notes of
 several independent open-source readers of Cursor's stores, Cursor forum bug reports, and Cursor's agent prompts as
 published by third parties. Where a name is backed by a single source it says **(one source)**; everything else is
