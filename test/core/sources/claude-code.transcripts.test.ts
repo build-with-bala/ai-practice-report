@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, statSync, symlinkSync } from "node:fs";
 import path from "node:path";
 import type { CoverageEv, Ev, ToolEv } from "../../../core/model/events";
 import { scan } from "../../../core/scan";
@@ -641,6 +641,21 @@ describe("claude-code transcripts: locate and coverage", () => {
     expect(r.store.all("session").map(s => s.id)).toEqual([sidOf("A1")]);
     expect(r.coverage[0]).toMatchObject({ status: "ok", retentionDays: 45 });
     expectNoCanaries(r.coverage);
+  });
+
+  test("a top-level transcript that is a link is read like the file it points to, with no session folder beside it", async () => {
+    const target = top("L1").prompt("kept in a dotfiles folder").write(h, "dotfiles/l1.jsonl");
+    const at = path.join(h.env.home, topFile("L1"));
+    mkdirSync(path.dirname(at), { recursive: true });
+    try {
+      symlinkSync(target, at);
+    } catch (e) {
+      if (process.platform !== "win32") throw e;
+      return; // where no link can be made, there is nothing to read through
+    }
+    const r = await run();
+    expect(r.store.all("session").map((s) => s.id)).toEqual([sidOf("L1")]);
+    expect(r.coverage[0]).toMatchObject({ status: "ok", files: 1, bytes: statSync(target).size });
   });
 
   test.skipIf(skipChmod)("an unreadable transcript counts as io-error and the scan goes on", async () => {

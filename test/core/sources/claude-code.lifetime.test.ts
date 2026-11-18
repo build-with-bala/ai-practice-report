@@ -290,6 +290,12 @@ describe("claude-code history: mapping", () => {
     expect(r.store.count()).toEqual({ coverage: 1 }); // no event of any other kind
   });
 
+  test("a history.jsonl that is not a regular file counts not-file", async () => {
+    mkdirSync(path.join(h.env.home, ".claude", "history.jsonl"), { recursive: true });
+    const r = await run([ccHistory]);
+    expect(r.coverage[0]).toMatchObject({ status: "empty", files: 0, skipped: { "not-file": 1 } });
+  });
+
   test.skipIf(skipChmod)("an unreadable history file counts as io-error", async () => {
     const file = h.writeJsonl(".claude/history.jsonl", [ccHistoryLine("hello", nzdt("2026-02-01", "10:00"), CC_H1)]);
     chmodSync(file, 0o000);

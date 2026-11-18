@@ -186,7 +186,8 @@ on every line), `workspace` (string), `type` (`slash_command` on slash commands,
   prompts and slash commands.
 - Drift: `history:not-object`, `history.type:(other)` (the type is never kept), `history.display:missing`, `history.timestamp:missing`,
   `history.timestamp:shape` (a `timestamp` that is not a time). Skipped: `bad-ts` (a well-formed time outside the
-  plausible range), `empty`, `parse`, `oversize`, `io-error`, `bad-record`.
+  plausible range), `empty`, `parse`, `oversize`, `io-error`, `bad-record`, `not-file` (a `history.jsonl` that is not a
+  regular file; a link to one is read through).
 - **Coverage** (window `lifetime`): `files`/`bytes` = the file read to its end, `records` = its lines, `from`/`to` =
   first/last prompt time; `empty` without the file.
 

@@ -30,7 +30,8 @@ not read: <sid>/tool-results/, <sid>/workflows/scripts/, subagents/workflows/wf_
 ```
 
 - `<slug>` is derived from the cwd and is never parsed; project identity comes from record `cwd`.
-- The CLI names a top-level transcript by its session id (a UUID), and its records' `sessionId` equals that stem.
+- The CLI names a top-level transcript by its session id (a UUID), and its records' `sessionId` equals that stem. A
+  top-level transcript is read through a link too: a link to a regular file counts as that file.
   Subagent and workflow-agent records repeat the parent's `sessionId` and add `agentId`.
 - Agent transcripts are named `agent-<id>` (`<id>` alphanumeric); workflow run folders `wf_<w>`. The `wf_<w>` folder
   name and the `workflows/wf_<w>.json` stem are the same run id.
@@ -239,7 +240,9 @@ not read: <root>/plugins/cache/ (only used to tell whether a skill folder resolv
 ```
 
 Symlinked config files (settings.json, the global config, installed_plugins.json, the skill lock) are read through the
-link: the target's own type and size are checked. history.jsonl and stats-cache.json are read only as regular files.
+link: the target's own type and size are checked. history.jsonl is read through a link too: anything at its path but a
+regular file, a link's target included, is skipped `not-file`. stats-cache.json is read only as a regular file: a link
+there counts as no file.
 
 ## history.jsonl (verified locally; schema per CLI program)
 
@@ -266,8 +269,8 @@ Never read: the values inside `pastedContents`, `project`.
   `count` = the day's prompts.
 - Drift (`unknownTypes`): `line:not-object`, `display:missing` (no string `display`), `timestamp:missing`,
   `timestamp:shape` (a `timestamp` that is not a time). Skipped: `parse`, `oversize`, `io-error`, `bad-ts` (a
-  well-formed time outside the plausible range), `empty` (blank
-  `display`), `bad-record`. Coverage `from`/`to` = first/last prompt time.
+  well-formed time outside the plausible range), `empty` (blank `display`), `bad-record`, `not-file` (a
+  `history.jsonl` that is not a regular file). Coverage `from`/`to` = first/last prompt time.
 
 ## stats-cache.json (verified locally; semantics per CLI program)
 

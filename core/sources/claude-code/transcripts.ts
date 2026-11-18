@@ -1,6 +1,6 @@
 import { readdirSync, type Stats } from "node:fs";
 import path from "node:path";
-import { readJsonSmall, safeStat } from "../../io/fs";
+import { isFile, readJsonSmall, safeStat } from "../../io/fs";
 import { toEpochMs } from "../../io/time";
 import { TASK_GAP_MS } from "../../model/constants";
 import type { Ev, FileFactEv, MarkerEv, SessionEv, ToolEv, TotalsEv, TurnEv } from "../../model/events";
@@ -583,9 +583,10 @@ export async function scanTranscripts(c: Candidate, ctx: ScanCtx): Promise<void>
     if (!safeStat(projDir)?.isDirectory()) continue;
     const sessions = new Set<string>();
     for (const entry of listDir(projDir, tally)) {
-      const st = safeStat(path.join(projDir, entry));
-      if (st?.isFile() && entry.endsWith(".jsonl")) sessions.add(entry.slice(0, -6));
-      else if (st?.isDirectory()) sessions.add(entry);
+      const p = path.join(projDir, entry);
+      // a transcript is listed as it is read (`<stem>.jsonl` by name, links followed), so a linked one counts as the file it points to
+      if (entry.endsWith(".jsonl") && isFile(p)) sessions.add(entry.slice(0, -6));
+      else if (safeStat(p)?.isDirectory()) sessions.add(entry);
     }
     for (const stem of [...sessions].sort()) {
       if (ctx.signal.aborted) break;

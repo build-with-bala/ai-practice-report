@@ -668,6 +668,12 @@ describe("antigravity history: history.jsonl (its own lifetime source)", () => {
     expect(cov.unknownTypes).toEqual({ "history.type:(other)": 1, "history.display:missing": 1, "history.timestamp:missing": 1, "history:not-object": 1 });
     expectNoCanaries([...allEvents(r), r.coverage]);
   });
+
+  test("a history.jsonl that is not a regular file counts not-file", async () => {
+    mkdirSync(path.join(h.env.home, historyRel), { recursive: true });
+    const r = await run([agHistory]);
+    expect(covOf(r, "antigravity.history")).toMatchObject({ status: "empty", files: 0, skipped: { "not-file": 1 } });
+  });
 });
 
 describe("antigravity cli: stores", () => {
