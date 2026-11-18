@@ -70,13 +70,13 @@ The owner hires engineers who are expected to work AI-natively. Interviews and t
 
 ## 3. Constraints
 
-- **Runtime/build:** Bun ≥ 1.3 (local 1.3.11), TypeScript, `bun build --compile` for `darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`, `windows-x64`. No native addons. Reports are one HTML file each: inline CSS/JS/fonts, no external requests, CSP meta `default-src 'none'` plus the inline/data: allowances needed.
+- **Runtime/build:** Bun ≥ 1.3 (CI pins `1.3.11`), TypeScript, `bun build --compile` for `darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`, `windows-x64`. No native addons. Reports are one HTML file each: inline CSS/JS/fonts, no external requests, CSP meta `default-src 'none'` plus the inline/data: allowances needed.
 - **Verified locally (2026-11-17):** `bun:sqlite` opens `file:<path>?mode=ro` URIs and reads uncheckpointed WAL data; `?immutable=1` does **not** see WAL data (use `mode=ro`). `node:crypto` Ed25519 sign/verify works in Bun.
 - **Data handling:** repos contain synthetic fixtures only — never real traces. Raw text exists only in memory inside a source plugin; events carry no free-text fields.
 - **Repos:** B is new (`build-with-bala/ai-practice-report`, name verified available) and **public from day one** (owner), so CI runs the full ubuntu/macos/windows matrix for free. A is the existing repo. A imports B's core **pinned by commit SHA** (the tag is recorded alongside for readability), so a moved tag can never swap the core underneath A; during local development A may point at B's checkout via a `file:` path, but A's CI always uses the pinned SHA from GitHub.
 - **GitHub account hygiene:** Releases build in GitHub Actions, but defensively: release jobs run only in a protected `release` environment that requires the owner's approval per run, `v*` tags are protected by a ruleset, workflows pin third-party actions by SHA, and every artifact gets a build-provenance attestation.
 - **Build-time inspection of real traces (my call):** while building, agents may inspect the *structure* of real local traces — keys, types, record-type histograms, protobuf field numbers/wire types, counts — exactly as the brainstorm did; never values, never content. Fixtures copy shapes, never data.
-- **Org rules (from workspace CLAUDE.md):** feature branches + PRs (Claude opens and merges); run the EtherHiding config scan before every push/pull/server start; commits end with the Co-Authored-By trailer; author identity = global git config.
+- **Org rules:** feature branches + PRs (Claude opens and merges); run a config scan before every push/pull/server start; commits end with the Co-Authored-By trailer; author identity = global git config.
 - **Legal posture:** evidence + human rubric; the tool never decides.
 - **Honest trust limits:** the candidate owns the machine; anything embedded in a client binary can be extracted. Signing gives tamper-*evidence*; forensics raise the cost of fabrication; only the live walkthrough/pairing ties evidence to a person. The product must say exactly this.
 - **Environments verified without real data:** Cursor, Windows, WSL, and all P2 tools — covered by synthetic fixtures built from public format docs, CI on all three OSes, and "beta" labelling until verified on real data.
@@ -519,7 +519,7 @@ ai-practice-report/ (B)                         ai-candidate-profiler/ (A)
 - **Real-machine smoke (local only, never committed):** run both apps against real local data; compare against brainstorm measurements (e.g., subagent share, Copilot journal coverage, Codex exec parsing) and record pass/fail in the PR description without data values that identify the owner.
 - **Visual QA:** Playwright screenshots of both reports in dark/light, 1440 px and 390 px, and print-to-PDF; reviewed before declaring done.
 - **Performance budgets:** a full scan of a heavy history ≤ 60 s cold; peak RSS ≤ 1 GB; payload ≤ 300 KB; report < 5,000 DOM nodes.
-- **CI:** test matrix on ubuntu/macos/windows for both repos (B is public, so free); release on a protected `v*` tag → job in the `release` environment (owner approval) → 5 targets → `SHA256SUMS` → `actions/attest-build-provenance` → GitHub release; only A's release job sees the release signing key. Third-party actions pinned by SHA. An inline `security-guard.yml` (fake-font + loader-marker gate) as used in the owner's other repos.
+- **CI:** test matrix on ubuntu/macos/windows for both repos (B is public, so free); release on a protected `v*` tag → job in the `release` environment (owner approval) → 5 targets → `SHA256SUMS` → `actions/attest-build-provenance` → GitHub release; only A's release job sees the release signing key. Third-party actions pinned by SHA. An inline `security-guard.yml` (fake-font + loader-marker gate).
 - **Versioning:** B `v1.0.0` (core API + app), A `v2.0.0` pinned to B's core by commit SHA.
 
 ---

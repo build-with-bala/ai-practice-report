@@ -8,10 +8,11 @@
 //             Code's project-folder form (every separator a dash). Placeholders (<name>, *, $USER), store layouts under the
 //             home shorthand and the synthetic homes of the test fixtures pass. Every line is read, code blocks included: a
 //             path leaks from code too. Scans every file of the repository, docs/ and the FORMAT.md files among them.
-//   D7        Outside code spans, fenced blocks and double-quoted strings, no phrase states a fact about the machine:
-//             "this Mac" (also 's), "this machine's", "on/of/from this machine", "installed here", "untestable locally",
-//             "can't/cannot test locally". A bare "this machine" is not checked: requirements use it too. Scans docs/ and
-//             the FORMAT.md files.
+//   D7        Outside code spans, fenced blocks and double-quoted strings, no phrase states a fact about the machine or the
+//             owner's setup: "this Mac" (also 's), "this machine's", "on/of/from this machine", "installed here",
+//             "untestable locally", "can't/cannot test locally", "workspace CLAUDE.md", "owner's other repos", and a
+//             local version in parentheses ("(local" and a digit). A bare "this machine" is not checked: requirements use
+//             it too. Scans docs/ and the FORMAT.md files.
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -106,8 +107,11 @@ function body(rel: string): string | undefined {
 
 // ---- D7: facts about the machine ----
 
-const MACHINE_FACT =
-  /\bthis mac\b|\bthis machine['’]s\b|\b(?:on|of|from) this machine\b|\binstalled here\b|\buntestable locally\b|\b(?:can['’]t|cannot) test locally\b/i;
+const MACHINE_FACT = new RegExp([
+  String.raw`\bthis mac\b`, String.raw`\bthis machine['’]s\b`, String.raw`\b(?:on|of|from) this machine\b`, String.raw`\binstalled here\b`,
+  String.raw`\buntestable locally\b`, String.raw`\b(?:can['’]t|cannot) test locally\b`,
+  String.raw`\bworkspace CLAUDE\.md\b`, String.raw`\bowner['’]s other repos\b`, String.raw`\(local \d`, // the owner's setup: private instructions, other repos, a local version
+].join("|"), "i");
 /** A phrase that states a fact about the machine, outside double-quoted strings (quoted copy is about the user's machine). */
 const breaksD7 = (prose: string): boolean => MACHINE_FACT.test(prose.replace(/"[^"]*"|“[^”]*”/g, " "));
 
@@ -226,6 +230,21 @@ describe("the rules themselves, on made-up lines", () => {
       "| Untestable locally (Cursor, Windows) |",
       "Environments the builder cannot test locally: Cursor",
       "what we can't test locally",
+    ];
+    expect(bad.filter((line) => d7Lines(line).length === 0)).toEqual([]);
+  });
+
+  test("D7: the owner's setup — private workspace instructions, the owner's other repos, a local version — is flagged; neighbours pass", () => {
+    const ok = [
+      "a repo's `CLAUDE.md`, `AGENTS.md` and `GEMINI.md` are scanned for test commands; workspace settings stay local",
+      "release jobs require the owner's approval per run; other repos pin the same actions",
+      "Bun ≥ 1.3 (CI pins `1.3.11`); a smoke run (local only, never committed)",
+    ];
+    expect(ok.filter((line) => d7Lines(line).length > 0)).toEqual([]);
+    const bad = [
+      "**Org rules (from workspace CLAUDE.md):** feature branches + PRs",
+      "a fake-font gate as used in the owner's other repos",
+      "Bun ≥ 1.3 (local 1.3.11), TypeScript",
     ];
     expect(bad.filter((line) => d7Lines(line).length === 0)).toEqual([]);
   });
