@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -8,7 +8,10 @@ import { TERM_SIGNALS } from "../../core/io/signals";
 import type { CoverageEv, Ev } from "../../core/model/events";
 import type { ToolId } from "../../core/model/ids";
 import { scan } from "../../core/scan";
+import { ccHistory, ccTranscripts } from "../../core/sources/claude-code";
 import type { Candidate, ScanCtx, SourcePlugin } from "../../core/sources/types";
+import { CC_S1, CC_S2, CcTranscript, ccHistoryLine, fixtureStart, MIN, slug } from "../fixtures/claude-code";
+import { fakeHome, type FakeHome } from "../kit/home";
 
 const home = mkdtempSync(path.join(os.tmpdir(), "scan-test-"));
 const env = detectEnv({ home, tmp: os.tmpdir(), platform: "linux", wslHomes: [] });
@@ -266,6 +269,18 @@ describe("signal policy", () => {
     await scan({ env, handleSignals: false, plugins: [plugin("codex", "a", () => { during = counts(); })] });
     expect(during).toEqual(before);
   });
+
+  test("scans running at once share one listener pair, removed once the last of them has left", async () => {
+    const before = counts();
+    let during: number[] = [];
+    let open!: () => void;
+    const gate = new Promise<void>((resolve) => { open = resolve; });
+    const first = scan({ env, plugins: [plugin("codex", "a", () => gate)] }); // still inside while the second one runs
+    const second = scan({ env, plugins: [plugin("cursor", "b", () => { during = counts(); open(); })] });
+    await Promise.all([first, second]);
+    expect(during).toEqual(before.map((n) => n + 1));
+    expect(counts()).toEqual(before);
+  });
 });
 
 describe("zero-yield guard", () => {
@@ -305,6 +320,49 @@ describe("zero-yield guard", () => {
   test("drift that is already there keeps its keys and gains zero-yield", async () => {
     const r = await scan({ env, plugins: [guarded((c) => { c.emit(cov("codex", "z", { records: 4, status: "drift", unknownTypes: { "timestamp:shape": 4 } })); c.emit(cov("codex", "z", { window: "lifetime", records: 0, status: "empty" })); })] });
     expect(r.coverage[0]!.unknownTypes).toEqual({ "timestamp:shape": 4, "zero-yield": 1 });
+  });
+
+  test("a plugin that read records and was aborted before any primary kind: the abort stamp alone decides, no zero-yield and no drift warning", async () => {
+    const ac = new AbortController();
+    const r = await scan({ env, signal: ac.signal, plugins: [guarded((c) => {
+      ac.abort();
+      c.emit(cov("codex", "z", { records: 5 }));
+      c.emit(cov("codex", "z", { window: "lifetime", records: 5 }));
+    })] });
+    expect(r.coverage.map((c) => [c.window, c.status, c.note, c.records, c.unknownTypes])).toEqual([
+      ["detail", "error", "aborted", 5, {}], ["lifetime", "error", "aborted", 5, {}],
+    ]);
+    expect(r.warnings.filter((w) => w.code === "drift" && w.source === "z")).toEqual([]);
+  });
+
+  describe("records read on purpose that yield nothing (skipped copied or empty) are no zero-yield", () => {
+    let h: FakeHome;
+    beforeEach(() => { h = fakeHome(); });
+    afterEach(() => h.cleanup());
+    const covOf = (r: Awaited<ReturnType<typeof scan>>, source: string) => r.coverage.find((c) => c.source === source)!;
+
+    test("a prompt log whose entries all have blank text", async () => {
+      const t0 = fixtureStart();
+      h.writeJsonl(".claude/history.jsonl", ["", "   ", "\n\t"].map((text, i) => ccHistoryLine(text, t0 + i * MIN, CC_S1)));
+      const r = await scan({ env: h.env, plugins: [ccHistory] });
+      const c = covOf(r, ccHistory.id);
+      expect(c).toMatchObject({ records: 3, skipped: { empty: 3 } });
+      expect(c.unknownTypes).not.toHaveProperty("zero-yield");
+      expect(c.status).not.toBe("drift");
+      expect(r.warnings.filter((w) => w.code === "drift")).toEqual([]);
+    });
+
+    test("a Claude Code root whose only transcript records are a fork's copies of another session", async () => {
+      // the fork's file is named by its own id; every record it holds keeps the original session's id
+      const copies = new CcTranscript(CC_S2).prompt("Fix the importer").text("Done.").prompt("Rerun the suite").text("Green.");
+      h.writeJsonl(`.claude/projects/${slug("/work/fork")}/${CC_S1}.jsonl`, copies.records);
+      const r = await scan({ env: h.env, plugins: [ccTranscripts] });
+      const c = covOf(r, ccTranscripts.id);
+      expect(c).toMatchObject({ records: 4, skipped: { copied: 4 } });
+      expect(c.unknownTypes).not.toHaveProperty("zero-yield");
+      expect(c.status).not.toBe("drift");
+      expect(r.store.all("session")).toEqual([]);
+    });
   });
 });
 

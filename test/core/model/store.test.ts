@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionEv, ToolEv } from "../../../core/model/events";
 import { sid, type Origin, type Window } from "../../../core/model/ids";
-import { EventStore } from "../../../core/model/store";
+import { EventStore, mergeSession, mergeSessions } from "../../../core/model/store";
 
 const sess = (over: Partial<SessionEv>): SessionEv => ({
   k: "session", tool: "codex", source: "t", id: "x", window: "detail", origin: "human",
@@ -128,6 +128,34 @@ describe("EventStore", () => {
     const results = orders.map((o) => merged(...o));
     for (const m of results) expect(m).toEqual(results[0]!);
     expect(results[0]).toMatchObject({ source: "c.rollouts", window: "detail", origin: "scripted", start: 10, end: 40, models: ["a", "b"], surface: "cli", approval: "never", version: "1.2.3" });
+  });
+
+  /** Every arrival order of `xs`. */
+  const orders = <T>(xs: readonly T[]): T[][] => (xs.length <= 1 ? [[...xs]] : xs.flatMap((x, i) => orders([...xs.slice(0, i), ...xs.slice(i + 1)]).map((o) => [x, ...o])));
+
+  test("three reports, all 6 arrival orders: one session; a field the detail report lacks comes from the first source in rank order", () => {
+    const r1 = sess({ window: "detail", source: "codex.rollouts", surface: "cli", version: "2.0.0", projectKey: "pd" });
+    const r2 = sess({ window: "lifetime", source: "codex.threads", approval: "on-request", surface: "vscode", version: "1.0.0", projectKey: "p2" });
+    const r3 = sess({ window: "lifetime", source: "codex.zz", approval: "never", surface: "exec", version: "0.1.0", projectKey: "p3" });
+    const results = orders([r1, r2, r3]).map((o) => merged(...o));
+    expect(results).toHaveLength(6);
+    for (const m of results) expect(m).toEqual(results[0]!);
+    expect(results[0]!.approval).toBe("on-request");
+    expect(results[0]).toMatchObject({ source: "codex.rollouts", window: "detail", surface: "cli", version: "2.0.0", projectKey: "pd" });
+  });
+
+  test("mergeSessions gives the same session for any order of the reports; mergeSession(a, b) is mergeSessions([a, b])", () => {
+    const a = sess({ window: "detail", source: "s.b", origin: "human", start: 20, end: 30, models: ["m2"], surface: "cli" });
+    const b = sess({ window: "lifetime", source: "s.a", origin: "peer", start: 10, end: 25, models: ["m1"], approval: "never", surface: "exec" });
+    const c = sess({ window: "lifetime", source: "s.a", start: 15, end: 40, models: ["m2", "m0"], approval: "on-request", effort: "high" });
+    const all = orders([a, b, c]).map((o) => mergeSessions(o));
+    for (const m of all) expect(m).toEqual(all[0]!);
+    expect(all[0]).toEqual({
+      k: "session", tool: "codex", id: "x", source: "s.b", window: "detail", origin: "peer", start: 10, end: 40, models: ["m0", "m1", "m2"],
+      surface: "cli", approval: "never", effort: "high",
+    });
+    expect(mergeSession(a, b)).toEqual(mergeSessions([a, b]));
+    expect(mergeSession(b, a)).toEqual(mergeSessions([a, b]));
   });
 
   test("a merge replaces the session in place: the session list keeps one entry per id, in first-arrival order", () => {

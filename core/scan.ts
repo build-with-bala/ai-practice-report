@@ -1,13 +1,14 @@
 import { randomBytes } from "node:crypto";
 import { detectEnv, type Env } from "./env/env";
 import { homesToScan } from "./env/paths";
-import { reraise, trapSignals, type TermSignal } from "./io/signals";
+import { enterScanTrap } from "./io/signals";
 import { ScanTemp } from "./io/temp";
 import { maybeYield } from "./io/yield";
 import type { CoverageEv, Ev } from "./model/events";
 import type { PluginCoverage } from "./sources/types";
 import type { ToolId } from "./model/ids";
 import { EventStore } from "./model/store";
+import { INERT_SKIPS } from "./sources/common/coverage";
 import { withCheckCategory } from "./sources/common/tools";
 import { registry } from "./sources/registry";
 import { windowsOf, type Candidate, type ScanCtx, type SourcePlugin, type TempDirs } from "./sources/types";
@@ -25,11 +26,14 @@ export interface ScanOptions { env?: Env; plugins?: SourcePlugin[]; tools?: Tool
    */
   signal?: AbortSignal;
   /**
-   * Signal policy, default true: while scan() runs it traps SIGINT and SIGTERM. The first one aborts the scan (as
-   * `signal` does), which unwinds through its cleanup — private copies and the `aipr-scan-*` folder are removed — and
-   * then raises the same signal again with the trap released: by its default action the process ends, by that signal
-   * (a non-zero exit status), and nothing after scan() runs. Pass false when the application owns these signals:
-   * scan() installs no handler, and the application aborts it through `signal` to get the partial result.
+   * Signal policy, default true: while scan() runs it traps SIGINT and SIGTERM, in one trap that every scan running at
+   * once shares. The first signal aborts them all (as `signal` does); each unwinds through its cleanup — private copies
+   * and its `aipr-scan-*` folder are removed — and once the last has, the same signal is raised again with the trap
+   * released: by its default action the process ends, by that signal (a non-zero exit status), and nothing after
+   * scan() runs. A signal that lands in a scan's last synchronous work is caught too: scan() gives the event loop a
+   * turn before it leaves the trap. A second signal ends the process at once, once every scan's temp files are removed.
+   * Pass false when the application owns these signals: scan() installs no handler, and the application aborts it
+   * through `signal` to get the partial result.
    */
   handleSignals?: boolean;
   onLog?: (level: "debug" | "info" | "warn", code: string, n?: number) => void;
@@ -43,6 +47,8 @@ const DEFAULT_CONCURRENCY = 4;
 /** Event kinds that say their window; every other kind counts toward any window of its plugin. */
 const WINDOWED: ReadonlySet<string> = new Set(["session", "prompt", "turn"]);
 const yieldKey = (k: string, window: string): string => (WINDOWED.has(k) ? `${k}@${window}` : k);
+/** The records of a coverage that should have yielded events: all those read, but for the ones skipped on purpose. */
+const yielding = (c: CoverageEv): number => c.records - INERT_SKIPS.reduce((n, r) => n + (c.skipped[r] ?? 0), 0);
 
 /** Coverage the orchestrator writes for a plugin (absent, error, aborted): one per window the plugin reports. */
 function emptyCoverage(p: SourcePlugin, status: CoverageEv["status"], note?: string): CoverageEv[] {
@@ -67,12 +73,8 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
   const now = Date.now();
   const stop = new AbortController();
   const signal = opts.signal ? AbortSignal.any([opts.signal, stop.signal]) : stop.signal;
-  let caught: TermSignal | undefined;
-  const release = opts.handleSignals === false ? undefined : trapSignals((sig) => {
-    caught ??= sig;
-    stop.abort();
-  });
   const temp = new ScanTemp(env.tmp, opts.tempFactory);
+  const trap = opts.handleSignals === false ? undefined : enterScanTrap({ abort: () => stop.abort(), closeSync: () => { temp.close(); } });
   let tempClean = false;
 
   try {
@@ -113,14 +115,16 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
           }
           // the plugin's own flag decides beta
           const cov: CoverageEv = { ...e, beta: plugin.beta };
-          // records read but none of the window's primary kinds yielded: the format moved under the reader
           const kinds = plugin.primary?.[cov.window];
-          if (kinds && (cov.status === "ok" || cov.status === "drift") && cov.records > 0 && !kinds.some((k) => (yielded.get(yieldKey(k, cov.window)) ?? 0) > 0)) {
+          // a coverage written after the abort may describe a source read only in part, so it never looks complete: the
+          // abort stamp alone decides it
+          if (signal.aborted) Object.assign(cov, { status: "error", note: "aborted" });
+          // records read, but none of the window's primary kinds yielded: the format moved under the reader. Records read
+          // on purpose that yield nothing (INERT_SKIPS) do not count.
+          else if (kinds && (cov.status === "ok" || cov.status === "drift") && yielding(cov) > 0 && !kinds.some((k) => (yielded.get(yieldKey(k, cov.window)) ?? 0) > 0)) {
             cov.status = "drift";
             cov.unknownTypes = { ...cov.unknownTypes, "zero-yield": 1 };
           }
-          // a coverage written after the abort may describe a source read only in part, so it never looks complete
-          if (signal.aborted) Object.assign(cov, { status: "error", note: "aborted" });
           store.add(cov);
         },
         hash: (v) => keyedHash(salt, v),
@@ -165,7 +169,9 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
     }
   } finally {
     tempClean = temp.close();
-    release?.();
+    // cleaned up: a trapped SIGINT/SIGTERM, one caught at the tail included, now ends the process by that signal once
+    // every scan inside the trap has cleaned up, so nothing after scan() runs
+    await trap?.leave();
   }
 
   // one drift and one too-large warning per source, whatever the number of its windows; drift a store's two windows
@@ -186,7 +192,5 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
   }
   for (const [source, tool] of tooLarge) warnings.push({ code: "too-large", tool, source, detail: "too-large" });
   if (!tempClean) warnings.push({ code: "temp-leftover", tool: "scan", source: "scan", detail: "cleanup-failed" });
-  // cleaned up: a trapped SIGINT/SIGTERM now takes its default action, ending the process before anything after scan()
-  if (caught !== undefined) reraise(caught);
   return { store, coverage, warnings, cwds, salt, startedAt, finishedAt: Date.now(), tempClean };
 }

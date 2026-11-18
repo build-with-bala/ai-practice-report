@@ -12,6 +12,12 @@ const SIDECAR_MAX = 8 * 1024 * 1024;
 export const isTypeName = (s: string): boolean => TYPE_NAME.test(s);
 
 /**
+ * Skip reasons of records read on purpose that yield nothing: a fork's copies of another session's records (`copied`)
+ * and blank prompts (`empty`). The zero-yield guard leaves them out, so a store that holds only these is quiet, not drift.
+ */
+export const INERT_SKIPS: readonly string[] = ["copied", "empty"];
+
+/**
  * An unknown record or payload type as a drift key: `(other)`, or `(none)` when it is not a string. A value outside the
  * reader's vocabulary is never echoed, however token-shaped: drift keys are enums, like every other event string.
  */

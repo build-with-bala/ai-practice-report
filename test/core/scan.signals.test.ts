@@ -32,30 +32,39 @@ beforeAll(() => {
 });
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 
+/** `sinceSignal`: ms from the last signal sent to the child's exit. */
 interface Run { code: number; signal: string | number | null; out: string; sinceSignal: number; leftovers: string[] }
+type Mode = "default" | "owned" | "tail" | "overlap" | "overlap-listener" | "stubborn";
 
-/** Runs the child in its own TMPDIR; once it prints `ready`, waits 200 ms and sends `sig`. */
-async function runChild(mode: "default" | "owned", sig: "SIGINT" | "SIGTERM"): Promise<Run> {
+/**
+ * Runs the child (test/kit/scan-child.ts) in its own TMPDIR; once it prints `ready`, waits `after` ms (200 by default)
+ * and sends `sig`, and with `again`, sends it a second time `again` ms later.
+ */
+async function runChild(mode: Mode, sig: "SIGINT" | "SIGTERM", o: { after?: number; again?: number } = {}): Promise<Run> {
   const tmp = mkdtempSync(path.join(root, "tmp-"));
   const child = Bun.spawn([process.execPath, CHILD, home, tmp, mode], { stdout: "pipe", stderr: "ignore", env: { ...process.env, TMPDIR: tmp } });
   let out = "";
   let sentAt = Number.NaN;
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timers: ReturnType<typeof setTimeout>[] = [];
+  const send = () => {
+    sentAt = performance.now();
+    child.kill(sig);
+  };
   const decoder = new TextDecoder();
   const reading = (async () => {
     for await (const chunk of child.stdout) {
       out += decoder.decode(chunk, { stream: true });
-      if (timer === undefined && out.includes("ready")) {
-        timer = setTimeout(() => {
-          sentAt = performance.now();
-          child.kill(sig);
-        }, 200);
+      if (timers.length === 0 && out.includes("ready")) {
+        timers.push(setTimeout(() => {
+          send();
+          if (o.again !== undefined) timers.push(setTimeout(send, o.again));
+        }, o.after ?? 200));
       }
     }
   })();
   const code = await child.exited;
   await reading;
-  if (timer !== undefined) clearTimeout(timer);
+  for (const t of timers) clearTimeout(t);
   return { code, signal: child.signalCode, out, sinceSignal: performance.now() - sentAt, leftovers: readdirSync(tmp).filter((n) => n.startsWith("aipr-")) };
 }
 
@@ -83,6 +92,45 @@ describe.skipIf(process.platform === "win32")("a signal during a scan (child pro
     expect(got).toMatchObject({ status: "error", note: "aborted", tempClean: true });
     expect(got.records).toBeLessThan(FILES * PROMPTS); // stopped part-way
     expect(r.sinceSignal).toBeLessThan(1_500);
+    expect(r.leftovers).toEqual([]);
+  }, 30_000);
+
+  test("a SIGINT during the last job's synchronous work, after its last await: the child ends by it, nothing after scan() runs, no aipr-* is left", async () => {
+    const r = await runChild("tail", "SIGINT", { after: 300 });
+    expect(r.out).toContain("copied");
+    expect(r.out).not.toContain("after-scan");
+    expect(r.signal).toBe("SIGINT");
+    expect(r.leftovers).toEqual([]);
+  }, 30_000);
+
+  test("two scans at once and one SIGINT: the child ends by it once both have cleaned up, and neither scan's caller goes on", async () => {
+    const r = await runChild("overlap", "SIGINT", { after: 300 });
+    expect(r.out).toContain("copied A");
+    expect(r.out).toContain("copied B");
+    expect(r.out).not.toContain("after-scan A");
+    expect(r.out).not.toContain("after-scan B");
+    expect(r.signal).toBe("SIGINT");
+    expect(r.leftovers).toEqual([]);
+  }, 30_000);
+
+  test("two scans at once while the application keeps a SIGINT listener of its own: the re-raise goes to it, and both scans resolve with aborted coverage", async () => {
+    const r = await runChild("overlap-listener", "SIGINT", { after: 300 });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("app-listener");
+    for (const name of ["A", "B"]) {
+      const line = r.out.split("\n").find((l) => l.startsWith(`after-scan ${name} `));
+      expect([name, line === undefined ? undefined : JSON.parse(line.slice(`after-scan ${name} `.length))])
+        .toEqual([name, { status: "error", note: "aborted", tempClean: true }]);
+    }
+    expect(r.leftovers).toEqual([]);
+  }, 30_000);
+
+  test("a second SIGINT while a plugin ignores the abort: the child ends by it at once, its temp files removed first", async () => {
+    const r = await runChild("stubborn", "SIGINT", { after: 300, again: 200 });
+    expect(r.out).toContain("copied");
+    expect(r.out).not.toContain("after-scan");
+    expect(r.signal).toBe("SIGINT");
+    expect(r.sinceSignal).toBeLessThan(500);
     expect(r.leftovers).toEqual([]);
   }, 30_000);
 });
