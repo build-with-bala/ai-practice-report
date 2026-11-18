@@ -11,9 +11,6 @@ import { uriToPath } from "../common/uri";
 import type { ScanCtx } from "../types";
 import { cpModel, cpSessionId, TOOL } from "./ids";
 
-/** Re-exported for the Copilot tests, which import it from here; the readers take it from `common/uri`. */
-export { uriToPath };
-
 export const VSCODE_SOURCE = "copilot.vscode";
 
 /** Response part kinds VS Code writes (its serializer and response model, 1.138, plus kinds older versions wrote); any other kind is drift. */

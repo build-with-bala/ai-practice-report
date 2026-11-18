@@ -21,7 +21,8 @@ export const CLI_SOURCE = "copilot.cli";
 
 /**
  * Session event types of the Copilot CLI (`session-state/<id>/events.jsonl`), from the event names the VS Code Copilot
- * extension handles (0.66) and the CLI SDK's session event list; not seen on this machine. Any other type is drift.
+ * extension handles (0.66) and the CLI SDK's session event list; not verified against a real CLI store. Any other type
+ * is drift.
  */
 const KNOWN_EVENTS: ReadonlySet<string> = new Set([
   "session.start", "session.resume", "session.error", "session.idle", "session.info", "session.model_change", "session.title_changed",

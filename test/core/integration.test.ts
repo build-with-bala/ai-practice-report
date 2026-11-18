@@ -211,5 +211,5 @@ describe("integration: every P0 source in one home", () => {
       holder.exec("ROLLBACK");
       holder.close();
     }
-  });
+  }, 30_000); // a full scan of every fixture: on a stalled CI runner it has needed more than the default 5 s
 });

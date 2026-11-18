@@ -392,4 +392,11 @@ describe("RoDb runs reads only", () => {
     expect(db.all("PRAGMA index_list(t)")).toEqual([]);
     expect([db.tables(), db.columns("t")]).toEqual([["t"], ["id", "name"]]);
   });
+
+  test("the connection behind a handle is a true private field: no cast reaches it, so no statement skips the read check", () => {
+    const { db } = stores("private");
+    const open = db as unknown as Record<string, unknown>;
+    expect(Object.values(open).filter((v) => v instanceof Database)).toEqual([]);
+    expect(open.db).toBeUndefined();
+  });
 });

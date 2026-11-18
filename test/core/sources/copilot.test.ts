@@ -7,7 +7,7 @@ import { scan } from "../../../core/scan";
 import { cpCli, cpJetbrains, cpVscode } from "../../../core/sources/copilot";
 import { copilotInstalled, installDirs } from "../../../core/sources/copilot/install";
 import { replayJournal } from "../../../core/sources/copilot/journal";
-import { uriToPath } from "../../../core/sources/copilot/map";
+import { uriToPath } from "../../../core/sources/common/uri";
 import { registry } from "../../../core/sources/registry";
 import type { SourcePlugin } from "../../../core/sources/types";
 import { keyedHash, normalizePath } from "../../../core/text/hash";

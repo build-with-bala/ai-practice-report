@@ -264,7 +264,7 @@ export const cpCli: SourcePlugin = {
   tool: "copilot",
   id: CLI_SOURCE,
   tier: "P0",
-  beta: true, // built from the CLI's documentation and the extension's code: no CLI store was there to verify it
+  beta: true, // built from the CLI's documentation and the extension's code: not verified against a real CLI store yet
   windows: ["detail", "lifetime"],
   primary: { detail: ["session", "prompt", "tool"] },
   describe: {

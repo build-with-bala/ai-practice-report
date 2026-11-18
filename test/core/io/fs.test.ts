@@ -44,8 +44,8 @@ describe("fileState, isDir, isFile", () => {
       expect(isDir(linked)).toBe(true);
     }
   });
-  const posixOnly = process.platform === "win32" || process.getuid?.() === 0;
-  test.skipIf(posixOnly)("a path inside a chmod 000 folder is an error, not missing", () => {
+  const skipChmod = process.platform === "win32" || process.getuid?.() === 0;
+  test.skipIf(skipChmod)("a path inside a chmod 000 folder is an error, not missing", () => {
     const d = path.join(root, "st-locked");
     mkdirSync(d);
     const f = path.join(d, "x");

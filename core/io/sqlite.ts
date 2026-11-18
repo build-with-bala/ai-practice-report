@@ -63,16 +63,20 @@ function readOnly(sql: string): void {
 }
 
 class Handle implements RoDb {
-  constructor(private db: Database, readonly copied: boolean, readonly immutable = false) {}
+  /** The connection: a true private field, so no cast reaches it and every statement goes through `readOnly`. */
+  readonly #db: Database;
+  constructor(db: Database, readonly copied: boolean, readonly immutable = false) {
+    this.#db = db;
+  }
   all<T>(sql: string, ...p: unknown[]): T[] {
     observer?.(sql);
     readOnly(sql);
-    return this.db.query(sql).all(...(p as never[])) as T[];
+    return this.#db.query(sql).all(...(p as never[])) as T[];
   }
   get<T>(sql: string, ...p: unknown[]): T | undefined {
     observer?.(sql);
     readOnly(sql);
-    return (this.db.query(sql).get(...(p as never[])) ?? undefined) as T | undefined;
+    return (this.#db.query(sql).get(...(p as never[])) ?? undefined) as T | undefined;
   }
   tables(): string[] {
     return this.all<{ name: string }>("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").map((r) => r.name);
@@ -82,7 +86,7 @@ class Handle implements RoDb {
   }
   close(): void {
     try {
-      this.db.close();
+      this.#db.close();
     } catch {
       /* already closed */
     }

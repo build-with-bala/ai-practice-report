@@ -16,7 +16,7 @@ const MiB = 1024 * 1024;
 const BUDGET_SECONDS = 60;
 const BUDGET_RSS = 1024 * MiB;
 const MIN_EXTRACTED_SHARE = 0.9;
-/** VS Code writes chat sessions as journals from 2026-02-23 on (the legacy JSON files end that day). */
+/** The first day of VS Code's journal format for chat sessions, as the spec's acceptance check names it. */
 const COPILOT_JOURNAL_SINCE = Date.UTC(2026, 1, 23);
 const DAY_MS = 86_400_000;
 /** Skip reasons and log codes are fixed tokens; anything else is printed as `other`. */

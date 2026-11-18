@@ -6,9 +6,9 @@ export const MAX_LINE_BYTES = 33_554_432;
 
 /**
  * Runs `collect` once per `step` bytes reported, while the process RSS is above `minRss` (a small scan pays nothing).
- * Parsed lines leave garbage faster than the engine reclaims it on its own while the event store grows: measured on a
- * full scan of several GiB of JSONL, peak RSS reached 0.9–1.1 GiB at any scan concurrency, and stayed at 0.6–0.7 GiB
- * with a full collection per 64 MiB streamed, for 1–3 s more.
+ * Parsed lines leave garbage faster than the engine reclaims it on its own while the event store grows, so without help
+ * a long scan's peak RSS climbs with the bytes it streams, whatever the scan concurrency; a full collection every `step`
+ * bytes keeps the peak well inside the memory budget, for a few seconds of collection time.
  */
 export class GcPacer {
   private bytes = 0;
