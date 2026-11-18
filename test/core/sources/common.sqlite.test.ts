@@ -9,6 +9,7 @@ import { TempRegistry } from "../../../core/io/temp";
 import { Tally } from "../../../core/sources/common/coverage";
 import { PAGE, Pass, q, readStore } from "../../../core/sources/common/sqlite";
 import type { ScanCtx } from "../../../core/sources/types";
+import { lockAboveCopyLimit } from "../../kit/home";
 
 const SQL = "SELECT rowid AS rid FROM \"t\" WHERE rowid > ? ORDER BY rowid LIMIT ?";
 const BUSY = "SQLITE_BUSY: database is locked";
@@ -166,6 +167,24 @@ describe("readStore", () => {
       throw new Error("a read failed");
     })).toBe(true);
     expect([tables, t2.files, t2.skipped, logs]).toEqual([["t"], 1, { "io-error": 1 }, ["zz.db-unreadable"]]);
+  });
+
+  test.skipIf(process.platform === "win32")("a locked store above the copy limit is never copied: skipped too-large, note too-large, warn <prefix>.db-too-large", async () => {
+    const root = scratch();
+    const file = path.join(root, "big.db");
+    const w = new Database(file);
+    w.exec("CREATE TABLE t (a INTEGER)");
+    w.close();
+    const release = lockAboveCopyLimit(file);
+    const logs: string[] = [];
+    const tally = tallyOf();
+    let read: boolean;
+    try {
+      read = await readStore(file, ctxFor({ logs, tmp: root }), tally, "zz", () => {});
+    } finally {
+      release();
+    }
+    expect([read, tally.skipped, tally.note, tally.files, logs]).toEqual([false, { "too-large": 1 }, "too-large", 0, ["zz.db-too-large"]]);
   });
 
   test("a linked store counts the bytes of its target, not of the link", async () => {

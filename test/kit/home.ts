@@ -1,8 +1,24 @@
 import { Database } from "bun:sqlite";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, truncateSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { detectEnv, type Env, type Platform } from "../../core/env/env";
+import { MAX_COPY_BYTES } from "../../core/io/sqlite";
+
+/**
+ * Makes the store at `file` a busy store too large to copy: grown past MAX_COPY_BYTES (sparse: SQLite reads only the
+ * pages its header counts) and held under an exclusive lock, so a reader gets SQLITE_BUSY and `openRo` may not fall back
+ * to a private copy. Returns the release. POSIX only: Windows grows the file for real and locks it apart.
+ */
+export function lockAboveCopyLimit(file: string): () => void {
+  truncateSync(file, MAX_COPY_BYTES + 1);
+  const lock = new Database(file);
+  lock.exec("BEGIN EXCLUSIVE");
+  return () => {
+    lock.exec("ROLLBACK");
+    lock.close();
+  };
+}
 
 /** A store whose writer is still open: what it has inserted since it was made lives only in its `-wal`. */
 export interface LiveSqlite { path: string; insert(table: string, row: unknown[]): void; close(): void }

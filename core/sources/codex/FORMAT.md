@@ -431,9 +431,10 @@ The SQL names only the columns below, validated against `pragma_table_info` firs
   `in-progress`, `bad-row`, `bad-record` (a row the mapping failed on; warn log `cx.bad-record` once with the count),
   `io-error` (a store that cannot be opened — warn `cx.db-unopenable` — or fails while read, a busy page, a later page
   that fails), `too-large` (a locked store whose private copy — the store and its `-wal` — would exceed
-  `MAX_COPY_BYTES`: never copied, `note: "too-large"`); `versions` = `cli_version`s; `from`/`to` = earliest/latest session start or end and turn time. Each store
+  `MAX_COPY_BYTES`: never copied, `note: "too-large"`, warn `cx.db-too-large`); `versions` = `cli_version`s; `from`/`to` = earliest/latest session start or end and turn time. Each store
   is read on its own: one that fails does not stop the other. Only when every store present fails does the reader
-  throw, making the coverage `error`.
+  throw, making the coverage `error` — unless a store was too large to copy: then the coverage keeps
+  `note: "too-large"`.
 
 ## history.jsonl (verified locally)
 

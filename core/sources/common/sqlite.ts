@@ -16,7 +16,8 @@ export const q = (ident: string): string => `"${ident.replace(/"/g, '""')}"`;
  * Opens and reads one store on its own; it counts as read once its tables are listed, and is always closed once `body`
  * has finished (an async body is awaited). A store that cannot be opened is an io-error (warn
  * `<logPrefix>.db-unopenable`) — or, when a private copy of it would take more than MAX_COPY_BYTES (`copyBytes`: the
- * store and its `-wal`), a locked store that is never copied: skipped `too-large`, coverage `note: "too-large"`. A store
+ * store and its `-wal`), a locked store that is never copied: skipped `too-large`, coverage `note: "too-large"`, warn
+ * `<logPrefix>.db-too-large`; a reader whose stores all fail keeps that reason (it is no error of the source). A store
  * that fails while it is read is an io-error (warn `<logPrefix>.db-unreadable`). True when its tables were listed. A
  * linked store counts the bytes of its target, the store's own file (links followed), not the link's.
  */
@@ -27,6 +28,7 @@ export async function readStore(file: string, ctx: ScanCtx, tally: Tally, logPre
     if (copyBytes(file) > MAX_COPY_BYTES) {
       tally.note = "too-large";
       tally.skip("too-large");
+      ctx.log("warn", `${logPrefix}.db-too-large`);
     } else {
       tally.skip("io-error");
       ctx.log("warn", `${logPrefix}.db-unopenable`);

@@ -230,7 +230,8 @@ async function readTurns(db: RoDb, tables: Set<string>, ctx: ScanCtx, tally: Tal
 /**
  * Scan the newest thread index (`state_<N>.sqlite`: threads, spawn edges) and turn history (`thread_history_<N>.sqlite`:
  * turns) under a Codex home; one CoverageEv, last. Each store is read on its own (`readStore`, warn `cx.db-*`), so one
- * that fails does not stop the other; only when every store present fails is the source an error.
+ * that fails does not stop the other; only when every store present fails is the source an error — unless a store was
+ * a locked one above MAX_COPY_BYTES (coverage note `too-large`).
  */
 export async function scanThreads(c: Candidate, ctx: ScanCtx): Promise<void> {
   const tally = new Tally(TOOL, THREADS_SOURCE, "lifetime");
@@ -249,7 +250,7 @@ export async function scanThreads(c: Candidate, ctx: ScanCtx): Promise<void> {
     present++;
     if (await readStore(file, ctx, tally, "cx", body)) read++;
   }
-  if (present > 0 && read === 0) throw new ThreadStoresUnreadable("no Codex thread store could be read");
+  if (present > 0 && read === 0 && tally.note !== "too-large") throw new ThreadStoresUnreadable("no Codex thread store could be read");
   const bad = tally.skipped["bad-record"] ?? 0;
   if (bad > 0) ctx.log("warn", "cx.bad-record", bad); // a mapping bug must not look like a healthy source
   ctx.emit(tally.coverage());

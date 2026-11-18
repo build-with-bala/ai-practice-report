@@ -194,7 +194,8 @@ on every line), `workspace` (string), `type` (`slash_command` on slash commands,
 
 `antigravity.cli` reports one coverage per window; no versions. Each store is read on its own; only when every store
 present fails is the source an error; a window whose stores are all unreadable is `error` with `note: "unreadable"`,
-one without any store `absent`.
+one without any store `absent`. A locked store above `MAX_COPY_BYTES` keeps that reason instead: its window notes
+`too-large` (warn `ag.db-too-large`), and it is no error of the source.
 
 - `lifetime` — the conversation index (`conversation_summaries.db`): `files`/`bytes` = the store, `records` = summary
   rows, `from`/`to` = the span of its sessions. Skipped: `empty-session`, `no-ts`, `bad-row`, `io-error`, `too-large`,
@@ -204,8 +205,8 @@ one without any store `absent`.
   sessions. Skipped: `no-ts`, `empty`, `battle-copy`, `parse`, `oversize` (a JSONL line above 32 MiB, or a step blob
   above 1 MiB), `io-error` (a store that cannot be opened — warn `ag.db-unopenable` — or read, a busy or failing later
   page, a JSONL read error), `too-large` (a locked store whose private copy — the store and its `-wal` — would exceed
-  `MAX_COPY_BYTES`: never copied), `bad-record` (a row or record the mapping failed on; warn `ag.bad-record` with the count,
-  both windows').
+  `MAX_COPY_BYTES`: never copied, warn `ag.db-too-large`), `bad-record` (a row or record the mapping failed on; warn
+  `ag.bad-record` with the count, both windows').
 
 ## state.vscdb (`antigravity.ide`)
 
@@ -233,7 +234,8 @@ SQLite, VS Code's `ItemTable` (`key` TEXT, `value` BLOB; verified locally) — w
   count: proto3 writes no 0, so a moved field would look like empty conversations). A NULL or empty value is no
   conversation.
 - **Coverage** (window `lifetime`): `files`/`bytes` = the store, `records` = topic entries. A store that cannot be opened or
-  read makes the source an error, unless it is a locked store above `MAX_COPY_BYTES` (`note: "too-large"`).
+  read makes the source an error, unless it is a locked store above `MAX_COPY_BYTES` (`note: "too-large"`, warn
+  `ag.db-too-large`).
 
 ## Brain artifacts (`antigravity.brain`)
 

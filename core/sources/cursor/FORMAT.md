@@ -35,7 +35,7 @@ not read: <user>/globalStorage/state.vscdb.backup, <user>/globalStorage/conversa
 `state.vscdb` grows very large — users report tens of GB, up to about a hundred, mostly bubble rows. It is never
 copied while it can be read in place: `openRo` reads it with `mode=ro` (or `immutable=1` for a WAL store whose writer
 closed it), and a locked store whose private copy — the store and its `-wal` — would exceed `MAX_COPY_BYTES` is not
-copied at all (coverage `note: "too-large"`, warning `too-large`). No query reads a whole table or a whole value except where stated.
+copied at all (coverage `note: "too-large"`, warning `too-large`, warn log `cu.db-too-large`). No query reads a whole table or a whole value except where stated.
 
 ## state.vscdb
 
@@ -250,7 +250,7 @@ strings are both accepted). One machine reported every line column of `scored_co
   never kept. No `repoKey`: the table names no repository. Rows without a time: `no-ts`.
 - **Coverage** (window `lifetime`): `files`/`bytes` = the store, `records` = rows read, `from`/`to` = first/last
   commit time. A store that cannot be opened makes the source an error, unless it is a locked store above
-  `MAX_COPY_BYTES` (`note: "too-large"`).
+  `MAX_COPY_BYTES` (`note: "too-large"`, warn `cu.db-too-large`).
 
 ## cursor-agent CLI (`cursor.agent-cli`, beta)
 

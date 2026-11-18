@@ -559,7 +559,8 @@ const tokens = (v: unknown): number | undefined => {
  * then per conversation its step store and transcript (the detail window: tools, errors, prompts, usage, its detail
  * session). One CoverageEv per window, last — `absent` for a window with no store, `error` (note `unreadable`) for one
  * whose stores are all unreadable. Each store is read on its own; only when every store present fails is the source an
- * error. (The CLI's prompt log is `antigravity.history`.)
+ * error. A locked store above MAX_COPY_BYTES keeps its reason instead: its window notes `too-large`, and it is no error
+ * of the source. (The CLI's prompt log is `antigravity.history`.)
  */
 export async function scanCli(c: Candidate, ctx: ScanCtx): Promise<void> {
   const tally = new Tally(TOOL, CLI_SOURCE);
@@ -599,13 +600,14 @@ export async function scanCli(c: Candidate, ctx: ScanCtx): Promise<void> {
     eachRow(() => conv.finish(), tally);
   }
   read += conversationsRead;
-  if (present > 0 && read === 0) throw new CliStoresUnreadable("no Antigravity CLI store could be read");
+  const tooLarge = tally.note === "too-large" || life.note === "too-large";
+  if (present > 0 && read === 0 && !tooLarge) throw new CliStoresUnreadable("no Antigravity CLI store could be read");
   const bad = (tally.skipped["bad-record"] ?? 0) + (life.skipped["bad-record"] ?? 0);
   if (bad > 0) ctx.log("warn", "ag.bad-record", bad); // a mapping bug must not look like a healthy source
   for (const [t, has, readable] of [[tally, conversations > 0, conversationsRead > 0], [life, hasSummaries, summariesRead]] as const) {
     const cov = t.coverage();
     if (!has) cov.status = "absent";
-    else if (!readable) {
+    else if (!readable && t.note !== "too-large") {
       cov.status = "error";
       cov.note = "unreadable";
     }

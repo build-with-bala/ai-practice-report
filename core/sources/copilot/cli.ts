@@ -412,11 +412,14 @@ export async function scanCli(c: Candidate, ctx: ScanCtx): Promise<void> {
   for (const [t, has, readable] of [[tally, hasState || hasOld, true], [life, hasStore, storeRead]] as const) ctx.emit(windowCoverage(t, has, readable));
 }
 
-/** A window's coverage: `absent` when its store is not there, `error` (note `unreadable`) when it is but could not be read. */
+/**
+ * A window's coverage: `absent` when its store is not there, `error` (note `unreadable`) when it is but could not be
+ * read — unless it is a locked store above MAX_COPY_BYTES, which keeps that reason (note `too-large`).
+ */
 export function windowCoverage(t: Tally, has: boolean, readable: boolean): PluginCoverage {
   const cov = t.coverage();
   if (!has) cov.status = "absent";
-  else if (!readable) {
+  else if (!readable && t.note !== "too-large") {
     cov.status = "error";
     cov.note = "unreadable";
   }

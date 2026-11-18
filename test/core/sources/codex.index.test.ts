@@ -11,7 +11,7 @@ import { registry } from "../../../core/sources/registry";
 import type { ScanCtx, SourcePlugin, PluginCoverage } from "../../../core/sources/types";
 import { keyedHash } from "../../../core/text/hash";
 import { CANARY, expectNoCanaries } from "../../kit/canary";
-import { fakeHome, type FakeHome } from "../../kit/home";
+import { fakeHome, lockAboveCopyLimit, type FakeHome } from "../../kit/home";
 import { fixtureStart } from "../../fixtures/claude-code";
 import {
   buildCodexIndex, CX_MAX, CX_MINI, cxHistoryLine, CxRollout, localTime, MANAGED_SANDBOX, THREAD_COLUMNS, threadRow, turnRow, uuidV7,
@@ -343,6 +343,22 @@ describe("codex threads: thread index and turn history", () => {
     r = await run([cxThreads]);
     expect(r.store.all("session")).toHaveLength(1);
     expect(covOf(r, "codex.threads")).toMatchObject({ status: "ok", files: 1, skipped: { "io-error": 1 } });
+  });
+
+  test.skipIf(process.platform === "win32")("the only store, locked and above the copy limit: no error — too-large note, warning and log", async () => {
+    const at = fixtureStart();
+    const file = writeStateDb(h, ".codex/state_5.sqlite", [threadRow(uuidV7(at - 1000, 0xf2), at)]);
+    const release = lockAboveCopyLimit(file);
+    const logs: string[] = [];
+    let r: Result;
+    try {
+      r = await scan({ env: h.env, plugins: [cxThreads], onLog: (level, code) => logs.push(`${level} ${code}`) });
+    } finally {
+      release();
+    }
+    expect(r.coverage).toEqual([expect.objectContaining({ source: "codex.threads", status: "empty", note: "too-large", files: 0, skipped: { "too-large": 1 } })]);
+    expect(r.warnings.map((w) => [w.code, w.source])).toEqual([["too-large", "codex.threads"]]);
+    expect(logs).toEqual(["warn cx.db-too-large"]);
   });
 
   test("a WITHOUT ROWID table cannot be paged: drift table-unreadable, and it is never queried", async () => {

@@ -14,7 +14,7 @@ import { keyedHash, normalizePath } from "../../../core/text/hash";
 import { classifyIntent } from "../../../core/text/intent";
 import { detectEnv } from "../../../core/env/env";
 import { CANARY, expectNoCanaries } from "../../kit/canary";
-import { fakeHome, type FakeHome } from "../../kit/home";
+import { fakeHome, lockAboveCopyLimit, type FakeHome } from "../../kit/home";
 import {
   buildCopilot, CliEvents, CP_EXT_VERSION, cpSid, editGroup, fileUrl, jetbrainsRel, markdown, MIN, request, S_J, S_L, sessionRoot, terminal, tool,
   userRel, writeSessionStore, type JournalRecord,
@@ -812,6 +812,21 @@ describe("copilot cli (session events and store, from the CLI's schema)", () => 
     const r = await run([cpCli]);
     expect(r.store.forSession(sidOf(id), "turn").map((t) => [t.status, t.ms, t.ts - at])).toEqual([["completed", 4_000, 5_000], ["interrupted", 3_000, 9_000]]);
     expect(toolsOf(r, id).map((t) => [t.name, t.checks, t.ok, t.outcome])).toEqual([["bash", ["test"], undefined, "interrupted"]]);
+  });
+
+  test.skipIf(process.platform === "win32")("a store locked and above the copy limit keeps its reason: too-large, not unreadable, with a warning and a log", async () => {
+    const file = writeSessionStore(h, path.join(".copilot", "session-store.db"), { id: cliSid, host: "github", at: t0() });
+    const release = lockAboveCopyLimit(file);
+    const logs: string[] = [];
+    let r: Result;
+    try {
+      r = await scan({ env: h.env, plugins: [cpCli], onLog: (level, code) => logs.push(`${level} ${code}`) });
+    } finally {
+      release();
+    }
+    expect(covOf(r, "copilot.cli", "lifetime")).toMatchObject({ status: "empty", note: "too-large", files: 0, skipped: { "too-large": 1 } });
+    expect(r.warnings.map((w) => [w.code, w.source])).toEqual([["too-large", "copilot.cli"]]);
+    expect(logs).toEqual(["warn cp.db-too-large"]);
   });
 
   test("no session-state and no store under ~/.copilot: absent", async () => {

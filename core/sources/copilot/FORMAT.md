@@ -196,10 +196,12 @@ Built-in tool ids (VS Code program and extension program): see `VSCODE_TOOLS` in
     `no-ts`), `duplicate`, `empty-session`, `bad-record`, `parse`, `oversize`, `too-large`, `io-error`.
   - `lifetime` (the session store): `files`/`bytes` = the store; `records` = its rows; `from`/`to` = its sessions and
     turns. Drift: `store.missing-table:<t>`, `store.missing-column:<c>`, `table-unreadable:<t>` (a table whose first
-    page fails other than busy). Skipped: `bad-row`, `no-ts`, `io-error` (a busy page, a later page that fails),
-    `too-large` (a locked store whose private copy — the store and its `-wal` — would exceed `MAX_COPY_BYTES`: never
-    copied), `bad-record`. `absent` without a store; `error` (`note: "unreadable"`) when the store is there but cannot
-    be read.
+    page fails other than busy). Skipped: `bad-row`, `no-ts`, `io-error` (a store that cannot be opened — warn
+    `cp.db-unopenable` — or that fails while read — warn `cp.db-unreadable` —, a busy page — warn `cp.db-busy` —, a later
+    page that fails — warn `cp.db-query`), `too-large` (a locked store whose private copy — the store and its `-wal` —
+    would exceed `MAX_COPY_BYTES`: never copied, `note: "too-large"`, warn `cp.db-too-large`), `bad-record`. `absent`
+    without a store; `error` (`note: "unreadable"`) when the store is there but cannot be read — a store too large to
+    copy keeps `note: "too-large"` instead.
 
 **Install detection** (`install.ts`, names only): a bundled `copilot*` extension — macOS `/Applications/<app>.app/Contents/
 Resources/app/extensions` and `~/Applications/…`, Windows `%LOCALAPPDATA%\Programs\Microsoft VS Code[ Insiders]\resources\
@@ -263,7 +265,8 @@ other type is drift `event:(other)` (the type itself is never kept).
 - SessionEv (`detail`, origin `human`, `surface: "cli"`); session id = the `session-state` folder name (UUID verbatim,
   else hashed). The session store is read as above.
 - **Coverage**, one per window: `detail` = `session-state/*/events.jsonl` (`absent` without `session-state/`),
-  `lifetime` = `session-store.db` (`absent` without it; `error`, `note: "unreadable"`, when it cannot be read).
+  `lifetime` = `session-store.db` (`absent` without it; `error`, `note: "unreadable"`, when it cannot be read; a store
+  too large to copy keeps `note: "too-large"`, as above).
   Drift in `detail`, beyond unknown event types: `event.timestamp:shape` (an event whose `timestamp` is absent or not a
   time; a well-formed one outside the plausible range is skipped `bad-ts`, an event without one `no-ts`),
   `user.message.content:shape` (no string `content`), `tool.execution_start:shape` (a call without its id or tool

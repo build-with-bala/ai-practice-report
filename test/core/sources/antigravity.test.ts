@@ -14,7 +14,7 @@ import type { SourcePlugin } from "../../../core/sources/types";
 import { keyedHash, normalizePath } from "../../../core/text/hash";
 import { classifyIntent } from "../../../core/text/intent";
 import { CANARY, expectNoCanaries, findCanaries } from "../../kit/canary";
-import { fakeHome, type FakeHome } from "../../kit/home";
+import { fakeHome, lockAboveCopyLimit, type FakeHome } from "../../kit/home";
 import { pbEncode } from "../../kit/pb";
 import { fixtureStart, MIN } from "../../fixtures/claude-code";
 import {
@@ -681,6 +681,22 @@ describe("antigravity cli: stores", () => {
     // the readable transcript is enough for the source; each window says how its own stores fared
     expect(covOf(r, "antigravity.cli")).toMatchObject({ status: "ok", files: 1, skipped: { "io-error": 1 } });
     expect(summariesCov(r)).toMatchObject({ status: "error", note: "unreadable", files: 0, skipped: { "io-error": 1 } });
+  });
+
+  test.skipIf(process.platform === "win32")("the only store, locked and above the copy limit: no error — too-large note, warning and log", async () => {
+    const file = writeSummaries(h, [{ id: C }]);
+    const release = lockAboveCopyLimit(file);
+    const logs: string[] = [];
+    let r: Result;
+    try {
+      r = await scan({ env: h.env, plugins: [agCli], onLog: (level, code) => logs.push(`${level} ${code}`) });
+    } finally {
+      release();
+    }
+    expect(summariesCov(r)).toMatchObject({ status: "empty", note: "too-large", files: 0, skipped: { "too-large": 1 } });
+    expect(covOf(r, "antigravity.cli").status).toBe("absent"); // no conversation store
+    expect(r.warnings.map((w) => [w.code, w.source])).toEqual([["too-large", "antigravity.cli"]]);
+    expect(logs).toEqual(["warn ag.db-too-large"]);
   });
 
   test("no CLI folder: absent; a folder without stores: absent in both windows, history empty", async () => {
