@@ -32,11 +32,33 @@ describe("checkRollouts: C6, every rollout has a thread row", () => {
     expect(c6.tools).toEqual(["codex"]);
   });
 
-  test("1 rollout missing its row fails", () => {
+  test("2 rollouts missing their rows fail", () => {
+    const [c6] = run([...indexed(5), rollout(9), rollout(10)]);
+    expect([c6.status, c6.reason]).toEqual(["fail", "missing-thread-rows"]);
+    expect(c6.values).toEqual({ missing: 2, rollouts: 7 });
+    expect(c6.askAbout).toBe("2 Codex session files have no entry in Codex's own thread index. Were session files copied in from somewhere else?");
+  });
+
+  test("1 rollout missing its row is a note with the same question", () => {
     const [c6] = run([...indexed(5), rollout(9)]);
-    expect(c6.status).toBe("fail");
-    expect(c6.values.missing).toBe(1);
+    expect([c6.status, c6.reason]).toEqual(["note", "missing-thread-rows"]);
+    expect(c6.values).toEqual({ missing: 1, rollouts: 6 });
     expect(c6.askAbout).toBe("1 Codex session file has no entry in Codex's own thread index. Were session files copied in from somewhere else?");
+  });
+
+  test("the fail threshold is max(2, 1% of the checked rollouts)", () => {
+    /** `total` rollouts, the last `missing` of them without a row. */
+    const of = (total: number, missing: number): Ev[] =>
+      [threadsCov(), ...Array.from({ length: total }, (_, i) => {
+        const r = rollout(i, { fileTs: T0 + i * MIN, uuidTs: T0 + i * MIN + 400 });
+        return i < total - missing ? [r, row(i)] : [r];
+      }).flat()];
+    const status = (total: number, missing: number) => run(of(total, missing))[0].status;
+    expect(status(1_000, 1)).toBe("note");
+    expect(status(1_000, 9)).toBe("note");
+    expect(status(1_000, 10)).toBe("fail");
+    expect(status(20, 1)).toBe("note");
+    expect(status(20, 2)).toBe("fail");
   });
 
   test("a rollout named 2 min before now is ignored", () => {
@@ -54,7 +76,7 @@ describe("checkRollouts: C6, every rollout has a thread row", () => {
   });
 
   test("a drifted store with records is read", () => {
-    const [c6] = run([threadsCov({ status: "drift" }), rollout(0)]);
+    const [c6] = run([threadsCov({ status: "drift" }), rollout(0), rollout(1)]);
     expect(c6.status).toBe("fail");
   });
 

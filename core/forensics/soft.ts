@@ -15,7 +15,7 @@ const MIN = 60_000;
 const DAY_MS = 86_400_000;
 const RHYTHM_GAP_MS = 30 * MIN;
 const RHYTHM_MIN_GAPS = 50;
-const RHYTHM_MAX_CV = 1;
+const RHYTHM_MAX_CV = 0.6;
 const LONG_CHARS = 200;
 const LONG_REPEATS = 5;
 const BURST_DAYS = 14;
@@ -40,9 +40,10 @@ function humanPrompts(raw: ScanResult, t: SessionTable): PromptEv[] {
 }
 
 /**
- * rhythm: per session, the gaps under 30 min between consecutive human prompts; a session with at least 50 such gaps
- * whose coefficient of variation (population sd / mean) is below 1.0 is regular. Raised when any session is. n/a when
- * no session has 50 gaps. `values`: `sessions` (measured), `regular`, `minCv`.
+ * rhythm: per session, the gaps under 30 min between consecutive human prompts; a session with at least 50 such gaps is
+ * measured by their coefficient of variation (population sd / mean). Gaps cut off at 30 min have a CV near 1 in ordinary
+ * human work, so a single session says little: raised when the median CV over the measured sessions is below 0.6. n/a
+ * when no session can be measured. `n` and `values.sessions`: the sessions measured; `values.medianCv` (2 decimals).
  */
 function rhythm(prompts: readonly PromptEv[]): CheckResult {
   const bySession = new Map<string, number[]>();
@@ -52,7 +53,7 @@ function rhythm(prompts: readonly PromptEv[]): CheckResult {
     if (list) list.push(p.ts);
     else bySession.set(p.sessionId, [p.ts]);
   }
-  let sessions = 0, regular = 0, minCv = Infinity;
+  const cvs: number[] = [];
   for (const times of bySession.values()) {
     times.sort((a, b) => a - b);
     const gaps: number[] = [];
@@ -61,19 +62,19 @@ function rhythm(prompts: readonly PromptEv[]): CheckResult {
       if (g < RHYTHM_GAP_MS) gaps.push(g);
     }
     if (gaps.length < RHYTHM_MIN_GAPS) continue;
-    sessions++;
     const mean = gaps.reduce((a, b) => a + b, 0) / gaps.length;
     const sd = Math.sqrt(gaps.reduce((a, g) => a + (g - mean) ** 2, 0) / gaps.length);
-    const cv = mean === 0 ? 0 : sd / mean;
-    minCv = Math.min(minCv, cv);
-    if (cv < RHYTHM_MAX_CV) regular++;
+    cvs.push(mean === 0 ? 0 : sd / mean);
   }
   const tools = toolsOf(prompts.filter((p) => p.sessionId !== undefined));
-  if (sessions === 0) return na("soft:rhythm", tools);
-  const base = { id: "soft:rhythm" as const, n: sessions, values: { sessions, regular, minCv: round(minCv) }, tools };
-  if (regular === 0) return { ...base, status: "pass", reason: "ok" };
+  if (cvs.length === 0) return na("soft:rhythm", tools);
+  cvs.sort((a, b) => a - b);
+  const m = cvs.length >> 1;
+  const median = cvs.length % 2 === 1 ? cvs[m]! : (cvs[m - 1]! + cvs[m]!) / 2;
+  const base = { id: "soft:rhythm" as const, n: cvs.length, values: { sessions: cvs.length, medianCv: round(median, 2) }, tools };
+  if (median >= RHYTHM_MAX_CV) return { ...base, status: "pass", reason: "ok" };
   return { ...base, status: "note", reason: "regular-rhythm",
-    askAbout: `${regular} ${regular === 1 ? "session has" : "sessions have"} typed prompts at unusually regular intervals. Were these prompts sent by a script rather than typed?` };
+    askAbout: `Across ${cvs.length} ${cvs.length === 1 ? "session" : "sessions"}, typed prompts arrive at unusually regular intervals. Were these prompts sent by a script rather than typed?` };
 }
 
 /**

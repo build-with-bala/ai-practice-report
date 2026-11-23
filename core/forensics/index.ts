@@ -9,7 +9,7 @@ import { checkFileTimes } from "./files";
 import { provenance } from "./provenance";
 import { checkReleases, RELEASES, type ReleaseTable } from "./releases";
 import { softFlags } from "./soft";
-import { round, type CheckResult, type CheckStatus } from "./types";
+import { round, type CheckResult } from "./types";
 
 export type { ReleaseTable } from "./releases";
 export type { CheckId, CheckResult, CheckStatus } from "./types";
@@ -29,27 +29,23 @@ const BACKING: readonly [ToolId, readonly CheckResult["id"][]][] = [["claude-cod
 const PRIMARY = new Set<CheckResult["id"]>(["C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9"]);
 
 /**
- * How a result counts toward the band. Ids that exist but cannot be verified are a note: a C1 or C2 result that is
- * n/a for a reason other than `too-few`, or that names an unverified kind, counts as `note` (a fail stays a fail). The
- * result itself is left as it is.
+ * Ids that exist but cannot be verified: a C1 or C2 result that is n/a for a reason other than `too-few`, or that names
+ * an unverified kind (`values.unverifiedKinds` > 0).
  */
-function bandStatus(c: CheckResult): CheckStatus {
-  if (c.id !== "C1" && c.id !== "C2") return c.status;
-  if (c.status === "fail") return "fail";
-  const unverified = (c.status === "n/a" && c.reason !== "too-few") || (typeof c.values.unverifiedKinds === "number" && c.values.unverifiedKinds > 0);
-  return unverified ? "note" : c.status;
-}
+const unverified = (c: CheckResult): boolean => (c.id === "C1" || c.id === "C2")
+  && ((c.status === "n/a" && c.reason !== "too-few") || (typeof c.values.unverifiedKinds === "number" && c.values.unverifiedKinds > 0));
 
 /**
- * The band over every result: `inconsistent` if any fails; else `consistent-with-notes` if any is a warn or a note
- * (a raised soft flag is a note); else `consistent` if any of C1–C9 passed; else `unverifiable`. Never `worst()`, where
- * n/a ranks below pass.
+ * The band over every result (never `worst()`, where n/a ranks below pass):
+ * 1. any fail → `inconsistent`;
+ * 2. else any warn or note (a raised soft flag is a note) → `consistent-with-notes`;
+ * 3. else, when any of C1–C9 passed → `consistent`, or `consistent-with-notes` when ids exist but cannot be verified;
+ * 4. else → `unverifiable` (unverifiable ids with nothing passing stay unverifiable).
  */
 function bandOf(checks: readonly CheckResult[]): Forensics["band"] {
-  const statuses = checks.map(bandStatus);
-  if (statuses.includes("fail")) return "inconsistent";
-  if (statuses.some((s) => s === "warn" || s === "note")) return "consistent-with-notes";
-  if (checks.some((c, i) => PRIMARY.has(c.id) && statuses[i] === "pass")) return "consistent";
+  if (checks.some((c) => c.status === "fail")) return "inconsistent";
+  if (checks.some((c) => c.status === "warn" || c.status === "note")) return "consistent-with-notes";
+  if (checks.some((c) => PRIMARY.has(c.id) && c.status === "pass")) return checks.some(unverified) ? "consistent-with-notes" : "consistent";
   return "unverifiable";
 }
 

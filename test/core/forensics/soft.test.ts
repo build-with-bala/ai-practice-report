@@ -36,6 +36,18 @@ const toolEv = (i: number, over: Partial<ToolEv> = {}): ToolEv =>
 const config = (over: Partial<ConfigEv> = {}): ConfigEv =>
   ({ k: "config", tool: "claude-code", source: "claude-code.config", kind: "skill", name: "a", provenance: "authored", uses: 3, ...over });
 
+/** A seeded generator (mulberry32): the fixtures are the same on every run. */
+function rng(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4_294_967_296;
+  };
+}
+
 const flags = (events: Ev[]): CheckResult[] => {
   const raw = scanResultOf([cov(CC, "detail"), cov("claude-code.history", "lifetime"), sess("s"), ...events], { finishedAt: NOW });
   return softFlags(raw, buildSessionTable(raw, { now: NOW, timeZone: "UTC" }), { now: NOW, timeZone: "UTC" });
@@ -50,20 +62,56 @@ describe("softFlags", () => {
   });
 
   describe("rhythm", () => {
-    test("60 prompts a minute apart (within a second) are raised", () => {
-      const f = flag(Array.from({ length: 61 }, (_, i) => prompt(T0 + i * MIN + (i % 2) * SEC)), "soft:rhythm");
+    /** A session of 61 prompts (60 gaps) whose gaps `gap(i)` draws. */
+    const session = (id: string, gap: (i: number) => number): PromptEv[] => {
+      let ts = T0;
+      return Array.from({ length: 61 }, (_, i) => prompt((ts += i === 0 ? 0 : gap(i)), { sessionId: id }));
+    };
+    /** Exponential gaps of mean 4 min, redrawn when 30 min or more: a heavy-tailed, human-like mix (CV near 1). */
+    const humanLike = (seed: number) => {
+      const r = rng(seed);
+      return () => {
+        for (;;) {
+          const g = Math.round(-Math.log(1 - r()) * 4 * MIN) + SEC;
+          if (g < 30 * MIN) return g;
+        }
+      };
+    };
+
+    test("constant gaps are raised, with the median CV and the sessions measured", () => {
+      const f = flag(session("s", () => MIN), "soft:rhythm");
       expect([f.status, f.reason]).toEqual(["note", "regular-rhythm"]);
-      expect(f.values.regular).toBe(1);
+      expect(f.values).toEqual({ sessions: 1, medianCv: 0 });
+      expect(f.n).toBe(1);
       expect(f.askAbout).toBeString();
     });
 
-    test("bursts and pauses pass", () => {
-      const gaps = [10 * SEC, 10 * SEC, 10 * SEC, 20 * MIN];
-      let ts = T0;
-      const ps = Array.from({ length: 61 }, (_, i) => prompt((ts += gaps[i % 4]!)));
-      const f = flag(ps, "soft:rhythm");
+    test("gaps with a small jitter are raised", () => {
+      const r = rng(3);
+      const f = flag(session("s", () => MIN + Math.round((r() - 0.5) * 10 * SEC)), "soft:rhythm");
+      expect(f.status).toBe("note");
+      expect(f.values.medianCv as number).toBeLessThan(0.1);
+    });
+
+    test("uniformly random gaps between two bounds are raised", () => {
+      const r = rng(4);
+      const f = flag(session("s", () => 30 * SEC + Math.round(r() * 270 * SEC)), "soft:rhythm");
+      expect(f.status).toBe("note");
+      expect(f.values.medianCv as number).toBeLessThan(0.6);
+    });
+
+    test("a human-like heavy-tailed mix, CV near 1, is not raised", () => {
+      const f = flag(session("s", humanLike(5)), "soft:rhythm");
       expect([f.status, f.reason]).toEqual(["pass", "ok"]);
-      expect(f.values.minCv as number).toBeGreaterThan(1);
+      expect(f.values.medianCv as number).toBeGreaterThan(0.8);
+    });
+
+    test("one scripted session among five human-like ones is not raised", () => {
+      const evs = [session("bot", () => MIN), ...[1, 2, 3, 4, 5].map((k) => session(`h${k}`, humanLike(10 + k)))].flat();
+      const f = flag(evs, "soft:rhythm");
+      expect(f.status).toBe("pass");
+      expect(f.values.sessions).toBe(6);
+      expect(f.n).toBe(6);
     });
 
     test("fewer than 50 gaps under 30 min are n/a: longer gaps do not count", () => {

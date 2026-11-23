@@ -11,6 +11,8 @@ import { toolsOf, type CheckResult } from "./types";
  */
 
 const RECENT_MS = 10 * 60_000;
+const MISSING_MIN = 2;
+const MISSING_SHARE = 0.01;
 const ID_TOL_MS = 1_000;
 const QUARTER_MS = 15 * 60_000;
 const ZONE_TOL_MS = 2_000;
@@ -24,7 +26,9 @@ const FAIL_SHARE = 0.005;
 /**
  * C6, every rollout has a thread-index row (by `threadId`). Rollouts named at or after 10 min before `now` are left out:
  * the CLI may not have written their row yet. n/a without a read thread index (coverage of `codex.threads` `ok` or
- * `drift` with records), or without rollouts; any rollout missing its row → fail. `n`: the rollouts checked.
+ * `drift` with records), or without rollouts. Rollouts missing their row: at least max(2, 1% of the rollouts checked) →
+ * fail; fewer, but at least 1 → note with the same question (a genuine machine can hold a stray one). `n`: the
+ * rollouts checked; `values`: `missing`, `rollouts`.
  */
 function checkThreadRows(raw: ScanResult, now: number): CheckResult {
   const rollouts = raw.store.all("codex-rollout").filter((r) => r.fileTs === undefined || r.fileTs < now - RECENT_MS);
@@ -37,7 +41,8 @@ function checkThreadRows(raw: ScanResult, now: number): CheckResult {
   const missing = rollouts.filter((r) => !have.has(r.threadId)).length;
   const base = { id: "C6" as const, n: rollouts.length, values: { missing, rollouts: rollouts.length }, tools };
   if (missing === 0) return { ...base, status: "pass", reason: "ok" };
-  return { ...base, status: "fail", reason: "missing-thread-rows",
+  const fail = missing >= Math.max(MISSING_MIN, MISSING_SHARE * rollouts.length);
+  return { ...base, status: fail ? "fail" : "note", reason: "missing-thread-rows",
     askAbout: `${missing} Codex session ${missing === 1 ? "file has" : "files have"} no entry in Codex's own thread index. Were session files copied in from somewhere else?` };
 }
 

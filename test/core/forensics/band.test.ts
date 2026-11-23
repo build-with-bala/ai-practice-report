@@ -134,7 +134,14 @@ describe("runForensics: the band", () => {
     expect(f.band).toBe("inconsistent");
   });
 
-  test("ids that exist but cannot be verified are a note, never plain consistent", () => {
+  test("unverifiable ids with nothing else passing are unverifiable", () => {
+    const f = run(scrambled(anchors("cc-msg", 1), 5));
+    expect([byId(f, "C1").status, byId(f, "C1").reason]).toEqual(["n/a", "scheme-changed"]);
+    expect(f.checks.some((c) => c.status === "pass" && /^C\d$/.test(c.id))).toBe(false);
+    expect(f.band).toBe("unverifiable");
+  });
+
+  test("ids that exist but cannot be verified downgrade a passing band to notes, never plain consistent", () => {
     // cc-msg passes, cc-req no longer tracks time: C1 and C2 are n/a (scheme-changed), with one unverified kind
     const f = run([...anchors("cc-msg", 1), ...scrambled(anchors("cc-req", 2), 5), ...claudeDays(10)]);
     expect(byId(f, "C1").status).toBe("n/a");
