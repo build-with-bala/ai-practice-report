@@ -28,7 +28,8 @@ import { cspFor } from "./page";
  *      nest in themselves, `li`/`dt`/`dd` and table parts have only their proper parents, tables and rows hold only
  *      their parts and white space. So the tree builder never closes, inserts or moves an element.
  * 3. Attributes are only ` name="value"`: separated by ASCII spaces or newlines, the name matching
- *    `[A-Za-z][A-Za-z0-9:-]*`, the value double-quoted with no raw `<`, `>` or `"`, and no name twice in a tag.
+ *    `[A-Za-z][A-Za-z0-9:-]*`, the value double-quoted with no raw `<`, `>` or `"`, and no name twice in a tag. No two
+ *    elements on the page, HTML or SVG, share an `id` value (`duplicate-id`).
  *    `style` and `on…` attributes are counted in `styleAttrs` and `inlineHandlers`.
  * 4. URL attributes (`URL_ATTRS`) hold exactly a `#fragment`, or a `data:image/…` URL on an image (`DATA_CONTEXTS`),
  *    matched literally: no trimming and no entity decoding. `srcset` is never allowed. A violation is an external ref.
@@ -167,6 +168,8 @@ export function auditHtml(html: string): Audit {
   let headIndex = 0;
   let charsetOk = false;
   let preDepth = 0;
+  /** Every id seen so far, HTML and SVG alike: a fragment or a label pointing at a repeated id is ambiguous. */
+  const ids = new Set<string>();
   /** The open elements, innermost last. */
   const stack: Open[] = [];
   /** 0 before <html>, 1 in html before head, 2 in head, 3 between head and body, 4 in body, 5 after body, 6 after </html>. */
@@ -298,6 +301,11 @@ export function auditHtml(html: string): Audit {
 
     if (preDepth === 0) elements++;
 
+    const id = attrs.get("id");
+    if (id !== undefined) {
+      if (ids.has(id)) flag("duplicate-id", lt);
+      ids.add(id);
+    }
     for (const [key, value] of attrs) {
       if (key === "style") styleAttrs++;
       if (key.startsWith("on")) inlineHandlers++;

@@ -116,6 +116,8 @@ describe("auditHtml: the canonical subset, rule by rule", () => {
     ["a tab separator", "<!doctype html><p\tclass=\"x\">y</p>", "attribute"],
     ["a non-ASCII space in a tag", "<!doctype html><p\u00a0class=\"x\">y</p>", "attribute"],
     ["a duplicate attribute", "<!doctype html><p class=\"a\" CLASS=\"b\">y</p>", "duplicate-attribute"],
+    ["two elements with one id", "<!doctype html><p id=\"a\">x</p><p id=\"a\">y</p>", "duplicate-id"],
+    ["an HTML id repeated inside svg", "<!doctype html><p id=\"r\">x</p><svg><path id=\"r\" d=\"M0 0\"/></svg>", "duplicate-id"],
     ["a meta that is not allowed", "<!doctype html><meta name=\"generator\" content=\"x\">", "meta"],
     ["a raw < in text", "<!doctype html><p>a < b</p>", "raw-lt"],
     ["a NUL", "<!doctype html><p>a\u0000b</p>", "nul"],
@@ -383,5 +385,13 @@ describe("auditHtml on page() output", () => {
 
   test("uncovered lists characters no embedded font covers", () => {
     expect(auditHtml("<!doctype html><p>a→b</p>").uncovered).toEqual(["→"]);
+  });
+});
+
+describe("auditHtml: ids", () => {
+  test("a page with two equal ids is never clean; distinct ids are", () => {
+    expect(clean(auditHtml(inPage('<p id="x">a</p><p id="y">b</p>')))).toBe(true);
+    const a = auditHtml(inPage('<p id="x">a</p><svg><path id="x" d="M0 0"/></svg>'));
+    expect([clean(a), codes(a)]).toEqual([false, ["duplicate-id"]]);
   });
 });
