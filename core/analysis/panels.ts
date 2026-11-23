@@ -4,9 +4,9 @@ import type { ScanResult } from "../scan";
 import { Span } from "../signals/types";
 import { keyedHash } from "../text/hash";
 import { langOfExt, type EditLang } from "../text/langs";
-import { analysisScope, artifactUse } from "./artifacts";
-import { humanInScope } from "./exposure";
+import { artifactUse } from "./artifacts";
 import { promptWindowByTool } from "./promptwindow";
+import { analysisScope } from "./scope";
 import type { MetricMeta, SessionTable } from "./types";
 import { isAction } from "./walk";
 
@@ -17,7 +17,8 @@ export type StackRole = "frontend" | "backend" | "mobile" | "data";
  * extension, by `langOfExt` (`doc` included); `toolchains`: check actions by their toolchain (none when unknown);
  * `techCategories`: `PromptFeatures.techCats` summed over the human prompts in scope of each tool's prompt window
  * (`promptWindowByTool`); `roleEdits`: code edits (no `doc`) per stack role, by `editExt` (pre-flight P12). `meta`
- * describes the edit actions: window `detail`, their sources and span, `n` = the edit actions counted.
+ * describes the edit counts only (`languages`, `roleEdits`): window `detail`, their sources and span, `n` = the edit
+ * actions counted; `techCategories` follows each tool's prompt window instead, and `toolchains` the detail checks.
  */
 export interface Stack { languages: Partial<Record<EditLang, number>>; toolchains: Partial<Record<Toolchain, number>>;
   techCategories: Partial<Record<TechCategory, number>>; roleEdits: Partial<Record<StackRole, number>>; meta: MetricMeta }
@@ -89,8 +90,7 @@ function localHour(ms: number, timeZone: string): number {
 /** The unscored panels (spec §6.5): pure and synchronous, with an explicit time zone. */
 export function panels(t: SessionTable, raw: ScanResult, o: { timeZone: string }): Panels {
   const scope = analysisScope(raw, t);
-  const { inRange, excluded, detailRows } = scope;
-  const human = humanInScope(raw, t);
+  const { inRange, excluded, detailRows, human } = scope;
   const windowOf = promptWindowByTool(raw, t);
 
   // stack: edits and checks of kept detail rows, inside the range
@@ -145,7 +145,7 @@ export function panels(t: SessionTable, raw: ScanResult, o: { timeZone: string }
     if (r.sandbox !== undefined) bump(sandbox, r.sandbox);
     if (modes.size === 0 && r.approval === undefined && r.sandbox === undefined) continue;
     riskRows++;
-    riskSpan.add({ source: r.source, start: Math.max(r.start, t.scope.from), end: Math.min(r.end, t.scope.to) });
+    riskSpan.add({ source: r.source, ...scope.clip(r) });
   }
 
   // config

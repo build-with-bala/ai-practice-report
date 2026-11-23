@@ -1,8 +1,8 @@
 import type { ConfigEv } from "../model/events";
-import type { ToolId } from "../model/ids";
 import type { ScanResult } from "../scan";
 import { keyedHash } from "../text/hash";
-import type { SessionRow, SessionTable } from "./types";
+import { analysisScope, type AnalysisScope } from "./scope";
+import type { SessionTable } from "./types";
 import { inScope } from "./walk";
 
 /** The config kinds that are artifacts a person uses: skills, commands, agents, plugins and MCP servers. */
@@ -10,32 +10,6 @@ export const ARTIFACT_KINDS: ReadonlySet<ConfigEv["kind"]> = new Set<ConfigEv["k
 
 /** Provenance precedence: an authored entry wins over an installed one, then bundled, then unknown. */
 const PROVENANCE: readonly ConfigEv["provenance"][] = ["authored", "installed", "bundled", "unknown"];
-
-/**
- * What the exclusions and the date range leave of the raw data, derived once from `t.scope` and `raw` for every
- * analysis across sessions (globals, the config panel):
- * - `inRange`: a time inside the date range; `excluded`: the tools left out;
- * - `kept`: a session that is a kept row and no host copy;
- * - `detailSources`: the sources that report a detail coverage;
- * - `detailRows`: the kept detail-window rows that are no host copy;
- * - `configs`: the config entries of kept tools.
- */
-export interface AnalysisScope {
-  inRange(ts: number): boolean; excluded: ReadonlySet<ToolId>; kept(sessionId: string): boolean;
-  detailSources: ReadonlySet<string>; detailRows: readonly SessionRow[]; configs: readonly ConfigEv[];
-}
-
-export function analysisScope(raw: ScanResult, t: SessionTable): AnalysisScope {
-  const { from, to, tools: excluded } = t.scope;
-  return {
-    inRange: (ts) => ts >= from && ts <= to,
-    excluded,
-    kept: (sessionId) => t.rows.has(sessionId) && !t.hosts.has(sessionId),
-    detailSources: new Set(raw.coverage.filter((c) => c.window === "detail").map((c) => c.source)),
-    detailRows: [...t.rows.values()].filter((r) => r.window === "detail" && !t.hosts.has(r.id)),
-    configs: raw.store.all("config").filter((c) => !excluded.has(c.tool)),
-  };
-}
 
 /**
  * One distinct (kind, name) artifact config entry of a kept tool. `used`: at least one entry of it, or an event, shows

@@ -1,5 +1,6 @@
 import { dayEnd, dayStart, isoWeek } from "../analysis/activity";
-import { analysisScope, artifactUse } from "../analysis/artifacts";
+import { artifactUse } from "../analysis/artifacts";
+import { analysisScope } from "../analysis/scope";
 import { PR_LINK_TOOLS, SWITCH_TOOLS, type Metric, type SessionTable } from "../analysis/types";
 import type { SessionStats } from "../analysis/walk";
 import type { CommitFact, RepoFacts } from "../git/types";
