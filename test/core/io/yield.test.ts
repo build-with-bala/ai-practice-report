@@ -72,12 +72,17 @@ describe("maybeYield", () => {
   });
 
   test("an abort fired by a timer ends a stream that never awaits I/O", async () => {
+    // A line cap, as above, only bounds the failing case: a stream that never let the timer run ends at the cap, before
+    // the abort, and fails the order check instead of hanging.
+    const MAX_LINES = 5_000_000;
     const ac = new AbortController();
     const order: string[] = [];
     const timer = setTimeout(() => { order.push("abort"); ac.abort(); }, 50);
     let lines = 0;
     try {
-      for await (const _ of readJsonlStream(endless(), { signal: ac.signal })) lines++;
+      for await (const _ of readJsonlStream(endless(), { signal: ac.signal })) {
+        if (++lines >= MAX_LINES) break;
+      }
       order.push("ended");
     } finally {
       clearTimeout(timer);

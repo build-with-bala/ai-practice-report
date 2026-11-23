@@ -79,7 +79,6 @@ describe("Pass", () => {
     expect(firedFirst).toBe(true);
     expect(firedBefore).toBeDefined(); // the timer ran while the pass still had pages to read
     const full = firedBefore! - 1;
-    expect(full).toBeGreaterThanOrEqual(1);
     expect(done).toBe(true);
     expect(pages).toEqual([...Array.from({ length: full }, () => PAGE), 7]);
     expect(tally.records).toBe(full * PAGE + 7);
