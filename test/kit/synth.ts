@@ -14,17 +14,18 @@ import type { ScanResult } from "../../core/scan";
  * calls (reads, a search, edits, a test run that sometimes fails) and a turn end; every third turn delegates to a
  * subagent session with a brief, its own model calls, tool calls and turn. Markers: an interrupt instead of a turn end
  * now and then, commits, PR links, auto-compactions, clears, model switches. Repo signals: 4 repos holding the sessions'
- * 8 projects, with a commit for every commit marker.
+ * 8 projects, with a commit for every commit marker. Top-level sessions start a fixed `SPACING` apart, so the time span
+ * grows with the event count and the mix (sessions running at once included) is the same at every size. Each source's
+ * coverage comes last, as a reader writes it, with its real record count.
  */
 
 const T0 = Date.UTC(2026, 6, 1);
 const SEC = 1_000;
 const MIN = 60 * SEC;
-const DAY = 24 * 60 * MIN;
-/** The time the sessions spread over, whatever their number. */
-const SPAN = 90 * DAY;
-/** About this many events per top-level session (with its subagents): it sets the spacing of session starts. */
-const PER_SESSION = 140;
+/** Between two top-level session starts, whatever their number: sessions last 24 to 48 min, so 2 or 3 run at once. */
+const SPACING = 20 * MIN;
+/** How long the synthetic scan took. */
+const SCAN_MS = 30 * SEC;
 const TURN = 6 * MIN;
 const PROJECTS = 8;
 const REPOS = 4;
@@ -52,27 +53,31 @@ function idTail(ts: number, seq: number): string {
 /** A ScanResult of exactly `events` events (coverage included), the same for the same `events`. */
 export function synthStore(events: number): ScanResult {
   const store = new EventStore();
-  let left = Math.max(0, Math.floor(events));
+  const wanted = Math.max(0, Math.floor(events));
+  const coverages = Math.min(2, wanted); // the detail coverage, then the lifetime one: written last, kept first
+  let left = wanted - coverages;
+  const records = { [DETAIL]: 0, [LIFETIME]: 0 } as Record<string, number>;
+  let files = 0; // one transcript per session
   const add = (e: Ev): void => {
     if (left === 0) return;
     left--;
+    if (e.k === "session") files++;
+    records[(e as { source: string }).source]!++;
     store.add(e);
   };
 
   const commits: CommitFact[][] = Array.from({ length: REPOS }, () => []);
   const sessionsPerRepo = new Array<number>(REPOS).fill(0);
-  const spacing = Math.max(MIN, Math.floor(SPAN / Math.max(1, Math.ceil(left / PER_SESSION))));
   let latest = T0;
   let hashes = 0;
   let anchors = 0;
   let commitNo = 0;
   let turnNo = 0;
 
-  const cov = (source: string, window: "detail" | "lifetime"): Ev => ({
-    k: "coverage", tool: TOOL, source, window, status: "ok", beta: false, files: 0, bytes: 0, records: 0, skipped: {}, unknownTypes: {}, versions: ["2.0.0"],
+  const cov = (source: string, window: "detail" | "lifetime", fileCount: number): Ev => ({
+    k: "coverage", tool: TOOL, source, window, status: "ok", beta: false, files: fileCount, bytes: records[source]! * 600,
+    records: records[source]!, skipped: {}, unknownTypes: {}, versions: ["2.0.0"],
   });
-  add(cov(DETAIL, "detail"));
-  add(cov(LIFETIME, "lifetime"));
 
   const modelCall = (sessionId: string, ts: number, model: string, size: number): void => {
     add({ k: "usage", tool: TOOL, source: DETAIL, ts, sessionId, model, inTok: 40 + size, outTok: 300 + size * 7, cacheR: 20_000 + size * 90, cacheW: 1_500 + size * 3 });
@@ -91,7 +96,7 @@ export function synthStore(events: number): ScanResult {
     const repo = p % REPOS;
     sessionsPerRepo[repo]!++;
     const turns = 4 + (i % 5);
-    const start = T0 + i * spacing;
+    const start = T0 + i * SPACING;
     const end = start + turns * TURN;
     latest = Math.max(latest, end);
     const model = i % 3 === 0 ? "claude-opus-4-1" : "claude-sonnet-4-5";
@@ -175,10 +180,13 @@ export function synthStore(events: number): ScanResult {
     for (const p of projects) cwds.set(projectKey(p), `/synthetic/repo-${r}/project-${p}`);
   }
 
+  if (coverages >= 1) store.add(cov(DETAIL, "detail", Math.max(1, files)));
+  if (coverages >= 2) store.add(cov(LIFETIME, "lifetime", 1));
+
   const finishedAt = latest + MIN;
   return {
     store, coverage: [...store.all("coverage")], warnings: [], cwds, salt: new Uint8Array(32),
-    startedAt: finishedAt, finishedAt, tempClean: true,
+    startedAt: finishedAt - SCAN_MS, finishedAt, tempClean: true,
     repos: { status: "ok", repos, roots, skipped: {}, since: T0, ms: 0 },
   };
 }

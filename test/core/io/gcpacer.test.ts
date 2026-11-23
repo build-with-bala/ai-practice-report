@@ -82,6 +82,26 @@ describe("GcPacer", () => {
     expect(pacer.collections).toBe(0);
   });
 
+  test("after RSS falls between scans, growth is measured from the low mark, not the stale high one", () => {
+    let rss = 600 * MiB;
+    let collections = 0;
+    const pacer = new GcPacer(OPTS, () => { collections++; rss = 900 * MiB; }, () => rss);
+    pacer.add(OPTS.checkEvery); // baseline 600
+    rss = 1_000 * MiB;
+    pacer.add(OPTS.checkEvery); // 400 over: collects, leaving a 900 MiB baseline
+    expect(collections).toBe(1);
+    rss = 350 * MiB; // the first scan's store is released and its pages returned
+    pacer.add(OPTS.checkEvery); // the baseline drops to 350
+    // the next scan grows 10 MiB per check: the first collection comes past 350 + 128 MiB, not past 900 + 128 MiB
+    let at = 0;
+    while (collections === 1) {
+      rss += 10 * MiB;
+      at = rss;
+      pacer.add(OPTS.checkEvery);
+    }
+    expect(at).toBe(480 * MiB);
+  });
+
   test("collections is read-only", () => {
     const pacer = new GcPacer(OPTS, () => {}, () => 0);
     expect(() => { (pacer as unknown as { collections: number }).collections = 5; }).toThrow();
@@ -109,14 +129,14 @@ describe("holdStreamGc", () => {
     }
   });
 
-  test("overlapping holds: off wins while any off hold is held, in either order of release; releases are idempotent", () => {
+  test("overlapping holds: auto wins while any auto hold is held, in either order of release; releases are idempotent", () => {
     const before = STREAM_GC.enabled;
     try {
       STREAM_GC.enabled = true;
       const auto = holdStreamGc("auto");
       const off = holdStreamGc("off");
-      expect(STREAM_GC.enabled).toBe(false);
-      off(); // the off scan ends first: the auto scan still running gets its pacer back
+      expect(STREAM_GC.enabled).toBe(true); // an off scan joining never turns it off under a running auto scan
+      off();
       expect(STREAM_GC.enabled).toBe(true);
       off(); // a second release changes nothing
       expect(STREAM_GC.enabled).toBe(true);
@@ -124,11 +144,22 @@ describe("holdStreamGc", () => {
       expect(STREAM_GC.enabled).toBe(true);
 
       const off2 = holdStreamGc("off");
-      const auto2 = holdStreamGc("auto");
       expect(STREAM_GC.enabled).toBe(false);
-      auto2(); // the auto scan ends first: the off scan still running is not re-enabled
+      const auto2 = holdStreamGc("auto");
+      expect(STREAM_GC.enabled).toBe(true); // an auto scan joining turns it on
+      auto2(); // the auto scan ends first: off for the off scan still running
+      expect(STREAM_GC.enabled).toBe(false);
+      auto2();
       expect(STREAM_GC.enabled).toBe(false);
       off2();
+      expect(STREAM_GC.enabled).toBe(true);
+
+      const off3 = holdStreamGc("off");
+      const off4 = holdStreamGc("off");
+      expect(STREAM_GC.enabled).toBe(false); // every hold asked for off
+      off3();
+      expect(STREAM_GC.enabled).toBe(false);
+      off4();
       expect(STREAM_GC.enabled).toBe(true);
     } finally {
       STREAM_GC.enabled = before;
@@ -163,7 +194,7 @@ describe("scan gc option", () => {
   const run = (p: SourcePlugin, o: Partial<ScanOptions> = {}) =>
     scan({ env, plugins: [p], handleSignals: false, repoSignals: false, ...o });
 
-  test("two overlapping scans: the off scan keeps the pacer off however it ends; the auto scan gets it back", async () => {
+  test("two overlapping scans: an auto scan keeps the pacer on however they end; an off scan alone has it off", async () => {
     const before = STREAM_GC.enabled;
     try {
       STREAM_GC.enabled = true;
@@ -174,7 +205,7 @@ describe("scan gc option", () => {
       await a.running;
       const rb = run(b.plugin, { gc: "off" });
       await b.running;
-      expect(STREAM_GC.enabled).toBe(false);
+      expect(STREAM_GC.enabled).toBe(true);
       b.release();
       await rb;
       expect(STREAM_GC.enabled).toBe(true); // the auto scan is still running
@@ -182,22 +213,25 @@ describe("scan gc option", () => {
       await ra;
       expect(STREAM_GC.enabled).toBe(true);
       expect(a.seen).toEqual([true, true]);
-      expect(b.seen).toEqual([false, false]);
+      expect(b.seen).toEqual([true, true]);
 
       // off starts, auto joins, auto ends first
       const c = gated("off-c");
       const d = gated("auto-d");
       const rc = run(c.plugin, { gc: "off" });
       await c.running;
+      expect(STREAM_GC.enabled).toBe(false);
       const rd = run(d.plugin, { gc: "auto" });
       await d.running;
+      expect(STREAM_GC.enabled).toBe(true);
       d.release();
       await rd;
-      expect(STREAM_GC.enabled).toBe(false); // the off scan is still running: not re-enabled
+      expect(STREAM_GC.enabled).toBe(false); // only the off scan is still running
       c.release();
       await rc;
       expect(STREAM_GC.enabled).toBe(true);
       expect(c.seen).toEqual([false, false]);
+      expect(d.seen).toEqual([true, true]);
     } finally {
       STREAM_GC.enabled = before;
     }
@@ -213,6 +247,38 @@ describe("scan gc option", () => {
     const [level, , n] = gc[0]!;
     expect(level).toBe("debug");
     expect(Number.isInteger(n) && n! >= 0).toBe(true);
+  });
+
+  test("the logged scan.gc value is the number of collections the scan's reading caused", async () => {
+    // STREAM_GC with a fake memory reading and collector, and a fresh byte count and baseline; all restored afterwards
+    const pacer = STREAM_GC as unknown as { rss: () => number; collect: () => void; bytes: number; baseline: number | undefined };
+    const saved = { rss: pacer.rss, collect: pacer.collect, bytes: pacer.bytes, baseline: pacer.baseline, enabled: STREAM_GC.enabled };
+    let rss = 400 * MiB;
+    pacer.rss = () => rss;
+    pacer.collect = () => { rss = 450 * MiB; };
+    pacer.bytes = 0;
+    pacer.baseline = undefined;
+    try {
+      const plugin: SourcePlugin = {
+        tool: "codex", id: "reads", tier: "P0", beta: false, describe: { reads: [], neverReads: [] },
+        locate: () => [{ root: env.home, home: env.home, wsl: false }],
+        scan: async (_c, ctx) => {
+          STREAM_GC.add(OPTS.checkEvery); // first look: the baseline, 400 MiB
+          rss = 600 * MiB;
+          STREAM_GC.add(OPTS.checkEvery); // 200 MiB over it: one collection, which leaves 450 MiB
+          STREAM_GC.add(OPTS.checkEvery); // no growth since: none
+          STREAM_GC.add(OPTS.checkEvery);
+          ctx.emit({ k: "coverage", tool: "codex", source: "reads", window: "detail", status: "empty", files: 0, bytes: 0, records: 0,
+            skipped: {}, unknownTypes: {}, versions: [] });
+        },
+      };
+      const logs: [string, string, number | undefined][] = [];
+      await run(plugin, { onLog: (level, code, n) => { logs.push([level, code, n]); } });
+      expect(logs.filter(([, code]) => code === "scan.gc")).toEqual([["debug", "scan.gc", 1]]);
+    } finally {
+      Object.assign(pacer, { rss: saved.rss, collect: saved.collect, bytes: saved.bytes, baseline: saved.baseline });
+      STREAM_GC.enabled = saved.enabled;
+    }
   });
 
   test("a scan restores the pacer state when it ends, and logs its collections as scan.gc", async () => {

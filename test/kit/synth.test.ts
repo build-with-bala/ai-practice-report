@@ -88,6 +88,35 @@ describe("synthStore", () => {
     expect(commitMarkers.every((m) => commitKeys.has(m.detail!))).toBe(true);
   });
 
+  test("each source's coverage counts its records and at least one file", () => {
+    const r = synthStore(30_000);
+    expect(r.coverage.map((c) => [c.source, c.window])).toEqual([["claude-code.transcripts", "detail"], ["claude-code.history", "lifetime"]]);
+    for (const c of r.coverage) {
+      const n = Object.keys(r.store.count()).flatMap((k) => r.store.all(k as never) as readonly { k: string; source: string }[])
+        .filter((e) => e.k !== "coverage" && e.source === c.source).length;
+      expect(n).toBeGreaterThan(0);
+      expect(c.records).toBe(n);
+      expect(c.files).toBeGreaterThanOrEqual(1);
+      expect(c.bytes).toBeGreaterThan(0);
+    }
+    expect(r.coverage[0]!.files).toBe(r.store.all("session").length);
+  });
+
+  test("the mix is the same at every size: the same peak of top-level sessions running at once", () => {
+    const peak = (n: number): number => {
+      const edges: [number, number][] = [];
+      for (const s of synthStore(n).store.all("session")) if (s.parentId === undefined) edges.push([s.start, 1], [s.end, -1]);
+      edges.sort((a, b) => a[0] - b[0] || a[1] - b[1]); // an end before a start at the same time
+      let now = 0;
+      let max = 0;
+      for (const [, d] of edges) max = Math.max(max, (now += d));
+      return max;
+    };
+    const small = peak(20_000);
+    expect(small).toBeGreaterThanOrEqual(2);
+    expect(peak(200_000)).toBe(small);
+  });
+
   test("ids, hashes and paths are plainly synthetic; finishedAt comes from the data", () => {
     const r = synthStore(10_000);
     for (const s of r.store.all("session")) expect(s.id).toMatch(/^claude-code:synth-/);
@@ -98,6 +127,6 @@ describe("synthStore", () => {
     let latest = 0;
     for (const s of r.store.all("session")) latest = Math.max(latest, s.end);
     expect(r.finishedAt).toBeGreaterThanOrEqual(latest);
-    expect(r.startedAt).toBeLessThanOrEqual(r.finishedAt);
+    expect(r.startedAt).toBeLessThan(r.finishedAt);
   });
 });

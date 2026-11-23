@@ -48,9 +48,10 @@ export interface ScanOptions { env?: Env; plugins?: SourcePlugin[]; tools?: Tool
   /**
    * The streaming reader's garbage-collection pacer, default `auto`: on for the scan. `off` turns it off for the scan
    * (an application that manages memory itself). The pacer is shared by every scan in the process: while scans overlap
-   * it stays off as long as any of them asked for `off`, and when the last ends it is restored as it was before
-   * (`holdStreamGc`). The scan logs `scan.gc` (debug) with the collections run while it ran — process-wide, so an
-   * overlapping scan's count in.
+   * it is on if any of them asked for `auto`, and off only while all of them asked for `off`; when the last ends it is
+   * restored as it was before (`holdStreamGc`). Every scan logs `scan.gc` (debug) once, with the number of collections
+   * the pacer ran during the scan's lifetime. The pacer is process-wide, so that count includes collections caused by
+   * an overlapping scan's reading.
    */
   gc?: "auto" | "off";
   /** @internal test hook: builds the temp registry inside the scan's temp folder, when a private copy first needs one. */
