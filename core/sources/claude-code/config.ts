@@ -1,7 +1,7 @@
 import { realpathSync } from "node:fs";
 import path from "node:path";
 import type { Env } from "../../env/env";
-import { isFile, readJsonSmallResult, safeStat } from "../../io/fs";
+import { bornAt, isFile, readJsonSmallResult, safeStat } from "../../io/fs";
 import { toEpochMs } from "../../io/time";
 import type { ConfigEv, IdentityEv, MarkerEv } from "../../model/events";
 import { classifyCommand } from "../../text/commands";
@@ -23,6 +23,9 @@ interface GlobalUsage { skills: Map<string, Usage>; plugins: Map<string, number>
 
 const isNum = (x: unknown): x is number => typeof x === "number" && Number.isFinite(x);
 const isStr = (x: unknown): x is string => typeof x === "string";
+const isBool = (x: unknown): x is boolean => typeof x === "boolean";
+/** One path segment: a plugin id's parts name folders of the plugin cache only when they cannot step out of it. */
+const SEGMENT = /^(?!\.{1,2}$)[^\\/]+$/;
 const realpathOf = (p: string): string | undefined => {
   try {
     return realpathSync(p);
@@ -37,6 +40,13 @@ const byName = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 function cfg(kind: ConfigEv["kind"], provenance: ConfigEv["provenance"], name?: string): ConfigEv {
   const ev: ConfigEv = { k: "config", tool: TOOL, source: CONFIG_SOURCE, kind, provenance };
   if (name !== undefined) ev.name = name;
+  return ev;
+}
+
+/** The event, with `firstSeen` = when the artifact at `p` appeared, when it is there (`bornAt`: stat, links followed, never opened). */
+function seen(ev: ConfigEv, p: string | undefined): ConfigEv {
+  const born = p === undefined ? undefined : bornAt(p);
+  if (born !== undefined) ev.firstSeen = born;
   return ev;
 }
 
@@ -114,8 +124,14 @@ function readGlobalConfig(file: string, ctx: ScanCtx, tally: Tally, out: Out): G
   return g;
 }
 
-/** settings.json hooks: one event per hook entry; a command hook's command is classified in memory and never kept. */
+/**
+ * settings.json hooks: one event per hook entry; a command hook's command is classified in memory and never kept. With
+ * `disableAllHooks: true` the CLI runs none of them: no hook event, one `hooks-disabled` feature, and each entry left
+ * out skipped `hooks-disabled`.
+ */
 function hooks(settings: Obj | undefined, tally: Tally, out: Out): void {
+  const disabled = settings !== undefined && field(settings, "disableAllHooks", isBool, tally) === true;
+  if (disabled) out(cfg("feature", "authored", "hooks-disabled"));
   const table = settings ? field(settings, "hooks", isObj, tally) : undefined;
   for (const [event, groups] of Object.entries(table ?? {})) {
     const name = HOOK_EVENT.test(event) ? event : "other";
@@ -132,6 +148,10 @@ function hooks(settings: Obj | undefined, tally: Tally, out: Out): void {
       for (const hook of list) {
         if (!isObj(hook)) {
           tally.unknownKey("hooks:shape");
+          continue;
+        }
+        if (disabled) {
+          tally.skip("hooks-disabled");
           continue;
         }
         const ev = cfg("hook", "authored", name);
@@ -170,9 +190,10 @@ function artifacts(c: Candidate, usage: GlobalUsage | undefined, tally: Tally, o
     if (name.startsWith(".") || !isFile(path.join(dir, name, "SKILL.md"))) continue;
     const real = realpathOf(path.join(dir, name));
     const installed = lock?.has(name) || (cache !== undefined && real !== undefined && real.startsWith(cache + path.sep));
-    skills.set(name, cfg("skill", installed ? "installed" : lock === undefined ? "unknown" : "authored", name));
+    skills.set(name, seen(cfg("skill", installed ? "installed" : lock === undefined ? "unknown" : "authored", name), path.join(dir, name)));
   }
-  const commands = new Map(markdownStems(path.join(c.root, "commands"), tally).map((n) => [n, cfg("command", "authored", n)] as const));
+  const cmdDir = path.join(c.root, "commands");
+  const commands = new Map(markdownStems(cmdDir, tally).map((n) => [n, seen(cfg("command", "authored", n), path.join(cmdDir, `${n}.md`))] as const));
   for (const [name, u] of usage?.skills ?? []) {
     let ev = skills.get(name) ?? commands.get(name);
     if (!ev) skills.set(name, (ev = cfg("skill", lock?.has(name) || name.includes(":") ? "installed" : "unknown", name)));
@@ -183,16 +204,30 @@ function artifacts(c: Candidate, usage: GlobalUsage | undefined, tally: Tally, o
     if (usage) ev.uses ??= 0;
     out(ev);
   }
-  for (const name of markdownStems(path.join(c.root, "agents"), tally)) out(cfg("agent", "authored", name));
+  const agentDir = path.join(c.root, "agents");
+  for (const name of markdownStems(agentDir, tally)) out(seen(cfg("agent", "authored", name), path.join(agentDir, `${name}.md`)));
 }
 
-/** Installed plugin ids (keys of installed_plugins.json `plugins`) and every id with usage, with pluginUsage counts. */
+/**
+ * A plugin's folder in the CLI's plugin cache: `<root>/plugins/cache/<marketplace>/<plugin>/` for the id
+ * `<plugin>@<marketplace>`; undefined for an id of another shape.
+ */
+function cacheFolder(root: string, id: string): string | undefined {
+  const at = id.lastIndexOf("@");
+  const [plugin, market] = [id.slice(0, at), id.slice(at + 1)];
+  return at > 0 && SEGMENT.test(plugin) && SEGMENT.test(market) ? path.join(root, "plugins", "cache", market, plugin) : undefined;
+}
+
+/**
+ * Installed plugin ids (keys of installed_plugins.json `plugins`) and every id with usage, with pluginUsage counts;
+ * `firstSeen` from the plugin's cache folder, when it is there.
+ */
 function plugins(c: Candidate, usage: GlobalUsage | undefined, tally: Tally, out: Out): void {
   const installed = readSidecar(resolved(path.join(c.root, "plugins", "installed_plugins.json")), tally);
   const ids = new Set(Object.keys((installed && field(installed, "plugins", isObj, tally, "installed_plugins.plugins")) ?? {}));
   for (const id of usage?.plugins.keys() ?? []) ids.add(id);
   for (const id of [...ids].sort(byName)) {
-    const ev = cfg("plugin", "installed", id);
+    const ev = seen(cfg("plugin", "installed", id), cacheFolder(c.root, id));
     if (usage) ev.uses = usage.plugins.get(id) ?? 0;
     out(ev);
   }

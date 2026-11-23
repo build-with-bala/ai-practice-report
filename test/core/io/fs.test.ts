@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileState, isDir, isFile, readJsonSmall, readJsonSmallResult, readTextLines, safeList, safeStat, walk } from "../../../core/io/fs";
+import { bornAt, fileState, isDir, isFile, readJsonSmall, readJsonSmallResult, readTextLines, safeList, safeStat, walk } from "../../../core/io/fs";
 
 let root: string;
 beforeAll(() => {
@@ -60,6 +60,30 @@ describe("fileState, isDir, isFile", () => {
   });
   test.skipIf(process.platform === "win32")("anything else that exists is other", () => {
     expect(fileState("/dev/null")).toBe("other"); // a character device
+  });
+});
+
+describe("bornAt", () => {
+  /** The rule, written out apart from the code: the birth time, else the ctime, in whole ms. */
+  const born = (p: string) => { const st = statSync(p); return Math.floor(st.birthtimeMs > 0 ? st.birthtimeMs : st.ctimeMs); };
+
+  test("a file's or folder's birth time (its ctime where the file system has none); nothing there, none", () => {
+    const f = path.join(root, "born-file");
+    writeFileSync(f, "x");
+    const d = path.join(root, "born-dir");
+    mkdirSync(d);
+    expect(bornAt(f)).toBe(born(f));
+    expect(bornAt(d)).toBe(born(d));
+    expect(bornAt(f)).toBeGreaterThan(0);
+    expect(bornAt(path.join(root, "born-nope"))).toBeUndefined();
+    expect(bornAt(path.join(f, "inside"))).toBeUndefined();
+  });
+
+  test("a link counts as what it points to", () => {
+    const target = path.join(root, "born-target");
+    mkdirSync(target);
+    const linked = path.join(root, "born-linked");
+    if (linkFolder(target, linked)) expect(bornAt(linked)).toBe(born(target));
   });
 });
 

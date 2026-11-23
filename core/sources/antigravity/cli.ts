@@ -460,9 +460,10 @@ class Conversation {
       const run: ReturnType<typeof runCommand> = type === RUN_COMMAND ? runCommand(r.payload) : {};
       const cmd = run.cmd ?? callCommand(call);
       if (cmd !== undefined) {
-        const { category, checks } = classifyCommand(cmd);
+        const { category, checks, toolchain } = classifyCommand(cmd);
         ev.category = category;
         if (checks.length > 0) ev.checks = checks;
+        if (toolchain !== undefined) ev.toolchain = toolchain;
       }
       if (run.rejected) outcome = "denied";
       exit = run.exit;

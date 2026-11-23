@@ -1,7 +1,7 @@
 import { readdirSync, type Stats } from "node:fs";
 import path from "node:path";
 import { safeStat } from "../../io/fs";
-import { toEpochMs } from "../../io/time";
+import { timeIssue, toEpochMs } from "../../io/time";
 import { TASK_GAP_MS } from "../../model/constants";
 import type { Ev, FileFactEv, MarkerEv, PromptEv, RateLimitEv, RolloutFactEv, SessionEv, ToolEv, TurnEv } from "../../model/events";
 import { sid, type MarkerKind, type Origin } from "../../model/ids";
@@ -213,6 +213,8 @@ class RolloutReader {
   private readonly done = new Set<string>();
   /** Shell-command events not emitted yet → whether a command line was found (by their call, or the item completing it). */
   private readonly commandLineFound = new WeakMap<ToolEv, boolean>();
+  /** The line being read has a well-formed but implausible time: counted once, as `bad-ts`. */
+  private badTs = false;
 
   constructor(
     private readonly file: string,
@@ -251,6 +253,14 @@ class RolloutReader {
     this.clock = ts;
   }
 
+  /**
+   * An event of a line without a usable time is dropped, skipped `no-ts` — unless the line's time was well-formed but
+   * implausible: that line was counted once already, as `bad-ts`.
+   */
+  private noTs(): void {
+    if (!this.badTs) this.tally.skip("no-ts");
+  }
+
   record(v: unknown): void {
     const type = isObj(v) ? v.type : undefined;
     if (!isObj(v) || typeof type !== "string" || !RECORD_TYPES.has(type)) {
@@ -265,6 +275,7 @@ class RolloutReader {
       return;
     }
     const ts = toEpochMs(v.timestamp, this.ctx.now);
+    this.badTs = ts === undefined && timeIssue(v.timestamp) === "implausible";
     if (ts !== undefined) this.tick(ts);
     else this.tally.badTime(v.timestamp); // every rollout line carries one: without it the field moved
     const p = isObj(v.payload) ? v.payload : undefined;
@@ -355,7 +366,7 @@ class RolloutReader {
     if (typeof c !== "string" && !(Array.isArray(c) && (c.length === 0 || c.some((x) => isObj(x) && typeof x.type === "string" && INPUT_PARTS.has(x.type))))) {
       return this.tally.unknownKey("user.content:shape");
     }
-    if (ts === undefined) return this.tally.skip("no-ts");
+    if (ts === undefined) return this.noTs();
     const found = promptText(c);
     if (!found) return;
     const { text, images } = found;
@@ -378,6 +389,7 @@ class RolloutReader {
     const ev: ToolEv = { k: "tool", tool: TOOL, source: ROLLOUTS_SOURCE, ts, sessionId: this.sessionId, name: c.name, category: c.category };
     if (rawId !== undefined) ev.callId = this.ctx.hash(rawId);
     if (c.checks.length > 0) ev.checks = c.checks;
+    if (c.toolchain !== undefined) ev.toolchain = c.toolchain;
     if (c.editExt !== undefined) ev.editExt = c.editExt;
     if (c.added !== undefined) ev.linesAdded = c.added;
     if (c.removed !== undefined) ev.linesRemoved = c.removed;
@@ -408,7 +420,7 @@ class RolloutReader {
   private call(p: Obj, ts: number | undefined): void {
     const id = str(p.call_id);
     if (id !== undefined && (this.pending.has(id) || this.done.has(id))) return; // the same call again
-    if (ts === undefined) return this.tally.skip("no-ts");
+    if (ts === undefined) return this.noTs();
     const evs = cxToolCalls(p).map((c) => this.toolEv(c, ts, id));
     if (evs.length === 0) return;
     if (id === undefined) {
@@ -468,13 +480,14 @@ class RolloutReader {
     if (waiting) {
       this.pending.delete(id!);
       this.finished(id!);
-      // the command that ran decides a linked shell call's category and checks (the call may not have named it);
-      // input sent to a running command, like a command the person ran, names no command of its own
+      // the command that ran decides a linked shell call's category, checks and toolchain (the call may not have named
+      // it); input sent to a running command, like a command the person ran, names no command of its own
       const [ran] = item.type === "CommandExecution" && waiting.length === 1 ? cxToolCalls(item) : [];
       for (const ev of waiting) {
-        if (ran && ev.category === "shell") {
+        if (ran?.commandLine !== undefined && ev.category === "shell") {
           ev.category = ran.category;
           if (ran.checks.length > 0) ev.checks = ran.checks;
+          if (ran.toolchain !== undefined) ev.toolchain = ran.toolchain;
         }
         if (ran?.commandLine && this.commandLineFound.has(ev)) this.commandLineFound.set(ev, true);
         RolloutReader.apply(ev, outcome);
@@ -490,7 +503,7 @@ class RolloutReader {
     const calls = cxToolCalls(item);
     const at = toEpochMs(p.started_at_ms, this.ctx.now) ?? ts ?? this.clock;
     if (calls.length === 0) return;
-    if (at === undefined) return this.tally.skip("no-ts");
+    if (at === undefined) return this.noTs();
     for (const c of calls) {
       const ev = this.toolEv(c, at, id);
       RolloutReader.apply(ev, outcome);
@@ -510,7 +523,7 @@ class RolloutReader {
    */
   private tokenCount(p: Obj, ts: number | undefined, emit = true): void {
     if (ts === undefined) {
-      if (emit) this.tally.skip("no-ts");
+      if (emit) this.noTs();
       return;
     }
     const info = isObj(p.info) ? p.info : undefined;
@@ -554,7 +567,7 @@ class RolloutReader {
   }
 
   private endTurn(p: Obj, ts: number | undefined, status: "completed" | "interrupted"): void {
-    if (ts === undefined) return this.tally.skip("no-ts");
+    if (ts === undefined) return this.noTs();
     const id = str(p.turn_id);
     const t = id === undefined ? undefined : this.turns.get(id);
     const ev: TurnEv = { k: "turn", tool: TOOL, source: ROLLOUTS_SOURCE, ts, sessionId: this.sessionId, window: "detail", status };
@@ -569,7 +582,7 @@ class RolloutReader {
 
   private marker(kind: MarkerKind, ts: number | undefined, detail?: string): void {
     const at = ts ?? this.clock;
-    if (at === undefined) return this.tally.skip("no-ts");
+    if (at === undefined) return this.noTs();
     const ev: MarkerEv = { k: "marker", tool: TOOL, source: ROLLOUTS_SOURCE, ts: at, sessionId: this.sessionId, kind };
     if (detail !== undefined) ev.detail = detail;
     this.out(ev);

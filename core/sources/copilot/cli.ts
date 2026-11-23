@@ -3,7 +3,7 @@ import type { Env } from "../../env/env";
 import { joinFor } from "../../env/paths";
 import { isDir, safeStat } from "../../io/fs";
 import type { RoDb } from "../../io/sqlite";
-import { toEpochMs } from "../../io/time";
+import { timeIssue, toEpochMs } from "../../io/time";
 import { TASK_GAP_MS } from "../../model/constants";
 import type { Ev, MarkerEv, PromptEv, SessionEv, ToolEv, TurnEv } from "../../model/events";
 import type { Origin, ToolCategory } from "../../model/ids";
@@ -138,7 +138,12 @@ class CliReader {
     if (ts !== undefined) this.tick(ts);
     else this.tally.badTime(v.timestamp, "event.timestamp"); // every event carries its time: without one the field moved
     const d = isObj(v.data) ? v.data : {};
-    const timed = (f: (at: number) => void): void => (ts === undefined ? this.tally.skip("no-ts") : f(ts));
+    // an event without a usable time drops what it carries: skipped no-ts when the time is missing or shapeless (drift);
+    // a well-formed one outside the plausible range is bad data, counted once, as bad-ts
+    const timed = (f: (at: number) => void): void => {
+      if (ts !== undefined) f(ts);
+      else if (timeIssue(v.timestamp) === "shape") this.tally.skip("no-ts");
+    };
     switch (type) {
       case "session.start": this.sessionStart(d); break;
       case "session.model_change": this.addModel(str(d.newModel)); break;
@@ -250,9 +255,10 @@ class CliReader {
       if (SHELL_TOOLS.has(name)) {
         const cmd = str(args.command);
         if (cmd !== undefined) {
-          const { category, checks } = classifyCommand(cmd);
+          const { category, checks, toolchain } = classifyCommand(cmd);
           ev.category = category;
           if (checks.length > 0) ev.checks = checks;
+          if (toolchain !== undefined) ev.toolchain = toolchain;
         }
       }
       if (name === "str_replace_editor") ev.category = args.command === "view" ? "read" : args.command === "create" ? "write" : "edit";

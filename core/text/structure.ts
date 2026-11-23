@@ -34,6 +34,7 @@ export function promptFeatures(text: string, o: { hasPaste?: boolean; isTaskStar
     constraintTerms: (text.match(RE_CONSTRAINT) ?? []).length,
     isTaskStart: o.isTaskStart ?? false,
     techCats: techCategories(text),
+    chars: text.trim().length,
   };
   if (typeof o.prevText === "string") f.simToPrev = shingleSimilarity(text, o.prevText);
   return f;

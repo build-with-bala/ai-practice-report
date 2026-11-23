@@ -447,6 +447,75 @@ describe("claude-code config: mapping", () => {
     expectNoCanaries([r.store, r.coverage]);
   });
 
+  test("disableAllHooks: no hook event, one hooks-disabled feature, the entries left out counted; skills keep their firstSeen", async () => {
+    h.writeJson(".claude/settings.json", {
+      disableAllHooks: true,
+      hooks: {
+        PostToolUse: [{ matcher: "Edit|Write", hooks: [{ type: "command", command: "bun test" }, { type: "command", command: `echo ${CANARY.secret}` }] }],
+        Stop: [{ hooks: [{ type: "command", command: "pytest -q" }] }, "not a group"],
+      },
+    });
+    skill("still-listed");
+    const r = await run([ccConfig]);
+    expect(configs(r, "hook")).toEqual([]);
+    expect(configs(r, "feature")).toEqual([
+      { k: "config", tool: "claude-code", source: "claude-code.config", kind: "feature", name: "hooks-disabled", provenance: "authored" },
+    ]);
+    expect(r.coverage[0]).toMatchObject({ skipped: { "hooks-disabled": 3 }, unknownTypes: { "hooks:shape": 1 }, records: 2 });
+    expect(configs(r, "skill")[0]!.firstSeen).toBeGreaterThan(0);
+    expectNoCanaries([r.store, r.coverage]);
+  });
+
+  test("disableAllHooks false, or of another type, leaves the hooks as they are (another type is drift); true with no hooks is the feature alone", async () => {
+    const hook = { Stop: [{ hooks: [{ type: "command", command: "make test" }] }] };
+    for (const [value, drift] of [[false, {}], ["yes", { "disableAllHooks:type": 1 }]] as const) {
+      h.writeJson(".claude/settings.json", { disableAllHooks: value, hooks: hook });
+      const r = await run([ccConfig]);
+      expect(configs(r, "hook").map((c) => [c.name, c.checks])).toEqual([["Stop", ["test"]]]);
+      expect(configs(r, "feature")).toEqual([]);
+      expect([r.coverage[0]!.skipped, r.coverage[0]!.unknownTypes]).toEqual([{}, drift]);
+    }
+    h.writeJson(".claude/settings.json", { disableAllHooks: true });
+    const r = await run([ccConfig]);
+    expect(configs(r, "feature").map((c) => [c.name, c.provenance])).toEqual([["hooks-disabled", "authored"]]);
+    expect(r.coverage[0]!.skipped).toEqual({});
+  });
+
+  test("firstSeen: skill folders, command and agent files, and a plugin's cache folder, by stat; nothing on disk, no firstSeen", async () => {
+    skill("own");
+    h.write(".claude/commands/review.md", CANARY.prompt);
+    h.write(".claude/agents/helper.md", CANARY.prompt);
+    h.writeJson(".claude/plugins/installed_plugins.json", { version: 2, plugins: { "alpha@market": [{ scope: "user" }], "beta@market": [{ scope: "user" }], "../up@market": [{}] } });
+    h.writeJson(".claude/plugins/cache/market/alpha/1.0.0/.claude-plugin/plugin.json", { name: "alpha" });
+    h.write(".claude/plugins/cache/up/x", "a cache entry outside the plugin's own folder");
+    claudeJson({ skillUsage: { "usage-only": { usageCount: 1 } }, pluginUsage: { "gamma@market": { usageCount: 2 } } });
+    const r = await run([ccConfig]);
+    const born = (rel: string) => { const st = statSync(path.join(h.env.home, rel)); return Math.floor(st.birthtimeMs > 0 ? st.birthtimeMs : st.ctimeMs); };
+    expect(r.store.all("config").filter((c) => c.kind !== "plugin").map((c) => [c.kind, c.name, c.firstSeen])).toEqual([
+      ["skill", "own", born(".claude/skills/own")], ["skill", "usage-only", undefined],
+      ["command", "review", born(".claude/commands/review.md")], ["agent", "helper", born(".claude/agents/helper.md")],
+    ]);
+    expect(configs(r, "plugin").map((c) => [c.name, c.firstSeen])).toEqual([
+      ["../up@market", undefined], ["alpha@market", born(".claude/plugins/cache/market/alpha")], ["beta@market", undefined], ["gamma@market", undefined],
+    ]);
+    expect(born(".claude/skills/own")).toBeGreaterThan(0);
+    expectNoCanaries([r.store, r.coverage]);
+  });
+
+  test.skipIf(process.platform === "win32")("firstSeen follows links: a linked skill folder or command file takes its target's birth", async () => {
+    h.write("dotfiles/skills/linked/SKILL.md", "x");
+    h.write("dotfiles/commands/linked-cmd.md", "x");
+    mkdirSync(path.join(h.env.home, ".claude", "skills"), { recursive: true });
+    mkdirSync(path.join(h.env.home, ".claude", "commands"), { recursive: true });
+    symlinkSync(path.join(h.env.home, "dotfiles/skills/linked"), path.join(h.env.home, ".claude/skills/linked"));
+    symlinkSync(path.join(h.env.home, "dotfiles/commands/linked-cmd.md"), path.join(h.env.home, ".claude/commands/linked-cmd.md"));
+    const r = await run([ccConfig]);
+    const born = (rel: string) => { const st = statSync(path.join(h.env.home, rel)); return Math.floor(st.birthtimeMs > 0 ? st.birthtimeMs : st.ctimeMs); };
+    expect(r.store.all("config").map((c) => [c.kind, c.name, c.firstSeen])).toEqual([
+      ["skill", "linked", born("dotfiles/skills/linked")], ["command", "linked-cmd", born("dotfiles/commands/linked-cmd.md")],
+    ]);
+  });
+
   test("CLAUDE_CONFIG_DIR: the global config is the one inside that directory", async () => {
     h.env.vars.CLAUDE_CONFIG_DIR = path.join(h.env.home, "alt-claude");
     h.writeJson("alt-claude/.claude.json", { promptQueueUseCount: 2, oauthAccount: { accountUuid: "uuid-alt" } });

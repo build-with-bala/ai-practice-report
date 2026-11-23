@@ -173,7 +173,8 @@ manual), preTokens, postTokens, durationMs, preservedSegment, …}`, `logicalPar
     (search); `Edit`, `MultiEdit`, `NotebookEdit` (edit); `Write` (write); `Agent`, `Task` (delegate); `Workflow`
     (workflow); `TodoWrite`, `TaskCreate`, `TaskUpdate` (todo); `EnterPlanMode`, `ExitPlanMode` (plan); `WebFetch`,
     `WebSearch` (web); `Skill` (skill); `Monitor` (monitor); `CronCreate`, `ScheduleWakeup` (schedule);
-    `AskUserQuestion`, `ToolSearch` (meta); `Bash`, `PowerShell` (by their command line).
+    `AskUserQuestion`, `ToolSearch` (meta); `Bash`, `PowerShell` (by their command line: `classifyCommand`'s category,
+    `checks`, and the `toolchain` of the command that produced the first check — `bun test` → `js`).
   - The CLI's other built-in tools, category `other` (CLI program, 2.1.327: its lists of built-in tool names, older
     names included): `Artifact`, `ArtifactCheck`, `ArtifactComments`, `ArtifactData`, `BashOutput`, `ClaudeDesign`,
     `CronDelete`, `CronList`, `EndConversation`, `EnterWorktree`, `ExitWorktree`, `ListAgents`, `ListMcpResourcesTool`,
@@ -202,8 +203,10 @@ manual), preTokens, postTokens, durationMs, preservedSegment, …}`, `logicalPar
   sha does not start with 7 hex digits).
 - `CoverageEv.skipped` reasons: `sniffed`, `oversize`, `parse`, `io-error`, `too-large`, `copied` (below),
   `bad-record` (a record the mapper could not handle; also logged once per root as `warn cc.bad-record`), `bad-ts` (a
-  well-formed time outside the plausible range), `no-ts` (a prompt, reply, tool call or turn duration whose record has
-  no time; the markers of a file that never gives one).
+  `user`, `assistant` or `system` record whose time is well-formed but outside the plausible range, counted once and
+  never also `no-ts`: its prompt, reply and turn duration are dropped; its tool calls and markers take the file's
+  clock, else are dropped with it), `no-ts` (a prompt, reply, tool call or turn duration whose record has no time,
+  absent or shapeless; the markers of a file that never gives one).
 - Drift, beyond unknown record types: `timestamp:shape` (a `user`, `assistant` or `system` record whose `timestamp` is
   absent or not a time), `user.content:shape` (`message.content` neither a string nor an array),
   `assistant.message:shape`, `assistant.content:shape`, `tool_use:shape` (a call without `id` or `name`),
@@ -234,14 +237,15 @@ readers report coverage with window `lifetime`.
 <root>/stats-cache.json                       claude-code.stats    the CLI's per-day aggregates behind /stats
 <global config>                               claude-code.config   $CLAUDE_CONFIG_DIR/.claude.json when that variable
                                                                    is set, else <home>/.claude.json (CLI program)
-<root>/settings.json                          claude-code.config   hooks
+<root>/settings.json                          claude-code.config   hooks, disableAllHooks
 <root>/plugins/installed_plugins.json         claude-code.config   installed plugins
 <home>/.agents/.skill-lock.json               claude-code.config   skills placed by the `skills` installer
 <root>/skills/<name>/SKILL.md                 claude-code.config   skill folders (often symlinks into <home>/.agents/skills)
 <root>/commands/<name>.md, agents/<name>.md   claude-code.config   custom slash commands, custom subagents
 <root>/projects/<slug>/memory/*.md            claude-code.config   auto-memory files
-not read: <root>/plugins/cache/ (only used to tell whether a skill folder resolves inside it), <root>/.config.json
-          (legacy global config), settings.local.json, managed settings, project .claude/ folders and .mcp.json
+not read: <root>/plugins/cache/ (only stat'ed: whether a skill folder resolves inside it, a plugin folder's birth
+          time), <root>/.config.json (legacy global config), settings.local.json, managed settings, project .claude/
+          folders and .mcp.json
 ```
 
 Symlinked config files (settings.json, the global config, installed_plugins.json, the skill lock) are read through the
@@ -334,7 +338,8 @@ usage entry without a numeric `usageCount` → `skillUsage:shape` / `pluginUsage
 ## settings.json, installed_plugins.json, the skill lock (verified locally)
 
 - settings.json `hooks` {`<Event>`: [{`matcher`?, `hooks`: [{`type`, `command`?, `timeout`?, …}]}]}. Drift:
-  `hooks:type`, `hooks:shape`.
+  `hooks:type`, `hooks:shape`. `disableAllHooks` (boolean; `true` turns every hook off, so the CLI runs none — the
+  CLI's documented setting, not confirmed with the probe). Drift: `disableAllHooks:type`.
 - plugins/installed_plugins.json {`version` (number), `plugins` {`<plugin id>`: [{`scope`, `installPath`, `version`,
   `installedAt`, `lastUpdated`, `gitCommitSha`, `directoryRepositoryKey`?}]}} — only the keys of `plugins` are read.
 - `.skill-lock.json` (written by the `skills` installer, shared by several agents) {`version`, `skills` {`<name>`:
@@ -354,7 +359,14 @@ allowlist; it is never exported raw.
 - `command` / `agent`: each `commands/<name>.md` / `agents/<name>.md` (names only), `authored`. A command's usage is
   the `skillUsage` entry of its name when no skill folder has that name.
 - `plugin`: each installed plugin id and each `pluginUsage` id, `installed`.
+- `firstSeen` (when the artifact appeared: its birth time by stat, links followed, the ctime where the file system
+  records none; nothing is opened) on skill folders, command and agent files, and on a plugin whose folder in the
+  plugin cache is there: `<root>/plugins/cache/<marketplace>/<plugin>/` for the id `<plugin>@<marketplace>`, each part
+  a single path segment (the CLI installs a plugin's versions below it; the layout is not confirmed with the probe,
+  which reads files, not folders). None on usage-only names.
 - `mcp-server`: each distinct server name, global or per project, `unknown`.
+- `feature` `hooks-disabled`, `authored`, when settings.json has `disableAllHooks: true`: then no `hook` events, and
+  each hook entry left out is skipped `hooks-disabled`.
 - `hook`: one per hook entry, `authored`; `name` = the event key when it is shaped like a CLI event name
   (`^[A-Z][A-Za-z]{2,40}$`), else `other`; `checks` = `classifyCommand(command).checks` for hooks with a `command`
   (the command text is never kept).
@@ -363,7 +375,8 @@ allowlist; it is never exported raw.
   the CLI's `usageCount`, or 0 for an inventory item without a usage entry; absent when the global config is missing
   or unusable.
 - Coverage: `files`/`bytes` = the JSON files read; `records` = events emitted; `from` = `firstStartTime` (else the
-  earliest marker); `to` = the latest marker. Skipped reasons: `parse`, `io-error`, `too-large`, `not-file`.
+  earliest marker); `to` = the latest marker. Skipped reasons: `parse`, `io-error`, `too-large`, `not-file`,
+  `hooks-disabled`.
 
 ## Limits (lifetime layer)
 

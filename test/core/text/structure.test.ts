@@ -7,7 +7,12 @@ test("short prompt", () => {
   expect("simToPrev" in f).toBe(false);
 });
 test("empty", () => {
-  expect(promptFeatures("  ")).toMatchObject({ words: 0, lenBucket: 0 });
+  expect(promptFeatures("  ")).toMatchObject({ words: 0, lenBucket: 0, chars: 0 });
+});
+test("chars: the UTF-16 length of the trimmed prompt", () => {
+  expect(promptFeatures("  hello  ").chars).toBe(5);
+  expect(promptFeatures("\n\tfix it\n").chars).toBe(6);
+  expect(promptFeatures("naïve 🙂").chars).toBe(8); // an astral character is two UTF-16 units
 });
 test("length buckets", () => {
   const w = (n: number) => promptFeatures(Array(n).fill("a").join(" ")).lenBucket;

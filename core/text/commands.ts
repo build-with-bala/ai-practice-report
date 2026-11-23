@@ -1,7 +1,33 @@
-import type { CheckKind, ToolCategory } from "../model/ids";
+import type { CheckKind, ToolCategory, Toolchain } from "../model/ids";
 
 type Check = CheckKind;
 const JS_RUNNERS = new Set(["npm", "pnpm", "yarn", "bun"]);
+/**
+ * The toolchain of a command that runs checks, by its name (after wrappers and runners); `python -m <x>` is `py`
+ * whatever x is. `php` runs checks only as `php artisan`. `just` and `nix` run no check this classifier knows yet.
+ */
+const TOOLCHAINS: Readonly<Record<Toolchain, string>> = {
+  js: "bun npm pnpm yarn deno vitest jest mocha ava karma eslint prettier biome tsc vue-tsc svelte-check vite next nuxt astro webpack esbuild rollup stylelint playwright cypress",
+  py: "pytest py.test tox nox unittest mypy pyright ruff flake8 pylint black isort",
+  go: "go golangci-lint gofmt",
+  rust: "cargo rustfmt",
+  jvm: "mvn gradle gradlew ktlint",
+  dotnet: "dotnet",
+  ruby: "rspec rake rubocop",
+  php: "phpunit pest phpcs phpstan psalm composer php",
+  swift: "swift xcodebuild swiftlint",
+  dart: "dart flutter",
+  native: "cmake ctest",
+  shell: "shellcheck",
+  any: "make just pre-commit bazel bazelisk nix",
+};
+const TOOLCHAIN_OF: ReadonlyMap<string, Toolchain> = new Map(
+  (Object.entries(TOOLCHAINS) as [Toolchain, string][]).flatMap(([toolchain, names]) => names.split(" ").map((n) => [n, toolchain] as const)),
+);
+/** The tools a JS package runner runs by name (`pnpm vitest run`): every command the toolchain table names but the runners. */
+const RUNNER_TOOLS: ReadonlySet<string> = new Set([...TOOLCHAIN_OF.keys()].filter((n) => !JS_RUNNERS.has(n)));
+/** What may stand between a JS package runner and the tool it runs: `run` (`run-script`), `exec`, `x`. */
+const RUNNER_VERBS = new Set(["run", "run-script", "exec", "x"]);
 const BARE_TEST = new Set(["pytest", "py.test", "vitest", "jest", "mocha", "ava", "karma", "rspec", "phpunit", "pest", "tox", "nox", "ctest", "unittest"]);
 const SUB_TEST = new Set(["go", "cargo", "swift", "deno", "dotnet", "flutter", "dart", "bazel", "bazelisk", "mix", "zig", "stack", "cabal", "lein", "sbt"]);
 const SUB_BUILD = new Set(["cargo", "go", "swift", "zig", "flutter", "dotnet"]);
@@ -98,41 +124,80 @@ function blankQuotes(s: string): string {
 
 const HELP_ONLY = new Set(["-v", "--version", "-h", "--help"]);
 const FLAGS_WITH_VALUE = new Set(["--filter", "-F", "--prefix", "-w", "--workspace", "-C", "--cwd", "--dir"]);
+const NO_VALUES: ReadonlySet<string> = new Set();
+/** Commands that run the command after their own flags; the flags listed take a value, which is skipped with them. */
+const WRAPPERS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  ["sudo", new Set(["-u", "-g", "-C", "-h", "-p"])],
+  ["env", new Set(["-u", "-C", "-S"])],
+  ["nice", new Set(["-n"])],
+  ["time", NO_VALUES], ["nohup", NO_VALUES], ["exec", NO_VALUES], ["npx", NO_VALUES], ["bunx", NO_VALUES],
+]);
+/** `timeout [-s SIGNAL] [-k DURATION] DURATION <command>`. */
+const TIMEOUT_VALUES: ReadonlySet<string> = new Set(["-s", "-k"]);
+/** Runners whose second word runs the rest of the line as a command. */
+const RUNNER_PREFIXES = new Set(["pnpm exec", "uv run", "poetry run", "pipenv run", "hatch run", "bundle exec"]);
 
-/** Strip env assignments and wrapper commands; return [command basename, args]. */
-function commandOf(tokens: string[]): [string, string[]] {
+/** A segment's command: its name and arguments, and whether it ran as `python -m <name>`. */
+interface Command { name: string; args: string[]; python: boolean }
+
+/** A token's command name: its last path part, without a Windows program extension. */
+const baseName = (token: string): string => token.split(/[\\/]/).pop()!.replace(/\.(exe|bat|cmd)$/i, "");
+
+/** The tokens after a leading run of flags; a flag in `valued` takes the token after it as its value. */
+function afterFlags(t: string[], valued: ReadonlySet<string>): string[] {
+  let i = 0;
+  while (t[i]?.startsWith("-")) i += valued.has(t[i]!) ? 2 : 1;
+  return t.slice(i);
+}
+
+/**
+ * Where a JS package runner names a tool of the toolchain table — after `workspace <name>` and one of `run`,
+ * `run-script`, `exec`, `x` — the index of that tool among the runner's tokens (`t[0]`), else -1: `pnpm vitest run`,
+ * `npm exec eslint .`, `bun x tsc`, and a package script named like the tool (`npm run eslint`), which runs as that tool.
+ */
+function runnerTool(t: string[]): number {
+  const at = positionalIndexes(t).filter((i) => i > 0);
+  let k = t[at[0] ?? -1] === "workspace" ? 2 : 0;
+  if (RUNNER_VERBS.has(t[at[k] ?? -1] ?? "")) k++;
+  const i = at[k];
+  return i !== undefined && RUNNER_TOOLS.has(baseName(t[i]!)) ? i : -1;
+}
+
+/** Strip env assignments, wrappers (with their flags) and runners; `python -m <x>` is read as x. */
+function commandOf(tokens: string[]): Command {
   let t = tokens.map((x) => x.replace(/^[({]+/, "")).filter(Boolean);
   for (;;) {
     const h = t[0];
-    if (h === undefined) return ["", []];
+    if (h === undefined) return { name: "", args: [], python: false };
     if (/^[A-Za-z_]\w*=/.test(h)) { t = t.slice(1); continue; }
-    if (["sudo", "time", "nohup", "exec", "env"].includes(h)) { t = t.slice(1); while (t[0]?.startsWith("-")) t = t.slice(1); continue; }
-    if (h === "npx" || h === "bunx") { t = t.slice(1); while (t[0]?.startsWith("-")) t = t.slice(1); continue; }
-    if (h === "timeout") {
-      t = t.slice(1);
-      while (t[0]?.startsWith("-")) t = t.slice(t[0] === "-s" || t[0] === "-k" ? 2 : 1);
-      t = t.slice(1);
-      continue;
+    const valued = WRAPPERS.get(h);
+    if (valued) { t = afterFlags(t.slice(1), valued); continue; }
+    if (h === "timeout") { t = afterFlags(t.slice(1), TIMEOUT_VALUES).slice(1); continue; } // its flags, then the duration
+    if (RUNNER_PREFIXES.has(`${h} ${t[1] ?? ""}`)) { t = t.slice(2); continue; }
+    if (JS_RUNNERS.has(baseName(h))) {
+      const tool = runnerTool(t);
+      if (tool > 0) { t = t.slice(tool); continue; }
     }
-    const two = `${h} ${t[1] ?? ""}`;
-    if (["pnpm exec", "uv run", "poetry run", "pipenv run", "hatch run", "bundle exec"].includes(two)) { t = t.slice(2); continue; }
     break;
   }
-  let cmd = t[0]!.split(/[\\/]/).pop()!.replace(/\.(exe|bat|cmd)$/i, "");
-  let args = t.slice(1);
-  if ((cmd === "python" || cmd === "python3") && args[0] === "-m" && args[1]) { cmd = args[1]; args = args.slice(2); }
-  return [cmd, args];
+  const name = baseName(t[0]!);
+  const args = t.slice(1);
+  if ((name === "python" || name === "python3") && args[0] === "-m" && args[1]) return { name: args[1], args: args.slice(2), python: true };
+  return { name, args, python: false };
 }
 
-function positionals(args: string[]): string[] {
-  const out: string[] = [];
+/** The indexes of the positional tokens (not flags, nor the values of FLAGS_WITH_VALUE). */
+function positionalIndexes(args: string[]): number[] {
+  const out: number[] = [];
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
     if (FLAGS_WITH_VALUE.has(a)) i++;
-    else if (!a.startsWith("-")) out.push(a);
+    else if (!a.startsWith("-")) out.push(i);
   }
   return out;
 }
+
+const positionals = (args: string[]): string[] => positionalIndexes(args).map((i) => args[i]!);
 
 function jsScript(args: string[]): string | undefined {
   let p = positionals(args);
@@ -144,7 +209,7 @@ function jsScript(args: string[]): string | undefined {
 function scriptCheck(s: string): Check[] {
   if (s === "t" || /^test([:-].*)?$/.test(s)) return ["test"];
   if (/^lint([:-].*)?$/.test(s)) return ["lint"];
-  if (/^(typecheck|type-check|check-types)([:-].*)?$/.test(s) || ["tsc", "types", "check"].includes(s)) return ["typecheck"];
+  if (/^(typecheck|type-check|check-types)([:-].*)?$/.test(s) || ["types", "check"].includes(s)) return ["typecheck"];
   if (/^build([:-].*)?$/.test(s)) return ["build"];
   return [];
 }
@@ -236,22 +301,31 @@ function writesFile(cmd: string, args: string[], segment: string): boolean {
 }
 
 /**
- * Category and checks of a command line. Quoted spans and heredoc bodies are data, never commands. The checks of every
- * command in the line count; the category is the first check, else the first command's own category (git, package,
- * …), else `write` when a command writes a file with what it prints, else `read`/`search`, else `shell`.
+ * Category, checks and toolchain of a command line. Quoted spans and heredoc bodies are data, never commands. The checks
+ * of every command in the line count; the category is the first check, else the first command's own category (git,
+ * package, …), else `write` when a command writes a file with what it prints, else `read`/`search`, else `shell`. The
+ * toolchain is that of the command that produced the first check (`TOOLCHAINS`); absent without checks, or when the
+ * table names no toolchain for that command.
  */
-export function classifyCommand(cmd: string): { category: ToolCategory; checks: CheckKind[] } {
+export function classifyCommand(cmd: string): { category: ToolCategory; checks: CheckKind[]; toolchain?: Toolchain } {
   const checks: CheckKind[] = [];
+  let toolchain: Toolchain | undefined;
   let category: ToolCategory | undefined;
   let written = false;
   let passive: ToolCategory | undefined;
   for (const raw of blankQuotes(dropHeredocs(cmd)).split(/&&|\|\||;|\||\n/)) {
-    const [c, args] = commandOf(raw.trim().split(/\s+/).filter(Boolean));
-    if (!c) continue;
-    for (const k of [...checksOf(c, args), ...extraChecks(c, args)]) if (!checks.includes(k)) checks.push(k);
-    category ??= categoryOf(c, args);
-    written ||= writesFile(c, args, raw);
-    passive ??= passiveOf(c, args);
+    const { name, args, python } = commandOf(raw.trim().split(/\s+/).filter(Boolean));
+    if (!name) continue;
+    const first = checks.length === 0;
+    for (const k of [...checksOf(name, args), ...extraChecks(name, args)]) if (!checks.includes(k)) checks.push(k);
+    if (first && checks.length > 0) toolchain = python ? "py" : TOOLCHAIN_OF.get(name);
+    category ??= categoryOf(name, args);
+    written ||= writesFile(name, args, raw);
+    passive ??= passiveOf(name, args);
   }
-  return { category: checks[0] ?? category ?? (written ? "write" : undefined) ?? passive ?? "shell", checks };
+  const out: { category: ToolCategory; checks: CheckKind[]; toolchain?: Toolchain } = {
+    category: checks[0] ?? category ?? (written ? "write" : undefined) ?? passive ?? "shell", checks,
+  };
+  if (toolchain !== undefined) out.toolchain = toolchain;
+  return out;
 }

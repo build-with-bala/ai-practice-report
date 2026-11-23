@@ -1,6 +1,6 @@
 import { realpathSync } from "node:fs";
 import path from "node:path";
-import { isDir, isFile, readTextLines, safeStat } from "../../io/fs";
+import { bornAt, isDir, isFile, readTextLines, safeStat } from "../../io/fs";
 import { MAX_LINE_BYTES } from "../../io/jsonl";
 import type { ConfigEv } from "../../model/events";
 import { isTypeName, listDir, readSidecar, Tally } from "../common/coverage";
@@ -269,13 +269,21 @@ function lockedSkills(home: string, tally: Tally): Set<string> | undefined {
   return new Set();
 }
 
-/** `<codex>/skills/<name>/` folders holding a SKILL.md (hidden ones — `.system`, the bundled skills — are skipped); never opened. */
+/**
+ * `<codex>/skills/<name>/` folders holding a SKILL.md (hidden ones — `.system`, the bundled skills — are skipped); never
+ * opened. `firstSeen`: when the folder appeared (`bornAt`, links followed).
+ */
 function skills(c: Candidate, tally: Tally, out: Out): void {
   const dir = path.join(c.root, "skills");
   const names = listDir(dir, tally).filter((n) => !n.startsWith(".") && isFile(path.join(dir, n, "SKILL.md")));
   if (names.length === 0) return;
   const lock = lockedSkills(c.home, tally);
-  for (const name of names) out(cfg("skill", lock === undefined ? "unknown" : lock.has(name) ? "installed" : "authored", name));
+  for (const name of names) {
+    const ev = cfg("skill", lock === undefined ? "unknown" : lock.has(name) ? "installed" : "authored", name);
+    const born = bornAt(path.join(dir, name));
+    if (born !== undefined) ev.firstSeen = born;
+    out(ev);
+  }
 }
 
 /** One event per Markdown file directly in `<codex>/memories/` (the CLI's memory files), without a name; never opened. */

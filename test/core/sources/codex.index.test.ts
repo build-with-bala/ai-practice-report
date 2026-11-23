@@ -35,6 +35,8 @@ const covOf = (r: Result, source: string) => r.coverage.find((c) => c.source ===
 const tally = (xs: (string | undefined)[]) => xs.reduce<Record<string, number>>((m, x) => ({ ...m, [String(x)]: (m[String(x)] ?? 0) + 1 }), {});
 const skipChmod = process.platform === "win32" || process.getuid?.() === 0;
 const MIN = 60_000;
+/** A path's birth time by stat, links followed; its ctime where the file system records none. */
+const born = (rel: string): number => { const st = statSync(path.join(h.env.home, rel)); return Math.floor(st.birthtimeMs > 0 ? st.birthtimeMs : st.ctimeMs); };
 
 /**
  * What each SELECT may name, by the table it reads: the columns the thread reader is allowed to select (written out here,
@@ -590,7 +592,7 @@ describe("codex config", () => {
       { ...base, kind: "mcp-server", name: CANARY.mcp, provenance: "unknown" },
       { ...base, kind: "plugin", name: "demo@market", provenance: "installed" },
       { ...base, kind: "plugin", name: "other@market", provenance: "installed" },
-      { ...base, kind: "skill", name: "review-helper", provenance: "authored" },
+      { ...base, kind: "skill", name: "review-helper", provenance: "authored", firstSeen: born(".codex/skills/review-helper") },
       { ...base, kind: "memory-file", provenance: "authored" },
       { ...base, kind: "memory-file", provenance: "authored" },
     ]);
@@ -637,6 +639,8 @@ describe("codex config", () => {
     h.writeJson(".agents/.skill-lock.json", { version: 3, skills: { "from-lock": { source: "acme/skills", sourceUrl: `https://${CANARY.host}/x.git` } } });
     let r = await run([cxConfig]);
     expect(configs(r, "skill").map((c) => [c.name, c.provenance])).toEqual([["from-lock", "installed"], ["linked", "authored"], ["mine", "authored"]]);
+    // when each skill folder appeared, by stat (a linked folder: its target's); never opened
+    expect(configs(r, "skill").map((c) => c.firstSeen)).toEqual([born(".codex/skills/from-lock"), born("dotfiles/linked"), born(".codex/skills/mine")]);
     expect(covOf(r, "codex.config")).toMatchObject({ files: 1, bytes: statSync(path.join(h.env.home, ".agents/.skill-lock.json")).size });
 
     h.write(".agents/.skill-lock.json", "{ not json");

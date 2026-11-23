@@ -414,8 +414,8 @@ export class DiskKv {
   }
 
   /**
-   * One ToolEv per tool bubble. A terminal tool takes the category and checks of its command line and its exit code; a
-   * file-changing tool the extension of its file; an MCP tool its server. A tool the person rejected has outcome
+   * One ToolEv per tool bubble. A terminal tool takes the category, checks and toolchain of its command line and its exit
+   * code; a file-changing tool the extension of its file; an MCP tool its server. A tool the person rejected has outcome
    * `denied` (and a denial marker), one `cancelled` or `aborted` the outcome `cancelled` or `interrupted` — none of them
    * has ok or exit. Else `ok` = `exit === 0` when an exit code is known, else from `status` (`completed`, `error`).
    */
@@ -431,9 +431,10 @@ export class DiskKv {
     if (kind.terminal) {
       const cmd = str(r.cmd);
       if (cmd !== undefined) {
-        const { category, checks } = classifyCommand(cmd);
+        const { category, checks, toolchain } = classifyCommand(cmd);
         ev.category = category;
         if (checks.length > 0) ev.checks = checks;
+        if (toolchain !== undefined) ev.toolchain = toolchain;
       }
       const exit = num(r.exit);
       if (exit !== undefined && Number.isInteger(exit)) ev.exit = exit;

@@ -273,9 +273,10 @@ class SessionMapper {
     if (id !== undefined && TERMINAL_TOOLS.has(id) && tsd?.kind === "terminal") {
       const cmd = terminalCommand(tsd);
       if (cmd !== undefined) {
-        const { category, checks } = classifyCommand(cmd);
+        const { category, checks, toolchain } = classifyCommand(cmd);
         ev.category = category;
         if (checks.length > 0) ev.checks = checks;
+        if (toolchain !== undefined) ev.toolchain = toolchain;
       }
       const state = isObj(tsd.terminalCommandState) ? tsd.terminalCommandState : undefined;
       const exit = num(state?.exitCode);

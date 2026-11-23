@@ -47,6 +47,17 @@ export function fileState(p: string): FileState {
 }
 
 /**
+ * When the file or folder at a path came to be, by stat (links followed; nothing is opened): its birth time, else — on
+ * a file system that records none — its ctime, in whole ms. Undefined when nothing is there or it cannot be stat'ed.
+ */
+export function bornAt(p: string): number | undefined {
+  const s = statPath(p);
+  if (!("stat" in s)) return undefined; // missing, or not stat-able
+  const ms = s.stat.birthtimeMs > 0 ? s.stat.birthtimeMs : s.stat.ctimeMs;
+  return ms > 0 ? Math.floor(ms) : undefined;
+}
+
+/**
  * Whether a path is a folder. The one policy for a path a reader names: a linked folder counts (the tools' folders are
  * often linked into place). Traversal (`walk`, `listDir`) never follows links.
  */

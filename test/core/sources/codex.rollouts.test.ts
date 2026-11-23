@@ -139,7 +139,7 @@ describe("codex rollouts: Task 11 scenario", () => {
     expect(r1[0]).toMatchObject({ ms: 2_500, callId: keyedHash(r.salt, firstCommand.id!) });
     expect(r.store.forSession(sidOf(fx.r2.id), "tool")).toEqual([{
       k: "tool", tool: "codex", source: "codex.rollouts", ts: expect.any(Number), sessionId: sidOf(fx.r2.id), callId: expect.any(String),
-      name: "exec_command", category: "build", checks: ["build"], ok: true, exit: 0, ms: 12_000,
+      name: "exec_command", category: "build", checks: ["build"], toolchain: "js", ok: true, exit: 0, ms: 12_000,
     }]);
   });
 
@@ -317,7 +317,61 @@ describe("codex rollouts: tools", () => {
     });
     r1.write(h);
     const r = await run();
-    expect(r.store.all("tool")).toEqual([expect.objectContaining({ name: "exec_command", category: "test", checks: ["test"], ok: true, exit: 0 })]);
+    expect(r.store.all("tool")).toEqual([expect.objectContaining({ name: "exec_command", category: "test", checks: ["test"], toolchain: "js", ok: true, exit: 0 })]);
+  });
+
+  test("a check's toolchain: from the call's command line, or from the command that ran when the call named none", async () => {
+    const r1 = rollout((r) => {
+      const named = r.fn("exec_command", { cmd: "pytest -q" });
+      r.command("pytest -q", 1, { id: named });
+      const bare = r.fn("exec_command", { yield_time_ms: 1_000 });
+      r.command("pytest", 0, { id: bare });
+      r.command("cargo clippy", 0);
+      r.command("git status", 0);
+    });
+    r1.write(h);
+    const r = await run();
+    expect(toolsByTs(r).map((t) => [t.category, t.checks, t.toolchain, t.ok])).toEqual([
+      ["test", ["test"], "py", false], ["test", ["test"], "py", true], ["lint", ["lint"], "rust", true], ["git", undefined, undefined, true],
+    ]);
+  });
+
+  test("a shell call that runs apply_patch is the patch: one edit per file, from argv[1] or the heredoc; a deleted file's removed lines are unknown", async () => {
+    const patch = "*** Begin Patch\n*** Update File: a.py\n+x\n*** End Patch";
+    const r1 = rollout((r) => {
+      r.fn("shell", { command: ["apply_patch", patch] });
+      r.fn("shell_command", { command: "apply_patch <<'EOF'\n*** Begin Patch\n*** Add File: docs/n.md\n+# T\n+x\n*** Update File: src/b.ts\n@@\n-old\n+new\n*** End Patch\nEOF\n" });
+      r.fn("shell", { command: ["bash", "-lc", "apply_patch <<\"PATCH\"\n*** Begin Patch\n*** Delete File: old/c.go\n*** End Patch\nPATCH"] });
+      r.item("local_shell_call", { call_id: "ls-1", status: "completed", action: { type: "exec", command: ["apply_patch", "*** Begin Patch\n*** Update File: d.rs\n-a\n*** End Patch"] } });
+      r.fn("exec_command", { cmd: "apply_patch '*** Begin Patch\n*** Update File: e.kt\n+y\n*** End Patch'" });
+    });
+    r1.write(h);
+    const r = await run();
+    expect(toolsByTs(r).map((t) => [t.name, t.category, t.editExt, t.linesAdded, t.linesRemoved, t.checks])).toEqual([
+      ["apply_patch", "edit", "py", 1, 0, undefined],
+      ["apply_patch", "edit", "md", 2, 0, undefined], ["apply_patch", "edit", "ts", 1, 1, undefined],
+      ["apply_patch", "edit", "go", 0, undefined, undefined],
+      ["apply_patch", "edit", "rs", 0, 1, undefined],
+      ["apply_patch", "edit", "kt", 1, 0, undefined],
+    ]);
+    expect(toolsByTs(r).find((t) => t.editExt === "go")).not.toHaveProperty("linesRemoved");
+  });
+
+  test("a line whose time is well-formed but implausible counts once, as bad-ts; one without a time is drift and no-ts", async () => {
+    const r1 = rollout((r) => {
+      r.user("Fix the importer");
+      r.user("a prompt stamped 1990");
+      r.records.at(-1)!.timestamp = "1990-01-01T00:00:00.000Z";
+      r.user("a prompt without a time");
+      delete r.records.at(-1)!.timestamp;
+      r.user("And add a test").done("turn-1");
+    });
+    r1.write(h);
+    const r = await run();
+    const cov = r.coverage[0]!;
+    expect(cov.skipped).toEqual({ "bad-ts": 1, "no-ts": 1 });
+    expect(cov.unknownTypes).toEqual({ "timestamp:shape": 1 });
+    expect(r.store.all("prompt")).toHaveLength(2);
   });
 
   test("input sent to a running command updates its call or is skipped; it is never a new command", async () => {
@@ -396,7 +450,8 @@ describe("codex rollouts: tools", () => {
     r1.write(h);
     const r = await run();
     expect(toolsByTs(r).map((t) => [t.name, t.category, t.editExt, t.linesAdded, t.linesRemoved, t.ok])).toEqual([
-      ["apply_patch", "edit", "md", 2, 0, true], ["apply_patch", "edit", "ts", 2, 1, true], ["apply_patch", "edit", "py", 0, 0, true],
+      // a patch's deleted file: its removed lines are not in the patch, so unknown (a file change's delete holds them)
+      ["apply_patch", "edit", "md", 2, 0, true], ["apply_patch", "edit", "ts", 2, 1, true], ["apply_patch", "edit", "py", 0, undefined, true],
       ["apply_patch", "edit", "tsx", 4, 2, false], ["apply_patch", "edit", undefined, 0, 2, false], ["apply_patch", "edit", undefined, 2, 0, false],
     ]);
     expectNoCanaries(allEvents(r));
@@ -698,19 +753,24 @@ describe("cxToolCalls", () => {
   const one = (name: string, category: string, extra: Record<string, unknown> = {}) => [{ name, category, checks: [], ...extra }];
   /** A shell command: its category and checks, and whether a command line was found (`commandLine`). */
   const ran = (name: string, category: string, checks: string[] = [], commandLine = true) => [{ name, category, checks, commandLine }];
+  /** A shell command that runs a check: its category, checks and the toolchain of the command that produced the first. */
+  const check = (name: string, category: string, checks: string[], toolchain: string) => [{ name, category, checks, toolchain, commandLine: true }];
+  /** The edits a patch makes, as apply_patch's: one per file. */
+  const edits = (...files: Record<string, unknown>[]) => files.map((f) => ({ name: "apply_patch", category: "edit", checks: [], ...f }));
+  const PATCH_PY = "*** Begin Patch\n*** Update File: a.py\n+x\n*** End Patch";
   const cmd = (script: string, parsed: unknown[]) => item("CommandExecution", { command: ["/bin/zsh", "-lc", script], parsed_cmd: parsed, exit_code: 0, source: "unified_exec_startup" });
   const cases: [string, unknown, unknown][] = [
     ["Code Mode exec cell", { type: "custom_tool_call", name: "exec", input: "await tools.exec_command({ cmd: \"bun test\" })", call_id: "c" }, []],
     ["Code Mode wait", fc("wait", { cell_id: "1", yield_time_ms: 1_000 }), []],
-    ["exec_command", fc("exec_command", { cmd: "pnpm lint" }), ran("exec_command", "lint", ["lint"])],
+    ["exec_command", fc("exec_command", { cmd: "pnpm lint" }), check("exec_command", "lint", ["lint"], "js")],
     ["exec_command without cmd", fc("exec_command", {}), ran("exec_command", "shell", [], false)],
     ["exec_command with unparseable arguments", { type: "function_call", name: "exec_command", arguments: "{", call_id: "c" }, ran("exec_command", "shell", [], false)],
     ["exec_command with a blank cmd", fc("exec_command", { cmd: "  \n" }), ran("exec_command", "shell", [], false)],
-    ["shell argv", fc("shell", { command: ["bash", "-lc", "cargo test"] }), ran("shell", "test", ["test"])],
-    ["shell argv without a shell", fc("shell", { command: ["go", "build", "./..."] }), ran("shell", "build", ["build"])],
+    ["shell argv", fc("shell", { command: ["bash", "-lc", "cargo test"] }), check("shell", "test", ["test"], "rust")],
+    ["shell argv without a shell", fc("shell", { command: ["go", "build", "./..."] }), check("shell", "build", ["build"], "go")],
     ["shell argv that is not all strings", fc("shell", { command: ["bash", "-lc", 7] }), ran("shell", "shell", [], false)],
     ["shell_command string", fc("shell_command", { command: "git push" }), ran("shell_command", "git")],
-    ["local shell", { type: "local_shell_call", call_id: "c", status: "completed", action: { type: "exec", command: ["make", "build"] } }, ran("local_shell", "build", ["build"])],
+    ["local shell", { type: "local_shell_call", call_id: "c", status: "completed", action: { type: "exec", command: ["make", "build"] } }, check("local_shell", "build", ["build"], "any")],
     ["local shell without an action", { type: "local_shell_call", call_id: "c", status: "completed" }, ran("local_shell", "shell", [], false)],
     ["write_stdin", fc("write_stdin", { session_id: 3, chars: "" }), one("write_stdin", "shell")],
     ["update_plan", fc("update_plan", { plan: [] }), one("update_plan", "plan")],
@@ -744,15 +804,26 @@ describe("cxToolCalls", () => {
     ["apply_patch freeform", { type: "custom_tool_call", name: "apply_patch", call_id: "c", input: "*** Begin Patch\n*** Update File: a/b.rs\n@@\n-x\n+y\n+z\n*** End Patch\n" }, [{ name: "apply_patch", category: "edit", checks: [], editExt: "rs", added: 2, removed: 1 }]],
     ["apply_patch function", fc("apply_patch", { input: "*** Begin Patch\r\n*** Add File: Dockerfile\r\n+FROM x\r\n*** End Patch" }), [{ name: "apply_patch", category: "edit", checks: [], added: 1, removed: 0 }]],
     ["apply_patch without files", { type: "custom_tool_call", name: "apply_patch", call_id: "c", input: "garbage" }, []],
+    // a shell call whose command starts with the word apply_patch is the CLI's patch tool: the patch from argv[1] or the heredoc
+    ["shell running apply_patch (argv)", fc("shell", { command: ["apply_patch", PATCH_PY] }), edits({ editExt: "py", added: 1, removed: 0 })],
+    ["shell_command running apply_patch with a heredoc", fc("shell_command", { command: `apply_patch <<'EOF'\n${PATCH_PY}\nEOF\n` }), edits({ editExt: "py", added: 1, removed: 0 })],
+    ["exec_command running apply_patch through a shell, <<- heredoc", fc("exec_command", { cmd: ["bash", "-lc", "apply_patch <<-EOF\n*** Begin Patch\n*** Delete File: gone.md\n*** End Patch\n\tEOF"] }), edits({ editExt: "md", added: 0 })],
+    ["local shell running apply_patch", { type: "local_shell_call", call_id: "c", status: "completed", action: { type: "exec", command: ["apply_patch", PATCH_PY] } }, edits({ editExt: "py", added: 1, removed: 0 })],
+    ["apply_patch with the patch after the word", fc("shell_command", { command: `apply_patch '${PATCH_PY}'` }), edits({ editExt: "py", added: 1, removed: 0 })],
+    ["a command executed as apply_patch", item("CommandExecution", { command: ["/bin/zsh", "-lc", `apply_patch <<"P"\n${PATCH_PY}\nP`] }), edits({ editExt: "py", added: 1, removed: 0 })],
+    ["apply_patch without a patch", fc("shell", { command: ["apply_patch"] }), []],
+    ["apply_patch later in the line is a command", fc("shell_command", { command: `cd x && apply_patch <<'EOF'\n${PATCH_PY}\nEOF` }), ran("shell_command", "shell")],
+    ["a word that starts like apply_patch is a command", fc("exec_command", { cmd: "apply_patches --dry-run" }), ran("exec_command", "shell")],
+    ["a here-string is no heredoc", fc("shell_command", { command: `apply_patch <<< '${PATCH_PY}'` }), edits({ editExt: "py", added: 1, removed: 0 })],
     ["command: sed is not a reader", cmd("sed -n 1,80p src/a.ts", [{ type: "read", cmd: "sed", name: "a.ts", path: "src/a.ts" }]), ran("exec_command", "shell")],
     ["command: search", cmd("rg foo", [{ type: "search", cmd: "rg foo", query: "foo" }]), ran("exec_command", "search")],
     ["command: list files", cmd("ls -la", [{ type: "list_files", cmd: "ls -la" }]), ran("exec_command", "read")],
     ["command: read then search", cmd("cat a; rg b", [{ type: "read", cmd: "cat a" }, { type: "search", cmd: "rg b" }]), ran("exec_command", "read")],
-    ["command: read and a test", cmd("cat a && npm test", [{ type: "read", cmd: "cat a" }, { type: "unknown", cmd: "npm test" }]), ran("exec_command", "test", ["test"])],
-    ["command: a test parsed as read", cmd("bun test src/a.test.ts", [{ type: "read", cmd: "bun test src/a.test.ts" }]), ran("exec_command", "test", ["test"])],
+    ["command: read and a test", cmd("cat a && npm test", [{ type: "read", cmd: "cat a" }, { type: "unknown", cmd: "npm test" }]), check("exec_command", "test", ["test"], "js")],
+    ["command: a test parsed as read", cmd("bun test src/a.test.ts", [{ type: "read", cmd: "bun test src/a.test.ts" }]), check("exec_command", "test", ["test"], "js")],
     ["command: unknown", cmd("python3 x.py", [{ type: "unknown", cmd: "python3 x.py" }]), ran("exec_command", "shell")],
     ["command: no parse", item("CommandExecution", { command: ["/bin/bash", "-c", "docker ps"] }), ran("exec_command", "container")],
-    ["command: string", item("CommandExecution", { command: "npm run build" }), ran("exec_command", "build", ["build"])],
+    ["command: string", item("CommandExecution", { command: "npm run build" }), check("exec_command", "build", ["build"], "js")],
     ["command: none recorded", item("CommandExecution", { exit_code: 0 }), ran("exec_command", "shell", [], false)],
     ["command run by the person", item("CommandExecution", { command: ["/bin/zsh", "-lc", "ls"], source: "user_shell" }), []],
     ["input sent to a running command", item("CommandExecution", { command: ["/bin/zsh", "-lc", "npm test"], source: "unified_exec_interaction", exit_code: 0 }), []],
@@ -779,8 +850,14 @@ describe("cxToolCalls", () => {
 
   test("patchFiles: per-file counts and extensions from apply_patch text", () => {
     expect(patchFiles("*** Begin Patch\n*** Add File: docs/new.md\n+# T\n+x\n*** Update File: src/a.ts\n*** Move to: src/b.ts\n@@ ctx\n-old\n+new\n+more\n*** End of File\n*** Delete File: old/c.py\n*** End Patch\n")).toEqual([
-      { ext: "md", added: 2, removed: 0 }, { ext: "ts", added: 2, removed: 1 }, { ext: "py", added: 0, removed: 0 },
+      { ext: "md", added: 2, removed: 0 }, { ext: "ts", added: 2, removed: 1 }, { ext: "py", added: 0 },
     ]);
     expect(patchFiles("no headers\n+x")).toEqual([]);
+  });
+
+  test("patchFiles: a deleted file adds nothing and its removed lines are unknown — absent, never 0", () => {
+    const [deleted] = patchFiles("*** Begin Patch\n*** Delete File: old/c.go\n+stray\n-stray\n*** End Patch");
+    expect(deleted).toEqual({ ext: "go", added: 0 });
+    expect(deleted).not.toHaveProperty("removed");
   });
 });

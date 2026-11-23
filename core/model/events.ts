@@ -1,5 +1,5 @@
 import type {
-  CheckKind, Intent, MarkerKind, Origin, TechCategory, ToolCategory, ToolId, Window,
+  CheckKind, Intent, MarkerKind, Origin, TechCategory, ToolCategory, Toolchain, ToolId, Window,
 } from "./ids";
 
 /*
@@ -34,8 +34,10 @@ import type {
  *   (parent → child thread) only for Codex's thread index.
  */
 
+/** What a prompt's text shows, computed in memory (`promptFeatures`). `chars`: the UTF-16 length of the trimmed prompt. */
 export interface PromptFeatures { words: number; lenBucket: 0 | 1 | 2 | 3 | 4; hasContext: boolean; fileRefs: number;
-  listLines: number; constraintTerms: number; isTaskStart: boolean; techCats: Partial<Record<TechCategory, number>>; simToPrev?: number }
+  listLines: number; constraintTerms: number; isTaskStart: boolean; techCats: Partial<Record<TechCategory, number>>; simToPrev?: number;
+  chars?: number }
 interface Base { tool: ToolId; source: string }   // source = plugin id
 
 /**
@@ -69,10 +71,12 @@ export interface PromptEv extends Base { k: "prompt"; ts: number; sessionId?: st
  *   `interrupted` (stopped while it ran). With an outcome, `ok` and `exit` are absent: a denied `npm test` is no
  *   failing check. A denial is also a `denial` marker.
  * - `exit`: the command's exit code, when the tool records one.
+ * - `toolchain`: the toolchain of the command that produced the call's first check (`classifyCommand`); absent without a
+ *   checking command, or when the table names no toolchain for it.
  */
 export interface ToolEv extends Base { k: "tool"; ts: number; sessionId: string; callId?: string; name: string; category: ToolCategory;
   checks?: CheckKind[]; ok?: boolean; outcome?: "denied" | "cancelled" | "interrupted"; exit?: number; ms?: number; editExt?: string;
-  linesAdded?: number; linesRemoved?: number; mcpServer?: string; delegateTo?: string }
+  linesAdded?: number; linesRemoved?: number; mcpServer?: string; delegateTo?: string; toolchain?: Toolchain }
 
 /**
  * One exchange that ended: an input — a prompt, a queued message, a subagent's brief — and the agent's work on it, all
@@ -128,12 +132,16 @@ export interface MarkerEv extends Base { k: "marker"; ts: number; sessionId?: st
 
 /**
  * Configuration measured by use. `name` holds the raw config name (skill, command, agent, plugin, MCP server, hook
- * event) for the export allowlist and is never exported raw — except for `feature`, a CLI feature counted by the CLI
- * itself, whose name is a fixed token (`prompt-queue`: times the input queue went from empty to non-empty).
+ * event) for the export allowlist and is never exported raw — except for `feature`, a feature of the CLI whose name is a
+ * fixed token: `prompt-queue` (`uses`: times the input queue went from empty to non-empty, as the CLI counts them),
+ * `hooks-disabled` (the settings turn every hook off, so none runs).
+ * `firstSeen`: when the artifact appeared — its file or folder's birth time (ctime where the file system has none) by
+ * stat, never opened, or an install time the tool records.
  */
 export interface ConfigEv extends Base { k: "config";
   kind: "skill" | "command" | "agent" | "plugin" | "hook" | "mcp-server" | "memory-file" | "instruction-file" | "profile" | "feature";
-  name?: string; provenance: "authored" | "installed" | "bundled" | "unknown"; uses?: number; lastUsed?: number; checks?: CheckKind[] }
+  name?: string; provenance: "authored" | "installed" | "bundled" | "unknown"; uses?: number; lastUsed?: number; checks?: CheckKind[];
+  firstSeen?: number }
 
 /**
  * A tool's own per-day totals. `zone`: the day's time zone — `utc`, or `local` (the scanning process's zone);

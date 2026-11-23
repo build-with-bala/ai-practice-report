@@ -190,6 +190,7 @@ describe("cursor: Task 14 scenario", () => {
       [3 * MIN, "run_terminal_cmd", "test", ["test"], false, undefined, 1],
       [6 * MIN, "run_terminal_cmd", "test", ["test"], undefined, "denied", undefined], // a rejected test is no failing check
     ]);
+    expect(tools.map((t) => t.toolchain)).toEqual(["py", "py", "py"]); // `pytest -q`: the command's toolchain
     expect(tools[0]!.callId).toBe(keyedHash(r.salt, `call_t1_${CANARY.secret}`));
     expect(r.store.forSession(sidOf(A), "marker").map((m) => [m.kind, m.detail, m.ts - fx.t0]).sort()).toEqual([["denial", "user", 6 * MIN], ["error", undefined, 3 * MIN]]);
     expect(r.store.all("turn")).toEqual([]);
@@ -257,6 +258,9 @@ describe("cursor ide: bubbles and tools", () => {
       ["mcp", "mcp", undefined, undefined, CANARY.mcp], ["mcp", "mcp", undefined, undefined, undefined],
       ["Shell", "lint", ["lint"], undefined, undefined], ["run_terminal_cmd", "test", ["test"], undefined, undefined],
       ["edit_file", "edit", undefined, "py", undefined],
+    ]);
+    expect(byTime(toolsOf(r, c)).filter((x) => x.checks !== undefined).map((x) => [x.name, x.toolchain])).toEqual([
+      ["run_terminal_command_v2", "js"], ["Shell", "js"], ["run_terminal_cmd", "rust"],
     ]);
     expectNoCanaries([...allEvents(r), r.coverage], { allow: ["mcp"] });
   });

@@ -1,7 +1,7 @@
 import { readdirSync, type Stats } from "node:fs";
 import path from "node:path";
 import { isFile, readJsonSmall, safeStat } from "../../io/fs";
-import { toEpochMs } from "../../io/time";
+import { timeIssue, toEpochMs } from "../../io/time";
 import { TASK_GAP_MS } from "../../model/constants";
 import type { Ev, FileFactEv, MarkerEv, SessionEv, ToolEv, TotalsEv, TurnEv } from "../../model/events";
 import { sid, type MarkerKind, type Origin } from "../../model/ids";
@@ -142,7 +142,10 @@ class TranscriptReader {
   private readonly messages = new Map<string, PendingUsage>();
   private readonly prs = new Set<string>();
   private readonly owners = new Set<string>();
-  private readonly undated: { kind: MarkerKind; detail?: string }[] = [];
+  /** Markers waiting for the file's first time; `badTs`: from a record whose time was implausible (already `bad-ts`). */
+  private readonly undated: { kind: MarkerKind; detail?: string; badTs: boolean }[] = [];
+  /** The record being read is a conversation record whose time is well-formed but implausible: counted once, as `bad-ts`. */
+  private badTs = false;
   private foreignSession = false;
 
   constructor(
@@ -161,7 +164,7 @@ class TranscriptReader {
   private marker(kind: MarkerKind, ts?: number, detail?: string): void {
     const at = ts ?? this.clock;
     if (at === undefined) {
-      this.undated.push(detail === undefined ? { kind } : { kind, detail });
+      this.undated.push(detail === undefined ? { kind, badTs: this.badTs } : { kind, detail, badTs: this.badTs });
       return;
     }
     const ev: MarkerEv = { k: "marker", tool: TOOL, source: TRANSCRIPTS_SOURCE, ts: at, sessionId: this.spec.sessionId, kind };
@@ -174,6 +177,14 @@ class TranscriptReader {
     if (this.end === undefined || ts > this.end) this.end = ts;
     this.clock = ts;
     if (this.undated.length > 0) for (const m of this.undated.splice(0)) this.marker(m.kind, ts, m.detail);
+  }
+
+  /**
+   * An item of a record without a usable time is dropped, skipped `no-ts` — unless the record's time was well-formed but
+   * implausible: that record was counted once already, as `bad-ts`.
+   */
+  private noTs(): void {
+    if (!this.badTs) this.tally.skip("no-ts");
   }
 
   record(v: unknown): void {
@@ -195,6 +206,7 @@ class TranscriptReader {
       return;
     }
     const ts = toEpochMs(v.timestamp, this.ctx.now);
+    this.badTs = ts === undefined && TIMED.has(type) && timeIssue(v.timestamp) === "implausible";
     if (ts !== undefined) this.tick(ts);
     else if (TIMED.has(type)) this.tally.badTime(v.timestamp);
     if (typeof v.entrypoint === "string" && v.entrypoint.startsWith("sdk")) this.sdk = true;
@@ -249,7 +261,7 @@ class TranscriptReader {
         features: promptFeatures(text, { isTaskStart, prevText: human ? this.prevHuman : undefined }),
         textHash: this.ctx.hash(text.trim()),
       });
-    } else this.tally.skip("no-ts");
+    } else this.noTs();
     if (human) this.prevHuman = text;
   }
 
@@ -264,7 +276,7 @@ class TranscriptReader {
       this.lastModel = model;
       this.lastEffort = safeEffort(str(v.effort));
       if (ts !== undefined) this.noteMessage(msg, v, model, ts);
-      else this.tally.skip("no-ts");
+      else this.noTs();
     }
     if (Array.isArray(msg.content)) for (const b of msg.content) if (isObj(b) && b.type === "tool_use") this.toolUse(b, ts ?? this.clock);
     if (ts !== undefined) this.lastActivity = ts;
@@ -309,13 +321,14 @@ class TranscriptReader {
     const name = str(b.name);
     if (id === undefined || name === undefined) return this.tally.unknownKey("tool_use:shape");
     if (this.tools.has(id) || this.doneTools.has(id)) return; // the same call again
-    if (ts === undefined) return this.tally.skip("no-ts");
-    const { category, checks, editExt } = ccToolCategory(name, b.input);
+    if (ts === undefined) return this.noTs();
+    const { category, checks, editExt, toolchain } = ccToolCategory(name, b.input);
     const ev: ToolEv = {
       k: "tool", tool: TOOL, source: TRANSCRIPTS_SOURCE, ts, sessionId: this.spec.sessionId, callId: id,
       name: category === "mcp" ? "mcp" : CC_BUILTIN_TOOLS.has(name) ? name : "other", category,
     };
     if (checks.length > 0) ev.checks = checks;
+    if (toolchain !== undefined) ev.toolchain = toolchain;
     if (editExt !== undefined) ev.editExt = editExt;
     if (category === "mcp") ev.mcpServer = mcpServerOf(name);
     if (category === "delegate") {
@@ -387,7 +400,7 @@ class TranscriptReader {
     if (v.subtype === "turn_duration") {
       const ms = num(v.durationMs);
       if (ms === undefined || ms < 0) return this.tally.unknownKey("turn_duration:shape");
-      if (ts === undefined) return this.tally.skip("no-ts");
+      if (ts === undefined) return this.noTs();
       const ev: TurnEv = { k: "turn", tool: TOOL, source: TRANSCRIPTS_SOURCE, ts, sessionId: this.spec.sessionId, window: "detail", status: "completed", ms };
       if (this.lastModel !== undefined) ev.model = this.lastModel;
       if (this.lastEffort !== undefined) ev.effort = this.lastEffort;
@@ -445,7 +458,8 @@ class TranscriptReader {
   /** Flush pending state; the session and file facts are emitted once the whole file was seen. */
   finish(stat: Stats | undefined): void {
     if (this.foreignSession) this.tally.foreignSessionFiles++;
-    for (const _ of this.undated.splice(0)) this.tally.skip("no-ts"); // markers of a file that never gave a time
+    // markers of a file that never gave a time; one of a record already counted as bad-ts is not counted again
+    for (const m of this.undated.splice(0)) if (!m.badTs) this.tally.skip("no-ts");
     for (const ev of this.tools.values()) this.out(ev);
     this.tools.clear();
     for (const p of this.messages.values()) this.usage(p);

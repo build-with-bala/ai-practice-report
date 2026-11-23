@@ -144,9 +144,9 @@ What the reader does:
   - GENERIC steps take the name and category of the tool their call names when it is a built-in name; an `mcp_`/`mcp-`
     name is `mcp` (the server inside it is never parsed out); any other name, or none, is `generic`, category `other`. The
     bookkeeping calls — `ask_question`, `ask_permission`, `ask_custom_permission`, `notify_user`, `finish` — are `meta`.
-  - Run commands (typed, or a GENERIC `run_command` call) take `classifyCommand` of the command line — the payload's
-    `command_line` (else `command`), else the call's `CommandLine` argument — and `exit` from the payload's `exit_code`
-    (`ok` = exit 0). A payload whose `user_rejected` is set (program) was denied: `outcome: "denied"`, no `ok` or `exit`,
+  - Run commands (typed, or a GENERIC `run_command` call) take `classifyCommand` of the command line (category, checks,
+    toolchain) — the payload's `command_line` (else `command`), else the call's `CommandLine` argument — and `exit`
+    from the payload's `exit_code` (`ok` = exit 0). A payload whose `user_rejected` is set (program) was denied: `outcome: "denied"`, no `ok` or `exit`,
     and a `denial` marker (`detail: "user"`). Only a run_command call's arguments are parsed; nothing of them is kept.
   - From the status: done → `ok` true; error → `ok` false; canceled → `outcome: "cancelled"`, interrupted →
     `outcome: "interrupted"` (neither has `ok` or `exit`); others none.

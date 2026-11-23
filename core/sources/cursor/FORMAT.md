@@ -192,8 +192,8 @@ conversations live in `cursorDiskKV`.
   - **ToolEv** per assistant (type-2) bubble with `toolFormerData`: `name` = the built-in name (above), else the name the numeric `tool`
     stands for, else `mcp` for an `mcp_`/`mcp-` name, else `other`; `callId` = keyed hash of `toolCallId`. Terminal
     tools (`run_terminal_cmd`, `run_terminal_command`, `run_terminal_command_v2`, `Shell`) take `classifyCommand` of
-    `params.command` (else `rawArgs.command`) — category and checks — and `exit` from `result.exitCodeV2`, else
-    `result.exitCode`. File tools (`edit_file`, `edit_file_v2`, `search_replace`, `write`, `delete_file`, `reapply`,
+    `params.command` (else `rawArgs.command`) — category, checks and toolchain — and `exit` from `result.exitCodeV2`,
+    else `result.exitCode`. File tools (`edit_file`, `edit_file_v2`, `search_replace`, `write`, `delete_file`, `reapply`,
     `StrReplace`, `Write`, `Delete`) take `editExt` from the target file (extension only; the path never leaves memory);
     deleting a file is an `edit`. MCP tools: `name: "mcp"`, `mcpServer` = `server` from the params or arguments (raw,
     export-allowlisted later), else none — never parsed out of a tool name. A tool that did not run to an end of its

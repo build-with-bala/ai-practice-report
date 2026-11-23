@@ -218,10 +218,14 @@ CLI's EventMsg tags (`exec_command_end`, `mcp_tool_call_end`, `collab_*`, `realt
   trimmed text) as for Claude Code; `isTaskStart` = first human prompt or ≥ 30 min since the thread's last line.
 - **ToolEv** (`cxToolCalls`), one per call, or per file for apply_patch:
   - shell tools (`exec_command`, `shell`, `shell_command`, `local_shell`): `classifyCommand` of the command line (a
-    `[<shell>, -c…, <script>]` argv is unwrapped to the script), as for Claude Code's shell tools; it recognises
-    reading (`cat`, `head`, `tail`, `ls`, …) and searching (`rg`, `grep`, `find`, …) behind every other category.
-    `parsed_cmd` is not read.
+    `[<shell>, -c…, <script>]` argv is unwrapped to the script), as for Claude Code's shell tools — category, checks
+    and the `toolchain` of the command that produced the first check; it recognises reading (`cat`, `head`, `tail`,
+    `ls`, …) and searching (`rg`, `grep`, `find`, …) behind every other category. `parsed_cmd` is not read. A shell
+    call whose command, as argv or as a string, starts with the word `apply_patch` is the CLI's patch tool run
+    through the shell: read as `apply_patch` (below), the patch taken from `argv[1]`, or — of a string — from the
+    heredoc its first line opens with `<<` (`<<-`, quoted delimiters), else from the rest of the string.
   - `apply_patch` → `edit` per file, `editExt` from the path, `linesAdded`/`linesRemoved` from the file's `+`/`-` lines;
+    a `*** Delete File:` section holds none of the file's lines: `linesAdded` 0 and no `linesRemoved` (unknown);
     `FileChange` items → the same per changed file (update: the diff's lines; add/delete: the content's lines).
   - `update_plan` → plan; `view_image`/`ImageView` → read; `web_search_call`, `web_search`, the `web` namespace and
     `Extension web.search` → web (`name:"web_search"`); the multi-agent tools (and v1 `wait` with agent ids) and
@@ -235,8 +239,8 @@ CLI's EventMsg tags (`exec_command_end`, `mcp_tool_call_end`, `collab_*`, `realt
     Commands the person ran (`source: user_shell`) are not tool events.
   - A call waits for the item with its `call_id`: `ok` = exit code 0 (else from `status`), `exit`, `ms` from
     `duration`; an item `declined` by the person never ran: `outcome: "denied"`, no `ok` or `exit`, and a `denial`
-    marker (`detail: "user"`). A linked shell call that classified as plain `shell` takes the category and checks of
-    the command that ran. Items without such a call are their own events, timed by `started_at_ms`; an item id is counted once, so the
+    marker (`detail: "user"`). A linked shell call that classified as plain `shell` takes the category, checks and
+    toolchain of the command that ran. Items without such a call are their own events, timed by `started_at_ms`; an item id is counted once, so the
     same item again, or its call arriving after it, adds nothing. Calls no item completes are emitted at the end of
     the file.
   - Input sent to a running command (`CommandExecution` with `source: unified_exec_interaction`) never makes a command
@@ -260,8 +264,9 @@ CLI's EventMsg tags (`exec_command_end`, `mcp_tool_call_end`, `collab_*`, `realt
   `fileTs` = the file name's local time; **FileFactEv** likewise.
 - **CoverageEv**: `files`/`bytes` of fully read rollouts, `records` = parsed lines; skipped `sniffed`, `oversize`,
   `parse`, `io-error`, `duplicate`, `foreign-item`, `exec-interaction`, `bad-record` (also logged once per root as
-  `warn cx.bad-record`), `bad-ts` (a well-formed time outside the plausible range), `no-ts` (an event whose line gives
-  no time; markers and command items take the latest earlier one when there is one); drift, beyond unknown types:
+  `warn cx.bad-record`), `bad-ts` (a line whose time is well-formed but outside the plausible range, counted once and
+  never also `no-ts` for what it holds), `no-ts` (an event whose line gives no time, absent or shapeless; markers and
+  command items take the latest earlier one when there is one); drift, beyond unknown types:
   `timestamp:shape` (a line whose `timestamp` is absent or not a time), `<type>.payload:shape` (a `session_meta`,
   `turn_context`, `response_item` or `event_msg` line whose `payload` is not an object), `user.content:shape` (a user
   message whose `content` is neither a string nor a list holding an `input_*` part); `versions` = `cli_version`s; `from`/`to` = first/last event time. Once per root the
@@ -483,7 +488,8 @@ Tables (CLI program): `[features]`, `[tui]`, `[tui.<k>]`, `[notice.<k>]`, `[plug
   inside); a config id `<plugin>@<marketplace>` names the same plugin. Only folder names are read; hidden entries are
   skipped; manifests are never opened.
 - **skill**: one per `skills/<name>/` folder holding a `SKILL.md` (symlinked folders followed; hidden ones skipped,
-  among them `.system`, which holds the bundled skills and a `.codex-system-skills.marker`). Provenance `installed` when
+  among them `.system`, which holds the bundled skills and a `.codex-system-skills.marker`); `firstSeen` = the folder's
+  birth time by stat (links followed; the ctime where the file system records none). Provenance `installed` when
   `<home>/.agents/.skill-lock.json` lists the name (only the keys of its `skills` are read), `unknown` when that lock
   exists but cannot be read, else `authored`. The lock is read only when there is at least one skill.
 - **memory-file**: one per `*.md` file directly in `memories/` (the CLI writes `MEMORY.md`, `memory_summary.md`,

@@ -166,8 +166,8 @@ Built-in tool ids (VS Code program and extension program): see `VSCODE_TOOLS` in
   - Name: the built-in tool id (`VSCODE_TOOLS`), `mcp` for MCP tools (`mcpServer` = `source.serverLabel`, else
     `source.label`; raw, export-allowlisted later), else `other` (extension tools and unknown ids).
   - Category from the tool table; terminal tools (`run_in_terminal`, `copilot_runInTerminal`, `send_to_terminal`) take
-    `classifyCommand` of the command that ran (category and checks), `exit` from `terminalCommandState.exitCode` and `ms`
-    from its `duration`; `runTests` checks `test`.
+    `classifyCommand` of the command that ran (category, checks, toolchain), `exit` from
+    `terminalCommandState.exitCode` and `ms` from its `duration`; `runTests` checks `test`.
   - A tool that did not run (its `isConfirmed`) has an `outcome` and no `ok` or `exit`: kind 0 (VS Code's Denied;
     older files `false`) → `denied`, and a `denial` marker (`detail: "user"`) — but in a request that was cancelled
     (`modelState.value` 2, or `isCanceled`) a tool left waiting for its confirmation was dropped: `cancelled`, no
@@ -260,9 +260,9 @@ other type is drift `event:(other)` (the type itself is never kept).
   ended, or one never started, ends nothing; an exchange whose call never ended (the file stops mid-call) has no turn.
 - `tool.execution_start` {`toolCallId`, `toolName`, `arguments`, `mcpServerName`?, `mcpToolName`?, `parentToolCallId`?}
   and `tool.execution_complete` {`toolCallId`, `success`, `result` {`content`}, `error` {`code`, `message`}} → ToolEv
-  (`CLI_TOOLS`): `bash`/`powershell` → `classifyCommand(arguments.command)`, `exit` from the result's trailing
-  `<exited with exit code N>`; `edit`, `str_replace`, `insert`, `create`, `str_replace_editor` → edit/write with `editExt`
-  from `arguments.path`; MCP tools → `mcp` with `mcpServer`; `think`, `report_intent` (written on every turn),
+  (`CLI_TOOLS`): `bash`/`powershell` → `classifyCommand(arguments.command)` (category, checks, toolchain), `exit` from
+  the result's trailing `<exited with exit code N>`; `edit`, `str_replace`, `insert`, `create`, `str_replace_editor` →
+  edit/write with `editExt` from `arguments.path`; MCP tools → `mcp` with `mcpServer`; `think`, `report_intent` (written on every turn),
   `report_progress`, `task_complete`, `ask_user` and `tool_search_tool_regex` are `meta`. `ok` = exit code 0 when known,
   else `success`; `ms` = completion − start. A call still running at an `abort` was interrupted: `outcome:
   "interrupted"`, no `ok`. The CLI's permission results are not mapped yet (their names differ between versions of its
@@ -273,7 +273,8 @@ other type is drift `event:(other)` (the type itself is never kept).
   `lifetime` = `session-store.db` (`absent` without it; `error`, `note: "unreadable"`, when it cannot be read; a store
   too large to copy keeps `note: "too-large"`, as above).
   Drift in `detail`, beyond unknown event types: `event.timestamp:shape` (an event whose `timestamp` is absent or not a
-  time; a well-formed one outside the plausible range is skipped `bad-ts`, an event without one `no-ts`),
+  time: what it carries is dropped, skipped `no-ts`; a well-formed time outside the plausible range is skipped `bad-ts`
+  instead, counted once and never also `no-ts`),
   `user.message.content:shape` (no string `content`), `tool.execution_start:shape` (a call without its id or tool
   name), `session-state:layout` (an entry of `session-state/` that is not a folder holding `events.jsonl`, such as a
   bare `<id>.jsonl`), `layout:history-session-state` (the older layout's folder is there).

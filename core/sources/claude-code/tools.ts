@@ -1,4 +1,4 @@
-import type { CheckKind, ToolCategory } from "../../model/ids";
+import type { CheckKind, ToolCategory, Toolchain } from "../../model/ids";
 import { classifyCommand } from "../../text/commands";
 import { extOfPath, isObj } from "../common/guards";
 
@@ -56,12 +56,9 @@ function extOf(input: unknown): string | undefined {
   return p === undefined ? undefined : extOfPath(p);
 }
 
-export function ccToolCategory(name: string, input: unknown): { category: ToolCategory; checks: CheckKind[]; editExt?: string } {
-  if (SHELL.has(name)) {
-    const cmd = isObj(input) && typeof input.command === "string" ? input.command : "";
-    const { category, checks } = classifyCommand(cmd);
-    return { category, checks };
-  }
+/** A tool call's category and checks — a shell call's by its command line, with that command's toolchain — and an edit's extension. */
+export function ccToolCategory(name: string, input: unknown): { category: ToolCategory; checks: CheckKind[]; editExt?: string; toolchain?: Toolchain } {
+  if (SHELL.has(name)) return classifyCommand(isObj(input) && typeof input.command === "string" ? input.command : "");
   if (mcpServerOf(name) !== undefined) return { category: "mcp", checks: [] };
   const category = FIXED.get(name) ?? "other";
   const out: { category: ToolCategory; checks: CheckKind[]; editExt?: string } = { category, checks: [] };

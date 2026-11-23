@@ -488,9 +488,9 @@ describe("antigravity cli: conversations/<id>.db steps", () => {
       { type: STEP.RUN_COMMAND, metadata: call({ CommandLine: "npm run lint" }), payload: runPayload({ cmd: "cargo build" }) },
     ]);
     const r = await run([agCli]);
-    expect(tools(r).map((t) => [t.name, t.category, t.checks])).toEqual([
-      ["run_command", "test", ["test"]], ["run_command", "shell", undefined], ["run_command", "shell", undefined], ["write_file", "write", undefined],
-      ["run_command", "lint", ["lint"]], ["run_command", "build", ["build"]],
+    expect(tools(r).map((t) => [t.name, t.category, t.checks, t.toolchain])).toEqual([
+      ["run_command", "test", ["test"], "py"], ["run_command", "shell", undefined, undefined], ["run_command", "shell", undefined, undefined],
+      ["write_file", "write", undefined, undefined], ["run_command", "lint", ["lint"], "js"], ["run_command", "build", ["build"], "rust"],
     ]);
     expectNoCanaries([...allEvents(r), r.coverage]);
   });
@@ -517,6 +517,8 @@ describe("antigravity cli: conversations/<id>.db steps", () => {
       ["blaze_test_targets", "test", ["test"], true, undefined, undefined], ["compile", "build", ["build"], false, undefined, undefined],
       ["lint_applet", "lint", ["lint"], true, undefined, undefined],
     ]);
+    // a run command's checks carry its toolchain; a typed check step names no command, so it has none
+    expect(tools(r).map((t) => t.toolchain)).toEqual(["js", "js", "js", undefined, undefined, undefined]);
     expect(markers(r, "denial").map((m) => [m.detail, m.ts - at])).toEqual([["user", 0]]);
   });
 

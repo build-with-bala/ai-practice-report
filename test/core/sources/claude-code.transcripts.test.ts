@@ -46,6 +46,8 @@ describe("claude-code transcripts: Task 9 scenario", () => {
     expect(tools).toHaveLength(11);                                 // 5 main + 4 subagent + 2 workflow
     const tests = tools.filter(t => t.checks?.includes("test"));
     expect(tests.map(t => t.ok)).toEqual([false, true]);
+    expect(tests.map(t => t.toolchain)).toEqual(["js", "js"]);         // Bash `bun test`: the command's toolchain
+    expect(tools.filter(t => t.toolchain !== undefined)).toHaveLength(2); // a call without checks has none
     expect(tools.find(t => t.category === "edit")).toMatchObject({ editExt: "ts", linesAdded: 3, linesRemoved: 1 });
     expect(tools.find(t => t.category === "delegate")!.delegateTo).toBe(sub.id);
     const kinds = r.store.all("marker").map(m => m.kind);
@@ -488,6 +490,34 @@ describe("claude-code transcripts: record mapping", () => {
     expect(events.filter(e => e.k === "prompt")).toHaveLength(1);       // "fine" still mapped after the failure
   });
 
+  test("a record whose time is well-formed but implausible counts once, as bad-ts; one without a time is drift and no-ts", async () => {
+    const t = top("BT").prompt("Fix the importer");
+    const stamp = (at: unknown) => { const rec = t.records.at(-1)!; if (at === undefined) delete rec.timestamp; else rec.timestamp = at; };
+    t.prompt("a prompt stamped 1990"); stamp("1990-01-01T00:00:00.000Z");
+    t.text("a reply stamped 1990"); stamp(631152000000);
+    t.system("turn_duration", { durationMs: 900 }); stamp("1990-01-01T00:00:00.000Z");
+    t.prompt("a prompt without a time"); stamp(undefined);
+    t.prompt("And add a test");
+    t.write(h, topFile("BT"));
+    const r = await run();
+    const cov = r.coverage[0]!;
+    expect(cov.skipped).toEqual({ "bad-ts": 3, "no-ts": 1 });
+    expect(cov.unknownTypes).toEqual({ "timestamp:shape": 1 });
+    expect(r.store.all("prompt")).toHaveLength(2);
+    expect([r.store.all("usage"), r.store.all("turn")]).toEqual([[], []]);
+  });
+
+  test("a tool call whose record time is implausible takes the file's clock; with none yet, it counts once, as bad-ts", async () => {
+    const early = top("BU");
+    early.tool("toolu_b1", "Bash", { command: "pytest" }, {}); early.records[0]!.timestamp = "1990-01-01T00:00:00.000Z";
+    early.prompt("now go on");
+    early.write(h, topFile("BU"));
+    const r = await run();
+    expect(r.coverage[0]!.skipped).toEqual({ "bad-ts": 1 });
+    expect(r.store.all("tool")).toEqual([]);
+    expect(r.store.all("usage")).toEqual([]);
+  });
+
   test("record type names the reader does not know are bucketed, never copied", async () => {
     const t = top("P10").prompt("hi");
     t.raw({ type: CANARY.prompt }).raw({ type: 42 }).raw({ noType: true });
@@ -724,7 +754,7 @@ describe("ccPromptOrigin", () => {
 });
 
 describe("ccToolCategory", () => {
-  const cases: [string, unknown, { category: string; checks: string[]; editExt?: string }][] = [
+  const cases: [string, unknown, { category: string; checks: string[]; editExt?: string; toolchain?: string }][] = [
     ["Read", { file_path: "/a/b.ts" }, { category: "read", checks: [] }],
     ["Grep", { pattern: "x" }, { category: "search", checks: [] }],
     ["Glob", { pattern: "*" }, { category: "search", checks: [] }],
@@ -733,13 +763,14 @@ describe("ccToolCategory", () => {
     ["NotebookEdit", { notebook_path: "n.ipynb" }, { category: "edit", checks: [], editExt: "ipynb" }],
     ["Write", { file_path: "Makefile" }, { category: "write", checks: [] }],
     ["Write", { file_path: "/x/y/notes.md" }, { category: "write", checks: [], editExt: "md" }],
-    ["Bash", { command: "bun test" }, { category: "test", checks: ["test"] }],
+    ["Bash", { command: "bun test" }, { category: "test", checks: ["test"], toolchain: "js" }],
+    ["Bash", { command: "cd api && uv run pytest -q" }, { category: "test", checks: ["test"], toolchain: "py" }],
     ["Bash", { command: "git status" }, { category: "git", checks: [] }],
     ["Bash", { command: "ls -la" }, { category: "read", checks: [] }],
     ["Bash", { command: "rg -n needle src" }, { category: "search", checks: [] }],
     ["Bash", { command: "python3 scripts/gen.py" }, { category: "shell", checks: [] }],
     ["Bash", {}, { category: "shell", checks: [] }],
-    ["PowerShell", { command: "npm run lint" }, { category: "lint", checks: ["lint"] }],
+    ["PowerShell", { command: "npm run lint" }, { category: "lint", checks: ["lint"], toolchain: "js" }],
     ["Agent", { subagent_type: "Explore" }, { category: "delegate", checks: [] }],
     ["Task", {}, { category: "delegate", checks: [] }],
     ["Workflow", {}, { category: "workflow", checks: [] }],

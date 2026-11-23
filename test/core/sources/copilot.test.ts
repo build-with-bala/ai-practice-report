@@ -230,7 +230,8 @@ describe("copilot vscode: Task 13 scenario", () => {
     const r = await run([cpVscode]);
     const tools = toolsOf(r, S_J);
     expect(tools).toHaveLength(2);
-    expect(tools.find((t) => t.name === "run_in_terminal")).toMatchObject({ category: "test", checks: ["test"], ok: true, exit: 0, ms: 4_200 });
+    expect(tools.find((t) => t.name === "run_in_terminal")).toMatchObject({ category: "test", checks: ["test"], toolchain: "js", ok: true, exit: 0, ms: 4_200 });
+    expect(tools.find((t) => t.category === "edit")!.toolchain).toBeUndefined();
     expect(tools.find((t) => t.name === "run_in_terminal")!.callId).toBe(keyedHash(r.salt, `call_run_in_terminal_${CANARY.secret}`));
     expect(tools.find((t) => t.category === "edit")).toMatchObject({ name: "textEditGroup", editExt: "py" });
     expect(tools.every((t) => t.ts === fx.t0 + 5 * MIN)).toBe(true);
@@ -714,6 +715,7 @@ describe("copilot cli (session events and store, from the CLI's schema)", () => 
       ["report_intent", "meta", undefined, true, undefined, 1_000, undefined, undefined], // bookkeeping: counted apart, never dropped
       ["mcp", "mcp", undefined, false, undefined, 1_000, undefined, CANARY.mcp],
     ]);
+    expect(toolsOf(r, cliSid).map((t) => t.toolchain)).toEqual(["js", undefined, undefined, undefined]); // bash `npm test`
     // one TurnEv per exchange: a user message over its model calls (a turn_start/turn_end pair is one model call)
     expect(r.store.forSession(sidOf(cliSid), "turn").map((t) => [t.status, t.ms])).toEqual([["completed", 14_000], ["interrupted", 2_000]]);
     expect(r.store.forSession(sidOf(cliSid), "marker").map((m) => [m.kind, m.detail])).toEqual([["interrupt", "user"]]);
@@ -771,9 +773,31 @@ describe("copilot cli (session events and store, from the CLI's schema)", () => 
       ["apply_patch", "edit", undefined, "py", undefined, undefined], ["powershell", "build", ["build"], undefined, true, 0],
       ["other", "other", undefined, undefined, undefined, undefined],
     ]);
+    expect(toolsOf(r, id).find((t) => t.name === "powershell")!.toolchain).toBe("dotnet");
     expect(r.store.session(sidOf(id))!.version).toBeUndefined();
     expect(covOf(r, "copilot.cli").versions).toEqual([]);
     expectNoCanaries([...allEvents(r), r.coverage]);
+  });
+
+  test("an event whose time is well-formed but implausible counts once, as bad-ts; one without a time is drift and no-ts", async () => {
+    const id = cpSid("cli5");
+    const e = new CliEvents(t0())
+      .ev("session.start", { sessionId: id }, 0)
+      .ev("user.message", { content: "Fix the importer" })
+      .ev("user.message", { content: "a message stamped 1990" })
+      .ev("tool.execution_start", { toolCallId: "x1", toolName: "bash", arguments: { command: "npm test" } })
+      .ev("user.message", { content: "a message without a time" })
+      .ev("user.message", { content: "And add a test" });
+    e.records[2]!.timestamp = "1990-01-01T00:00:00.000Z";
+    e.records[3]!.timestamp = 631152000000;
+    delete e.records[4]!.timestamp;
+    h.writeJsonl(path.join(".copilot", "session-state", id, "events.jsonl"), e.records);
+    const r = await run([cpCli]);
+    const c = covOf(r, "copilot.cli");
+    expect(c.skipped).toEqual({ "bad-ts": 2, "no-ts": 1 });
+    expect(c.unknownTypes).toEqual({ "event.timestamp:shape": 1 });
+    expect(r.store.forSession(sidOf(id), "prompt")).toHaveLength(2);
+    expect(toolsOf(r, id)).toEqual([]);
   });
 
   test("a turn_end after an abort does not end the exchange again; a turn_end for a model call never started ends nothing", async () => {
