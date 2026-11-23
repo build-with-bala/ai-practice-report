@@ -129,6 +129,44 @@ describe("checkClaudeHistory (C3)", () => {
   });
 });
 
+describe("checkClaudeHistory (C3): pasted prompts and one-part results", () => {
+  const pasted = (ts: number, sessionId?: string): PromptEv => ({ ...hPrompt(ts, "placeholder"), hasPaste: true, ...(sessionId ? { sessionId } : {}) });
+  const span = [hPrompt(T0 - DAY, "early"), hPrompt(T0 + DAY, "late")];
+
+  test("a pasted prompt matches a hasPaste history entry by time", () => {
+    const { raw, t } = tableOf([sess("s", T0), tPrompt("s", T0, "typed-with-paste"), pasted(T0 + 3_000, "s"), ...span]);
+    expect(checkClaudeHistory(raw, t).values.matchShare).toBe(1);
+  });
+
+  test("a second transcript prompt cannot reuse the same history entry", () => {
+    const { raw, t } = tableOf([sess("s", T0), tPrompt("s", T0, "a"), tPrompt("s", T0 + 2_000, "b"), pasted(T0 + 1_000, "s"), ...span]);
+    expect(checkClaudeHistory(raw, t).values.matchShare).toBe(0.5);
+  });
+
+  test("a hasPaste entry in another session does not match", () => {
+    const { raw, t } = tableOf([sess("s", T0), tPrompt("s", T0, "a"), pasted(T0 + 1_000, "other"), ...span]);
+    expect(checkClaudeHistory(raw, t).values.matchShare).toBe(0);
+  });
+
+  test("a pass says which parts ran", () => {
+    const history = tableOf(promptsWithHistory(10));
+    expect(checkClaudeHistory(history.raw, history.t).reason).toBe("ok-history-only");
+    const statsOnly: Ev[] = [sess("s", T0), tPrompt("s", T0, "p"), stats(day(T0))];
+    const s = tableOf(statsOnly);
+    const c = checkClaudeHistory(s.raw, s.t);
+    expect([c.status, c.reason, c.n]).toEqual(["pass", "ok-stats-only", 1]);
+    const both = tableOf([...promptsWithHistory(10), ...Array.from({ length: 10 }, (_, i) => stats(day(T0 + i * DAY)))]);
+    expect(checkClaudeHistory(both.raw, both.t).reason).toBe("ok");
+  });
+
+  test("only utc stats days are read", () => {
+    const evs: Ev[] = [sess("s", T0), tPrompt("s", T0, "p"), tPrompt("s", T0 + 2 * DAY, "q"), tPrompt("s", T0 + 4 * DAY, "r"),
+      stats(day(T0)), stats(day(T0 + 4 * DAY)), { ...stats(day(T0 + 2 * DAY)), zone: "local" }];
+    const { raw, t } = tableOf(evs);
+    expect(checkClaudeHistory(raw, t).values.missingDays).toBe(1);
+  });
+});
+
 const ident = (scope: IdentityEv["scope"], hash: string, sessionId?: string): IdentityEv =>
   ({ k: "identity", tool: "claude-code", source: scope === "config" ? "claude-code.config" : "claude-code.transcripts", scope, hash, sessionId });
 

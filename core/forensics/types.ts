@@ -18,7 +18,10 @@ export interface CheckResult { id: CheckId; status: CheckStatus; n: number; reas
 /** How bad a status is: the higher, the worse. `n/a` is the least, so any measured result outranks it. */
 const SEVERITY: Readonly<Record<CheckStatus, number>> = { "n/a": 0, info: 1, pass: 2, note: 3, warn: 4, fail: 5 };
 
-/** The worse of the results (the first among equals); `undefined` for none. */
+/**
+ * The worse of the results (the first among equals); `undefined` for none. Here n/a and info rank below pass: a
+ * measured result outranks one that was not measured. (C1/C2's two-kind combination ranks differently, see anchors.ts.)
+ */
 export function worst<T extends { status: CheckStatus }>(results: readonly T[]): T | undefined {
   let out: T | undefined;
   for (const r of results) if (out === undefined || SEVERITY[r.status] > SEVERITY[out.status]) out = r;

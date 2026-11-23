@@ -129,3 +129,87 @@ describe("checkAnchors (C1, C2)", () => {
     }
   });
 });
+
+describe("checkAnchors: breakdown and what is left out", () => {
+  /** `count` fabricated ids (`01` + random base58) at random plausible times inside the genuine span. */
+  const fakes = (count: number, seed: number): AnchorEv[] => {
+    const r = rng(seed);
+    return Array.from({ length: count }, () => anchor(T0 + Math.floor(r() * 20 * 86_400_000), `01${randomB58(r, 22)}`));
+  };
+
+  for (const [pct, count] of [[30, 857], [40, 1_333]] as const) {
+    test(`random fabricated ids at ${pct}% of the anchors fail C1`, () => {
+      const [c1] = checkAnchors(scanResultOf([...genuine(), ...fakes(count, 13)]));
+      expect(c1.status).toBe("fail");
+      expect(c1.values.offShare as number).toBeGreaterThan(pct / 100 - 0.03);
+    });
+  }
+
+  test("a session block shifted by 2 h at 30% of the anchors fails C1", () => {
+    const [c1] = checkAnchors(scanResultOf(genuine().map((e, i) => (i >= 700 && i < 1_300 ? { ...e, ts: e.ts + 2 * HOUR } : e))));
+    expect(c1.status).toBe("fail");
+    expect(c1.values.offShare).toBe(0.3);
+  });
+
+  test("random ids at 60% of the anchors are n/a: no line holds half of them", () => {
+    const [c1, c2] = checkAnchors(scanResultOf([...genuine(), ...fakes(3_000, 17)]));
+    expect([c1.status, c1.reason]).toEqual(["n/a", "scheme-changed"]);
+    expect(c1.n).toBe(5_000);
+    expect(c2.status).toBe("n/a");
+  });
+
+  test("p99Seconds is capped at a year", () => {
+    const [c1] = checkAnchors(scanResultOf(genuine().map((e, i) => (i % 33 === 5 ? { ...e, ts: e.ts + 2 * 365 * 86_400_000 } : e))));
+    expect(c1.status).toBe("fail");
+    expect(c1.values.p99Seconds).toBe(31_536_000);
+  });
+
+  test("C2's question shows rho rounded down to 3 decimals", () => {
+    const evs = genuine();
+    const times = evs.map((e) => e.ts).reverse();
+    const [, c2] = checkAnchors(scanResultOf(evs.map((e, i) => ({ ...e, ts: times[i]! }))));
+    expect(c2.askAbout).toContain("(rank correlation -1)");
+  });
+
+  test("9% malformed marker-carrying ids are a C1 note with the counts", () => {
+    const r = rng(19);
+    const evs = genuine().map((e, i) => (i % 11 === 0 ? { ...e, idTail: `010${randomB58(r, 21)}` } : e));
+    const malformed = evs.filter((e) => e.idTail.startsWith("010")).length;
+    const [c1, c2] = checkAnchors(scanResultOf(evs));
+    expect([c1.status, c1.reason]).toEqual(["note", "malformed-ids"]);
+    expect(c1.values.malformed).toBe(malformed);
+    expect(c1.values.unrecognized).toBe(malformed);
+    expect(c1.askAbout).toBe(`${malformed} server-issued ids do not have the form the service issues. Were some sessions run through another provider or gateway?`);
+    expect(c2.status).toBe("pass");
+  });
+
+  test("a single malformed id is no note; a failing fit wins over the note", () => {
+    const one = genuine().map((e, i) => (i === 0 ? { ...e, idTail: `010${"x".repeat(21)}` } : e));
+    expect(checkAnchors(scanResultOf(one))[0].status).toBe("pass");
+    const r = rng(23);
+    const both = genuine().map((e, i) => (i % 11 === 0 ? { ...e, idTail: `010${randomB58(r, 21)}` } : i % 33 === 5 ? { ...e, ts: e.ts + 2 * HOUR } : e));
+    expect(checkAnchors(scanResultOf(both))[0].status).toBe("fail");
+  });
+
+  test("11% foreign-marker ids are n/a with the kind's anchor count", () => {
+    const r = rng(29);
+    const evs = genuine().map((e, i) => (i % 9 === 0 ? { ...e, idTail: `02${randomB58(r, 22)}` } : e));
+    const [c1, c2] = checkAnchors(scanResultOf(evs));
+    expect([c1.status, c1.reason, c1.n]).toEqual(["n/a", "unknown-marker", 2_000]);
+    expect(c1.values.unrecognized).toBe(evs.filter((e) => e.idTail.startsWith("02")).length);
+    expect([c2.status, c2.n]).toEqual(["n/a", 2_000]);
+  });
+
+  test("one kind n/a on the marker share and the other passing is n/a", () => {
+    const r = rng(31);
+    const req = genuine("cc-req", 2).map((e, i) => (i % 9 === 0 ? { ...e, idTail: `02${randomB58(r, 22)}` } : e));
+    const [c1, c2] = checkAnchors(scanResultOf([...genuine("cc-msg", 1), ...req]));
+    expect([c1.status, c1.reason]).toEqual(["n/a", "unknown-marker"]);
+    expect(c2.status).toBe("n/a");
+  });
+
+  test("one kind too-few and the other passing is pass", () => {
+    const [c1, c2] = checkAnchors(scanResultOf([...genuine("cc-msg", 1), ...genuine("cc-req", 2).slice(0, 20)]));
+    expect([c1.status, c2.status]).toEqual(["pass", "pass"]);
+  });
+});

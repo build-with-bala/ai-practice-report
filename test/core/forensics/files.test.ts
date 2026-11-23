@@ -99,3 +99,41 @@ describe("checkFileTimes (C5)", () => {
     expect(`${c.reason}${c.askAbout ?? ""}`).toMatch(/^[ -ÿ -⁯−]*$/);
   });
 });
+
+describe("checkFileTimes (C5): bulk changes", () => {
+  const moved = Date.UTC(2026, 10, 10, 8, 0);
+  /** File `i` with its ctime moved to `at` (birth and mtime kept, as a date-preserving copy leaves them). */
+  const migrated = (i: number, at: number): FileFactEv => clean(i, { ctime: at });
+
+  test("a migrated history: births spread, old mtimes, every ctime in one 10-min window, is a note with that date", () => {
+    const c = checkFileTimes(scanResultOf(files(20, (i) => migrated(i * 1.5, moved + i * 10_000))), UTC);
+    expect([c.status, c.reason]).toEqual(["note", "bulk-change"]);
+    expect(c.values.date).toBe("2026-11-10");
+    expect(c.values.bulkFiles).toBe(20);
+    expect(c.values.violations).toBe(0);
+    expect(c.askAbout).toBe("20 trace files were last changed on 2026-11-10 although their content is older. Was this history copied, restored or migrated then?");
+  });
+
+  test("an older migration: 40 of 100 files with ctime in one window, the rest clean, is a note", () => {
+    const c = checkFileTimes(scanResultOf(files(100, (i) => (i < 40 ? migrated(i * 0.3, moved + i * 5_000) : clean(i * 0.3)))), UTC);
+    expect(c.status).toBe("note");
+    expect(c.values.bulkFiles).toBe(40);
+  });
+
+  test("3 of 100 files with ctime long after mtime at scattered times fail", () => {
+    const c = checkFileTimes(scanResultOf(files(100, (i) => (i < 3 ? migrated(i * 0.3, moved + i * DAY) : clean(i * 0.3)))), UTC);
+    expect(c.status).toBe("fail");
+    expect(c.values.violations).toBe(3);
+  });
+
+  test("3 of 100 files changed inside one 10-min window, under the bulk minimum of 10, fail", () => {
+    const c = checkFileTimes(scanResultOf(files(100, (i) => (i < 3 ? migrated(i * 0.3, moved + i * 1_000) : clean(i * 0.3)))), UTC);
+    expect(c.status).toBe("fail");
+  });
+
+  test("mtime violators still count inside a bulk window", () => {
+    const c = checkFileTimes(scanResultOf(files(20, (i) => migrated(i * 1.5, moved + i * 10_000)).map((f, i) => (i < 3 ? { ...f, mtime: f.lastTs! - HOUR } : f))), UTC);
+    expect(c.status).toBe("fail");
+    expect(c.values.violations).toBe(3);
+  });
+});
