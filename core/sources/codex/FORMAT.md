@@ -407,7 +407,9 @@ The SQL names only the columns below, validated against `pragma_table_info` firs
   `missing-table:<name>`. Without `threads.id`, `thread_turns.thread_id`/`status` or either edge column that table is
   skipped. Tables are read in rowid pages of 5,000 rows (`WHERE rowid > ? ORDER BY rowid LIMIT ?`). A table that
   cannot be paged — declared `WITHOUT ROWID` (checked in `sqlite_master.sql` before paging), or whose first page fails
-  for any reason but a busy store — is drift `table-unreadable:<name>` and is skipped.
+  for any reason but a busy store — is drift `table-unreadable:<name>` and is skipped. A full page whose last rowid is
+  not a safe integer above the page's start (it could not place the next page) ends that table as drift
+  `page-stalled:<name>`; the rows already read stay.
 - **Ids**: `codex:<thread id>`, the id verbatim when UUID-shaped, else its keyed hash — the same form as the rollouts'
   session ids and `RolloutFactEv.threadId`, so index rows and rollouts join and their sessions merge in the store:
   start = earliest, end = latest, models = the sorted union, a non-human origin wins (subagent > peer > scripted >

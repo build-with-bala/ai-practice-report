@@ -141,7 +141,10 @@ conversations live in `cursorDiskKV`.
   composer by key, and those outside the window are read but not mapped), and records drift `no-key-index:cursorDiskKV`;
   a table that then has no rowid either (`WITHOUT ROWID`) is drift `table-unreadable:cursorDiskKV`. The first query of
   a pass that fails for any reason but a busy store is drift `table-unreadable:cursorDiskKV`; a busy store or any later
-  failure is an io-error. Either ends the pass.
+  failure is an io-error. Either ends the pass. So does a full page whose last row cannot place the next one — a rowid
+  that is not a safe integer above the page's start, or a key that does not sort after the page's start key inside the
+  range asked for (Bun reads a key that is not valid UTF-8 as other text) —, as drift `page-stalled:cursorDiskKV`
+  (`page-stalled:scored_commits` for the tracking store); the rows already read stay.
 - **Listed bubbles only.** Just before a composer's bubble range is read, its listed bubble ids are looked up by its
   key: `SELECT <ids of fullConversationHeadersOnly>, <ids of conversation> FROM cursorDiskKV AS kv WHERE kv.key = ? AND
   json_valid(kv.value)`, each a `json_group_array` of `json_extract(h.value, '$.bubbleId')` over `json_each` of the

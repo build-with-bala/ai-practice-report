@@ -7,7 +7,14 @@ import { detectEnv } from "../../../core/env/env";
 import type { RoDb } from "../../../core/io/sqlite";
 import { TempRegistry } from "../../../core/io/temp";
 import { Tally } from "../../../core/sources/common/coverage";
-import { PAGE, Pass, q, readStore } from "../../../core/sources/common/sqlite";
+import { cmpCodePoints, PAGE, Pass, q, readStore } from "../../../core/sources/common/sqlite";
+import { scan } from "../../../core/scan";
+import { agCli } from "../../../core/sources/antigravity";
+import { cuIde, cuTracking } from "../../../core/sources/cursor";
+import { stepsRel } from "../../fixtures/antigravity";
+import { globalRel, trackingRel } from "../../fixtures/cursor";
+import { pbEncode } from "../../kit/pb";
+import { fakeHome, type FakeHome } from "../../kit/home";
 import type { ScanCtx } from "../../../core/sources/types";
 import { lockAboveCopyLimit } from "../../kit/home";
 
@@ -142,6 +149,128 @@ describe("Pass", () => {
     await new Pass(stubDb([], { fail: new Map([[1, new Error(BUSY)]]) }), "t", tallyOf(), ctx, "t.db-query", { busyLogCode: "t.db-busy" }).byRowid(SQL, () => {});
     await new Pass(stubDb([], { fail: new Map([[1, new Error("no such table: t")]]) }), "t", tallyOf(), ctx, "t.db-query", { busyLogCode: "t.db-busy" }).byRowid(SQL, () => {});
     expect(logs).toEqual(["t.db-busy", "t.db-query"]);
+  });
+});
+
+/** A store that answers key pages from `pages`: the n-th query returns `pages[n - 1]` as `{ key }` rows (none past the list). */
+function keyStub(pages: unknown[][]): RoDb & { params: unknown[][] } {
+  const params: unknown[][] = [];
+  return {
+    params, copied: false, immutable: false,
+    all<T>(_sql: string, ...p: unknown[]): T[] {
+      params.push(p);
+      return (pages[params.length - 1] ?? []).map((key) => ({ key })) as T[];
+    },
+    get: () => undefined, tables: () => [], columns: () => [], close: () => {},
+  };
+}
+
+const KEY_SQL = "SELECT key FROM kv WHERE key > ? AND key < ? ORDER BY key LIMIT ?";
+
+describe("Pass: pages that must advance", () => {
+  test("byKey: each page resumes after the last key read, inside the range; a short page ends it: true", async () => {
+    const db = keyStub([["a:1", "a:2"], ["a:3", "a:4"], ["a:5"]]);
+    const tally = tallyOf();
+    const seen: unknown[] = [];
+    expect(await new Pass(db, "kv", tally, ctxFor(), "t.db-query", { page: 2 }).byKey(KEY_SQL, "a:", "a;", (rows) => seen.push(...rows.map((r) => r.key)))).toBe(true);
+    expect(seen).toEqual(["a:1", "a:2", "a:3", "a:4", "a:5"]);
+    expect(db.params).toEqual([["a:", "a;", 2], ["a:2", "a;", 2], ["a:4", "a;", 2]]);
+    expect([tally.records, tally.unknownTypes]).toEqual([5, {}]);
+  });
+
+  test("byKey: a last key that does not sort after the start (as Bun reads text that is not UTF-8), or lies outside the range, ends the pass as drift page-stalled", async () => {
+    for (const bad of ["", "a:", "a:0", "a;", "b", 7]) {
+      const db = keyStub([["a:1", "a:2"], ["a:3", bad]]);
+      const tally = tallyOf();
+      const logs: string[] = [];
+      const pass = new Pass(db, "kv", tally, ctxFor({ logs }), "t.db-query", { page: 2 });
+      let rows = 0;
+      expect(await pass.byKey(KEY_SQL, "a:", "a;", (r) => { rows += r.length; })).toBe(false);
+      expect(rows).toBe(4); // the rows already handed on stay
+      expect([db.params.length, pass.failed, tally.unknownTypes, logs]).toEqual([2, true, { "page-stalled:kv": 1 }, ["t.db-query"]]);
+    }
+  });
+
+  test("byRowid: a last rowid that is not a safe integer, or does not rise, ends the pass as drift page-stalled; a prefix goes before the pass's drift keys", async () => {
+    for (const bad of [2 ** 62, Number.MAX_SAFE_INTEGER + 1, 1, 2, -5, "3", 2.5]) {
+      const params: unknown[][] = [];
+      const db: RoDb = {
+        copied: false, immutable: false,
+        all<T>(_sql: string, ...p: unknown[]): T[] { params.push(p); return (params.length === 1 ? [{ rid: 1 }, { rid: 2 }] : [{ rid: 3 }, { rid: bad }]) as T[]; },
+        get: () => undefined, tables: () => [], columns: () => [], close: () => {},
+      };
+      const tally = tallyOf();
+      expect(await new Pass(db, "t", tally, ctxFor(), "t.db-query", { page: 2, driftPrefix: "store." }).byRowid(SQL, () => {})).toBe(false);
+      expect([params.length, tally.records, tally.unknownTypes]).toEqual([2, 4, { "store.page-stalled:t": 1 }]);
+    }
+  });
+
+  test("cmpCodePoints orders as UTF-8 bytes do, not as UTF-16 units", () => {
+    expect(cmpCodePoints("\u{1F600}", "\uFFFD")).toBeGreaterThan(0); // UTF-16 units would put the pair first
+    expect(cmpCodePoints("ab", "abc")).toBeLessThan(0);
+    expect(cmpCodePoints("ab", "ab")).toBe(0);
+    expect(cmpCodePoints("b", "a\u{1F600}")).toBeGreaterThan(0);
+  });
+});
+
+describe("Pass: stores whose pages cannot advance end, with drift, in every reader", () => {
+  let h: FakeHome;
+  afterEach(() => h?.cleanup());
+  const big = 2n ** 62n;
+
+  test("an Antigravity step store whose rowids lie above 2^53", async () => {
+    h = fakeHome();
+    const id = "11111111-2222-4333-8444-555555555555";
+    const db = new Database(h.sqlite(stepsRel(id), ["CREATE TABLE steps (idx INTEGER, step_type INTEGER NOT NULL DEFAULT 0, status INTEGER NOT NULL DEFAULT 0, metadata BLOB, error_details BLOB, step_payload BLOB)"]));
+    const now = Date.now();
+    const ins = db.query("INSERT INTO steps (rowid, idx, step_type, status, metadata) VALUES (?, ?, 8, 3, ?)");
+    for (let i = 1; i <= 40; i++) ins.run(big + BigInt(i), i, pbEncode([[1, pbEncode([[1, Math.floor((now - 3_600_000 + i * 1000) / 1000)], [2, 0]])]]));
+    db.close();
+    const r = await scan({ env: h.env, plugins: [agCli], repoSignals: false, handleSignals: false });
+    const cov = r.coverage.find((c) => c.window === "detail")!;
+    expect(cov.status).toBe("drift");
+    expect(cov.unknownTypes["page-stalled:steps"]).toBe(1);
+    expect(cov.records).toBeLessThanOrEqual(40);
+    expect(r.store.all("tool").length).toBeLessThanOrEqual(40);
+  });
+
+  test("a Cursor store whose composer keys are not valid UTF-8", async () => {
+    h = fakeHome();
+    const db = new Database(h.sqlite(globalRel(h), ["CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)", "CREATE TABLE cursorDiskKV (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)"]));
+    const hex = (x: string) => Buffer.from(x, "utf8").toString("hex");
+    const value = JSON.stringify({ createdAt: Date.now() - 60_000, lastUpdatedAt: Date.now() - 30_000 });
+    const ROWS = PAGE + 100;
+    db.exec("BEGIN");
+    for (let i = 0; i < ROWS; i++) db.query(`INSERT INTO cursorDiskKV (key, value) VALUES (CAST(x'${hex("composerData:")}ff${hex(String(i).padStart(6, "0"))}' AS TEXT), ?)`).run(value);
+    db.exec("COMMIT");
+    db.close();
+    const r = await scan({ env: h.env, plugins: [cuIde], repoSignals: false, handleSignals: false });
+    const life = r.coverage.find((c) => c.window === "lifetime")!;
+    expect(life.status).toBe("drift");
+    expect(life.unknownTypes["page-stalled:cursorDiskKV"]).toBe(1);
+    expect(life.records).toBeLessThanOrEqual(ROWS);
+  });
+
+  test("a Cursor tracking store with more than a page of rows above 2^53; the same rows at ordinary rowids are all read", async () => {
+    const ROWS = PAGE * 2 + 500;
+    for (const base of [0n, big]) {
+      h = fakeHome();
+      const db = new Database(h.sqlite(trackingRel, ["CREATE TABLE scored_commits (commitHash TEXT, commitDate INTEGER, scoredAt INTEGER, tabLinesAdded INTEGER, composerLinesAdded INTEGER, humanLinesAdded INTEGER)"]));
+      const now = Date.now();
+      const ins = db.query("INSERT INTO scored_commits (rowid, commitHash, commitDate, tabLinesAdded, humanLinesAdded) VALUES (?, ?, ?, 1, 1)");
+      db.exec("BEGIN");
+      for (let i = 1; i <= ROWS; i++) ins.run(base + BigInt(i), `h${i}`, now - 86_400_000 + i);
+      db.exec("COMMIT");
+      db.close();
+      const r = await scan({ env: h.env, plugins: [cuTracking], repoSignals: false, handleSignals: false });
+      const cov = r.coverage[0]!;
+      if (base === 0n) expect([cov.status, cov.records, r.store.all("commit").length]).toEqual(["ok", ROWS, ROWS]);
+      else {
+        expect([cov.status, cov.unknownTypes]).toEqual(["drift", { "page-stalled:scored_commits": 1 }]);
+        expect(cov.records).toBe(PAGE); // the first page stays; nothing is read twice
+      }
+      h.cleanup();
+    }
   });
 });
 

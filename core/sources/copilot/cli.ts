@@ -338,13 +338,13 @@ function storeColumns(db: RoDb, tables: Set<string>, table: string, wanted: read
 
 /**
  * Maps every row of `table` in rowid pages, on the shared pager (`Pass`): a first page that fails other than busy is
- * drift `table-unreadable:<table>`; a busy store, or a later page that fails, is an io-error; either ends the table, with
+ * drift `store.table-unreadable:<table>` (a page that does not advance: `store.page-stalled:<table>`); a busy store, or a later page that fails, is an io-error; either ends the table, with
  * warn `cp.db-busy` for a busy store and `cp.db-query` for any other failure. A row the mapping fails on is skipped as
  * bad-record and the others go on.
  */
 async function eachStoreRow(db: RoDb, table: string, cols: string[], map: (r: Obj) => void, ctx: ScanCtx, tally: Tally): Promise<void> {
   const sql = `SELECT rowid AS rid, ${cols.map(q).join(", ")} FROM ${q(table)} WHERE rowid > ? ORDER BY rowid LIMIT ?`;
-  await new Pass(db, table, tally, ctx, "cp.db-query", { page: STORE_PAGE, busyLogCode: "cp.db-busy" }).byRowid(sql, (rows) => {
+  await new Pass(db, table, tally, ctx, "cp.db-query", { page: STORE_PAGE, busyLogCode: "cp.db-busy", driftPrefix: "store." }).byRowid(sql, (rows) => {
     for (const r of rows) eachRow(() => map(r), tally);
   });
 }

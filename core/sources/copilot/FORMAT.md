@@ -200,8 +200,9 @@ Built-in tool ids (VS Code program and extension program): see `VSCODE_TOOLS` in
     well-formed time outside the plausible range: dropped with its prompt and tools, and counted once, never also
     `no-ts`), `duplicate`, `empty-session`, `bad-record`, `parse`, `oversize`, `too-large`, `io-error`.
   - `lifetime` (the session store): `files`/`bytes` = the store; `records` = its rows; `from`/`to` = its sessions and
-    turns. Drift: `store.missing-table:<t>`, `store.missing-column:<c>`, `table-unreadable:<t>` (a table whose first
-    page fails other than busy). Skipped: `bad-row`, `no-ts`, `io-error` (a store that cannot be opened — warn
+    turns. Drift: `store.missing-table:<t>`, `store.missing-column:<c>`, `store.table-unreadable:<t>` (a table whose first
+    page fails other than busy), `store.page-stalled:<t>` (a full page whose last rowid cannot place the next one: the
+    rows read stay, the table ends). Skipped: `bad-row`, `no-ts`, `io-error` (a store that cannot be opened — warn
     `cp.db-unopenable` — or that fails while read — warn `cp.db-unreadable` —, a busy page — warn `cp.db-busy` —, a later
     page that fails — warn `cp.db-query`), `too-large` (a locked store whose private copy — the store and its `-wal` —
     would exceed `MAX_COPY_BYTES`: never copied, `note: "too-large"`, warn `cp.db-too-large`), `bad-record`. `absent`

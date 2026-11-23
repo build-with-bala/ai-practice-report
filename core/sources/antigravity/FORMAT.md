@@ -61,7 +61,9 @@ when never set, which `toEpochMs` rejects as implausible). There is no creation 
   `CASE COALESCE("source", '') WHEN '<enum name>' THEN '<code>' … ELSE 'other' END AS src` (below). Rowid pages of 1,000
   (`WHERE rowid > ? ORDER BY rowid LIMIT ?`). Each one missing is drift `missing-column:<name>` (without `conversation_id`
   nothing is read); no table is drift `missing-table:conversation_summaries`; `WITHOUT ROWID`, or a first page that fails for
-  any reason but a busy store, is drift `table-unreadable:conversation_summaries`.
+  any reason but a busy store, is drift `table-unreadable:conversation_summaries`. A full page whose last rowid is not a
+  safe integer above the page's start ends the table as drift `page-stalled:<table>` (here and for `steps`); the rows
+  already read stay.
 - **Never selected**: `title`, `preview`, `raw_summary` (the summary message, title inside), `agent_name`, `status`,
   `project_id`, `app_data_dir`, `group_id`, `not_fully_idle`, `last_user_input_step_index`, and the values of `battle_id`,
   `winning_conversation_id` and `source`.
