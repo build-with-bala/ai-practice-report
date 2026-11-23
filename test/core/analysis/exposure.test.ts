@@ -1,10 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import { isoWeek } from "../../../core/analysis/activity";
 import { exposure, type Exposure } from "../../../core/analysis/exposure";
+import { panels } from "../../../core/analysis/panels";
 import { buildSessionTable } from "../../../core/analysis/sessions";
+import { buildSessionStats } from "../../../core/analysis/walk";
 import type { Exclusions } from "../../../core/analysis/types";
 import type { ConfigEv, CoverageEv, Ev, MarkerEv, PromptEv, PromptFeatures, SessionEv, ToolEv } from "../../../core/model/events";
 import type { MarkerKind, ToolId, Window } from "../../../core/model/ids";
+import { loadReference } from "../../../core/scoring/reference";
+import { roles } from "../../../core/scoring/roles";
+import { scoreDimensions } from "../../../core/scoring/score";
+import { computeSignals } from "../../../core/signals/compute";
+import { computeGlobals } from "../../../core/signals/globals";
 import { scanResultOf } from "../../kit/scanresult";
 
 const SEC = 1_000;
@@ -78,10 +85,38 @@ describe("exposure", () => {
 
   test("weekly keeps the windows apart: a detail-window tool fills detailPrompts", () => {
     const e = exp([sess("a", NOW - 2 * DAY), prompt("a", NOW - 2 * DAY), prompt("a", NOW - 2 * DAY + MIN), life(NOW - DAY, "codex")]);
-    // Saturday and Sunday of W46: the Claude Code day is detail-only, so only the Codex (lifetime) day is an active day
+    // Saturday and Sunday of W46: the union of Claude Code's detail day and Codex's lifetime day
     const w = e.weekly.find((x) => x.week === "2026-W46")!;
-    expect(w).toEqual({ week: "2026-W46", activeDays: 1, detailPrompts: 2, lifetimePrompts: 1 });
+    expect(w).toEqual({ week: "2026-W46", activeDays: 2, detailPrompts: 2, lifetimePrompts: 1 });
     expect(e.weekly[51]).toEqual({ week: "2026-W47", activeDays: 0, detailPrompts: 0, lifetimePrompts: 0 });
+  });
+
+  test("weekly: a detail-only tool's busy week shows its days", () => {
+    const evs: Ev[] = [];
+    for (let d = 1; d <= 5; d++) evs.push(sess(`s${d}`, NOW - 7 * DAY + (d - 1) * DAY), prompt(`s${d}`, NOW - 7 * DAY + (d - 1) * DAY));
+    const e = exp(evs);
+    expect(e.weekly.find((x) => x.week === "2026-W46")).toEqual({ week: "2026-W46", activeDays: 5, detailPrompts: 5, lifetimePrompts: 0 });
+  });
+
+  test("weekly: the union of days, each tool's chosen window only", () => {
+    const e = exp([
+      // Claude Code: 2 lifetime prompts (Mon, Tue of W46) beat 1 detail prompt (Wed): only its lifetime days count
+      life(NOW - 7 * DAY), life(NOW - 6 * DAY), sess("a", NOW - 5 * DAY), prompt("a", NOW - 5 * DAY),
+      // Codex, detail only: Tue (shared with Claude Code's lifetime day) and Thu
+      sess("c", NOW - 6 * DAY, { tool: "codex" }), prompt("c", NOW - 6 * DAY, { tool: "codex" }),
+      sess("d", NOW - 4 * DAY, { tool: "codex" }), prompt("d", NOW - 4 * DAY, { tool: "codex" }),
+    ]);
+    expect(e.weekly.find((x) => x.week === "2026-W46")).toEqual({ week: "2026-W46", activeDays: 3, detailPrompts: 2, lifetimePrompts: 2 });
+  });
+
+  test("tenure falls back to the detail days without a lifetime layer; its span ends where it counts to", () => {
+    const d = exp([sess("a", NOW - 14 * DAY), prompt("a", NOW - 14 * DAY), sess("b", NOW - 7 * DAY), prompt("b", NOW - 7 * DAY)]);
+    expect(d.tenureWeeks).toEqual({ window: "detail", sources: [CC], n: 2, value: 3, from: Date.UTC(2026, 10, 2), to: NOW });
+    const l = exp([life(NOW - 14 * DAY), sess("a", NOW - 35 * DAY), prompt("a", NOW - 35 * DAY)]);
+    expect(l.tenureWeeks).toEqual({ window: "lifetime", sources: [HIST], n: 1, value: 3, from: Date.UTC(2026, 10, 2), to: NOW });
+    // a date range ending before now: the value and the span end at the range's end
+    const r = exp([life(NOW - 14 * DAY)], { exclude: { to: NOW - 6 * DAY } }); // W45 through W46
+    expect(r.tenureWeeks).toMatchObject({ value: 2, to: NOW - 6 * DAY });
   });
 
   test("a home with nothing: null metrics, 52 empty weeks, no tools", () => {
@@ -95,6 +130,11 @@ describe("exposure", () => {
   test("a tool active 100 days ago is in rotation.ever but not active90d", () => {
     const e = exp([life(NOW - 100 * DAY, "codex"), sess("a", NOW - 3 * DAY), prompt("a", NOW - 3 * DAY)]);
     expect(e.rotation).toEqual({ active90d: ["claude-code"], ever: ["claude-code", "codex"] });
+  });
+
+  test("rotation.active90d covers exactly 90 day keys, now's day the last", () => {
+    expect(exp([life(NOW - 89 * DAY, "codex")]).rotation).toEqual({ active90d: ["codex"], ever: ["codex"] });
+    expect(exp([life(NOW - 90 * DAY, "codex")]).rotation).toEqual({ active90d: [], ever: ["codex"] });
   });
 
   test("tools: sessions, prompts and actions per tool and window", () => {
@@ -150,18 +190,40 @@ describe("exposure", () => {
     });
   });
 
+  test("firstSeen: a row that started before the range gives its first in-range event, or nothing", () => {
+    const B = NOW - 10 * DAY;
+    const evs = (withEvent: boolean): Ev[] => [
+      sess("a", B - 2 * HOUR, { end: B + 2 * HOUR }), prompt("a", B + MIN),
+      sess("k", B - HOUR, { parentId: "a", origin: "subagent", end: B + HOUR }), tool("k", B - 30 * MIN),
+      ...(withEvent ? [tool("k", B + 20 * MIN)] : []),
+    ];
+    expect(exp(evs(true), { exclude: { from: B } }).firstSeen).toEqual({ subagents: B + 20 * MIN });
+    expect(exp(evs(false), { exclude: { from: B } }).firstSeen).toEqual({});
+  });
+
   test("firstSeen: an excluded tool's evidence does not count", () => {
     const evs: Ev[] = [sess("c", NOW - DAY, { tool: "codex", origin: "scripted" }), prompt("c", NOW - DAY, { tool: "codex", origin: "scripted" })];
     expect(exp(evs).firstSeen).toEqual({ headless: NOW - DAY });
     expect(exp(evs, { exclude: { tools: ["codex"] } }).firstSeen).toEqual({});
   });
 
-  test("every number is finite", () => {
-    const e = exp([sess("a", NOW - DAY), prompt("a", NOW - DAY), life(NOW - DAY)]);
+  test("every number is finite: exposure, panels and roles, on an empty scan and a small one", () => {
     const walk = (v: unknown): void => {
       if (typeof v === "number") expect(Number.isFinite(v)).toBe(true);
       else if (v !== null && typeof v === "object") for (const x of Object.values(v)) walk(x);
     };
-    walk(e);
+    for (const evs of [[], [sess("a", NOW - DAY), prompt("a", NOW - DAY), life(NOW - DAY)]] as Ev[][]) {
+      const raw = scanResultOf([...COVERAGE, ...evs], { finishedAt: NOW });
+      const t = buildSessionTable(raw, { now: NOW, timeZone: "UTC" });
+      const stats = buildSessionStats(t, raw.store, raw.repos, { timeZone: "UTC" });
+      const g = computeGlobals(t, stats, raw, { now: NOW });
+      const dims = scoreDimensions(computeSignals(stats, g), loadReference());
+      const p = panels(t, raw, { timeZone: "UTC" });
+      const r = roles(dims, p.stack);
+      walk(exposure(t, raw, { now: NOW, timeZone: "UTC", ...(g.firstParallelBucket === undefined ? {} : { firstParallelBucket: g.firstParallelBucket }) }));
+      walk(p);
+      walk(r);
+      expect(r).toEqual([]);
+    }
   });
 });

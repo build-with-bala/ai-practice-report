@@ -175,6 +175,14 @@ describe("project labels", () => {
     expect(labels.get("k1")).toBe(`P-${keyedHash(SALT, "label:k1").slice(0, 4).toUpperCase()}`);
   });
 
+  test("another salt gives other labels", () => {
+    const keys = ["k1", "k2", "k3", "k4", "k5"];
+    const a = projectLabels(SALT, keys);
+    const b = projectLabels(new Uint8Array(32).fill(8), keys);
+    for (const k of keys) expect(b.get(k)).toMatch(/^P-[0-9A-F]{4}$/);
+    expect(keys.filter((k) => a.get(k) === b.get(k)).length).toBe(0);
+  });
+
   test("keys whose 4-hex labels collide get 6 hex", () => {
     const seen = new Map<string, string>();
     let pair: [string, string] | undefined;
