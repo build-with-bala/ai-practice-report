@@ -21,3 +21,6 @@ export type { Evidence, Signals } from "./signals/types";
 export type { ComponentResult, Confidence, DimensionId, DimensionResult } from "./scoring/score";
 export type { Band, Overall } from "./scoring/overall";
 export type { CheckId, CheckResult, CheckStatus, Forensics, ReleaseTable } from "./forensics/index";
+export { exportPayload } from "./privacy/export";
+export type { ExportOptions, ExportResult } from "./privacy/export";
+export { canonicalJson } from "./privacy/jcs";
