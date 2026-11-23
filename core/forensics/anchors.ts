@@ -12,22 +12,25 @@ import { round, toolsOf, type CheckResult } from "./types";
  *   `unknown-marker`), and the rest is base58 of 20 to 40 digits. Other anchors are left out, never counted as off:
  *   ids from other providers and gateways are genuine. `values.unrecognized` counts every anchor left out,
  *   `values.malformed` those that carry the marker but not the tail form; more than 1% of the marker-carrying anchors
- *   malformed, and at least 2, make C1 at least a note (`malformed-ids`);
- * - fewer than 50 recognized anchors: n/a (`too-few`);
+ *   malformed, and at least 2, make C1 at least a note (`malformed-ids`), however few recognized anchors remain;
+ *   every result of a kind carries both counts;
+ * - fewer than 50 recognized anchors, and no malformed share over that rule: n/a (`too-few`);
  * - the decoded value `v`: the 12 base58 digits after the marker, less their minimum over the kind (BigInt);
  * - the fit of `ts` on `v`, over a stride sample of at most 5,000 (in time order). The start is the most-inliers line:
  *   of the lines through the pairs half the sample apart in `v` order, the one with the most sample points within
  *   10 min (the first among equals); then ordinary least squares over the sample points within 10 min of it. That is
- *   about 2,500 × 5,000 operations at most, and deterministic. Breakdown: the start finds the genuine line whenever
- *   some pair half the sample apart is genuine at both ends, which holds whenever more than half of the sample is
- *   genuine (the pairs partition the sample); fabricated or edited ids up to just under half the anchors therefore
- *   still fail C1, and at half or more the median rule below makes it n/a;
+ *   about 2,500 × 5,000 operations at most, and deterministic. Breakdown: whenever more than half of the sample is
+ *   genuine, some pair half the sample apart is genuine at both ends (the pairs partition the sample), so a candidate
+ *   through the genuine line exists. A crossing fabricated line can still win the start; the check then still fails,
+ *   but the off share may understate the fabricated share. Fabricated or edited ids up to just under half the anchors
+ *   therefore fail C1, and at half or more the median rule below makes it n/a;
  * - a median |residual| over 10 min: no line holds half of the anchors, n/a (`scheme-changed`);
  * - C1 fails when more than 1% of the anchors are off their time by more than 10 min (`p99Seconds` capped at a year);
  * - C2 is Spearman's rank correlation of `v` and `ts` over a stride sample of at most 20,000, and fails below 0.99;
  *   it is n/a wherever C1 is.
  *
- * The two kinds combine to the worse result, where an n/a other than `too-few` outranks a pass: a kind that cannot be
+ * The two kinds combine to the worse result, with `values.unverifiedKinds` (0, 1 or 2: the kinds that are n/a for a
+ * reason other than `too-few`), where an n/a other than `too-few` outranks a pass: a kind that cannot be
  * verified does not vanish behind the other kind's pass.
  */
 
@@ -168,12 +171,16 @@ function naPair(n: number, reason: string, values: Record<string, number>, tools
 
 function checkKind(anchors: readonly AnchorEv[]): [CheckResult, CheckResult] {
   const tools = toolsOf(anchors);
-  if (anchors.length < MIN_ANCHORS) return naPair(anchors.length, "too-few", {}, tools);
   const rec = recognize(anchors);
   const left = { unrecognized: rec.unrecognized, malformed: rec.malformed };
-  if (rec.marked < MARKER_SHARE * anchors.length) return naPair(anchors.length, "unknown-marker", left, tools);
+  if (anchors.length >= MIN_ANCHORS && rec.marked < MARKER_SHARE * anchors.length) return naPair(anchors.length, "unknown-marker", left, tools);
+  const malformed = rec.malformed >= MALFORMED_MIN && rec.malformed > MALFORMED_SHARE * rec.marked;
   const ps = rec.points;
-  if (ps.length < MIN_ANCHORS) return naPair(ps.length, "too-few", left, tools);
+  if (ps.length < MIN_ANCHORS) {
+    const [c1, c2] = naPair(ps.length, "too-few", left, tools);
+    if (!malformed) return [c1, c2];
+    return [{ id: "C1", status: "note", n: anchors.length, reason: "malformed-ids", values: { ...left }, askAbout: C1_MALFORMED_ASK(rec.malformed), tools }, c2];
+  }
   const sample = stride(ps, FIT_SAMPLE);
   const start = inlierLine(sample);
   const inliers = start ? sample.filter((p) => Math.abs(p.ts - start.a - start.b * p.v) <= OFF_MS) : [];
@@ -184,7 +191,6 @@ function checkKind(anchors: readonly AnchorEv[]): [CheckResult, CheckResult] {
 
   const off = res.filter((r) => r > OFF_MS).length / ps.length;
   const c1Fail = off > OFF_SHARE;
-  const malformed = rec.malformed >= MALFORMED_MIN && rec.malformed > MALFORMED_SHARE * rec.marked;
   const c1: CheckResult = {
     id: "C1", status: c1Fail ? "fail" : malformed ? "note" : "pass", n: ps.length, reason: c1Fail ? "off-time" : malformed ? "malformed-ids" : "ok",
     values: { offShare: round(off), p99Seconds: Math.min(MAX_P99_S, Math.round(quantile(res, 0.99) / 1_000)), ...left }, tools,
@@ -208,7 +214,8 @@ const comboRank = (r: CheckResult): number =>
 function combine(rs: readonly CheckResult[]): CheckResult {
   let out = rs[0]!;
   for (const r of rs) if (comboRank(r) > comboRank(out)) out = r;
-  return out;
+  const unverifiedKinds = rs.filter((r) => r.status === "n/a" && r.reason !== "too-few").length;
+  return { ...out, values: { ...out.values, unverifiedKinds } };
 }
 
 /** C1 (ids linear in time) and C2 (id order vs time order) over Claude Code's anchors, per kind, then combined. */

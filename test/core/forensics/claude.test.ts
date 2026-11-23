@@ -143,6 +143,11 @@ describe("checkClaudeHistory (C3): pasted prompts and one-part results", () => {
     expect(checkClaudeHistory(raw, t).values.matchShare).toBe(0.5);
   });
 
+  test("pasted entries are matched one to one at the maximum: entries at 0 s and 9 s, prompts at 5 s and 15 s", () => {
+    const { raw, t } = tableOf([sess("s", T0), tPrompt("s", T0 + 5_000, "a"), tPrompt("s", T0 + 15_000, "b"), pasted(T0, "s"), pasted(T0 + 9_000, "s"), ...span]);
+    expect(checkClaudeHistory(raw, t).values.matchShare).toBe(1);
+  });
+
   test("a hasPaste entry in another session does not match", () => {
     const { raw, t } = tableOf([sess("s", T0), tPrompt("s", T0, "a"), pasted(T0 + 1_000, "other"), ...span]);
     expect(checkClaudeHistory(raw, t).values.matchShare).toBe(0);

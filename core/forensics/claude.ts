@@ -32,8 +32,9 @@ function near(sorted: readonly number[], x: number, tol: number): boolean {
 }
 
 /**
- * How many of `prompts` (each unmatched by hash) match a pasted history prompt: the nearest unused one within 10 s, of
- * the same session where both name one. Prompts go in time order; each history prompt is used at most once.
+ * How many of `prompts` (each unmatched by hash) match a pasted history prompt: the earliest unused one within 10 s, of
+ * the same session where both name one. Prompts go in time order; each history prompt is used at most once. With both
+ * lists in time order and one window for both sides, taking the earliest gives a maximum one-to-one matching.
  */
 function pasteMatches(prompts: readonly PromptEv[], pasted: readonly PromptEv[]): number {
   const hs = [...pasted].sort((a, b) => a.ts - b.ts);
@@ -51,7 +52,8 @@ function pasteMatches(prompts: readonly PromptEv[], pasted: readonly PromptEv[])
       const h = hs[i]!;
       if (used.has(i)) continue;
       if (h.sessionId !== undefined && p.sessionId !== undefined && h.sessionId !== p.sessionId) continue;
-      if (best < 0 || Math.abs(h.ts - p.ts) < Math.abs(hs[best]!.ts - p.ts)) best = i;
+      best = i;
+      break;
     }
     if (best >= 0) {
       used.add(best);
@@ -66,7 +68,7 @@ function pasteMatches(prompts: readonly PromptEv[], pasted: readonly PromptEv[])
  * - Match: the share of human transcript prompts inside the history's span that have a history prompt with an equal
  *   text hash within 10 s; below 75% → warn. The history hashes a prompt as displayed, where pasted content is a
  *   placeholder, so a prompt with a paste never hash-matches: a transcript prompt left unmatched also matches a history
- *   prompt with `hasPaste` within 10 s (the nearest; the same session where both name one), and each such history prompt
+ *   prompt with `hasPaste` within 10 s (the earliest unused one; the same session where both name one), and each such history prompt
  *   matches at most one transcript prompt.
  * - Missing days: UTC days with human transcript prompts, inside the span of the stats cache's `utc` days, that the
  *   stats cache has no day for; at least 2 such days and 2% of those days → fail, fewer → note.

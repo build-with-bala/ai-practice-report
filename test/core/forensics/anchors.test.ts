@@ -212,4 +212,39 @@ describe("checkAnchors: breakdown and what is left out", () => {
     const [c1, c2] = checkAnchors(scanResultOf([...genuine("cc-msg", 1), ...genuine("cc-req", 2).slice(0, 20)]));
     expect([c1.status, c2.status]).toEqual(["pass", "pass"]);
   });
+
+  test("a kind whose marker-carrying ids are all malformed is a note, not too-few", () => {
+    const r = rng(37);
+    const bad = Array.from({ length: 1_000 }, (_, i) => anchor(T0 + i * MIN, `010${randomB58(r, 21)}`, "cc-req"));
+    const [c1] = checkAnchors(scanResultOf([...genuine("cc-msg", 1), ...bad]));
+    expect([c1.status, c1.reason]).toEqual(["note", "malformed-ids"]);
+    expect(c1.values.malformed).toBe(1_000);
+  });
+
+  test("40 recognized and 960 malformed ids are a note", () => {
+    const r = rng(41);
+    const req = genuine("cc-req", 2).slice(0, 1_000).map((e, i) => (i < 960 ? { ...e, idTail: `010${randomB58(r, 21)}` } : e));
+    const [c1] = checkAnchors(scanResultOf([...genuine("cc-msg", 1), ...req]));
+    expect([c1.status, c1.reason]).toEqual(["note", "malformed-ids"]);
+    expect(c1.values.malformed).toBe(960);
+  });
+
+  test("a kind of 30 clean anchors is too-few with its counts, and ranks below the other kind's pass", () => {
+    const few = checkAnchors(scanResultOf(genuine("cc-req", 2).slice(0, 30)))[0];
+    expect([few.status, few.reason]).toEqual(["n/a", "too-few"]);
+    expect([few.values.unrecognized, few.values.malformed]).toEqual([0, 0]);
+    const [c1] = checkAnchors(scanResultOf([...genuine("cc-msg", 1), ...genuine("cc-req", 2).slice(0, 30)]));
+    expect(c1.status).toBe("pass");
+    expect(c1.values.unverifiedKinds).toBe(0);
+  });
+
+  test("a note on one kind does not hide an unverifiable other kind", () => {
+    const r = rng(43);
+    const msg = genuine("cc-msg", 1).map((e, i) => (i % 33 === 0 ? { ...e, idTail: `010${randomB58(r, 21)}` } : e));
+    const req = [...genuine("cc-req", 2), ...Array.from({ length: 3_000 }, () => anchor(T0 + Math.floor(r() * 20 * 86_400_000), `01${randomB58(r, 22)}`, "cc-req"))];
+    const [c1, c2] = checkAnchors(scanResultOf([...msg, ...req]));
+    expect([c1.status, c1.reason]).toEqual(["note", "malformed-ids"]);
+    expect(c1.values.unverifiedKinds).toBe(1);
+    expect(c2.values.unverifiedKinds).toBe(1);
+  });
 });
