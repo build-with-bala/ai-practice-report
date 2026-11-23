@@ -177,3 +177,43 @@ describe("EventStore", () => {
     expect(s.count()).toEqual({ session: 1, tool: 3 });
   });
 });
+
+describe("forSession: the compact index", () => {
+  test("for every kind and a spread of sessions, exactly the events a filter over all(kind) gives: same order, same objects", async () => {
+    const { synthStore } = await import("../../kit/synth");
+    const r = synthStore(30_000);
+    const ids = r.store.all("session").map((s) => s.id).filter((_, i) => i % 7 === 0);
+    ids.push("claude-code:no-such-session"); // unknown
+    r.store.add({ k: "session", tool: "claude-code", source: "t", id: "claude-code:empty", window: "detail", origin: "human", start: 0, end: 1, models: [] });
+    ids.push("claude-code:empty"); // a session with no events
+    const kinds = Object.keys(r.store.count()) as Array<keyof ReturnType<EventStore["count"]>>;
+    expect(kinds.length).toBeGreaterThan(5);
+    let compared = 0;
+    for (const k of kinds) {
+      for (const id of ids) {
+        const want = r.store.all(k).filter((e) => (e as { sessionId?: string }).sessionId === id);
+        const got = r.store.forSession(id, k);
+        expect(got.length).toBe(want.length);
+        for (let i = 0; i < want.length; i++) expect(got[i]).toBe(want[i]!);
+        compared += want.length;
+      }
+    }
+    expect(compared).toBeGreaterThan(1_000);
+    for (const k of kinds) {
+      expect(r.store.forSession("claude-code:empty", k)).toEqual([]);
+      expect(r.store.forSession("claude-code:no-such-session", k)).toEqual([]);
+    }
+  });
+
+  test("a session first seen in a later kind, and an add after the index is built", () => {
+    const s = new EventStore();
+    s.add({ k: "marker", tool: "codex", source: "t", ts: 1, sessionId: "a", kind: "error" });
+    s.add(tool("b", 2)); s.add(tool("a", 3)); s.add(tool("b", 4));
+    expect(s.forSession("b", "tool").map((e) => e.ts)).toEqual([2, 4]);
+    expect(s.forSession("a", "tool").map((e) => e.ts)).toEqual([3]);
+    expect(s.forSession("b", "marker")).toEqual([]);
+    const late = tool("a", 5);
+    s.add(late);
+    expect(s.forSession("a", "tool").at(-1)).toBe(late);
+  });
+});

@@ -86,7 +86,12 @@ export class EventStore {
   private reports = new Map<string, SessionEv[]>();
   /** A session's position in the `session` list, so a merge replaces it in place. */
   private sessionAt = new Map<string, number>();
-  private index: Map<string, Map<Kind, Ev[]>> | undefined;
+  /**
+   * `forSession`'s index, built on first use and dropped by `add`. Compact on purpose (it lives as long as the store):
+   * one number per distinct session id, and per kind a CSR table — `order` holds the kind list's positions grouped by
+   * session (store order kept within a session), and a session's slice of it runs from `start[slot]` to `start[slot + 1]`.
+   */
+  private index: { slots: Map<string, number>; byKind: Map<Kind, { order: Uint32Array; start: Uint32Array }> } | undefined;
 
   add(e: Ev): void {
     this.index = undefined;
@@ -117,22 +122,47 @@ export class EventStore {
   }
 
   forSession<K extends Kind>(id: string, k: K): readonly EvOf<K>[] {
-    if (!this.index) {
-      const idx = new Map<string, Map<Kind, Ev[]>>();
-      for (const [kind, list] of this.byKind) {
-        for (const ev of list) {
-          const sessionId = (ev as { sessionId?: string }).sessionId;
-          if (sessionId === undefined) continue;
-          let perKind = idx.get(sessionId);
-          if (!perKind) idx.set(sessionId, (perKind = new Map()));
-          const bucket = perKind.get(kind);
-          if (bucket) bucket.push(ev);
-          else perKind.set(kind, [ev]);
-        }
+    const index = (this.index ??= this.buildIndex());
+    const slot = index.slots.get(id);
+    const table = index.byKind.get(k);
+    if (slot === undefined || table === undefined) return [];
+    const list = this.byKind.get(k)!;
+    const from = table.start[slot]!;
+    const out = new Array<Ev>(table.start[slot + 1]! - from);
+    for (let i = 0; i < out.length; i++) out[i] = list[table.order[from + i]!]!;
+    return out as EvOf<K>[];
+  }
+
+  private buildIndex(): NonNullable<EventStore["index"]> {
+    const slots = new Map<string, number>();
+    const byKind = new Map<Kind, { order: Uint32Array; start: Uint32Array }>();
+    const tables: Array<[Kind, Int32Array]> = [];
+    for (const [kind, list] of this.byKind) {
+      const slotOf = new Int32Array(list.length); // transient: each event's slot, −1 without a session id
+      let any = false;
+      for (let i = 0; i < list.length; i++) {
+        const sessionId = (list[i] as { sessionId?: string }).sessionId;
+        if (sessionId === undefined) { slotOf[i] = -1; continue; }
+        let slot = slots.get(sessionId);
+        if (slot === undefined) slots.set(sessionId, (slot = slots.size));
+        slotOf[i] = slot;
+        any = true;
       }
-      this.index = idx;
+      if (any) tables.push([kind, slotOf]);
     }
-    return (this.index.get(id)?.get(k) ?? []) as EvOf<K>[];
+    for (const [kind, slotOf] of tables) {
+      const start = new Uint32Array(slots.size + 1);
+      for (const slot of slotOf) if (slot >= 0) start[slot + 1]!++;
+      for (let s = 0; s < slots.size; s++) start[s + 1]! += start[s]!;
+      const next = start.slice(0, slots.size); // transient fill cursors
+      const order = new Uint32Array(start[slots.size]!);
+      for (let i = 0; i < slotOf.length; i++) {
+        const slot = slotOf[i]!;
+        if (slot >= 0) order[next[slot]!++] = i;
+      }
+      byKind.set(kind, { order, start });
+    }
+    return { slots, byKind };
   }
 
   count(): Partial<Record<Kind, number>> {
