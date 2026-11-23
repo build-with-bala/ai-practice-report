@@ -10,8 +10,13 @@ export type InstructionKind = "claude" | "agents" | "gemini" | "cursorrules" | "
  * the keyed hash of its sha's first 7 hex digits lower-cased (the key a Claude Code `commit` marker gives the same
  * commit), the AI co-author or generated-with trailer it names, whether its subject marks rework, and the keyed hashes
  * of the paths it changed (capped). The message itself is never kept.
+ *
+ * `owner`: the same commit can sit in several repos (clones, forks): every repo lists it, and it is the owner's in
+ * exactly one — the repo with the most detail-window sessions, then the smallest repoKey (compared by full sha, in
+ * memory only). Whole-report totals count owner commits only; per-repo matching (delivery, rework, file history) may
+ * use all of a repo's commits.
  */
-export interface CommitFact { ts: number; shaKey: string; ai?: AiTool; generated?: AiTool; rework?: "revert" | "fixup" | "fix"; files: string[] }
+export interface CommitFact { ts: number; shaKey: string; ai?: AiTool; generated?: AiTool; rework?: "revert" | "fixup" | "fix"; files: string[]; owner: boolean }
 export interface InstructionFacts { files: InstructionKind[]; namesChecks: CheckKind[]; touched: number; lastTouched?: number }
 export interface HookFacts { entries: number; checks: CheckKind[]; disabled: boolean }
 export interface CheckFacts { present: boolean; checks: CheckKind[] }

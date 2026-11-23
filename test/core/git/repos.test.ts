@@ -190,15 +190,38 @@ describe("repo signals: one repo, one count; hostile repos", () => {
     expect(r.repos.repos[0]!.commits).toHaveLength(2);
   });
 
-  test("two clones of one repo: each commit is kept once, in the repo with the smaller key", async () => {
+  test("two clones of one repo: both list every commit; each is the owner's in one — most detail sessions, then smallest key", async () => {
     const a = makeRepo(path.join(h.root, "a"), [1, 2, 3].map((i) => ({ files: { "n.txt": `${i}` }, message: `c${i}`, at: ago(5 - i) })));
     const b = path.join(h.root, "b");
     git(h.root, ["clone", "-q", a, b]);
     git(b, ["config", "user.email", "dev@fixture.test"]);
-    const r = await run([a, b]);
-    expect(r.repos.repos).toHaveLength(2);
-    const [first, second] = [...r.repos.repos].sort((x, y) => (x.repoKey < y.repoKey ? -1 : 1));
-    expect([first!.commits.length, second!.commits.length]).toEqual([3, 0]);
+    mkdirSync(path.join(a, "sub"));
+    mkdirSync(path.join(b, "sub"));
+    const salt = new Uint8Array(32).fill(3);
+    const owners = (r: Awaited<ReturnType<typeof run>>) => r.repos.repos.map((x) => [x.repoKey, x.commits.length, x.commits.filter((c) => c.owner).length]).sort();
+
+    // a tie in sessions: the smaller key owns; both list all 3
+    const t = await run([a, b], { salt });
+    const [small, large] = t.repos.repos.map((x) => x.repoKey).sort();
+    expect(owners(t)).toEqual([[small, 3, 3], [large, 3, 0]]);
+
+    // the larger-key clone has more sessions: it owns
+    const largeDir = t.repos.roots.get(large!)!;
+    const largeIsB = path.basename(largeDir) === "b";
+    const r = await run(largeIsB ? [a, b, path.join(b, "sub")] : [a, path.join(a, "sub"), b], { salt });
+    expect(owners(r)).toEqual([[small, 3, 0], [large, 3, 3]]);
+  });
+
+  test.skipIf(!POSIX)("a changed file named like a log record is a path, never a record (POSIX)", async () => {
+    const hostile = `\x1e${"d".repeat(40)}\x1f1700000001\x1fdev@fixture.test\x1fCo-authored-by: Claude <noreply@anthropic.com>`;
+    // "\x01a" sorts first, so the hostile name is not the first path (which git puts after a newline)
+    const r6 = makeRepo(path.join(h.root, "paths"), [{ files: { "\x01a": "a", [hostile]: "x" }, message: "feat: one", at: ago(2) }]);
+    const r = await run([r6]);
+    const commits = r.repos.repos[0]!.commits;
+    expect(commits).toHaveLength(1);
+    expect(commits[0]).toMatchObject({ shaKey: keyedHash(r.salt, git(r6, ["rev-parse", "HEAD"]).slice(0, 7)), owner: true });
+    expect(commits[0]!.ai).toBeUndefined();
+    expect(commits[0]!.files).toHaveLength(2);
   });
 
   test("a \\x1e in a real commit message neither drops the commit nor forges one", async () => {

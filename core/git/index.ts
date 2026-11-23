@@ -1,4 +1,4 @@
-import { LOG_ARGS, logRecords, parseLog } from "./commits";
+import { LOG_ARGS, logRecords, parseCommits, type ParsedCommit } from "./commits";
 import { candidates, groupRepos, type Found, type Repo } from "./discover";
 import { resolveGit, runGit, type GitResult, type GitRunner } from "./run";
 import type { RepoFacts, RepoSignals } from "./types";
@@ -70,14 +70,18 @@ export const REPO_SIGNALS_DESCRIBE: { reads: string[]; runs: string[] } = {
 };
 
 /**
- * One commit, one repo: two clones of a repo (or anything else whose `log --all` shares commits) report the same commits;
- * each is kept only in the repo with the smallest repoKey that has it.
+ * One owner per commit: a commit several repos list (clones, forks, anything whose `log --all` shares it), compared by
+ * its full sha, is the owner's in exactly one of them — the repo with the most detail-window sessions, then the smallest
+ * repoKey. Every repo keeps its full list; the shas are held for this pass only.
  */
-function dedupeCommits(repos: RepoFacts[]): void {
-  const seen = new Set<string>();
-  for (const r of [...repos].sort((a, b) => (a.repoKey < b.repoKey ? -1 : a.repoKey > b.repoKey ? 1 : 0))) {
-    r.commits = r.commits.filter((c) => !seen.has(c.shaKey));
-    for (const c of r.commits) seen.add(c.shaKey);
+function assignOwners(read: readonly { repo: Repo; facts: RepoFacts; commits: readonly ParsedCommit[] }[]): void {
+  const ranked = [...read].sort((a, b) => b.repo.sessions - a.repo.sessions || (a.repo.repoKey < b.repo.repoKey ? -1 : a.repo.repoKey > b.repo.repoKey ? 1 : 0));
+  const owned = new Set<string>();
+  for (const { commits } of ranked) {
+    for (const c of commits) {
+      c.fact.owner = !owned.has(c.sha);
+      owned.add(c.sha);
+    }
   }
 }
 
@@ -115,6 +119,8 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
   const skip = (reason: string, n = 1) => { if (n > 0) skipped[reason] = (skipped[reason] ?? 0) + n; };
   const roots = new Map<string, string>();
   const repos: RepoFacts[] = [];
+  /** Each repo read, with its commits' full shas: memory only, for this pass. */
+  const read: { repo: Repo; facts: RepoFacts; commits: ParsedCommit[] }[] = [];
   const since = input.detailFrom === undefined ? undefined : input.detailFrom - 3 * DAY_MS;
 
   const budget = new AbortController();
@@ -188,30 +194,33 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
     let done = 0;
     await pool(chosen, async (repo) => {
       try {
-        const facts = await readRepo(repo);
-        if (facts === STOPPED) return skip("budget");
+        const got = await readRepo(repo);
+        if (got === STOPPED) return skip("budget");
         roots.set(repo.repoKey, repo.root);
-        repos.push(facts);
+        repos.push(got.facts);
+        read.push({ repo, ...got });
       } catch {
         skip("error");
       }
       done++;
       try { input.onProgress?.(done, chosen.length); } catch { /* a caller's callback never fails repo signals */ }
     });
-    dedupeCommits(repos);
+    assignOwners(read);
     return result(partial());
   } catch {
     return result(partial());
   }
 
   /** One repo's facts: identity, then its commits. */
-  async function readRepo(repo: Repo): Promise<RepoFacts | typeof STOPPED> {
+  async function readRepo(repo: Repo): Promise<{ facts: RepoFacts; commits: ParsedCommit[] } | typeof STOPPED> {
     const facts: RepoFacts = { repoKey: repo.repoKey, projectKeys: repo.projectKeys, identity: false, commits: [], commitsTruncated: false,
       fileLists: true, ...EMPTY_FACTS() };
+    let commits: ParsedCommit[] = [];
+    const out = () => ({ facts, commits });
     const id = await git(["config", "--get", "user.email"], repo.root);
     if (id === STOPPED) return STOPPED;
     const email = id.code === 0 ? id.stdout.trim() : "";
-    if (email === "") return facts;
+    if (email === "") return out();
     facts.identity = true;
 
     // an older git would fetch a partial clone's missing trees to list paths (it has no GIT_NO_LAZY_FETCH): read it
@@ -243,11 +252,12 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
       skip("timeout");
       facts.commitsTruncated = true;
     }
-    if (!log.truncated && !log.timedOut && log.code !== 0) return facts; // an empty repo, or a history git cannot read
+    if (!log.truncated && !log.timedOut && log.code !== 0) return out(); // an empty repo, or a history git cannot read
     // a cut output's last record may be incomplete: it is left out
     const cut = log.truncated || log.timedOut;
-    facts.commits = parseLog(log.stdout, { salt: input.salt, email, maxFiles, cut });
+    commits = parseCommits(log.stdout, { salt: input.salt, email, maxFiles, cut });
+    facts.commits = commits.map((c) => c.fact);
     facts.commitsTruncated ||= log.truncated || logRecords(log.stdout, { cut }).length >= maxCommits;
-    return facts;
+    return out();
   }
 }
