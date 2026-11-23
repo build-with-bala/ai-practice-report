@@ -3,8 +3,8 @@ import { cite } from "../../../core/viz/html";
 import { KIT_RUNTIME } from "../../../core/viz/runtime";
 
 /*
- * Source checks on the runtime's cite and print handling. The script itself is never executed here: running a string
- * as code is exactly what the repository's push guard refuses, so behaviour is pinned through the source's shape.
+ * Source checks on the runtime's cite and print handling. Its behaviour is pinned by runtime.behaviour.test.ts, which
+ * loads the script as a temporary ES module against a fake DOM.
  */
 
 describe("KIT_RUNTIME: cites", () => {
