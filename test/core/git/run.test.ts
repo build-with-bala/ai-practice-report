@@ -14,10 +14,10 @@ afterEach(() => h.cleanup());
 const opts = (cwd: string, over: Partial<{ timeoutMs: number; maxBytes: number; signal: AbortSignal }> = {}) =>
   ({ cwd, timeoutMs: 10_000, maxBytes: 1 << 20, signal: new AbortController().signal, ...over });
 
-/** Runs `f` with PATH set to `dir` alone, restoring it after (by assignment). */
+/** Runs `f` with `dir` first on PATH, restoring it after (by assignment). */
 async function withPath<T>(dir: string, f: () => Promise<T>): Promise<T> {
   const saved = process.env.PATH;
-  process.env.PATH = dir;
+  process.env.PATH = `${dir}${path.delimiter}${saved ?? ""}`;
   try {
     return await f();
   } finally {

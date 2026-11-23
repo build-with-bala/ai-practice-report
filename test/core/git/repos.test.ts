@@ -192,13 +192,15 @@ describe("repo signals: switches, budget, missing git, abort", () => {
       const marker = path.join(h.root, "git-ran");
       const bin = path.dirname(touchScript("git", marker));
       const saved = process.env.PATH;
-      process.env.PATH = bin;
+      process.env.PATH = `${bin}${path.delimiter}${saved ?? ""}`;
       try {
         await run([r1], { repoSignals: false });
+        expect(existsSync(marker)).toBe(false);
+        await run([r1]); // the fake is live: with repo signals on, it runs
+        expect(existsSync(marker)).toBe(true);
       } finally {
         process.env.PATH = saved;
       }
-      expect(existsSync(marker)).toBe(false);
     }
   });
 
