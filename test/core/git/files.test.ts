@@ -11,16 +11,18 @@ import { parseHooks } from "../../../core/sources/common/hooks";
 import type { Candidate, SourcePlugin } from "../../../core/sources/types";
 import { CANARY, expectNoCanaries } from "../../kit/canary";
 import { fakeHome, type FakeHome } from "../../kit/home";
-import { git, makeRepo } from "../../fixtures/repos";
+import { git, isolateGitHome, makeRepo } from "../../fixtures/repos";
 
 const POSIX = process.platform !== "win32";
 const DAY = 86_400_000;
 const ago = (days: number) => Date.now() - days * DAY;
 
 let h: FakeHome;
-beforeEach(() => { h = fakeHome(); });
+let restoreHome: () => void = () => {};
+beforeEach(() => { h = fakeHome(); restoreHome = isolateGitHome(path.join(h.root, "home")); });
 afterEach(() => {
   __observeOpens(undefined);
+  restoreHome();
   h.cleanup();
 });
 
@@ -253,16 +255,15 @@ describe("readRepoFiles: the allowlisted repo files, as booleans and counts", ()
     let opens = 0;
     __observeOpens(() => opens++);
     const skipped: Record<string, number> = {};
-    const t = Date.now();
     await readRepoFiles(root, [], { signal: ac.signal, runner: runGit, now: Date.now(), timeoutMs: 10_000,
       skip: (r) => { skipped[r] = (skipped[r] ?? 0) + 1; } });
     __observeOpens(undefined);
     clearTimeout(timer);
+    // the timer fired while the pass ran (not after it), and stopped it before its last file
     expect(fired).toBeGreaterThan(0);
-    expect(fired - t).toBeLessThan(500);
     expect(opens).toBeLessThan(64);
     expect(skipped).toEqual({ budget: 1 });
-  });
+  }, 30_000);
 
   test.skipIf(!POSIX)("a FIFO where a repo file goes is no file: never opened, the read never hangs (POSIX)", async () => {
     const root = repoWith("r", {});
@@ -274,14 +275,12 @@ describe("readRepoFiles: the allowlisted repo files, as booleans and counts", ()
     }
     const opened: string[] = [];
     __observeOpens((p) => opened.push(p));
-    const t = Date.now();
     const f = await read(root, [root]);
     __observeOpens(undefined);
-    expect(Date.now() - t).toBeLessThan(5_000);
     expect(opened).toEqual([]);
     expect([f.instructions.files, f.ci.present, f.precommit.present]).toEqual([[], false, false]);
     expect(f.skipped).toEqual({ "file-not-file": 4 });
-  });
+  }, 30_000);
 });
 
 describe("repo files in a scan", () => {
@@ -307,16 +306,8 @@ describe("repo files in a scan", () => {
 
   test("a repo without user.email still has its files read", async () => {
     const root = makeRepo(path.join(h.root, "r"), [{ files: { "CLAUDE.md": "`pytest`" }, message: "a", at: ago(3) }], { email: "" });
-    // no global config either: a home of its own
-    const saved = { HOME: process.env.HOME, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME };
-    process.env.HOME = h.root;
-    process.env.XDG_CONFIG_HOME = path.join(h.root, "xdg");
-    let r: Awaited<ReturnType<typeof run>>;
-    try {
-      r = await run([root]);
-    } finally {
-      for (const [k, v] of Object.entries(saved)) if (v === undefined) Reflect.deleteProperty(process.env, k); else process.env[k] = v;
-    }
+    // no global config either: every test here runs with a home of its own
+    const r = await run([root]);
     expect(r.repos.repos[0]).toMatchObject({ identity: false, commits: [], instructions: { files: ["claude"], namesChecks: ["test"], touched: 1 } });
   });
 

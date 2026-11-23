@@ -1,15 +1,16 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { GIT_SAFE_ARGS, gitEnv, resolveGit, runGit } from "../../../core/git/run";
 import { fakeHome, type FakeHome } from "../../kit/home";
-import { makeRepo } from "../../fixtures/repos";
+import { isolateGitHome, makeRepo } from "../../fixtures/repos";
 
 const POSIX = process.platform !== "win32";
 const T0 = Date.UTC(2026, 9, 1);
 let h: FakeHome;
-beforeEach(() => { h = fakeHome(); });
-afterEach(() => h.cleanup());
+let restoreHome: () => void = () => {};
+beforeEach(() => { h = fakeHome(); restoreHome = isolateGitHome(path.join(h.root, "home")); });
+afterEach(() => { restoreHome(); h.cleanup(); });
 
 const opts = (cwd: string, over: Partial<{ timeoutMs: number; maxBytes: number; signal: AbortSignal }> = {}) =>
   ({ cwd, timeoutMs: 10_000, maxBytes: 1 << 20, signal: new AbortController().signal, ...over });
@@ -25,13 +26,24 @@ async function withPath<T>(dir: string, f: () => Promise<T>): Promise<T> {
   }
 }
 
-/** A fake `git` on its own folder that sleeps 5 s. */
-function sleepyGit(): string {
+/** A fake `git` on its own folder that writes its process id to `pidFile`, then sleeps 30 s (as that same process). */
+function sleepyGit(): { bin: string; pidFile: string } {
   const bin = path.join(h.root, "bin");
+  const pidFile = path.join(h.root, "git.pid");
   mkdirSync(bin, { recursive: true });
-  writeFileSync(path.join(bin, "git"), "#!/bin/sh\nsleep 5\n");
+  writeFileSync(path.join(bin, "git"), `#!/bin/sh\necho $$ > '${pidFile}'\nexec sleep 30\n`);
   chmodSync(path.join(bin, "git"), 0o755);
-  return bin;
+  return { bin, pidFile };
+}
+
+/** Whether the process `pid` still exists (signal 0 checks without sending anything). */
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 describe("runGit", () => {
@@ -51,23 +63,27 @@ describe("runGit", () => {
     });
   });
 
-  test.skipIf(!POSIX)("a git that hangs is killed at the timeout (POSIX)", async () => {
-    const bin = sleepyGit();
-    const t = Date.now();
-    const r = await withPath(bin, () => runGit(["--version"], opts(h.root, { timeoutMs: 200 })));
-    expect(Date.now() - t).toBeLessThan(1_000);
+  test.skipIf(!POSIX)("a git that hangs is killed at the timeout: its process is gone when the result comes (POSIX)", async () => {
+    const { bin, pidFile } = sleepyGit();
+    const r = await withPath(bin, () => runGit(["--version"], opts(h.root, { timeoutMs: 2_000 })));
     expect(r).toMatchObject({ code: null, timedOut: true });
-  });
+    expect(alive(Number(readFileSync(pidFile, "utf8").trim()))).toBe(false);
+  }, 30_000);
 
-  test.skipIf(!POSIX)("an abort kills the process (POSIX)", async () => {
-    const bin = sleepyGit();
+  test.skipIf(!POSIX)("an abort kills the process: it is gone when the result comes (POSIX)", async () => {
+    const { bin, pidFile } = sleepyGit();
     const ac = new AbortController();
-    setTimeout(() => ac.abort(), 100);
-    const t = Date.now();
-    const r = await withPath(bin, () => runGit(["--version"], opts(h.root, { signal: ac.signal })));
-    expect(Date.now() - t).toBeLessThan(1_000);
+    // abort once the fake has started (its pid file is written), not after a guessed delay
+    const poll = setInterval(() => { if (existsSync(pidFile) && readFileSync(pidFile, "utf8").trim() !== "") ac.abort(); }, 5);
+    let r: Awaited<ReturnType<typeof runGit>>;
+    try {
+      r = await withPath(bin, () => runGit(["--version"], opts(h.root, { signal: ac.signal })));
+    } finally {
+      clearInterval(poll);
+    }
     expect(r).toMatchObject({ code: null, timedOut: false });
-  });
+    expect(alive(Number(readFileSync(pidFile, "utf8").trim()))).toBe(false);
+  }, 30_000);
 
   test("an abort before the start stops at once", async () => {
     const ac = new AbortController();

@@ -15,8 +15,11 @@ export interface FixtureCommit {
 
 export const FIXTURE_EMAIL = "dev@fixture.test";
 
-/** A global config file that does not exist: git reads none (so no hook or signing setting of the machine applies). */
-const NO_GLOBAL = path.join(os.tmpdir(), "no-such-gitconfig-for-fixtures");
+/**
+ * The null device as the global config file: git reads it as empty (so no hook or signing setting of the machine
+ * applies), and nothing anyone writes in the shared temp folder can stand in for it.
+ */
+const NO_GLOBAL = os.devNull;
 
 /** The environment a fixture's git runs in: no inherited GIT_* variable, no system or global config, no prompt. */
 function gitEnv(extra: Record<string, string> = {}): Record<string, string> {
@@ -57,6 +60,24 @@ export function makeRepo(dir: string, commits: FixtureCommit[], o: { email?: str
   // config that takes effect only after the commits (a hostile repo's settings must not break building it)
   for (const [k, v] of Object.entries(o.config ?? {})) git(dir, ["config", k, v]);
   return dir;
+}
+
+/**
+ * Points HOME and XDG_CONFIG_HOME at `home` (a fake home holding no git config), so the git the engine runs — which
+ * inherits this process's environment — never reads the developer's global config. Returns the restore, which puts the
+ * old values back by assignment (deleting only what was unset before).
+ */
+export function isolateGitHome(home: string): () => void {
+  const saved = { HOME: process.env.HOME, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME };
+  mkdirSync(home, { recursive: true });
+  process.env.HOME = home;
+  process.env.XDG_CONFIG_HOME = path.join(home, ".config");
+  return () => {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) Reflect.deleteProperty(process.env, k);
+      else process.env[k] = v;
+    }
+  };
 }
 
 /** The installed git's version as [major, minor]. */

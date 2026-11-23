@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import path from "node:path";
 import { classifyCommit, LOG_ARGS, logRecords, parseLog, shaKey } from "../../../core/git/commits";
 import { scan } from "../../../core/scan";
 import { ccTranscripts } from "../../../core/sources/claude-code";
 import { keyedHash } from "../../../core/text/hash";
 import { CcTranscript, ccSid, slug } from "../../fixtures/claude-code";
 import { fakeHome, type FakeHome } from "../../kit/home";
+import { isolateGitHome } from "../../fixtures/repos";
 
 const salt = new Uint8Array(32).fill(7);
 const SHA1 = "abc1234def5678901234567890abcdef12345678";
@@ -117,8 +119,9 @@ describe("parseLog", () => {
 
 describe("one commit, one key: git and Claude Code agree (shared vector)", () => {
   let h: FakeHome;
-  beforeEach(() => { h = fakeHome(); });
-  afterEach(() => h.cleanup());
+  let restoreHome: () => void = () => {};
+  beforeEach(() => { h = fakeHome(); restoreHome = isolateGitHome(path.join(h.root, "home")); });
+  afterEach(() => { restoreHome(); h.cleanup(); });
 
   test("a git %H starting ABC1234 and a Claude Code sha ABC1234def both key as keyedHash(salt, \"abc1234\")", async () => {
     const want = keyedHash(salt, "abc1234");

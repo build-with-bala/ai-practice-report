@@ -8,7 +8,7 @@ import type { Ev } from "../../../core/model/events";
 import { scan } from "../../../core/scan";
 import type { Candidate, SourcePlugin } from "../../../core/sources/types";
 import { fakeHome, type FakeHome } from "../../kit/home";
-import { makeRepo } from "../../fixtures/repos";
+import { isolateGitHome, makeRepo } from "../../fixtures/repos";
 
 const POSIX = process.platform !== "win32";
 const DAY = 86_400_000;
@@ -216,8 +216,9 @@ describe("commitStream", () => {
 
 describe("runGit streaming", () => {
   let h: FakeHome;
-  beforeEach(() => { h = fakeHome(); });
-  afterEach(() => h.cleanup());
+  let restoreHome: () => void = () => {};
+  beforeEach(() => { h = fakeHome(); restoreHome = isolateGitHome(path.join(h.root, "home")); });
+  afterEach(() => { restoreHome(); h.cleanup(); });
   const opts = (cwd: string, over: Partial<Parameters<GitRunner>[1]> = {}) =>
     ({ cwd, timeoutMs: 10_000, maxBytes: 1 << 20, signal: new AbortController().signal, ...over });
 
@@ -298,8 +299,9 @@ describe("runGit streaming", () => {
 
 describe("repo signals stream git log", () => {
   let h: FakeHome;
-  beforeEach(() => { h = fakeHome(); });
-  afterEach(() => h.cleanup());
+  let restoreHome: () => void = () => {};
+  beforeEach(() => { h = fakeHome(); restoreHome = isolateGitHome(path.join(h.root, "home")); });
+  afterEach(() => { restoreHome(); h.cleanup(); });
 
   function sessions(folders: string[]): SourcePlugin {
     return {
