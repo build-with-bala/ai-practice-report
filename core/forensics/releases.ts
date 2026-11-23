@@ -2,6 +2,7 @@ import type { SessionTable } from "../analysis/types";
 import type { ToolId } from "../model/ids";
 import type { ScanResult } from "../scan";
 import shipped from "./releases.json" with { type: "json" };
+import { forensicScope, type ForensicScope } from "./scope";
 import type { CheckResult } from "./types";
 
 /*
@@ -22,11 +23,14 @@ const TOL_MS = 2 * DAY_MS;
 
 const dayMs = (day: string): number => Date.parse(`${day}T00:00:00Z`);
 
-/** The earliest time each model is carried by an event of the session (its turns' and usage records' `model`). */
-function firstUses(raw: ScanResult, sessionId: string): Map<string, number> {
+/**
+ * The earliest time inside the date range each model is carried by an event of the session (its turns' and usage
+ * records' `model`).
+ */
+function firstUses(raw: ScanResult, sessionId: string, s: ForensicScope): Map<string, number> {
   const out = new Map<string, number>();
   for (const e of [...raw.store.forSession(sessionId, "turn"), ...raw.store.forSession(sessionId, "usage")]) {
-    if (e.model === undefined) continue;
+    if (e.model === undefined || !s.inRange(e.ts)) continue;
     const was = out.get(e.model);
     if (was === undefined || e.ts < was) out.set(e.model, e.ts);
   }
@@ -34,26 +38,27 @@ function firstUses(raw: ScanResult, sessionId: string): Map<string, number> {
 }
 
 /**
- * C9 over the session rows. Each model of a row is checked against the first table entry whose pattern matches it, and
- * the row's version against its tool's entry of that exact version. A check compares the release day with the model's
- * first use in the session (the earliest of its events that carries the model), so a thread resumed after a release with
- * the new model is not taken for an early one; where no event carries it (a version, a model only the session row
- * names), with the row's end. It is violated when that time is more than 2 days before the release day. Any violation
- * → fail; n/a when nothing matched. `values`: `checked` (the checks made), `violations`, `sessions` (the rows with one).
- * The result names no model or version: counts only.
+ * C9 over the session rows in scope (`ForensicScope.rows`: kept rows, no host copy). Each model of a row is checked
+ * against the first table entry whose pattern matches it, and the row's version against its tool's entry of that exact
+ * version. A check compares the release day with the model's first use in the session (the earliest of its events
+ * inside the date range that carries the model), so a thread resumed after a release with the new model is not taken
+ * for an early one; where no event carries it (a version, a model only the session row names), with the row's end. It
+ * is violated when that time is more than 2 days before the release day. Any violation → fail; n/a when nothing
+ * matched. `values`: `checked` (the checks made), `violations`, `sessions` (the rows with one). The result names no
+ * model or version: counts only.
  */
-export function checkReleases(t: SessionTable, table: ReleaseTable, raw: ScanResult): CheckResult {
+export function checkReleases(t: SessionTable, table: ReleaseTable, raw: ScanResult, s: ForensicScope = forensicScope(raw, t)): CheckResult {
   const models = table.models.map((m) => ({ re: new RegExp(m.match), at: dayMs(m.released) }));
   let checked = 0, violations = 0;
   const violating = new Set<string>();
   const tools = new Set<ToolId>();
-  for (const row of t.rows.values()) {
+  for (const row of s.rows()) {
     const checks: { at: number; used: number }[] = [];
     let uses: Map<string, number> | undefined;
     for (const model of row.models) {
       const hit = models.find((m) => m.re.test(model));
       if (!hit) continue;
-      uses ??= firstUses(raw, row.id);
+      uses ??= firstUses(raw, row.id, s);
       checks.push({ at: hit.at, used: uses.get(model) ?? row.end });
     }
     if (row.version !== undefined) {
@@ -73,7 +78,7 @@ export function checkReleases(t: SessionTable, table: ReleaseTable, raw: ScanRes
   if (checked === 0) return { ...base, status: "n/a", reason: "no-match", values: {} };
   const values = { checked, violations, sessions: violating.size };
   if (violations === 0) return { ...base, status: "pass", reason: "ok", values };
-  const s = violating.size;
+  const k = violating.size;
   return { ...base, status: "fail", reason: "before-release", values,
-    askAbout: `${s} ${s === 1 ? "session" : "sessions"} used a model or tool version more than 2 days before its public release. Were session times edited?` };
+    askAbout: `${k} ${k === 1 ? "session" : "sessions"} used a model or tool version more than 2 days before its public release. Were session times edited?` };
 }

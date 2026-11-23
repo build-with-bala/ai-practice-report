@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { checkAnchors } from "../../../core/forensics/anchors";
 import type { AnchorEv } from "../../../core/model/events";
+import type { ScanResult } from "../../../core/scan";
 import { scanResultOf } from "../../kit/scanresult";
+import { tableOf } from "./table";
+
+const anchorsOf = (raw: ScanResult) => checkAnchors(raw, tableOf(raw));
 
 const B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 const T0 = Date.UTC(2026, 9, 1, 8, 0);
@@ -51,7 +55,7 @@ function genuine(kind: AnchorEv["kind"] = "cc-msg", seed = 1): AnchorEv[] {
 
 describe("checkAnchors (C1, C2)", () => {
   test("a genuine-like set passes both", () => {
-    const [c1, c2] = checkAnchors(scanResultOf([...genuine("cc-msg", 1), ...genuine("cc-req", 2)]));
+    const [c1, c2] = anchorsOf(scanResultOf([...genuine("cc-msg", 1), ...genuine("cc-req", 2)]));
     expect(c1.id).toBe("C1");
     expect(c1.status).toBe("pass");
     expect(c1.values.offShare).toBe(0);
@@ -66,7 +70,7 @@ describe("checkAnchors (C1, C2)", () => {
 
   test("edited timestamps: 3% of the anchors shifted by 2 h fail C1", () => {
     const evs = genuine().map((e, i) => (i % 33 === 5 ? { ...e, ts: e.ts + 2 * HOUR } : e));
-    const [c1] = checkAnchors(scanResultOf(evs));
+    const [c1] = anchorsOf(scanResultOf(evs));
     expect(c1.status).toBe("fail");
     expect(c1.values.offShare as number).toBeGreaterThan(0.01);
     expect(c1.values.p99Seconds as number).toBeGreaterThan(3_600);
@@ -76,30 +80,30 @@ describe("checkAnchors (C1, C2)", () => {
   test("fabricated: a session of 100 random ids at plausible times fails C1", () => {
     const r = rng(7);
     const fake = Array.from({ length: 100 }, (_, i) => anchor(T0 + 10 * 86_400_000 + i * 2 * MIN, `01${randomB58(r, 22)}`));
-    const [c1] = checkAnchors(scanResultOf([...genuine(), ...fake]));
+    const [c1] = anchorsOf(scanResultOf([...genuine(), ...fake]));
     expect(c1.status).toBe("fail");
     expect(c1.values.offShare as number).toBeGreaterThan(0.04);
   });
 
   test("the worse kind wins: a clean cc-msg set and an edited cc-req set fail C1", () => {
     const req = genuine("cc-req", 3).map((e, i) => (i % 20 === 0 ? { ...e, ts: e.ts + 2 * HOUR } : e));
-    const [c1] = checkAnchors(scanResultOf([...genuine("cc-msg", 1), ...req]));
+    const [c1] = anchorsOf(scanResultOf([...genuine("cc-msg", 1), ...req]));
     expect(c1.status).toBe("fail");
   });
 
   test("every id out of scheme is n/a for both", () => {
     const r = rng(9);
     const evs = genuine().map((e) => ({ ...e, idTail: randomB58(r, 24).replace(/^0?1?/, "zz") }));
-    const [c1, c2] = checkAnchors(scanResultOf(evs));
+    const [c1, c2] = anchorsOf(scanResultOf(evs));
     expect(c1.status).toBe("n/a");
     expect(c2.status).toBe("n/a");
   });
 
   test("fewer than 50 recognized anchors is n/a (too-few); no anchors at all too", () => {
-    const [c1, c2] = checkAnchors(scanResultOf(genuine().slice(0, 49)));
+    const [c1, c2] = anchorsOf(scanResultOf(genuine().slice(0, 49)));
     expect([c1.status, c1.reason]).toEqual(["n/a", "too-few"]);
     expect(c2.status).toBe("n/a");
-    const [e1, e2] = checkAnchors(scanResultOf([]));
+    const [e1, e2] = anchorsOf(scanResultOf([]));
     expect([e1.status, e2.status]).toEqual(["n/a", "n/a"]);
     expect(e1.n).toBe(0);
   });
@@ -107,7 +111,7 @@ describe("checkAnchors (C1, C2)", () => {
   test("ids that no longer track time are n/a (scheme-changed)", () => {
     const r = rng(11);
     const evs = genuine().map((e) => ({ ...e, idTail: `01${randomB58(r, 22)}` }));
-    const [c1, c2] = checkAnchors(scanResultOf(evs));
+    const [c1, c2] = anchorsOf(scanResultOf(evs));
     expect([c1.status, c1.reason]).toEqual(["n/a", "scheme-changed"]);
     expect(c2.status).toBe("n/a");
   });
@@ -115,7 +119,7 @@ describe("checkAnchors (C1, C2)", () => {
   test("reversed order fails C2", () => {
     const evs = genuine();
     const times = evs.map((e) => e.ts).reverse();
-    const [, c2] = checkAnchors(scanResultOf(evs.map((e, i) => ({ ...e, ts: times[i]! }))));
+    const [, c2] = anchorsOf(scanResultOf(evs.map((e, i) => ({ ...e, ts: times[i]! }))));
     expect(c2.status).toBe("fail");
     expect(c2.values.rho as number).toBeLessThan(0);
     expect(c2.askAbout).toBeString();
@@ -123,7 +127,7 @@ describe("checkAnchors (C1, C2)", () => {
 
   test("results hold numbers only, and texts stay within the covered characters", () => {
     const evs = genuine().map((e, i) => (i % 33 === 5 ? { ...e, ts: e.ts + 2 * HOUR } : e));
-    for (const c of checkAnchors(scanResultOf(evs))) {
+    for (const c of anchorsOf(scanResultOf(evs))) {
       for (const v of Object.values(c.values)) expect(typeof v === "number" && Number.isFinite(v)).toBe(true);
       expect(`${c.reason}${c.askAbout ?? ""}`).toMatch(/^[ -ÿ -⁯−]*$/);
     }
@@ -139,27 +143,27 @@ describe("checkAnchors: breakdown and what is left out", () => {
 
   for (const [pct, count] of [[30, 857], [40, 1_333]] as const) {
     test(`random fabricated ids at ${pct}% of the anchors fail C1`, () => {
-      const [c1] = checkAnchors(scanResultOf([...genuine(), ...fakes(count, 13)]));
+      const [c1] = anchorsOf(scanResultOf([...genuine(), ...fakes(count, 13)]));
       expect(c1.status).toBe("fail");
       expect(c1.values.offShare as number).toBeGreaterThan(pct / 100 - 0.03);
     });
   }
 
   test("a session block shifted by 2 h at 30% of the anchors fails C1", () => {
-    const [c1] = checkAnchors(scanResultOf(genuine().map((e, i) => (i >= 700 && i < 1_300 ? { ...e, ts: e.ts + 2 * HOUR } : e))));
+    const [c1] = anchorsOf(scanResultOf(genuine().map((e, i) => (i >= 700 && i < 1_300 ? { ...e, ts: e.ts + 2 * HOUR } : e))));
     expect(c1.status).toBe("fail");
     expect(c1.values.offShare).toBe(0.3);
   });
 
   test("random ids at 60% of the anchors are n/a: no line holds half of them", () => {
-    const [c1, c2] = checkAnchors(scanResultOf([...genuine(), ...fakes(3_000, 17)]));
+    const [c1, c2] = anchorsOf(scanResultOf([...genuine(), ...fakes(3_000, 17)]));
     expect([c1.status, c1.reason]).toEqual(["n/a", "scheme-changed"]);
     expect(c1.n).toBe(5_000);
     expect(c2.status).toBe("n/a");
   });
 
   test("p99Seconds is capped at a year", () => {
-    const [c1] = checkAnchors(scanResultOf(genuine().map((e, i) => (i % 33 === 5 ? { ...e, ts: e.ts + 2 * 365 * 86_400_000 } : e))));
+    const [c1] = anchorsOf(scanResultOf(genuine().map((e, i) => (i % 33 === 5 ? { ...e, ts: e.ts + 2 * 365 * 86_400_000 } : e))));
     expect(c1.status).toBe("fail");
     expect(c1.values.p99Seconds).toBe(31_536_000);
   });
@@ -167,7 +171,7 @@ describe("checkAnchors: breakdown and what is left out", () => {
   test("C2's question shows rho rounded down to 3 decimals", () => {
     const evs = genuine();
     const times = evs.map((e) => e.ts).reverse();
-    const [, c2] = checkAnchors(scanResultOf(evs.map((e, i) => ({ ...e, ts: times[i]! }))));
+    const [, c2] = anchorsOf(scanResultOf(evs.map((e, i) => ({ ...e, ts: times[i]! }))));
     expect(c2.askAbout).toContain("(rank correlation -1)");
   });
 
@@ -175,7 +179,7 @@ describe("checkAnchors: breakdown and what is left out", () => {
     const r = rng(19);
     const evs = genuine().map((e, i) => (i % 11 === 0 ? { ...e, idTail: `010${randomB58(r, 21)}` } : e));
     const malformed = evs.filter((e) => e.idTail.startsWith("010")).length;
-    const [c1, c2] = checkAnchors(scanResultOf(evs));
+    const [c1, c2] = anchorsOf(scanResultOf(evs));
     expect([c1.status, c1.reason]).toEqual(["note", "malformed-ids"]);
     expect(c1.values.malformed).toBe(malformed);
     expect(c1.values.unrecognized).toBe(malformed);
@@ -185,16 +189,16 @@ describe("checkAnchors: breakdown and what is left out", () => {
 
   test("a single malformed id is no note; a failing fit wins over the note", () => {
     const one = genuine().map((e, i) => (i === 0 ? { ...e, idTail: `010${"x".repeat(21)}` } : e));
-    expect(checkAnchors(scanResultOf(one))[0].status).toBe("pass");
+    expect(anchorsOf(scanResultOf(one))[0].status).toBe("pass");
     const r = rng(23);
     const both = genuine().map((e, i) => (i % 11 === 0 ? { ...e, idTail: `010${randomB58(r, 21)}` } : i % 33 === 5 ? { ...e, ts: e.ts + 2 * HOUR } : e));
-    expect(checkAnchors(scanResultOf(both))[0].status).toBe("fail");
+    expect(anchorsOf(scanResultOf(both))[0].status).toBe("fail");
   });
 
   test("11% foreign-marker ids are n/a with the kind's anchor count", () => {
     const r = rng(29);
     const evs = genuine().map((e, i) => (i % 9 === 0 ? { ...e, idTail: `02${randomB58(r, 22)}` } : e));
-    const [c1, c2] = checkAnchors(scanResultOf(evs));
+    const [c1, c2] = anchorsOf(scanResultOf(evs));
     expect([c1.status, c1.reason, c1.n]).toEqual(["n/a", "unknown-marker", 2_000]);
     expect(c1.values.unrecognized).toBe(evs.filter((e) => e.idTail.startsWith("02")).length);
     expect([c2.status, c2.n]).toEqual(["n/a", 2_000]);
@@ -203,20 +207,20 @@ describe("checkAnchors: breakdown and what is left out", () => {
   test("one kind n/a on the marker share and the other passing is n/a", () => {
     const r = rng(31);
     const req = genuine("cc-req", 2).map((e, i) => (i % 9 === 0 ? { ...e, idTail: `02${randomB58(r, 22)}` } : e));
-    const [c1, c2] = checkAnchors(scanResultOf([...genuine("cc-msg", 1), ...req]));
+    const [c1, c2] = anchorsOf(scanResultOf([...genuine("cc-msg", 1), ...req]));
     expect([c1.status, c1.reason]).toEqual(["n/a", "unknown-marker"]);
     expect(c2.status).toBe("n/a");
   });
 
   test("one kind too-few and the other passing is pass", () => {
-    const [c1, c2] = checkAnchors(scanResultOf([...genuine("cc-msg", 1), ...genuine("cc-req", 2).slice(0, 20)]));
+    const [c1, c2] = anchorsOf(scanResultOf([...genuine("cc-msg", 1), ...genuine("cc-req", 2).slice(0, 20)]));
     expect([c1.status, c2.status]).toEqual(["pass", "pass"]);
   });
 
   test("a kind whose marker-carrying ids are all malformed is a note, not too-few", () => {
     const r = rng(37);
     const bad = Array.from({ length: 1_000 }, (_, i) => anchor(T0 + i * MIN, `010${randomB58(r, 21)}`, "cc-req"));
-    const [c1] = checkAnchors(scanResultOf([...genuine("cc-msg", 1), ...bad]));
+    const [c1] = anchorsOf(scanResultOf([...genuine("cc-msg", 1), ...bad]));
     expect([c1.status, c1.reason]).toEqual(["note", "malformed-ids"]);
     expect(c1.values.malformed).toBe(1_000);
   });
@@ -224,16 +228,16 @@ describe("checkAnchors: breakdown and what is left out", () => {
   test("40 recognized and 960 malformed ids are a note", () => {
     const r = rng(41);
     const req = genuine("cc-req", 2).slice(0, 1_000).map((e, i) => (i < 960 ? { ...e, idTail: `010${randomB58(r, 21)}` } : e));
-    const [c1] = checkAnchors(scanResultOf([...genuine("cc-msg", 1), ...req]));
+    const [c1] = anchorsOf(scanResultOf([...genuine("cc-msg", 1), ...req]));
     expect([c1.status, c1.reason]).toEqual(["note", "malformed-ids"]);
     expect(c1.values.malformed).toBe(960);
   });
 
   test("a kind of 30 clean anchors is too-few with its counts, and ranks below the other kind's pass", () => {
-    const few = checkAnchors(scanResultOf(genuine("cc-req", 2).slice(0, 30)))[0];
+    const few = anchorsOf(scanResultOf(genuine("cc-req", 2).slice(0, 30)))[0];
     expect([few.status, few.reason]).toEqual(["n/a", "too-few"]);
     expect([few.values.unrecognized, few.values.malformed]).toEqual([0, 0]);
-    const [c1] = checkAnchors(scanResultOf([...genuine("cc-msg", 1), ...genuine("cc-req", 2).slice(0, 30)]));
+    const [c1] = anchorsOf(scanResultOf([...genuine("cc-msg", 1), ...genuine("cc-req", 2).slice(0, 30)]));
     expect(c1.status).toBe("pass");
     expect(c1.values.unverifiedKinds).toBe(0);
   });
@@ -242,7 +246,7 @@ describe("checkAnchors: breakdown and what is left out", () => {
     const r = rng(43);
     const msg = genuine("cc-msg", 1).map((e, i) => (i % 33 === 0 ? { ...e, idTail: `010${randomB58(r, 21)}` } : e));
     const req = [...genuine("cc-req", 2), ...Array.from({ length: 3_000 }, () => anchor(T0 + Math.floor(r() * 20 * 86_400_000), `01${randomB58(r, 22)}`, "cc-req"))];
-    const [c1, c2] = checkAnchors(scanResultOf([...msg, ...req]));
+    const [c1, c2] = anchorsOf(scanResultOf([...msg, ...req]));
     expect([c1.status, c1.reason]).toEqual(["note", "malformed-ids"]);
     expect(c1.values.unverifiedKinds).toBe(1);
     expect(c2.values.unverifiedKinds).toBe(1);

@@ -4,6 +4,7 @@ import { promptWindowByTool } from "../analysis/promptwindow";
 import type { SessionTable } from "../analysis/types";
 import type { PromptEv } from "../model/events";
 import type { ScanResult } from "../scan";
+import { forensicScope, type ForensicScope } from "./scope";
 import { round, toolsOf, type CheckId, type CheckResult } from "./types";
 
 /*
@@ -30,14 +31,12 @@ const na = (id: CheckId, tools: CheckResult["tools"], n = 0): CheckResult => ({ 
 const pct = (x: number): number => Math.round(x * 100);
 
 /**
- * The human prompts in scope, each tool's from one window (`promptWindowByTool`), so a prompt both windows hold counts
- * once; host copies are left out (their prompts are the other tool's).
+ * The human prompts in scope (`ForensicScope.human`: no session left out, no host copy — a host copy's prompts are the
+ * other tool's), each tool's from one window (`promptWindowByTool`), so a prompt both windows hold counts once.
  */
-function humanPrompts(raw: ScanResult, t: SessionTable): PromptEv[] {
+function humanPrompts(raw: ScanResult, t: SessionTable, s: ForensicScope): PromptEv[] {
   const chosen = promptWindowByTool(raw, t);
-  const { from, to, tools: excluded } = t.scope;
-  return raw.store.all("prompt").filter((p) => !excluded.has(p.tool) && p.ts >= from && p.ts <= to && t.isHuman(p)
-    && chosen.get(p.tool) === p.window && (p.sessionId === undefined || !t.hosts.has(p.sessionId)));
+  return s.prompts().filter((p) => s.human(p) && chosen.get(p.tool) === p.window);
 }
 
 /**
@@ -115,14 +114,13 @@ function recentBurst(t: SessionTable, now: number, timeZone: string): CheckResul
 }
 
 /**
- * unclosed-tools: the share of Claude Code's detail-window tool calls (from sources with detail coverage, in scope,
- * no host copy) with neither `ok` nor an `outcome`; raised above 10%. n/a without such calls. `values`: `open`, `share`.
+ * unclosed-tools: the share of Claude Code's detail-window tool calls (from sources with detail coverage, in scope:
+ * `ForensicScope.toolCalls`, so no session left out and no host copy) with neither `ok` nor an `outcome`; raised above
+ * 10%. n/a without such calls. `values`: `open`, `share`.
  */
-function unclosedTools(raw: ScanResult, t: SessionTable): CheckResult {
-  const detail = new Set(raw.coverage.filter((c) => c.window === "detail").map((c) => c.source));
-  const { from, to, tools: excluded } = t.scope;
-  const calls = raw.store.all("tool").filter((e) => e.tool === "claude-code" && !excluded.has(e.tool) && detail.has(e.source)
-    && e.ts >= from && e.ts <= to && !t.hosts.has(e.sessionId));
+function unclosedTools(s: ForensicScope): CheckResult {
+  const detail = s.analysis.detailSources;
+  const calls = s.toolCalls().filter((e) => e.tool === "claude-code" && detail.has(e.source));
   const tools = toolsOf(calls);
   if (calls.length === 0) return na("soft:unclosed-tools", tools);
   const open = calls.filter((e) => e.ok === undefined && e.outcome === undefined).length;
@@ -135,17 +133,19 @@ function unclosedTools(raw: ScanResult, t: SessionTable): CheckResult {
 
 /**
  * new-config: the used artifacts (`artifactUse`, the rule the Context dimension's `artifacts` signal counts: skills,
- * commands, agents, plugins and MCP servers with use evidence) whose first-seen time (the earliest of their reports) is
- * at or after `now` − 7 days. A first-seen time can be a file's change time where the system keeps no creation time,
- * which a migration or a tool update resets: the question allows for both. Raised when at least 3, and at least half,
- * of the used artifacts with a first-seen time are that recent: one newly added skill says nothing. n/a without a used
- * artifact with a first-seen time. `values`: `recent`, `artifacts` (those with a first-seen time); `tools`: the tools
- * whose config entries report those artifacts.
+ * commands, agents, plugins and MCP servers with use evidence, in scope) whose first-seen time is at or after `now` − 7
+ * days. An artifact's first-seen time is the earliest over all of its config entries of kept tools, used or not: an
+ * artifact is as old as its oldest report. A first-seen time can be a file's change time where the system keeps no
+ * creation time, which a migration or a tool update resets: the question allows for both. Raised when at least 3, and
+ * at least half, of the used artifacts with a first-seen time are that recent: one newly added skill says nothing. n/a
+ * without a used artifact with a first-seen time. `values`: `recent`, `artifacts` (those with a first-seen time);
+ * `tools`: the tools of the config entries that show those artifacts' use (an entry whose source is among the
+ * artifact's `sources`: a source belongs to one tool), never those of unused entries.
  */
-function newConfig(raw: ScanResult, t: SessionTable, now: number): CheckResult {
-  const dated = artifactUse(raw, t).filter((a) => a.used && a.firstSeen !== undefined);
-  const keys = new Set(dated.map((a) => `${a.kind}\u0000${a.name}`));
-  const tools = toolsOf(raw.store.all("config").filter((c) => !t.scope.tools.has(c.tool) && c.name !== undefined && keys.has(`${c.kind}\u0000${c.name}`)));
+function newConfig(raw: ScanResult, t: SessionTable, now: number, s: ForensicScope): CheckResult {
+  const dated = artifactUse(raw, t, s.analysis).filter((a) => a.used && a.firstSeen !== undefined);
+  const used = new Map(dated.map((a) => [`${a.kind}\u0000${a.name}`, new Set(a.sources)]));
+  const tools = toolsOf(s.configs().filter((c) => c.name !== undefined && used.get(`${c.kind}\u0000${c.name}`)?.has(c.source) === true));
   if (dated.length === 0) return na("soft:new-config", tools);
   const m = dated.length;
   const recent = dated.filter((a) => a.firstSeen! >= now - NEW_CONFIG_MS).length;
@@ -156,8 +156,11 @@ function newConfig(raw: ScanResult, t: SessionTable, now: number): CheckResult {
     askAbout: `${recent} of the ${m} tools and skills in use were first seen in the 7 days before this scan. Was this machine set up or migrated, or were its tools updated, in that week?` };
 }
 
-/** The five soft flags, in order: rhythm, repeated-long, recent-burst, unclosed-tools, new-config. */
-export function softFlags(raw: ScanResult, t: SessionTable, o: { now: number; timeZone: string }): CheckResult[] {
-  const prompts = humanPrompts(raw, t);
-  return [rhythm(prompts), repeatedLong(prompts), recentBurst(t, o.now, o.timeZone), unclosedTools(raw, t), newConfig(raw, t, o.now)];
+/**
+ * The five soft flags, in order: rhythm, repeated-long, recent-burst, unclosed-tools, new-config, each over in-scope
+ * data only (`ForensicScope`; recent-burst reads the session table's activity, which the exclusions already shaped).
+ */
+export function softFlags(raw: ScanResult, t: SessionTable, o: { now: number; timeZone: string }, s: ForensicScope = forensicScope(raw, t)): CheckResult[] {
+  const prompts = humanPrompts(raw, t, s);
+  return [rhythm(prompts), repeatedLong(prompts), recentBurst(t, o.now, o.timeZone), unclosedTools(s), newConfig(raw, t, o.now, s)];
 }

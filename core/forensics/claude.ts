@@ -5,6 +5,7 @@ import type { ScanResult } from "../scan";
 import { HISTORY_SOURCE } from "../sources/claude-code/history";
 import { STATS_SOURCE } from "../sources/claude-code/stats";
 import { TRANSCRIPTS_SOURCE } from "../sources/claude-code/transcripts";
+import { forensicScope, type ForensicScope } from "./scope";
 import { round, toolsOf, worst, type CheckResult, type CheckStatus } from "./types";
 
 /*
@@ -64,7 +65,9 @@ function pasteMatches(prompts: readonly PromptEv[], pasted: readonly PromptEv[])
 }
 
 /**
- * C3, history vs transcripts vs stats cache.
+ * C3, history vs transcripts vs stats cache, over in-scope data only (`ForensicScope`): the transcripts' human prompts in
+ * scope, the history prompts in scope (the same prompt rule: a history prompt of a session left out is left out), and
+ * the stats cache's days within the range's days.
  * - Match: the share of human transcript prompts inside the history's span that have a history prompt with an equal
  *   text hash within 10 s; below 75% → warn. The history hashes a prompt as displayed, where pasted content is a
  *   placeholder, so a prompt with a paste never hash-matches: a transcript prompt left unmatched also matches a history
@@ -76,10 +79,10 @@ function pasteMatches(prompts: readonly PromptEv[], pasted: readonly PromptEv[])
  * parts ran: `ok` (both), `ok-history-only`, `ok-stats-only`. `n`: the transcript prompts in the history's span when the
  * match part ran, else the transcript days in the stats span.
  */
-export function checkClaudeHistory(raw: ScanResult, t: SessionTable): CheckResult {
-  const transcript = raw.store.all("prompt").filter((p) => p.source === TRANSCRIPTS_SOURCE && t.isHuman(p));
-  const history = raw.store.all("prompt").filter((p) => p.source === HISTORY_SOURCE);
-  const stats = raw.store.all("daily").filter((d) => d.source === STATS_SOURCE && d.zone === "utc");
+export function checkClaudeHistory(raw: ScanResult, t: SessionTable, s: ForensicScope = forensicScope(raw, t)): CheckResult {
+  const transcript = s.prompts().filter((p) => p.source === TRANSCRIPTS_SOURCE && s.human(p));
+  const history = s.prompts().filter((p) => p.source === HISTORY_SOURCE);
+  const stats = s.daily().filter((d) => d.source === STATS_SOURCE && d.zone === "utc");
   const tools = toolsOf([...transcript, ...history, ...stats]);
   const values: Record<string, number> = {};
   const parts: Part[] = [];
@@ -144,11 +147,14 @@ export function checkClaudeHistory(raw: ScanResult, t: SessionTable): CheckResul
 }
 
 /**
- * C4, the session accounts vs the config's (as keyed hashes). `matchShare`: the share of session identities whose hash
- * the config names; none → fail. More than 1 distinct session hash → note (`accounts`). n/a when either side is missing.
+ * C4, the session accounts vs the config's (as keyed hashes), over Claude Code's identities in scope
+ * (`ForensicScope.identities`): a session's hash counts only when its session is a kept row; config hashes, and session
+ * hashes that name no session the store holds, count while Claude Code is kept. `matchShare`: the share of session
+ * identities whose hash the config names; none → fail. More than 1 distinct session hash → note (`accounts`). n/a when
+ * either side is missing.
  */
-export function checkAccount(raw: ScanResult): CheckResult {
-  const ids = raw.store.all("identity").filter((e) => e.tool === "claude-code");
+export function checkAccount(raw: ScanResult, t: SessionTable, s: ForensicScope = forensicScope(raw, t)): CheckResult {
+  const ids = s.identities().filter((e) => e.tool === "claude-code");
   const sessions = ids.filter((e) => e.scope === "session");
   const config = new Set(ids.filter((e) => e.scope === "config").map((e) => e.hash));
   const tools = toolsOf(ids);

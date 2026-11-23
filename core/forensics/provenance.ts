@@ -1,5 +1,6 @@
 import type { SessionTable } from "../analysis/types";
 import type { ScanResult } from "../scan";
+import { forensicScope, type ForensicScope } from "./scope";
 import { toolsOf, type CheckResult } from "./types";
 
 /*
@@ -10,12 +11,11 @@ import { toolsOf, type CheckResult } from "./types";
 
 /**
  * C10, `info`: prompt counts by tool × origin × window, keyed `<tool>/<origin>/<window>` in `values`. Prompts in scope
- * only (kept tools, inside the date range); a scripted prompt the dedupe relabelled counts as `human`. n/a without
- * prompts. `n`: the prompts counted.
+ * only (`ForensicScope.prompt`: kept tools, inside the date range, no session left out, no host copy); a scripted
+ * prompt the dedupe relabelled counts as `human`. n/a without prompts. `n`: the prompts counted.
  */
-export function provenance(raw: ScanResult, t: SessionTable): CheckResult {
-  const { from, to, tools: excluded } = t.scope;
-  const prompts = raw.store.all("prompt").filter((p) => !excluded.has(p.tool) && p.ts >= from && p.ts <= to);
+export function provenance(raw: ScanResult, t: SessionTable, s: ForensicScope = forensicScope(raw, t)): CheckResult {
+  const prompts = s.prompts();
   const tools = toolsOf(prompts);
   if (prompts.length === 0) return { id: "C10", status: "n/a", n: 0, reason: "no-data", values: {}, tools };
   const counts = new Map<string, number>();

@@ -1,6 +1,8 @@
 import { dayKey } from "../analysis/activity";
+import type { SessionTable } from "../analysis/types";
 import type { FileFactEv } from "../model/events";
 import type { ScanResult } from "../scan";
+import { forensicScope, type ForensicScope } from "./scope";
 import { toolsOf, type CheckResult } from "./types";
 
 /*
@@ -79,14 +81,15 @@ function bulkWindows(gapped: readonly FileFactEv[], total: number): { start: num
 }
 
 /**
- * C5 over every trace file's facts. A file violates when its mtime is more than 2 s before its last event, or its
+ * C5 over the trace files' facts in scope (`ForensicScope.files`: kept tools, and files whose events overlap the date
+ * range or that have no event times). A file violates when its mtime is more than 2 s before its last event, or its
  * ctime more than 24 h after its mtime — unless it is in the restore cluster or in a bulk-change window. Fewer than 5
  * files → n/a; at least max(2, 1% of the files) violating → fail; else a restore cluster → note with its local day
  * (`date`) in `timeZone`; else a bulk-change window → note with the largest window's local day (`date`) and its file
  * count (`bulkFiles`).
  */
-export function checkFileTimes(raw: ScanResult, o: { timeZone: string }): CheckResult {
-  const files = raw.store.all("file");
+export function checkFileTimes(raw: ScanResult, t: SessionTable, o: { timeZone: string }, s: ForensicScope = forensicScope(raw, t)): CheckResult {
+  const files = s.files();
   const tools = toolsOf(files);
   if (files.length < MIN_FILES) return { id: "C5", status: "n/a", n: files.length, reason: "too-few", values: {}, tools };
   const cluster = restoreCluster(files);

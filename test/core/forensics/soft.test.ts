@@ -227,6 +227,19 @@ describe("softFlags", () => {
       expect(f.status).toBe("pass");
     });
 
+    test("tools lists only the tools of entries that show use", () => {
+      const codexUnused = config({ tool: "codex", source: "codex.config", name: "n0", uses: 0 });
+      const f = flag([...artifacts(3, 0), codexUnused], "soft:new-config");
+      expect(f.tools).toEqual(["claude-code"]);
+      const codexUsed = config({ tool: "codex", source: "codex.config", name: "n0", uses: 1 });
+      expect(flag([...artifacts(3, 0), codexUsed], "soft:new-config").tools).toEqual(["claude-code", "codex"]);
+    });
+
+    test("an unused entry's first-seen time still counts for its artifact", () => {
+      const f = flag([...artifacts(3, 0), config({ name: "n0", uses: 0, firstSeen: NOW - 30 * DAY })], "soft:new-config");
+      expect(f.values).toEqual({ recent: 2, artifacts: 3 });
+    });
+
     test("older artifacts pass; unused ones and features are not counted", () => {
       expect(flag([config({ firstSeen: NOW - 8 * DAY })], "soft:new-config").status).toBe("pass");
       expect(flag([config({ uses: 0, firstSeen: NOW - DAY })], "soft:new-config").status).toBe("n/a");

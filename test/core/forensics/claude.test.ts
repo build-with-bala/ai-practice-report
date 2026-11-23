@@ -2,7 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { buildSessionTable } from "../../../core/analysis/sessions";
 import { checkAccount, checkClaudeHistory } from "../../../core/forensics/claude";
 import type { DailyEv, Ev, IdentityEv, PromptEv, SessionEv } from "../../../core/model/events";
+import type { ScanResult } from "../../../core/scan";
 import { scanResultOf } from "../../kit/scanresult";
+import { tableOf as tableOfRaw } from "./table";
+
+const accountOf = (raw: ScanResult) => checkAccount(raw, tableOfRaw(raw));
 
 const T0 = Date.UTC(2026, 9, 5, 9, 0);
 const MIN = 60_000;
@@ -177,7 +181,7 @@ const ident = (scope: IdentityEv["scope"], hash: string, sessionId?: string): Id
 
 describe("checkAccount (C4)", () => {
   test("matching hashes pass", () => {
-    const c = checkAccount(scanResultOf([ident("config", "a"), ident("session", "a", "s1"), ident("session", "a", "s2")]));
+    const c = accountOf(scanResultOf([ident("config", "a"), ident("session", "a", "s1"), ident("session", "a", "s2")]));
     expect(c.id).toBe("C4");
     expect(c.status).toBe("pass");
     expect(c.values).toEqual({ matchShare: 1, accounts: 1 });
@@ -185,22 +189,22 @@ describe("checkAccount (C4)", () => {
   });
 
   test("no match fails", () => {
-    const c = checkAccount(scanResultOf([ident("config", "a"), ident("session", "b", "s1")]));
+    const c = accountOf(scanResultOf([ident("config", "a"), ident("session", "b", "s1")]));
     expect(c.status).toBe("fail");
     expect(c.values.matchShare).toBe(0);
     expect(c.askAbout).toBeString();
   });
 
   test("2 session accounts are a note", () => {
-    const c = checkAccount(scanResultOf([ident("config", "a"), ident("session", "a", "s1"), ident("session", "b", "s2")]));
+    const c = accountOf(scanResultOf([ident("config", "a"), ident("session", "a", "s1"), ident("session", "b", "s2")]));
     expect(c.status).toBe("note");
     expect(c.values.accounts).toBe(2);
     expect(c.askAbout).toContain("2 ");
   });
 
   test("n/a when either side is missing", () => {
-    expect(checkAccount(scanResultOf([ident("config", "a")])).status).toBe("n/a");
-    expect(checkAccount(scanResultOf([ident("session", "a", "s1")])).status).toBe("n/a");
-    expect(checkAccount(scanResultOf([])).status).toBe("n/a");
+    expect(accountOf(scanResultOf([ident("config", "a")])).status).toBe("n/a");
+    expect(accountOf(scanResultOf([ident("session", "a", "s1")])).status).toBe("n/a");
+    expect(accountOf(scanResultOf([])).status).toBe("n/a");
   });
 });

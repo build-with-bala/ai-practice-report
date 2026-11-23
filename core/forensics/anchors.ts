@@ -1,5 +1,7 @@
+import type { SessionTable } from "../analysis/types";
 import type { AnchorEv } from "../model/events";
 import type { ScanResult } from "../scan";
+import { forensicScope, type ForensicScope } from "./scope";
 import { round, toolsOf, type CheckResult } from "./types";
 
 /*
@@ -218,9 +220,12 @@ function combine(rs: readonly CheckResult[]): CheckResult {
   return { ...out, values: { ...out.values, unverifiedKinds } };
 }
 
-/** C1 (ids linear in time) and C2 (id order vs time order) over Claude Code's anchors, per kind, then combined. */
-export function checkAnchors(raw: ScanResult): [CheckResult, CheckResult] {
-  const all = raw.store.all("anchor");
+/**
+ * C1 (ids linear in time) and C2 (id order vs time order) over Claude Code's anchors in scope (`ForensicScope.anchors`:
+ * kept tools, `ts` inside the date range), per kind, then combined.
+ */
+export function checkAnchors(raw: ScanResult, t: SessionTable, s: ForensicScope = forensicScope(raw, t)): [CheckResult, CheckResult] {
+  const all = s.anchors();
   const perKind = KINDS.map((k) => checkKind(all.filter((a) => a.kind === k)));
   return [combine(perKind.map((p) => p[0])), combine(perKind.map((p) => p[1]))];
 }
