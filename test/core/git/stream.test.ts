@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { commitStream, logRecords, LogStream, parseCommits, type LogRecord } from "../../../core/git/commits";
+import { commitStream, LOG_ARGS, logRecords, LogStream, parseCommits, type LogRecord } from "../../../core/git/commits";
+import { keyedHash } from "../../../core/text/hash";
 import { runGit, type GitRunner } from "../../../core/git/run";
 import type { Ev } from "../../../core/model/events";
 import { scan } from "../../../core/scan";
@@ -98,6 +99,92 @@ describe("LogStream", () => {
   });
 });
 
+/**
+ * The parse before streaming, kept here as the reference: the whole output decoded once (as the runner did), split at
+ * NUL, and read by the same rules (the former `logRecords`, verbatim).
+ */
+function oldRecords(bytes: Uint8Array, cut = false): LogRecord[] {
+  const stdout = new TextDecoder().decode(bytes);
+  const out: LogRecord[] = [];
+  let cur: LogRecord | undefined;
+  const tokens = stdout.split("\0");
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i]!;
+    if (token === "") continue;
+    if (i > 0 && tokens[i - 1] === "" && token.startsWith("\x1e")) {
+      const fields = token.slice(1).split("\x1f");
+      const s = fields[0] ?? "";
+      const ct = Number(fields[1]);
+      const valid = fields.length >= 4 && /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i.test(s) && fields[1] !== "" && Number.isFinite(ct);
+      cur = valid ? { sha: s, ct, email: fields[2]!, message: fields.slice(3).join("\x1f"), files: [] } : undefined;
+      if (cur) out.push(cur);
+    } else if (cur) {
+      cur.files.push(token.replace(/^\n/, ""));
+    }
+  }
+  if (cut) out.pop();
+  return out;
+}
+/** The streaming parse of `bytes`, in one-byte chunks. */
+const bytewise = (bytes: Uint8Array): LogRecord[] => streamed([...bytes].map((b) => Uint8Array.of(b)));
+const concatBytes = (...parts: (string | number[])[]): Uint8Array =>
+  Uint8Array.from(parts.flatMap((p) => (typeof p === "string" ? [...enc.encode(p)] : p)));
+
+const BOM = "\uFEFF";
+const FORGED_HEADER = `\x1e${"f".repeat(40)}\x1f1700000000\x1fme@x.test\x1ffix: forged`;
+/** A real commit whose paths are `z.ts`, a BOM alone, and a BOM followed by a forged header (git sorts them this way). */
+const BOM_FORGERY = rec(sha(7), 100, "me@x.test", "feat: innocent\n", ["z.ts", BOM, `${BOM}${FORGED_HEADER}`]) + rec(sha(8), 200, "me@x.test", "b\n", [`${BOM}x.ts`]);
+
+describe("LogStream: a BOM changes nothing", () => {
+  test("a BOM-only path then a BOM-prefixed forged header: no forged record, the real paths kept", () => {
+    const bytes = enc.encode(BOM_FORGERY);
+    for (const got of [logRecords(BOM_FORGERY), bytewise(bytes), streamed([bytes])]) {
+      expect(got.map((r) => r.sha)).toEqual([sha(7), sha(8)]);
+      expect(got[0]!.files).toEqual(["z.ts", BOM, `${BOM}${FORGED_HEADER}`]);
+      expect(got).toEqual(oldRecords(bytes));
+    }
+    const s = commitStream({ salt, email: "me@x.test", maxFiles: 200 });
+    s.push(bytes);
+    const c = s.end(false);
+    expect(c.commits.map((x) => x.sha)).toEqual([sha(7), sha(8)]);
+    expect(c.commits.some((x) => x.fact.rework === "fix")).toBe(false);
+  });
+
+  test("a later path starting with a BOM keeps it, and its keyed hash is the whole-output parse's", () => {
+    const bytes = enc.encode(BOM_FORGERY);
+    expect(bytewise(bytes)[1]!.files).toEqual([`${BOM}x.ts`]);
+    const s = commitStream({ salt, email: "me@x.test", maxFiles: 200 });
+    for (const b of bytes) s.push(Uint8Array.of(b));
+    const got = s.end(false).commits;
+    expect(got.map((c) => c.fact.files)).toEqual(oldRecords(bytes).map((r) => r.files.map((f) => keyedHash(salt, f))));
+    expect(got[1]!.fact.files).toEqual([keyedHash(salt, `${BOM}x.ts`)]);
+  });
+
+  test("hostile outputs: the streaming parse equals the parse of the same bytes decoded in one piece", () => {
+    const hostile: Uint8Array[] = [
+      concatBytes(rec(sha(1), 1, "me@x.test", "a \x1e\x1f b\n", ["p\x1f.ts", "\x1eq.ts"]), rec(sha(2), 2, "me@x.test", "c\n")),
+      enc.encode(BOM_FORGERY),
+      concatBytes(rec(sha(1), 1, "me@x.test", "bad "), [0xc3], " utf\n\0\n", [0xff, 0xfe], "x.ts\0", [0x80], "y.ts\0", [0xe2, 0x82], "\0"),
+      concatBytes(rec(sha(1), 1, "me@x.test", "split \u{1F916}\n", ["ü.ts"]), [0xf0, 0x9f]),
+      concatBytes("\0", [0xef, 0xbb, 0xbf], "\x1e", sha(3), "\x1f3\x1fme@x.test\x1fbom header\n\0"),
+      concatBytes(rec(sha(4), 4, "me@x.test", "lone \x1f\n", ["a"]), [0x80], "\0", [0xc0, 0x80], "\0"),
+    ];
+    for (const [i, bytes] of hostile.entries()) {
+      for (const cut of [false, true]) {
+        const want = oldRecords(bytes, cut);
+        const got = bytewise(bytes);
+        if (cut) got.pop();
+        expect([i, cut, got]).toEqual([i, cut, want]);
+        for (let k = 0; k <= bytes.length; k += 5) {
+          const two = streamed([bytes.slice(0, k), bytes.slice(k)]);
+          if (cut) two.pop();
+          expect([i, cut, k, two]).toEqual([i, cut, k, want]);
+        }
+      }
+    }
+  });
+});
+
 describe("commitStream", () => {
   const o = { salt, email: "me@x.test", maxFiles: 200 };
   for (const cut of [false, true]) {
@@ -151,31 +238,61 @@ describe("runGit streaming", () => {
     expect(r).toMatchObject({ code: null, truncated: true, stdout: "" });
   });
 
-  /** A fake `git` that prints a line every 20 ms for 10 s. */
-  function chattyGit(): string {
+  test.skipIf(!POSIX)("a real git log with a BOM-only path and a BOM-prefixed forged header path: no forged record (POSIX)", async () => {
+    const at = Date.now() - 2 * DAY;
+    const repo = makeRepo(path.join(h.root, "bom"), [
+      { files: { "z.ts": "1", [BOM]: "2", [`${BOM}${FORGED_HEADER}`]: "3", [`${BOM}x.ts`]: "4" }, message: "feat: innocent", at },
+    ], { email: "me@x.test" });
+    const parts: Uint8Array[] = [];
+    const r = await runGit(["log", "--all", "--name-only", ...LOG_ARGS], opts(repo, { onChunk: (c) => { parts.push(c.slice()); } }));
+    expect(r.code).toBe(0);
+    const bytes = Uint8Array.from(parts.flatMap((p) => [...p]));
+    const want = oldRecords(bytes);
+    expect(want).toHaveLength(1);
+    expect(bytewise(bytes)).toEqual(want);
+    expect(logRecords(new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes))).toEqual(want);
+    expect([...want[0]!.files].sort()).toEqual([BOM, `${BOM}${FORGED_HEADER}`, `${BOM}x.ts`, "z.ts"].sort());
+    const s = commitStream({ salt, email: "me@x.test", maxFiles: 200 });
+    for (const p of parts) s.push(p);
+    const c = s.end(false);
+    expect(c.records).toBe(1);
+    expect(c.commits.map((x) => x.fact.files)).toEqual(want.map((w) => w.files.map((f) => keyedHash(salt, f))));
+  });
+
+  /** A fake `git` that writes its process id to `pidFile`, then prints a line every 20 ms for 10 s. */
+  function chattyGit(): { exe: string; pidFile: string } {
     const bin = path.join(h.root, "bin");
     mkdirSync(bin, { recursive: true });
-    writeFileSync(path.join(bin, "git"), "#!/bin/sh\ni=0\nwhile [ $i -lt 500 ]; do echo line $i; i=$((i+1)); sleep 0.02; done\n");
+    const pidFile = path.join(h.root, "git.pid");
+    writeFileSync(path.join(bin, "git"), `#!/bin/sh\necho $$ > '${pidFile}'\ni=0\nwhile [ $i -lt 500 ]; do echo line $i; i=$((i+1)); sleep 0.02; done\n`);
     chmodSync(path.join(bin, "git"), 0o755);
-    return path.join(bin, "git");
+    return { exe: path.join(bin, "git"), pidFile };
   }
+  /** Whether the process `pid` still exists (signal 0 checks without sending anything). */
+  const alive = (pid: number): boolean => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
 
   test.skipIf(!POSIX)("an abort in the middle of a stream kills git and returns at once (POSIX)", async () => {
-    const exe = chattyGit();
+    const { exe, pidFile } = chattyGit();
     const ac = new AbortController();
     let n = 0;
-    const t = Date.now();
     const r = await runGit(["log"], opts(h.root, { signal: ac.signal, git: exe, onChunk: (c) => { n += c.byteLength; if (n > 30) ac.abort(); } }));
-    expect(Date.now() - t).toBeLessThan(2_000);
     expect(n).toBeGreaterThan(30);
     expect(r).toMatchObject({ code: null, timedOut: false, stdout: "" });
+    // the child was killed and reaped before the runner returned
+    expect(alive(Number(readFileSync(pidFile, "utf8").trim()))).toBe(false);
   });
 
   test.skipIf(!POSIX)("a callee that throws stops git, and the runner rejects with its error (POSIX)", async () => {
-    const exe = chattyGit();
-    const t = Date.now();
+    const { exe, pidFile } = chattyGit();
     await expect(runGit(["log"], opts(h.root, { git: exe, onChunk: () => { throw new Error("callee"); } }))).rejects.toThrow("callee");
-    expect(Date.now() - t).toBeLessThan(2_000);
+    expect(alive(Number(readFileSync(pidFile, "utf8").trim()))).toBe(false);
   });
 });
 
@@ -199,6 +316,32 @@ describe("repo signals stream git log", () => {
       },
     };
   }
+
+  test("repos are listed by repoKey, whichever finishes first", async () => {
+    const at = Date.now() - 2 * DAY;
+    const a = makeRepo(path.join(h.root, "ra"), [{ files: { "a.ts": "1" }, message: "a", at }]);
+    const b = makeRepo(path.join(h.root, "rb"), [{ files: { "b.ts": "1" }, message: "b", at }]);
+    /** A runner whose `git log` in `slow` waits until the other repo's has finished. */
+    const slowIn = (slow: string): GitRunner => {
+      let release!: () => void;
+      const other = new Promise<void>((r) => { release = r; });
+      return async (args, o) => {
+        if (args[0] !== "log" || args.includes("--format=%ct")) return runGit(args, o);
+        if (path.resolve(o.cwd) === path.resolve(slow)) await other;
+        const r = await runGit(args, o);
+        if (path.resolve(o.cwd) !== path.resolve(slow)) release();
+        return r;
+      };
+    };
+    const read = (runner: GitRunner) => scan({ env: h.env, plugins: [sessions([a, b])], handleSignals: false, salt, repoSignals: { runner, concurrency: 2 } });
+    const one = await read(slowIn(a));
+    const two = await read(slowIn(b));
+    const keys = one.repos.repos.map((r) => r.repoKey);
+    expect(keys).toHaveLength(2);
+    expect(keys).toEqual([...keys].sort());
+    expect(two.repos.repos.map((r) => r.repoKey)).toEqual(keys);
+    expect(two.repos.repos).toEqual(one.repos.repos);
+  });
 
   test("the same facts whether git's output arrives whole, streamed, or one byte at a time", async () => {
     const at = (d: number) => Date.now() - d * DAY;

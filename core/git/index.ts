@@ -161,6 +161,8 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
   const result = (status: RepoSignals["status"]): RepoSignals => {
     clearTimeout(timer);
     assignOwners(read);
+    // repos finish in any order when several are read at once: the result lists them by repoKey
+    repos.sort((a, b) => (a.repoKey < b.repoKey ? -1 : a.repoKey > b.repoKey ? 1 : 0));
     const out: RepoSignals = { status, repos, roots, skipped, ms: Date.now() - started };
     if (since !== undefined) out.since = since;
     return out;

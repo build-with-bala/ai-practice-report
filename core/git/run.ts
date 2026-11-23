@@ -147,6 +147,9 @@ async function run(args: readonly string[], o: Parameters<GitRunner>[1], env: Re
       for (;;) {
         const { done, value } = await reader.read();
         if (done || stopped) break;
+        // counted by the backing buffer: this assumes the runtime gives each read a buffer of its own (the current
+        // one does, 256 KiB at the time of writing). Were the buffer a shared pool, its size would overstate the read,
+        // which only brings collections sooner, never later
         STREAM_GC.add(Math.max(value.byteLength, value.buffer.byteLength));
         const room = o.maxBytes - size;
         if (value.byteLength > room) {

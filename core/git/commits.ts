@@ -136,7 +136,14 @@ const NUL = 0;
  * NUL, so `logRecords` (the whole-output form) and the stream agree byte for byte.
  */
 export class LogStream {
-  private readonly decoder = new TextDecoder();
+  /**
+   * Each token is decoded on its own, so the decoder must change nothing a single decode of the whole output would not:
+   * `ignoreBOM`, since a non-streaming decode would strip a leading U+FEFF from every token (a BOM-only path would read
+   * as an empty token, and a BOM-prefixed path as a header). The output itself never starts with a BOM (its first byte
+   * is NUL). A token ends at a NUL, which is never inside a UTF-8 sequence, so invalid or unfinished sequences decode to
+   * the same U+FFFD per token as in the whole; a character split across chunks is decoded only once its token is whole.
+   */
+  private readonly decoder = new TextDecoder("utf-8", { ignoreBOM: true });
   private pending: Uint8Array[] = [];
   private pendingBytes = 0;
   private tokens = 0;
