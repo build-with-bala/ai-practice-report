@@ -61,10 +61,33 @@ describe("ledgerRuleSvg", () => {
     }
   });
 
-  test("scores and intervals are clamped to the scale", () => {
-    const s = ledgerRuleSvg(row({ score: 104, interval: [-3, 120] }));
+  test("scores and intervals are clamped to the scale, and the text says what the marks show", () => {
+    const r = row({ score: 104, interval: [-3, 120] });
+    const s = ledgerRuleSvg(r);
     expect(s).toContain("M392 7L397 12L392 17L387 12Z");
     expect(s).toContain("M8 12H392M8 8V16M392 8V16");
+    const out = ledger([{ label: "g", rows: [r] }]);
+    expect(out).toContain('<span class="t-mono-16">100</span>');
+    expect(out).toContain(">[0–100]</span>");
+  });
+
+  test("the mark sits at the rounded score the text prints (pre-flight H1)", () => {
+    const r = row({ score: 70.6 });
+    expect(ledgerRuleSvg(r)).toContain('d="M280.64 7L285.64 12L280.64 17L275.64 12Z"');
+    expect(ledger([{ label: "g", rows: [r] }])).toContain('<span class="t-mono-16">71</span>');
+  });
+
+  test("interval endpoints are sorted once, for drawing and text alike", () => {
+    const r = row({ interval: [78, 63] });
+    expect(ledgerRuleSvg(r)).toContain("M249.92 12H307.52");
+    const out = ledger([{ label: "g", rows: [r] }]);
+    expect(out).toContain(">[63–78]</span>");
+    expect(out).toContain('aria-label="Leverage 71, interval 63 to 78, high confidence"');
+  });
+
+  test("a scored row without a score is a named error", () => {
+    expect(() => ledgerRuleSvg(row({ score: null }))).toThrow('ledger: row "leverage" is scored but has no finite score');
+    expect(() => ledger([{ label: "g", rows: [row({ score: Number.NaN })] }])).toThrow("is scored but has no finite score");
   });
 
   test("placement: x, y and width go on the nested svg; it holds no HTML element", () => {
@@ -116,14 +139,20 @@ describe("ledger", () => {
       .toContain('aria-label="Leverage 97, interval 90 to 100 or above, high confidence"');
   });
 
-  test("insufficient with a note: the hatch, no diamond, the note in place of the score", () => {
+  test("insufficient with a note: the hatch, no diamond, a short token for the value and the note on its own line", () => {
     const note = "insufficient (n=12, needs 60) — not enough data yet";
     const out = ledger([group([row({ status: "insufficient", score: null, interval: null, confidence: null, note })])]);
     expect(out).toContain('class="m-hatch"');
     expect(out).not.toContain("L285.64 12");
-    expect(out).toContain(`<span class="ledger-row__value ledger-row__note t-mono-14">${note}</span>`);
+    expect(out).toContain('<span class="ledger-row__value t-mono-14 c-muted">n=12/60</span>');
+    expect(out).toContain(`<span class="ledger-row__note t-mono-14">${note}</span>`);
     expect(out).toContain('class="ledger-row ledger-row--unscored"');
     expect(out).toContain(`aria-label="Leverage, ${note}"`);
+  });
+
+  test("an unscored row whose note gives no counts shows — as its value", () => {
+    const out = ledger([group([row({ status: "not-measured", score: null, interval: null, confidence: null, note: "not measured: no hook data" })])]);
+    expect(out).toContain('<span class="ledger-row__value t-mono-14 c-muted">—</span>');
   });
 
   test("not measured: the note, no diamond", () => {
@@ -134,25 +163,32 @@ describe("ledger", () => {
 
   test("not scored and no note: the status, said plainly", () => {
     const out = ledger([group([row({ status: "not-measurable", score: null, interval: null, confidence: null })])]);
-    expect(out).toContain(">not measurable here</span>");
+    expect(out).toContain('<span class="ledger-row__note t-mono-14">not measurable here</span>');
+  });
+
+  test("a row with no components is a plain row, not a disclosure with nothing in it", () => {
+    const out = ledger([group([row({ components: [] })])]);
+    expect(out).not.toContain("<details");
+    expect(out).not.toContain("<summary");
+    expect(out).toContain('<div class="ledger-row" id="ledger-leverage"><div class="ledger-row__line" role="group" aria-label="Leverage 71, interval 63 to 78, high confidence">');
   });
 
   test("components: one table row each, z through fmt.signed, weights as shares, and their cites", () => {
     const tbody = one.slice(one.indexOf("<tbody>"), one.indexOf("</tbody>"));
     expect(tbody.match(/<tr>/g)?.length).toBe(2);
-    expect(tbody).toContain(`<td class="num">${fmt.signed(1.234)}</td>`);
-    expect(tbody).toContain(`<td class="num">${fmt.signed(-0.5)}</td>`);
-    expect(tbody).toContain('<td class="num">60%</td>');
+    expect(tbody).toContain(`<td class="num" data-label="z">${fmt.signed(1.234)}</td>`);
+    expect(tbody).toContain(`<td class="num" data-label="z">${fmt.signed(-0.5)}</td>`);
+    expect(tbody).toContain('<td class="num" data-label="weight">60%</td>');
     expect(tbody).toContain(cite("ex-a", "Ex. A") + " " + cite("ex-b", "Ex. B"));
     expect(tbody).toContain("<td>Parallel sessions</td>");
     expect(tbody).toContain('<td class="num">2.4 at once</td>');
-    expect(tbody).toContain('<td class="num">48</td>');
+    expect(tbody).toContain('<td class="num" data-label="n">48</td>');
   });
 
   test("a component that is not ok shows its status, and a null z shows —", () => {
     const out = ledger([group([row({ components: [comp({ id: "c", status: "not-measurable", value: "", z: null, n: 0 })] })])]);
     expect(out).toContain('<td class="num">not measurable here</td>');
-    expect(out).toContain('<td class="num">—</td>');
+    expect(out).toContain('<td class="num" data-label="z">—</td>');
   });
 
   test("labels, notes, values and cite ids are escaped", () => {

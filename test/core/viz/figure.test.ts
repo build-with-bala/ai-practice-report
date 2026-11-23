@@ -18,8 +18,12 @@ describe("figure", () => {
     expect(out.startsWith('<figure class="exhibit" id="ex-c" aria-labelledby="ex-c-t">')).toBe(true);
     expect(out).toContain('<header class="exhibit__head"><span class="exhibit__letter t-mono-12">Ex. C</span>'
       + `<h3 class="${displayText("Verification loop", 20)}" id="ex-c-t">Verification loop</h3>`
-      + '<span class="exhibit__tag t-mono-12">Detail · n=412</span></header>');
+      + '<span class="exhibit__tag t-mono-12">Detail · <span class="keep-case">n</span>=412</span></header>');
     expect(out.endsWith("</figure>")).toBe(true);
+  });
+
+  test("the statistical n stays lower-case in a caps tag; words are left to the caps", () => {
+    expect(figure({ ...F, tag: "n=3 · Lifetime · min=2" })).toContain('<span class="exhibit__tag t-mono-12"><span class="keep-case">n</span>=3 · Lifetime · min=2</span>');
   });
 
   test("the body, then exactly one figcaption", () => {

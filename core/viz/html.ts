@@ -25,6 +25,14 @@ export function cite(id: string, label: string): string {
   return `<button type="button" class="cite"${attr("data-cite", id)} aria-pressed="false">${esc(label)}</button>`;
 }
 
+/**
+ * Text for a caps role (`tag`, `t-mono-12`), escaped, with each statistical `n` before `=` wrapped in
+ * `<span class="keep-case">` so it stays lower-case: `DETAIL · n=412`. Caps apply to words only.
+ */
+export function capsText(s: string): string {
+  return esc(s).replace(/(^|[^A-Za-z0-9_])n(?==)/g, '$1<span class="keep-case">n</span>');
+}
+
 const JSON_ESC: Readonly<Record<string, string>> = { "<": "\\u003c", ">": "\\u003e", "&": "\\u0026", "\u2028": "\\u2028", "\u2029": "\\u2029" };
 
 /**

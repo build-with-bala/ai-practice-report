@@ -19,9 +19,9 @@ import { PRINT_SCALE_PT, SPACE, THEMES, TYPE_SCALE, type ColorToken, type ThemeN
  *   and `mw-888` (`data-print="fit"` lets a marks-only SVG scale to the printed column), `kit-defs` and `kit-hatch-line` (the hatch pattern's stroke), `print-footer`, `icon`;
  * - components `exhibit` (`exhibit__head`, `exhibit__letter`, `exhibit__tag`, `exhibit__note`, `exhibit__placeholder`,
  *   `exhibit--thin`, `exhibit--empty`, `is-cited`), `cite`, `ledger` (`ledger-group`, `ledger-row`, `ledger-row--unscored`,
- *   `ledger-row__label`, `__rule`, `__value`, `__interval`, `__note`, `__dots`, `__window`, `ledger-components`,
+ *   `ledger-row__line`, `ledger-row__label`, `__rule`, `__value`, `__interval`, `__note`, `__dots`, `__window`, `ledger-components`,
  *   `ledger-legend`), `seal` (`seal--struck|provisional|flagged` on the seal's <svg>, `seal-ring`, `seal-disc`, `seal-text`,
- *   `seal-band`, `seal-outline`, `seal-ringtext`, `seal__meta`, `seal__interval`), `tree`, `dots`, `tag`.
+ *   `seal-band`, `seal-outline`, `seal-dash`, `seal-ringtext`, `seal__meta`, `seal__interval`), `tree`, `dots`, `tag`, `keep-case`.
  */
 
 /**
@@ -40,11 +40,11 @@ export const KIT_CLASSES: readonly string[] = [
   "page", "layout", "rail", "chapter-bar", "masthead", "kit-controls", "chapter", "skip-link", "scroll-x", "mw-960", "mw-888",
   "kit-defs", "kit-hatch-line", "print-footer", "no-margin-boxes", "icon",
   // components
-  "num", "tag", "dots", "cite",
+  "num", "tag", "keep-case", "dots", "cite",
   "exhibit", "exhibit__head", "exhibit__letter", "exhibit__tag", "exhibit__note", "exhibit__placeholder", "exhibit--thin", "exhibit--empty", "is-cited",
   "ledger", "ledger-group", "ledger-row", "ledger-row--unscored", "ledger-row__label", "ledger-row__rule", "ledger-row__value",
-  "ledger-row__interval", "ledger-row__note", "ledger-row__dots", "ledger-row__window", "ledger-components", "ledger-legend",
-  "seal", "seal--struck", "seal--provisional", "seal--flagged", "seal-ring", "seal-disc", "seal-text", "seal-band", "seal-outline",
+  "ledger-row__line", "ledger-row__interval", "ledger-row__note", "ledger-row__dots", "ledger-row__window", "ledger-components", "ledger-legend",
+  "seal", "seal--struck", "seal--provisional", "seal--flagged", "seal-ring", "seal-disc", "seal-text", "seal-band", "seal-outline", "seal-dash",
   "seal-ringtext", "seal__meta", "seal__interval",
   "tree",
 ];
@@ -196,6 +196,8 @@ function components(): string[] {
   return [
     // tags, dots, cites
     rule(".tag", [...MONO_12_CAPS, `color:${v("faint")}`]),
+    // Inside caps text, a symbol that must keep its case (the statistical n); see `capsText`.
+    rule(".keep-case", ["text-transform:none"]),
     rule(".dots", ["display:inline-flex", "gap:3px", "vertical-align:middle"]),
     // A cite (a button, see `cite` in html.ts) is neutral; the exhibit it points at takes the goldHi outline (`is-cited`), and focus the goldHi ring.
     rule(".cite", [`color:${v("ink")}`, "text-decoration:none", `border-bottom:1px solid ${v("axis")}`]),
@@ -218,7 +220,8 @@ function components(): string[] {
     // assay ledger
     rule(".ledger", ["display:grid", "grid-template-columns:minmax(0,1fr)", "gap:var(--s3)"]),
     rule(".ledger-group>h3,.ledger-group>.tag", ["margin:var(--s5) 0 var(--s2)"]),
-    rule(".ledger-row>summary", ["display:grid", "grid-template-columns:minmax(0,160px) minmax(0,1fr) 128px 36px 64px",
+    // A row's line is its <summary>, or, for a row with no components, a plain `.ledger-row__line`.
+    rule(".ledger-row>summary,.ledger-row>.ledger-row__line", ["display:grid", "grid-template-columns:minmax(0,160px) minmax(0,1fr) 128px 36px 64px",
       "grid-template-areas:\"label rule value dots window\"", "align-items:center", "gap:var(--s4)", "padding:var(--s1) 0"]),
     rule(".ledger-row__label", ["grid-area:label"]),
     // The rule has no text, so it scales freely with its column (viewBox 400 × 24, aspect kept).
@@ -228,9 +231,9 @@ function components(): string[] {
     rule(".ledger-row__interval", [`color:${v("muted")}`]),
     rule(".ledger-row__dots", ["grid-area:dots", "display:block"]),
     rule(".ledger-row__window", ["grid-area:window", "text-align:right"]),
-    // A row that is not scored: the note takes the score's place and the dots' column.
-    rule(".ledger-row--unscored>summary", ["grid-template-areas:\"label rule value value window\""]),
-    rule(".ledger-row__note", ["white-space:normal", `color:${v("muted")}`]),
+    // A row that is not scored: a short token for the value, and the full note on its own line under the rule.
+    rule(".ledger-row--unscored>summary,.ledger-row--unscored>.ledger-row__line", ["grid-template-areas:\"label rule value dots window\" \". note note note note\"", "row-gap:0"]),
+    rule(".ledger-row__note", ["grid-area:note", `color:${v("muted")}`]),
     rule(".ledger-row[open]>summary,.ledger-row>summary:hover", [`background:${v("raised")}`]),
     rule(".ledger-components", ["margin:var(--s2) 0 var(--s4)", "overflow-x:auto", "overscroll-behavior-x:contain"]),
     rule(".ledger-legend", ["display:flex", "flex-wrap:wrap", "align-items:center", "gap:var(--s2) var(--s5)", "margin-bottom:var(--s4)", ...MONO_12_CAPS, `color:${v("faint")}`]),
@@ -250,6 +253,9 @@ function components(): string[] {
     rule("svg.seal--struck", ["animation:kit-strike 420ms cubic-bezier(.2,.8,.2,1)", "transform-origin:50% 50%"]),
     // Provisional: nothing is struck, so the disc stays open and the numerals are drawn as an outline.
     rule(".seal--provisional .seal-outline", ["fill:none", "stroke:currentColor", "stroke-width:1"]),
+    // A missing score: a short solid hairline where the numerals would be.
+    rule(".seal-dash", ["fill:none", "stroke:currentColor", "stroke-width:1.5"]),
+    rule(".seal--struck .seal-dash", [`stroke:${v("onAccent")}`]),
     rule(".seal--flagged", [`color:${v("vermilion")}`]),
     rule(".seal__meta", ["display:grid", "justify-items:center", "gap:var(--s1)", `color:${v("muted")}`]),
     rule(".seal__interval", [`color:${v("ink")}`]),
@@ -267,9 +273,23 @@ function components(): string[] {
       rule(".page", ["padding:0 var(--s4) var(--s8)"]),
       rule(".chapter + .chapter", ["margin-top:var(--s8)"]),
       // Ledger rows stack: label, value and dots above; the rule with the window tag below.
-      rule(".ledger-row>summary", ["grid-template-columns:minmax(0,1fr) auto 72px", "grid-template-areas:\"label value dots\" \"rule rule window\"",
-        "gap:var(--s1) var(--s3)"]),
-      rule(".ledger-row--unscored>summary", ["grid-template-areas:\"label label label\" \"value value value\" \"rule rule window\""]),
+      rule(".ledger-row>summary,.ledger-row>.ledger-row__line", ["grid-template-columns:minmax(0,1fr) auto 72px",
+        "grid-template-areas:\"label value dots\" \"rule rule window\"", "gap:var(--s1) var(--s3)"]),
+      rule(".ledger-row--unscored>summary,.ledger-row--unscored>.ledger-row__line", ["grid-template-areas:\"label value value\" \"rule rule window\" \"note note note\"", "row-gap:var(--s1)"]),
+      // Components stack: label and weight, then value, z and n, then the evidence. The head stays for assistive technology.
+      rule(".ledger-components thead", ["position:absolute", "width:1px", "height:1px", "overflow:hidden", "clip:rect(0 0 0 0)", "white-space:nowrap"]),
+      rule(".ledger-components tr", ["display:grid", "grid-template-columns:minmax(0,1fr) auto auto",
+        "grid-template-areas:\"label label weight\" \"value z n\" \"cites cites cites\"", "gap:var(--s1) var(--s4)", "padding:var(--s2) var(--s3)",
+        `border-bottom:1px solid ${v("rule")}`]),
+      rule(".ledger-components td", ["display:block", "padding:0", "border:0"]),
+      rule(".ledger-components td:nth-child(1)", ["grid-area:label"]),
+      rule(".ledger-components td:nth-child(2)", ["grid-area:weight"]),
+      rule(".ledger-components td:nth-child(3)", ["grid-area:value", "text-align:left"]),
+      rule(".ledger-components td:nth-child(4)", ["grid-area:z"]),
+      rule(".ledger-components td:nth-child(5)", ["grid-area:n"]),
+      rule(".ledger-components td:nth-child(6)", ["grid-area:cites"]),
+      rule(".ledger-components td:nth-child(6):empty", ["display:none"]),
+      rule(".ledger-components td[data-label]::before", ["content:attr(data-label) \" \"", `color:${v("faint")}`]),
       rule(".ledger-row__dots", ["justify-self:end"]),
       rule(".exhibit__tag", ["margin-left:0"]),
       rule(".seal>svg", ["width:144px", "height:144px"]),
@@ -334,6 +354,7 @@ function print(footerLeft: string): string[] {
       // Only a marks-only SVG may scale to the column; a chart with text keeps its size and Task 7 gives it a print layout.
       rule('.scroll-x[data-print="fit"]>svg', ["min-width:0", "width:100%"]),
       rule(".seal>svg", ["width:48mm", "height:48mm", "animation:none"]),
+      rule("svg.seal--struck", ["animation:none"]),
       rule("html.no-margin-boxes .print-footer", ["display:flex", "position:fixed", "left:0", "right:0", "bottom:0",
         "justify-content:space-between", ...box]),
     ]),

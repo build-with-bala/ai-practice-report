@@ -254,3 +254,29 @@ describe("seal states", () => {
     expect(ruleOf(".seal--flagged")).toBe("color:var(--vermilion)");
   });
 });
+
+describe("fix round 1: print, the seal dash, keep-case and the stacked components table", () => {
+  const printBlock = css.slice(css.indexOf("@media print{"));
+  const mobile = css.slice(css.indexOf("@media (max-width:639px){"), css.indexOf("}}", css.indexOf("@media (max-width:639px){")) + 2);
+
+  test("a bare struck seal does not animate in print", () => {
+    expect(printBlock).toContain("svg.seal--struck{animation:none}");
+  });
+
+  test("the missing-score dash is a stroke in the seal's colour, onAccent on a struck disc", () => {
+    expect(ruleOf(".seal-dash")).toBe("fill:none;stroke:currentColor;stroke-width:1.5");
+    expect(ruleOf(".seal--struck .seal-dash")).toBe("stroke:var(--on-accent)");
+  });
+
+  test("keep-case undoes the caps transform", () => {
+    expect(ruleOf(".keep-case")).toBe("text-transform:none");
+  });
+
+  test("below 640 px each component stacks: label and weight, then value, z and n, then the evidence; the head is hidden visually only", () => {
+    expect(mobile).toContain(".ledger-components tr{display:grid");
+    expect(mobile).toContain('grid-template-areas:"label label weight" "value z n" "cites cites cites"');
+    expect(mobile).toContain(".ledger-components td[data-label]::before{content:attr(data-label)");
+    expect(mobile).toMatch(/\.ledger-components thead\{position:absolute;[^}]*clip:rect\(0 0 0 0\)/);
+    expect(mobile).not.toMatch(/\.ledger-components thead\{[^}]*display:none/);
+  });
+});

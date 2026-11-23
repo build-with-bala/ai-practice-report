@@ -93,7 +93,7 @@ class Target {
  * A page with a theme toggle, two cite buttons, a link that carries data-cite, two exhibits, two closed details and one
  * closed details under `[data-print="skip"]`. A key press on a button is followed by the click the browser makes of it.
  */
-function boot(o: { saved?: string; prefersLight?: boolean } = {}) {
+function boot(o: { saved?: string; prefersLight?: boolean; userAgent?: string } = {}) {
   const html = new FakeElement("html");
   html.setAttribute("data-theme", "auto");
   const el = (tag: string, attrs: Record<string, string> = {}): FakeElement => {
@@ -125,7 +125,7 @@ function boot(o: { saved?: string; prefersLight?: boolean } = {}) {
   win.matchMedia = () => ({ matches: o.prefersLight === true, addEventListener() {} });
   let prints = 0;
   win.print = () => { prints++; };
-  run(doc, win, { userAgent: "Fake/1.0" }, FakeElement);
+  run(doc, win, { userAgent: o.userAgent ?? "Fake/1.0" }, FakeElement);
 
   const click = (t: FakeElement) => doc.fire("click", { target: t });
   /** A key press on a button: the runtime sees the keydown, then the browser's own click of the button. */
@@ -218,6 +218,16 @@ describe("KIT_RUNTIME behaviour: print", () => {
     p.win.fire("afterprint");
     expect([p.html.getAttribute("data-theme"), p.d1.open, p.d2.open]).toEqual(["auto", false, false]);
     expect(p.html.classList.contains("no-margin-boxes")).toBe(false);
+  });
+
+  test("Chromium 131 or later prints its own margin boxes: no-margin-boxes is not added; Chromium 130 gets it", () => {
+    const ua = (v: number) => `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${v}.0.0.0 Safari/537.36`;
+    const p131 = boot({ userAgent: ua(131) });
+    p131.win.fire("beforeprint");
+    expect([p131.html.getAttribute("data-theme"), p131.html.classList.contains("no-margin-boxes")]).toEqual(["paper", false]);
+    const p130 = boot({ userAgent: ua(130) });
+    p130.win.fire("beforeprint");
+    expect(p130.html.classList.contains("no-margin-boxes")).toBe(true);
   });
 
   test("a details the reader had open stays open after the print", () => {

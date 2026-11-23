@@ -1,5 +1,5 @@
 import { fmt } from "./fmt";
-import { attr, cite, esc } from "./html";
+import { attr, capsText, cite, esc } from "./html";
 import type { LedgerComponent, LedgerGroup, LedgerRow } from "./types";
 
 /*
@@ -25,22 +25,36 @@ const REF = `<path class="m-ref" d="M${n(x(50))} 4V20"/>`;
 const TAIL = '<path class="m-solid" d="M392 8L400 12L392 16Z"/>';
 const HATCH = '<rect class="m-hatch" x="8" y="8" width="384" height="8"/>';
 
-const scored = (r: LedgerRow): r is LedgerRow & { score: number } => r.status === "scored" && r.score !== null && Number.isFinite(r.score);
+/** A scored row's values as drawn and printed: the score rounded and clamped, the interval sorted, rounded and clamped. */
+interface Resolved { score: number; interval: readonly [number, number] | null }
+
+/**
+ * The one place a row's numbers are fixed, so the mark and the text always agree: a score of 70.6 prints "71" and sits
+ * at x(71); `[78, 63]` reads 63–78. Null for a row that is not scored; a scored row without a finite score throws.
+ */
+function resolve(r: LedgerRow): Resolved | null {
+  if (r.status !== "scored") return null;
+  if (r.score === null || !Number.isFinite(r.score)) throw new Error(`ledger: row "${r.id}" is scored but has no finite score`);
+  const fix = (v: number): number => Math.round(clamp(v));
+  const iv = r.interval === null ? null : ([fix(Math.min(...r.interval)), fix(Math.max(...r.interval))] as const);
+  return { score: fix(r.score), interval: iv };
+}
 
 /** One row's rule as a nested `<svg viewBox="0 0 400 24">`, pure SVG; `ledger()` and the share card both use it (pre-flight F15). */
 export function ledgerRuleSvg(row: LedgerRow, o: { x?: number; y?: number; width?: number } = {}): string {
+  const v = resolve(row);
   const place = (o.x === undefined ? "" : attr("x", n(o.x))) + (o.y === undefined ? "" : attr("y", n(o.y)))
     + (o.width === undefined ? "" : attr("width", n(o.width)) + attr("height", n((o.width * 24) / 400)));
   let marks = `<path class="m-axis" d="${AXIS}"/>${REF}`;
-  if (!scored(row)) {
+  if (v === null) {
     marks += HATCH;
   } else {
-    if (row.interval !== null) {
-      const lo = n(x(Math.min(row.interval[0], row.interval[1])));
-      const hi = n(x(Math.max(row.interval[0], row.interval[1])));
+    if (v.interval !== null) {
+      const lo = n(x(v.interval[0]));
+      const hi = n(x(v.interval[1]));
       marks += `<path class="m-solid m-stroke" stroke-width="2" d="M${lo} 12H${hi}M${lo} 8V16M${hi} 8V16"/>`;
     }
-    const cx = x(row.score);
+    const cx = x(v.score);
     const mark = row.confidence === "low" ? "m-hollow" : "m-solid";
     marks += `<path class="${mark}" d="M${n(cx)} 7L${n(cx + 5)} 12L${n(cx)} 17L${n(cx - 5)} 12Z"/>`;
     if (row.openTail) marks += TAIL;
@@ -72,33 +86,46 @@ const STATUS_TEXT: Readonly<Record<Exclude<LedgerRow["status"], "scored"> | Excl
   "not-measured": "not measured",
 };
 
-/** The row's reading as text: "Leverage 71, interval 63 to 78, high confidence". */
-function reading(r: LedgerRow): string {
-  if (!scored(r)) return `${r.label}, ${r.note ?? STATUS_TEXT[r.status as Exclude<LedgerRow["status"], "scored">]}`;
-  const parts = [`${r.label} ${fmt.score(r.score)}`];
-  if (r.interval !== null) parts.push(`interval ${fmt.score(r.interval[0])} to ${fmt.score(r.interval[1])}${r.openTail ? " or above" : ""}`);
+type Unscored = Exclude<LedgerRow["status"], "scored">;
+/** An unscored row's explanation: its note, or its status said plainly. */
+const noteOf = (r: LedgerRow): string => r.note ?? STATUS_TEXT[r.status as Unscored];
+
+/** The row's reading as text: "Leverage 71, interval 63 to 78, high confidence"; for an unscored row, "Label, <note>". */
+function reading(r: LedgerRow, v: Resolved | null): string {
+  if (v === null) return `${r.label}, ${noteOf(r)}`;
+  const parts = [`${r.label} ${fmt.score(v.score)}`];
+  if (v.interval !== null) parts.push(`interval ${fmt.score(v.interval[0])} to ${fmt.score(v.interval[1])}${r.openTail ? " or above" : ""}`);
   if (r.confidence !== null) parts.push(`${r.confidence} confidence`);
   return parts.join(", ");
+}
+
+/**
+ * An unscored row's short value token: `n=12/60` when its note carries the kit's "n=<count>, needs <count>" wording,
+ * else `—`. The full note goes on its own line under the rule and into the row's accessible name.
+ */
+function unscoredToken(note: string): string {
+  const m = note.match(/\bn=([\d,]+), needs ([\d,]+)/);
+  return m ? `n=${m[1]}/${m[2]}` : "—";
 }
 
 /** An exhibit id's cite label: `ex-c` → `Ex. C`; any other id is its own label. */
 const citeLabel = (id: string): string => (/^ex-[a-z]$/.test(id) ? `Ex. ${id.slice(3).toUpperCase()}` : id);
 
+/** One component row. `data-label` names the cell when the table stacks below 640 px (kit CSS). */
 function componentRow(c: LedgerComponent): string {
   const value = c.status === "ok" ? c.value : STATUS_TEXT[c.status];
   const cites = (c.cites ?? []).map((id) => cite(id, citeLabel(id))).join(" ");
   return "<tr>"
     + `<td>${esc(c.label)}</td>`
-    + `<td class="num">${esc(fmt.share(c.weight))}</td>`
+    + `<td class="num" data-label="weight">${esc(fmt.share(c.weight))}</td>`
     + `<td class="num">${esc(value)}</td>`
-    + `<td class="num">${esc(c.z === null ? "—" : fmt.signed(c.z))}</td>`
-    + `<td class="num">${esc(fmt.count(c.n))}</td>`
+    + `<td class="num" data-label="z">${esc(c.z === null ? "—" : fmt.signed(c.z))}</td>`
+    + `<td class="num" data-label="n">${esc(fmt.count(c.n))}</td>`
     + `<td>${cites}</td>`
     + "</tr>";
 }
 
 function componentsTable(r: LedgerRow): string {
-  if (r.components.length === 0) return "";
   return '<div class="ledger-components"><table><thead><tr><th>Component</th><th class="num">Weight</th><th class="num">Value</th>'
     + '<th class="num">z</th><th class="num">n</th><th>Evidence</th></tr></thead><tbody>'
     + r.components.map(componentRow).join("") + "</tbody></table></div>";
@@ -106,27 +133,36 @@ function componentsTable(r: LedgerRow): string {
 
 const WINDOW: Readonly<Record<LedgerRow["window"], string>> = { detail: "Detail", lifetime: "Lifetime" };
 
+/**
+ * One row. With components it is a `<details>` whose `<summary>` is the line; with none it is a plain `div` with a
+ * `role="group"` line, so no keyboard stop discloses nothing.
+ */
 function ledgerRow(r: LedgerRow, idPrefix: string): string {
-  const isScored = scored(r);
-  const value = isScored
-    ? `<span class="ledger-row__value"><span class="t-mono-16">${esc(fmt.score(r.score))}</span>`
-      + (r.interval === null ? "" : ` <span class="t-mono-14 ledger-row__interval">${esc(fmt.interval(r.interval))}</span>`) + "</span>"
-    : `<span class="ledger-row__value ledger-row__note t-mono-14">${esc(r.note ?? STATUS_TEXT[r.status as Exclude<LedgerRow["status"], "scored">])}</span>`;
-  const dots = isScored ? `<span class="ledger-row__dots">${confidenceDots(r.confidence)}</span>` : "";
-  return `<details${attr("class", isScored ? "ledger-row" : "ledger-row ledger-row--unscored")}${attr("id", idPrefix + r.id)}>`
-    + `<summary${attr("aria-label", reading(r))}>`
-    + `<span class="ledger-row__label t-mono-14">${esc(r.label)}</span>`
+  const v = resolve(r);
+  const cls = v === null ? "ledger-row ledger-row--unscored" : "ledger-row";
+  const value = v === null
+    ? `<span class="ledger-row__value t-mono-14 c-muted">${esc(unscoredToken(noteOf(r)))}</span>`
+    : `<span class="ledger-row__value"><span class="t-mono-16">${esc(fmt.score(v.score))}</span>`
+      + (v.interval === null ? "" : ` <span class="t-mono-14 ledger-row__interval">${esc(fmt.interval(v.interval))}</span>`) + "</span>";
+  const dots = v === null ? "" : `<span class="ledger-row__dots">${confidenceDots(r.confidence)}</span>`;
+  const note = v === null ? `<span class="ledger-row__note t-mono-14">${esc(noteOf(r))}</span>` : "";
+  const line = `<span class="ledger-row__label t-mono-14">${esc(r.label)}</span>`
     + `<span class="ledger-row__rule">${ledgerRuleSvg(r)}</span>`
     + value + dots
     + `<span class="ledger-row__window tag">${WINDOW[r.window]}</span>`
-    + "</summary>" + componentsTable(r) + "</details>";
+    + note;
+  const label = attr("aria-label", reading(r, v));
+  if (r.components.length === 0) {
+    return `<div${attr("class", cls)}${attr("id", idPrefix + r.id)}><div class="ledger-row__line" role="group"${label}>${line}</div></div>`;
+  }
+  return `<details${attr("class", cls)}${attr("id", idPrefix + r.id)}><summary${label}>${line}</summary>${componentsTable(r)}</details>`;
 }
 
 /** The assay ledger: each group a labelled section of rows; row ids are `idPrefix + row.id` (default `ledger-`). */
 export function ledger(groups: readonly LedgerGroup[], o: { idPrefix?: string } = {}): string {
   const idPrefix = o.idPrefix ?? "ledger-";
   return '<div class="ledger">' + groups.map((g) => '<section class="ledger-group">'
-    + `<h3 class="tag">${esc(g.label)}</h3>` + g.rows.map((r) => ledgerRow(r, idPrefix)).join("") + "</section>").join("") + "</div>";
+    + `<h3 class="tag">${capsText(g.label)}</h3>` + g.rows.map((r) => ledgerRow(r, idPrefix)).join("") + "</section>").join("") + "</div>";
 }
 
 /** One legend mark on the 12 × 12 icon grid. */

@@ -1,4 +1,4 @@
-import { attr, displayText, esc } from "./html";
+import { attr, capsText, displayText, esc } from "./html";
 import type { FigureOptions } from "./types";
 
 /** The note an empty exhibit shows when the caller gives none. */
@@ -21,7 +21,7 @@ export function figure(o: FigureOptions): string {
   const head = '<header class="exhibit__head">'
     + `<span class="exhibit__letter t-mono-12">Ex. ${esc(o.letter)}</span>`
     + `<h3${attr("class", displayText(o.title, 20))}${attr("id", titleId)}>${esc(o.title)}</h3>`
-    + `<span class="exhibit__tag t-mono-12">${esc(o.tag)}</span>`
+    + `<span class="exhibit__tag t-mono-12">${capsText(o.tag)}</span>`
     + "</header>";
   const note = (text: string): string => `<p class="exhibit__note t-mono-14">${esc(text)}</p>`;
   const content = state === "empty" ? PLACEHOLDER + note(o.note ?? EMPTY_NOTE)
