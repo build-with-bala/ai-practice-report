@@ -204,7 +204,7 @@ export function buildSessionTable(raw: ScanResult, o: { now: number; timeZone: s
   });
 
   return {
-    rows, detailTop, hosts: d.hosts, repoOf, scope: { from, to, tools: toolEx }, timeZone: o.timeZone, isHuman, activity, capabilities: capabilitiesOf(raw, (id) => id !== undefined && rows.has(id) && !d.hosts.has(id)),
+    rows, detailTop, hosts: d.hosts, repoOf, scope: { from, to, tools: toolEx, projects: projectsHit }, timeZone: o.timeZone, isHuman, activity, capabilities: capabilitiesOf(raw, (id) => id !== undefined && rows.has(id) && !d.hosts.has(id)),
     dedupe: { hostSessions: d.hosts.size, pairedPrompts: d.pairedPrompts, relabelled: d.relabelled.size },
     exclusions: { tools: toolsHit.size, projects: projectsHit.size, sessions: dropped.size }, orphans,
   };

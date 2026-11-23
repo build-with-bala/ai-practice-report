@@ -62,8 +62,13 @@ export interface SessionEv extends Base { k: "session"; id: string; window: Wind
   background?: boolean; workflowId?: string; inRepo?: boolean; approval?: string; sandbox?: string;
   effort?: string;    // the session's reasoning effort level, when the tool records one per session (shape-guarded)
   mode?: "agent" | "chat" }
+/**
+ * One prompt. `projectKey`: the keyed hash of the project the prompt was typed in (the key a session of that project
+ * carries in `SessionEv.projectKey`), set when the source records the project per prompt; a prompt that names a session
+ * takes its project from the session.
+ */
 export interface PromptEv extends Base { k: "prompt"; ts: number; sessionId?: string; window: Window; origin: Origin; intent: Intent;
-  features: PromptFeatures; textHash: string; hasPaste?: boolean }
+  features: PromptFeatures; textHash: string; hasPaste?: boolean; projectKey?: string }
 
 /**
  * One tool call (or, for a patch, one file of it).
@@ -143,11 +148,13 @@ export interface MarkerEv extends Base { k: "marker"; ts: number; sessionId?: st
  * `firstSeen`: when the artifact appeared — its file or folder's birth time (ctime where the file system has none) by
  * stat, never opened, or an install time the tool records. It never counts as activity (spec §6.2: file times never
  * make a day active).
+ * `projectKey`: the keyed hash of the project the entry belongs to (a per-project server, a project's own settings,
+ * hooks, skills or agents); absent for a user-level entry.
  */
 export interface ConfigEv extends Base { k: "config";
   kind: "skill" | "command" | "agent" | "plugin" | "hook" | "mcp-server" | "memory-file" | "instruction-file" | "profile" | "feature";
   name?: string; provenance: "authored" | "installed" | "bundled" | "unknown"; uses?: number; lastUsed?: number; checks?: CheckKind[];
-  firstSeen?: number }
+  firstSeen?: number; projectKey?: string }
 
 /**
  * A tool's own per-day totals. `zone`: the day's time zone — `utc`, or `local` (the scanning process's zone);
@@ -157,13 +164,19 @@ export interface ConfigEv extends Base { k: "config";
 export interface DailyEv extends Base { k: "daily"; day: string; zone: "local" | "utc"; unit: "prompts" | "messages"; count: number;
   sessions?: number; toolCalls?: number; models?: Record<string, number> }
 export interface EdgeEv extends Base { k: "edge"; parentId: string; childId: string }
-export interface AnchorEv extends Base { k: "anchor"; kind: "cc-msg" | "cc-req"; ts: number; idTail: string }
+export interface AnchorEv extends Base { k: "anchor"; kind: "cc-msg" | "cc-req"; ts: number; idTail: string;
+  /** The session the event belongs to, when the reader knows it; scope rules treat the event like its session. */
+  sessionId?: string }
 export interface IdentityEv extends Base { k: "identity"; scope: "session" | "config"; hash: string; sessionId?: string }
-export interface FileFactEv extends Base { k: "file"; pathHash: string; bytes: number; mtime: number; birth?: number; ctime?: number; firstTs?: number; lastTs?: number }
+export interface FileFactEv extends Base { k: "file"; pathHash: string; bytes: number; mtime: number; birth?: number; ctime?: number; firstTs?: number; lastTs?: number;
+  /** The session the event belongs to, when the reader knows it; scope rules treat the event like its session. */
+  sessionId?: string }
 export interface RolloutFactEv extends Base { k: "codex-rollout"; threadId: string; uuidTs?: number; fileTs?: number }
 export interface ThreadRowEv extends Base { k: "codex-thread-row"; threadId: string; createdAt?: number }
 export interface RateLimitEv extends Base { k: "ratelimit"; ts: number; window: "primary" | "secondary"; windowMinutes?: number; usedPercent: number; resetsAt?: number;
-  bucket?: string }   // keyed hash of the provider's rate-limit bucket id, when the trace names one
+  bucket?: string;   // keyed hash of the provider's rate-limit bucket id, when the trace names one
+  /** The session the event belongs to, when the reader knows it; scope rules treat the event like its session. */
+  sessionId?: string }
 export interface CommitFactEv extends Base { k: "commit"; ts: number; aiLines?: number; humanLines?: number; repoKey?: string }
 
 /**

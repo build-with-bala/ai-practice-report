@@ -49,10 +49,12 @@ export interface Activity { detailDays: string[]; lifetimeDays: string[]; detail
 export interface SessionTable {
   rows: Map<string, SessionRow>; detailTop: SessionRow[]; hosts: Set<string>; repoOf: Map<string, string>;
   /**
-   * What the exclusions left in scope: the date range (epoch ms, inclusive; ±Infinity when open) and the tools left out.
+   * What the exclusions left in scope: the date range (epoch ms, inclusive; ±Infinity when open), the tools left out, and
+   * the project keys left out (`projects`: exactly the keys whose sessions the project exclusion drops; empty when no
+   * project is excluded).
    * Every later stage clips to the range: events, commits and markers outside it never count, even in a kept row.
    */
-  scope: { from: number; to: number; tools: ReadonlySet<ToolId> };
+  scope: { from: number; to: number; tools: ReadonlySet<ToolId>; projects: ReadonlySet<string> };
   /** The IANA zone the activity days are keyed in. */
   timeZone: string;
   /** Origin human, or a scripted prompt the dedupe relabelled (its host copy was typed by the person). */

@@ -15,8 +15,11 @@ export type InstructionKind = "claude" | "agents" | "gemini" | "cursorrules" | "
  * exactly one — the repo with the most detail-window sessions, then the smallest repoKey (compared by full sha, in
  * memory only). Whole-report totals count owner commits only; per-repo matching (delivery, rework, file history) may
  * use all of a repo's commits.
+ *
+ * `id`: a keyed hash (16 lowercase hex digits) of the commit's full sha: equal for the same commit in every clone of one
+ * repository within one scan, never the sha itself.
  */
-export interface CommitFact { ts: number; shaKey: string; ai?: AiTool; generated?: AiTool; rework?: "revert" | "fixup" | "fix"; files: string[]; owner: boolean }
+export interface CommitFact { id?: string; ts: number; shaKey: string; ai?: AiTool; generated?: AiTool; rework?: "revert" | "fixup" | "fix"; files: string[]; owner: boolean }
 export interface InstructionFacts { files: InstructionKind[]; namesChecks: CheckKind[]; touched: number; lastTouched?: number }
 /** `.claude/settings.json` hooks: the entries there, the checks their commands run, and `disableAllHooks` (then none runs, and `checks` is empty). */
 export interface HookFacts { entries: number; checks: CheckKind[]; disabled: boolean }
@@ -26,11 +29,13 @@ export interface CheckFacts { present: boolean; checks: CheckKind[] }
  * One repository found from session folders. `repoKey` = keyedHash(salt, normalizePath(root)); `projectKeys`: the
  * session projects inside it; `identity`: the repo has a `user.email`, so the person's commits can be told apart (none
  * are read without it); `commitsTruncated`: the history held more commits than were read (`maxCommits`, or the output
- * cap); `fileLists`: changed paths were read (false for a partial clone read without them, where rework is not
+ * cap); `commitsReach`: set when the commit list was cut short (the commit cap, the output cap or a timeout) — the
+ * commit time (epoch ms) of the oldest record that was read; absent when the list is complete back to the time asked
+ * for; `fileLists`: changed paths were read (false for a partial clone read without them, where rework is not
  * measurable). `instructions`, `hooks`, `ci` and `precommit` come from the repo's allowlisted files, read from the
  * worktree the most detail-window sessions ran in (`readRepoFiles`).
  */
-export interface RepoFacts { repoKey: string; projectKeys: string[]; identity: boolean; commits: CommitFact[]; commitsTruncated: boolean; fileLists: boolean;
+export interface RepoFacts { repoKey: string; projectKeys: string[]; identity: boolean; commits: CommitFact[]; commitsTruncated: boolean; commitsReach?: number; fileLists: boolean;
   instructions: InstructionFacts; hooks: HookFacts; ci: CheckFacts; precommit: CheckFacts }
 
 /**
