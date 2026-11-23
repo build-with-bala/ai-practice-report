@@ -4,6 +4,7 @@ import path from "node:path";
 import { analyze, type Analysis } from "../../core/analyze";
 import { buildSessionTable, childType, exportPayload, isAction, modelExportId, registry, scan } from "../../core/index";
 import { CcTranscript, ccSid, fixtureStart, slug } from "../fixtures/claude-code";
+import { metricMetaProblems } from "../../scripts/smoke-local";
 import { makeRepo } from "../fixtures/repos";
 import { buildAll } from "../kit/allsources";
 import { expectNoCanaries } from "../kit/canary";
@@ -32,20 +33,6 @@ function impurities(v: unknown, at = "$", out: string[] = []): string[] {
   }
   return out;
 }
-
-/** Every object in `v` that has a `value` key holding a number or null (a metric), with its path. */
-function metrics(v: unknown, at = "$", out: Array<{ path: string; m: Record<string, unknown> }> = []): typeof out {
-  if (v === null || typeof v !== "object") return out;
-  const o = v as Record<string, unknown>;
-  if (!Array.isArray(v) && "value" in o && (o.value === null || typeof o.value === "number")) out.push({ path: at, m: o });
-  for (const [k, x] of Object.entries(o)) metrics(x, `${at}.${k}`, out);
-  return out;
-}
-
-/** The metrics of an analysis that lack a window or a count: none may. */
-const metricsWithoutMeta = (a: Analysis): string[] => metrics(a)
-  .filter(({ m }) => !(m.window === "detail" || m.window === "lifetime") || typeof m.n !== "number" || !Number.isFinite(m.n))
-  .map(({ path: p }) => p);
 
 /** An instruction file that names the test command, and a CI workflow that runs it. */
 const repoFiles = (name: string): Record<string, string> => ({
@@ -97,8 +84,18 @@ describe("analysis integration: scan → analyze → export, end to end", () => 
     const a = analyze(r, UTC);
     expect(a.dimensions.length).toBe(7);
     expect(a.dimensions.filter((d) => !DIMENSION_STATUSES.includes(d.status)).map((d) => `${d.id}:${d.status}`)).toEqual([]);
-    expect(metrics(a).length).toBeGreaterThan(30);
-    expect(metricsWithoutMeta(a)).toEqual([]);
+    const meta = metricMetaProblems(a);
+    expect(meta.metrics).toBeGreaterThan(30);
+    expect(meta.bad).toEqual([]);
+    // repo signals on: the fixture repos' instruction files and CI are measured
+    const dimOf = (id: string) => a.dimensions.find((d) => d.id === id)!;
+    const compOf = (dimId: string, id: string) => dimOf(dimId).components.find((c) => c.id === id)!;
+    expect(dimOf("delivery").status).not.toBe("not-measured");
+    // both repos name test commands in their instruction files and run them in CI: each share is 2 of 2
+    for (const [dimId, id] of [["verification", "ver.guardrails"], ["context", "ctx.instructions"]] as const) {
+      const c = compOf(dimId, id);
+      expect([id, c.status, c.n, c.raw, c.meta.sources]).toEqual([id, "ok", 2, 1, ["git"]]);
+    }
     expect(impurities(a)).toEqual([]);
 
     // export: no canary anywhere (no exemptions), within its size bound; analyze is deterministic
@@ -140,7 +137,7 @@ describe("analysis integration: scan → analyze → export, end to end", () => 
     }
     expect(a.overall.status).toBe("insufficient");
     expect(a.forensics.band).toBe("unverifiable");
-    expect(metricsWithoutMeta(a)).toEqual([]);
+    expect(metricMetaProblems(a).bad).toEqual([]);
     expect(impurities(a)).toEqual([]);
     const result = exportPayload(a, OPTS);
     expect(JSON.parse(result.json)).toEqual(result.value);

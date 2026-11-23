@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmodSync } from "node:fs";
 import path from "node:path";
-import { analyze } from "../../core/analyze";
+import { analyze, type Analysis } from "../../core/analyze";
+import type { ScanResult } from "../../core/scan";
 import type { CoverageEv } from "../../core/model/events";
-import { analysisLines, coverageLine, exportOf } from "../../scripts/smoke-local";
+import { analysisLines, coverageLine, exportOf, metricMetaProblems } from "../../scripts/smoke-local";
 import { buildAntigravity, C as AG_C, I1, I2, K, P } from "../fixtures/antigravity";
 import { buildCcLifetime, buildCcTranscripts, CC_H1, CC_H2, CC_S1, CC_S2, CcTranscript, ccSid, fixtureStart, slug } from "../fixtures/claude-code";
 import { buildCodexIndex, buildCodexRollouts } from "../fixtures/codex";
@@ -155,27 +156,67 @@ describe("the local smoke, run on a synthetic home (child process)", () => {
 describe("the smoke's analysis lines (in process)", () => {
   const home = "/home/dev";
 
-  test("a clean persona: every check passes", () => {
+  /** The expert persona's scan and a fresh analysis of it, which a test may break. */
+  const fresh = () => {
     const raw = personaScan("expert");
-    const a = analyze(raw, { timeZone: "UTC" });
-    const { lines, failures } = analysisLines(raw, a, exportOf(a), home);
-    expect(failures).toEqual([]);
-    const v = valuesOf(lines);
-    expect(ANALYSIS_CHECKS.map((k) => v[k])).toEqual(ANALYSIS_CHECKS.map(() => "PASS"));
-    expect(lines.flatMap(offGrammar)).toEqual([]);
+    return { raw, a: analyze(raw, { timeZone: "UTC" }) };
+  };
+  const checkOf = (key: string, raw: ScanResult, a: Analysis) => valuesOf(analysisLines(raw, a, exportOf(a), home).lines)[key];
+  /** A signal metric of the analysis, as mutable data. */
+  const signal = (a: Analysis) => a.signals.guardrails as unknown as Record<string, unknown>;
+
+  for (const kind of ["novice", "intermediate", "expert"] as const) {
+    test(`the ${kind} persona: every check passes, every metric's metadata is whole`, () => {
+      const raw = personaScan(kind);
+      const a = analyze(raw, { timeZone: "UTC" });
+      expect(metricMetaProblems(a)).toMatchObject({ bad: [] });
+      expect(metricMetaProblems(a).metrics).toBeGreaterThan(30);
+      const { lines, failures } = analysisLines(raw, a, exportOf(a), home);
+      expect(failures).toEqual([]);
+      const v = valuesOf(lines);
+      expect(ANALYSIS_CHECKS.map((k) => v[k])).toEqual(ANALYSIS_CHECKS.map(() => "PASS"));
+      expect(lines).toContain("dimensions scored=" + a.dimensions.filter((d) => d.status === "scored").length + "/7");
+      expect(lines.flatMap(offGrammar)).toEqual([]);
+    });
+  }
+
+  const breaks: Array<[string, (a: Analysis) => void]> = [
+    ["a dimension's meta deleted", (a) => { delete (a.dimensions[0] as Partial<typeof a.dimensions[0]>).meta; }],
+    ["the overall's meta window deleted", (a) => { delete (a.overall.meta as Partial<typeof a.overall.meta>).window; }],
+    ["a component's meta deleted", (a) => { delete (a.dimensions[0]!.components[0] as Partial<typeof a.dimensions[0]["components"][0]>).meta; }],
+    ["a signal metric's sources deleted", (a) => { delete signal(a).sources; }],
+    ["a signal metric's value and window set to undefined", (a) => { signal(a).value = undefined; signal(a).window = undefined; }],
+    ["a signal metric's n set to undefined", (a) => { signal(a).n = undefined; }],
+    ["the stack's meta deleted", (a) => { delete (a.stack as Partial<typeof a.stack>).meta; }],
+    ["the risk posture's meta n made NaN", (a) => { a.risk.meta.n = Number.NaN; }],
+  ];
+  for (const [what, harm] of breaks) {
+    test(`metrics-have-window-and-n fails on ${what}`, () => {
+      const { raw, a } = fresh();
+      const exported = exportOf(a); // before the harm: the exporter reads the metadata too, and may throw on it
+      harm(a);
+      expect(metricMetaProblems(a).bad.length).toBeGreaterThan(0);
+      expect(valuesOf(analysisLines(raw, a, exported, home).lines)["metrics-have-window-and-n"]).toBe("FAIL");
+    });
+  }
+
+  test("not-saturated: a 99 with the open-tail mark passes; a 99 without it, or any score above 99, fails", () => {
+    const at = (score: number, openTail: boolean) => {
+      const { raw, a } = fresh();
+      const d = a.dimensions.find((x) => x.status === "scored")!;
+      d.score = score;
+      d.openTail = openTail;
+      return checkOf("not-saturated", raw, a);
+    };
+    expect([at(99, true), at(99, false), at(100, true), at(100, false), at(98, false)]).toEqual(["PASS", "FAIL", "FAIL", "FAIL", "PASS"]);
   });
 
-  test("a displayed 99 without openTail fails not-saturated; a metric without n fails metrics-have-window-and-n", () => {
-    const raw = personaScan("expert");
-    const a = analyze(raw, { timeZone: "UTC" });
-    const d = a.dimensions.find((x) => x.status === "scored")!;
-    d.score = 99;
-    d.openTail = false;
-    (a.signals as unknown as Record<string, { n: unknown }>)[Object.keys(a.signals).find((k) => k !== "evidence" && k !== "repoSignals")!]!.n = undefined;
+  test("a missing dimension: the line still reads /7, and the analysis checks fail", () => {
+    const { raw, a } = fresh();
+    a.dimensions.pop();
     const { lines, failures } = analysisLines(raw, a, exportOf(a), home);
-    const v = valuesOf(lines);
-    expect([v["not-saturated"], v["metrics-have-window-and-n"]]).toEqual(["FAIL", "FAIL"]);
-    expect(failures.length).toBeGreaterThanOrEqual(2);
+    expect(lines.filter((l) => l.startsWith("dimensions scored="))).toEqual([expect.stringMatching(/^dimensions scored=\d\/7$/)]);
+    expect(failures).toContain("dimension count");
   });
 
   test("an export the schema refuses: a count of the violating paths, never a path, and both export checks fail", () => {
@@ -203,6 +244,11 @@ describe("the smoke's analysis lines (in process)", () => {
     expect(at(`${exported.json}"C:\\\\work\\\\proj"`, { ...raw, cwds: new Map([["k", "C:\\work\\proj"]]) })).toBe("FAIL");
     const roots = new Map([["r", "/srv/repo-a"]]);
     expect(at(`${exported.json}/srv/repo-a`, { ...raw, repos: { ...raw.repos, roots } })).toBe("FAIL");
+    // case and separators do not hide a path
+    expect(at(`${exported.json}"${home.toUpperCase()}/x"`)).toBe("FAIL");
+    expect(at(`${exported.json}c:/work/proj`, { ...raw, cwds: new Map([["k", "C:\\work\\proj"]]) })).toBe("FAIL");
+    expect(at(`${exported.json}/SRV/Repo-A`, { ...raw, repos: { ...raw.repos, roots } })).toBe("FAIL");
+    expect(at(exported.json, { ...raw, cwds: new Map([["k", "C:\\"], ["j", "C:/"]]) })).toBe("PASS");
   });
 });
 

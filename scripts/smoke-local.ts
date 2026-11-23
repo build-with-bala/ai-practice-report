@@ -19,6 +19,8 @@ const BUDGET_RSS = 1024 * MiB;
 const MIN_EXTRACTED_SHARE = 0.9;
 /** The export's size bound, in bytes (pre-flight P19). */
 const MAX_EXPORT_BYTES = 300_000;
+/** The dimensions an analysis scores (spec §6.5). */
+const DIMENSIONS = 7;
 const BANDS: ReadonlySet<string> = new Set(["consistent", "consistent-with-notes", "inconsistent", "unverifiable"]);
 /** The forensic checks that always run, C1–C10 (the soft flags follow them). */
 const FORENSIC_CHECKS = ["C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10"];
@@ -121,28 +123,73 @@ export function exportOf(a: Analysis): Exported {
   }
 }
 
-/** Every object in `v` with a `value` key holding a number or null (a metric) that lacks a window or a finite count. */
-function metricsWithoutMeta(v: unknown, out = { metrics: 0, bad: 0 }): typeof out {
-  if (v === null || typeof v !== "object") return out;
-  const o = v as Record<string, unknown>;
-  if (!Array.isArray(v) && "value" in o && (o.value === null || typeof o.value === "number")) {
-    out.metrics++;
-    if (!(o.window === "detail" || o.window === "lifetime") || typeof o.n !== "number" || !Number.isFinite(o.n)) out.bad++;
-  }
-  for (const x of Object.values(o)) metricsWithoutMeta(x, out);
+/**
+ * Objects that carry a `window` but are panel rows keyed by tool, not metric metadata: the coverage rows and exposure's
+ * per-tool rows. `$.meta` is the analysis's own meta (core version and options), not a `MetricMeta`.
+ */
+const NOT_METRIC_META: ReadonlySet<string> = new Set(["$.meta", "$.coverage.rows[]", "$.exposure.tools[]"]);
+
+/** True for a `MetricMeta`: a window, a finite count and a list of sources. */
+const isMetricMeta = (o: Record<string, unknown>): boolean =>
+  (o.window === "detail" || o.window === "lifetime") && typeof o.n === "number" && Number.isFinite(o.n) && Array.isArray(o.sources);
+
+/**
+ * The metric metadata of an analysis that is missing or malformed, by JSON path (for tests; the smoke prints only
+ * PASS/FAIL). Metric metadata is every `meta` object, every object with a `window` key, and every metric (an object
+ * with a `value` key holding a number, null or undefined), but for `NOT_METRIC_META`; each must be a `MetricMeta`.
+ * The places the types require a `meta` are checked by name, so metadata that is missing is found too: each
+ * dimension, each component, the overall, the stack and the risk posture. `metrics` counts what was checked.
+ */
+export function metricMetaProblems(a: Analysis): { metrics: number; bad: string[] } {
+  const out = { metrics: 0, bad: [] as string[] };
+  const walk = (v: unknown, at: string, shape: string, key: string): void => {
+    if (v === null || typeof v !== "object") return;
+    if (Array.isArray(v)) {
+      v.forEach((x, i) => walk(x, `${at}[${i}]`, `${shape}[]`, key));
+      return;
+    }
+    const o = v as Record<string, unknown>;
+    const metric = "value" in o && (o.value === null || o.value === undefined || typeof o.value === "number");
+    if (!NOT_METRIC_META.has(shape) && (key === "meta" || "window" in o || metric)) {
+      out.metrics++;
+      if (!isMetricMeta(o) || (metric && o.value === undefined)) out.bad.push(at);
+    }
+    for (const [k, x] of Object.entries(o)) walk(x, `${at}.${k}`, `${shape}.${k}`, k);
+  };
+  walk(a, "$", "$", "");
+  const required = (owner: unknown, at: string): void => {
+    const meta = owner !== null && typeof owner === "object" ? (owner as { meta?: unknown }).meta : undefined;
+    if (meta === null || typeof meta !== "object") out.bad.push(`${at}.meta (missing)`);
+  };
+  const dims: unknown[] = Array.isArray(a.dimensions) ? a.dimensions : [];
+  dims.forEach((d, i) => {
+    required(d, `$.dimensions[${i}]`);
+    const comps = (d as { components?: unknown }).components;
+    if (!Array.isArray(comps)) out.bad.push(`$.dimensions[${i}].components (missing)`);
+    else comps.forEach((c, j) => required(c, `$.dimensions[${i}].components[${j}]`));
+  });
+  required(a.overall, "$.overall");
+  required(a.stack, "$.stack");
+  required(a.risk, "$.risk");
   return out;
 }
 
+/** A file-system root (`/`, `C:\`, `C:/`, `C:`): no path of anyone's, and it would match any path. */
+const FS_ROOT = /^(?:[A-Za-z]:)?[\\/]*$/;
+
 /**
- * The raw paths an export must never hold: the home, every session cwd and every repo root, as written and as JSON
- * escapes them. A file-system root (`/`, `C:\`) is no path of anyone's, so it is left out.
+ * The raw paths an export must never hold, lower-cased (they are matched against the lower-cased JSON): the home,
+ * every session cwd and every repo root, each as written and with forward slashes, each also as JSON escapes it.
  */
 function rawPaths(r: ScanResult, home: string): string[] {
   const out = new Set<string>();
   for (const p of [home, ...r.cwds.values(), ...r.repos.roots.values()]) {
-    if (p === "" || path.parse(p).root === p) continue;
-    out.add(p);
-    out.add(JSON.stringify(p).slice(1, -1));
+    for (const form of [p, p.replaceAll("\\", "/")]) {
+      if (FS_ROOT.test(form)) continue;
+      const lower = form.toLowerCase();
+      out.add(lower);
+      out.add(JSON.stringify(lower).slice(1, -1));
+    }
   }
   return [...out];
 }
@@ -161,13 +208,16 @@ export function analysisLines(r: ScanResult, a: Analysis, exported: Exported, ho
     if (!ok) failures.push(key);
   };
   const scored = a.dimensions.filter((d) => d.status === "scored");
-  lines.push(`dimensions scored=${scored.length}/${a.dimensions.length}`);
-  check("not-saturated", scored.every((d) => d.score !== 99 || d.openTail));
-  const m = metricsWithoutMeta(a);
-  check("metrics-have-window-and-n", m.metrics > 0 && m.bad === 0);
+  lines.push(`dimensions scored=${scored.length}/${DIMENSIONS}`);
+  if (a.dimensions.length !== DIMENSIONS) failures.push("dimension count");
+  // a score is clamped to [1, 99], and every displayed 99 carries the open-tail mark
+  check("not-saturated", a.dimensions.every((d) => d.score === null || (d.score <= 99 && (d.score < 99 || d.openTail))));
+  const m = metricMetaProblems(a);
+  check("metrics-have-window-and-n", m.metrics > 0 && m.bad.length === 0);
   if (!exported.ok) lines.push(`export-violations=${exported.violations}`);
   const needles = rawPaths(r, home);
-  check("export-no-raw-paths", exported.ok && !needles.some((p) => exported.json.includes(p)));
+  const haystack = exported.ok ? exported.json.toLowerCase() : "";
+  check("export-no-raw-paths", exported.ok && !needles.some((p) => haystack.includes(p)));
   check("export-under-300kb", exported.ok && exported.bytes <= MAX_EXPORT_BYTES);
   const ids = new Set<string>(a.forensics.checks.map((c) => c.id));
   check("forensics-ran", BANDS.has(a.forensics.band) && FORENSIC_CHECKS.every((id) => ids.has(id)));
