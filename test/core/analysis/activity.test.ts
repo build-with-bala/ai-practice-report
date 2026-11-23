@@ -43,6 +43,26 @@ describe("dayKey", () => {
   });
 });
 
+describe("dayKey: DST and midnight", () => {
+  test("Pacific/Auckland's 2027-04-04 change from +13 to +12: prompts on both sides of it, and of the midnights around it", () => {
+    const nz = (iso: string) => dayKey(Date.parse(iso), "Pacific/Auckland");
+    expect(nz("2027-04-03T10:59:00Z")).toBe("2027-04-03"); // 23:59 NZDT
+    expect(nz("2027-04-03T11:01:00Z")).toBe("2027-04-04"); // 00:01 NZDT
+    expect(nz("2027-04-03T13:59:00Z")).toBe("2027-04-04"); // 02:59 NZDT, just before the change
+    expect(nz("2027-04-03T14:01:00Z")).toBe("2027-04-04"); // 02:01 NZST, just after it
+    expect(nz("2027-04-04T11:59:00Z")).toBe("2027-04-04"); // 23:59 NZST (a fixed +13 would say 04-05)
+    expect(nz("2027-04-04T12:01:00Z")).toBe("2027-04-05"); // 00:01 NZST
+  });
+
+  test("a session crossing local midnight is active on both days", () => {
+    const a = Date.parse("2026-11-16T10:50:00Z"); // 23:50 NZDT
+    const b = Date.parse("2026-11-16T11:10:00Z"); // 00:10 NZDT the next day
+    const raw = scanResultOf([sess("s", { start: a, end: b }), prompt("s", a), prompt("s", b)]);
+    expect(buildSessionTable(raw, { ...opts, timeZone: "Pacific/Auckland" }).activity.detailDays).toEqual(["2026-11-16", "2026-11-17"]);
+    expect(buildSessionTable(raw, { ...opts, timeZone: "UTC" }).activity.detailDays).toEqual(["2026-11-16"]);
+  });
+});
+
 describe("isoWeek", () => {
   test("ISO-8601 weeks across the year boundary", () => {
     expect(isoWeek("2026-12-31")).toBe("2026-W53");

@@ -242,7 +242,10 @@ CLI's EventMsg tags (`exec_command_end`, `mcp_tool_call_end`, `collab_*`, `realt
     marker (`detail: "user"`). A linked shell call that classified as plain `shell` takes the category, checks and
     toolchain of the command that ran. Items without such a call are their own events, timed by `started_at_ms`; an item id is counted once, so the
     same item again, or its call arriving after it, adds nothing. Calls no item completes are emitted at the end of
-    the file.
+    the file. Items are told apart by id only, never by shape: a Code Mode cell that applies patches of one shape (the
+    same extensions and line counts) to several files in a loop writes one `FileChange` item per nested call, each
+    with an id of its own and its own changed paths, and every one counts — as does the same patch applied again
+    later in the turn.
   - Input sent to a running command (`CommandExecution` with `source: unified_exec_interaction`) never makes a command
     event: it completes the call with its id, else it is skipped (`exec-interaction`).
   - An item recorded for another thread (`item_completed.thread_id`, or a `CollabAgentToolCall`'s `sender_thread_id`,

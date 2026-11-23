@@ -185,6 +185,30 @@ describe("buildSessionTable: capabilities", () => {
     });
   });
 
+  test("events of project-excluded, date-excluded and host-copy sessions give no capability: not measurable, never n = 0", () => {
+    const check = (sessionId: string, tool: ToolId): Ev => ({ k: "tool", tool, source: "x", ts: T0, sessionId, name: "n", category: "test", checks: ["test"], ok: true });
+    const edit = (sessionId: string, tool: ToolId): Ev => ({ k: "tool", tool, source: "x", ts: T0, sessionId, name: "n", category: "edit", linesAdded: 2 });
+    const usage = (sessionId: string, tool: ToolId): Ev => ({ k: "usage", tool, source: "x", ts: T0, sessionId, model: "m", inTok: 1, outTok: 1, cacheR: 0, cacheW: 0 });
+    const turn = (sessionId: string, tool: ToolId): Ev => ({ k: "turn", tool, source: "x", ts: T0, sessionId, window: "detail", effort: "high" });
+    const evs: Ev[] = [
+      sess("kept"),
+      sess("proj", { tool: "codex", source: "codex.rollouts", projectKey: "PX", background: true, effort: "low" }),
+      check("proj", "codex"), edit("proj", "codex"), usage("proj", "codex"), turn("proj", "codex"),
+      sess("old", { tool: "cursor", source: "cursor.x", start: T0 - 40 * DAY, end: T0 - 40 * DAY + MIN, background: false }),
+      check("old", "cursor"), edit("old", "cursor"), usage("old", "cursor"), turn("old", "cursor"),
+      check("nope", "antigravity"), // an orphan event: no session
+    ];
+    // H: a Copilot VS Code host copy of A (4 paired prompts); only H carries outcomes, lines, usage and effort
+    evs.push(sess("H", { tool: "copilot", source: "copilot.x", surface: "vscode", effort: "high", background: true }), sess("A", { origin: "scripted" }));
+    for (let i = 0; i < 4; i++) {
+      evs.push(prompt("H", T0 + i * MIN, { tool: "copilot", source: "copilot.x", textHash: `t${i}` }), prompt("A", T0 + i * MIN + 1_000, { textHash: `t${i}`, origin: "scripted" }));
+    }
+    evs.push(check("H", "copilot"), edit("H", "copilot"), usage("H", "copilot"), turn("H", "copilot"));
+    const t = buildSessionTable(scanResultOf(evs), { ...opts, exclude: { projects: ["PX"], from: T0 - DAY } });
+    expect([...t.hosts]).toEqual(["H"]);
+    expect(t.capabilities).toEqual({ outcomes: [], lines: [], background: [], usage: [], effort: [] });
+  });
+
   test("the marker tool sets", () => {
     expect([...PR_LINK_TOOLS]).toEqual(["claude-code"]);
     expect([...SWITCH_TOOLS]).toEqual(["claude-code"]);

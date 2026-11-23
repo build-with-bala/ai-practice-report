@@ -310,6 +310,21 @@ describe("codex rollouts: tools", () => {
     ]);
   });
 
+  test("FileChange items of one shape on different files in one turn (a Code Mode loop) all count: items dedupe by id, never by shape", async () => {
+    const diff = "@@ -1,3 +1,3 @@\n-a\n-b\n-c\n+x\n+y\n+z\n";
+    const r1 = rollout((r) => {
+      r.cell("for (const f of files) await tools.apply_patch(patchFor(f));");
+      r.fileChange({ "/p/src/a.ts": { type: "update", unified_diff: diff } }, { id: "fc-a" })
+        .fileChange({ "/p/src/b.ts": { type: "update", unified_diff: diff } }, { id: "fc-b" })
+        .fileChange({ "/p/src/b.ts": { type: "update", unified_diff: diff } }, { id: "fc-b" }); // the same item again: once
+    });
+    r1.write(h);
+    const r = await run();
+    expect(r.store.all("tool").map((t) => [t.callId, t.category, t.editExt, t.linesAdded, t.linesRemoved])).toEqual([
+      [keyedHash(r.salt, "fc-a"), "edit", "ts", 3, 3], [keyedHash(r.salt, "fc-b"), "edit", "ts", 3, 3],
+    ]);
+  });
+
   test("a call completed by the command that ran takes that command's category and checks", async () => {
     const r1 = rollout((r) => {
       const c = r.fn("exec_command", { yield_time_ms: 1_000 });

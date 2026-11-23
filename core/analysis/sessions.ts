@@ -57,20 +57,25 @@ function withDescendants(roots: Iterable<string>, children: ReadonlyMap<string, 
   return out;
 }
 
-function capabilitiesOf(raw: ScanResult, keep: (tool: ToolId) => boolean): Capabilities {
+/**
+ * The capabilities, from the events of counted sessions only: a session that is a kept row and no host copy (an event
+ * naming no such session — excluded by project or date, a host copy, an orphan — gives none), so a tool whose only
+ * evidence was left out is not measurable, rather than measurable with n = 0.
+ */
+function capabilitiesOf(raw: ScanResult, counted: (sessionId: string | undefined) => boolean): Capabilities {
   const sets = { outcomes: new Set<ToolId>(), lines: new Set<ToolId>(), background: new Set<ToolId>(), usage: new Set<ToolId>(), effort: new Set<ToolId>() };
   for (const t of raw.store.all("tool")) {
-    if (!keep(t.tool)) continue;
+    if (!counted(t.sessionId)) continue;
     if (t.checks !== undefined && t.checks.length > 0 && t.ok !== undefined) sets.outcomes.add(t.tool);
     if ((t.category === "edit" || t.category === "write") && (t.linesAdded !== undefined || t.linesRemoved !== undefined)) sets.lines.add(t.tool);
   }
   for (const s of raw.store.all("session")) {
-    if (!keep(s.tool)) continue;
+    if (!counted(s.id)) continue;
     if (s.background !== undefined) sets.background.add(s.tool);
     if (s.effort !== undefined) sets.effort.add(s.tool);
   }
-  for (const u of raw.store.all("usage")) if (keep(u.tool)) sets.usage.add(u.tool);
-  for (const t of raw.store.all("turn")) if (keep(t.tool) && t.effort !== undefined) sets.effort.add(t.tool);
+  for (const u of raw.store.all("usage")) if (counted(u.sessionId)) sets.usage.add(u.tool);
+  for (const t of raw.store.all("turn")) if (counted(t.sessionId) && t.effort !== undefined) sets.effort.add(t.tool);
   const list = (s: Set<ToolId>): ToolId[] => [...s].sort(cmp);
   return { outcomes: list(sets.outcomes), lines: list(sets.lines), background: list(sets.background), usage: list(sets.usage), effort: list(sets.effort) };
 }
@@ -164,7 +169,7 @@ export function buildSessionTable(raw: ScanResult, o: { now: number; timeZone: s
 
   // dedupe
   const prompts = raw.store.all("prompt");
-  const d = dedupe(prompts, rows);
+  const d = dedupe(prompts.filter((p) => inRange(p.ts)), rows); // a prompt outside the date range never helps pair a session
   for (const id of d.relabelledSessions) {
     const row = rows.get(id)!;
     if (row.parentId === undefined && row.origin === "scripted") row.origin = "human";
@@ -199,7 +204,7 @@ export function buildSessionTable(raw: ScanResult, o: { now: number; timeZone: s
   });
 
   return {
-    rows, detailTop, hosts: d.hosts, repoOf, isHuman, activity, capabilities: capabilitiesOf(raw, keepTool),
+    rows, detailTop, hosts: d.hosts, repoOf, isHuman, activity, capabilities: capabilitiesOf(raw, (id) => id !== undefined && rows.has(id) && !d.hosts.has(id)),
     dedupe: { hostSessions: d.hosts.size, pairedPrompts: d.pairedPrompts, relabelled: d.relabelled.size },
     exclusions: { tools: toolsHit.size, projects: projectsHit.size, sessions: dropped.size }, orphans,
   };

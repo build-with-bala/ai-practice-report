@@ -130,6 +130,15 @@ describe("cross-tool dedupe", () => {
     expect(t.dedupe).toEqual({ hostSessions: 1, pairedPrompts: 4, relabelled: 4 });
   });
 
+  test("prompts outside the date range never help pair a session", () => {
+    // 4 pairs, but 2 of them before `from`: only 2 pairs remain in range, under HOST_MIN_PAIRS
+    const { evs } = hosted(5 * SEC);
+    const from = T0 + 10 * MIN - 1; // prompts at T0 + 0, 5, 10, 15 min: the first two (and their copies) are out of range
+    const t = buildSessionTable(scanResultOf(evs), { ...opts, exclude: { from } });
+    expect(t.hosts.size).toBe(0);
+    expect(t.dedupe).toEqual({ hostSessions: 0, pairedPrompts: 2, relabelled: 0 });
+  });
+
   test("isHuman: human prompts are human, scripted ones only when relabelled", () => {
     const t = buildSessionTable(scanResultOf([sess("S", "codex")]), opts);
     expect(t.isHuman(prompt("S", "codex", T0, "a"))).toBe(true);
