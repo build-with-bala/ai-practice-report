@@ -212,6 +212,15 @@ describe("repo files: only the allowlisted ones are opened", () => {
     for (const rel of allowed) files[rel] = rel.endsWith(".json") ? "{}" : "x\n";
     for (const rel of planted) files[rel] = rel.endsWith(".json") ? JSON.stringify({ token: CANARY.secret }) : `${CANARY.secret}\n`;
     const repo = makeRepo(path.join(h.env.home, "code", "repo"), [{ files, message: "init", at: Date.now() - 3 * 86_400_000 }]);
+    // links where allowlisted files go: out of the repo, to a source file inside it, and one allowed link (folder links:
+    // files.test.ts)
+    const outside = h.write(path.join("elsewhere", "ci.yml"), `run: ${CANARY.secret}\n`);
+    const links: [target: string, at: string][] = [
+      [outside, ".github/workflows/up.yml"], [path.join("..", "..", "src", "index.ts"), ".cursor/rules/b.md"],
+      [path.join("..", "AGENTS.md"), "pkg/AGENTS.md"],
+    ];
+    let linked = true;
+    for (const [target, at] of links) linked &&= link(target, path.join(repo, at));
 
     const { r, opens } = await recordScan({ env: h.env, plugins: [sessionIn(path.join(repo, "pkg"))], handleSignals: false });
 
@@ -220,9 +229,13 @@ describe("repo files: only the allowlisted ones are opened", () => {
     // native realpath expands
     const native = (p: string) => { try { return realpathSync.native(p); } catch { return p; } };
     expect(violations(opens.map((o) => ({ ...o, path: native(o.path) })), native(h.root))).toEqual([]);
-    const inRepo = opens.map((o) => path.relative(native(repo), native(o.path)).split(path.sep).join("/")).filter((rel) => !rel.startsWith(".."));
-    expect(inRepo.sort()).toEqual([...allowed].sort());
+    // every open, by its real path: none may leave the repo — flagged, never filtered out
+    const rels = opens.map((o) => path.relative(native(repo), native(o.path)).split(path.sep).join("/"));
+    expect(rels.filter((rel) => rel === ".." || rel.startsWith("../") || path.isAbsolute(rel))).toEqual([]);
+    // the allowed link (pkg/AGENTS.md → AGENTS.md) is opened by its real path
+    expect(rels.sort()).toEqual([...allowed, ...(linked ? ["AGENTS.md"] : [])].sort());
     expect(opens.every((o) => o.how === "read")).toBe(true);
+    if (linked) expect(r.repos.skipped["file-outside"]).toBe(2);
   });
 });
 

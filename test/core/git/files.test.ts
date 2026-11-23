@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { ciChecks, INSTRUCTION_FILES, mentionedChecks, precommitChecks, readRepoFiles, REPO_FILES, REPO_FOLDERS } from "../../../core/git/files";
-import { REPO_SIGNALS_DESCRIBE } from "../../../core/git/index";
+import { collectRepoSignals, REPO_SIGNALS_DESCRIBE } from "../../../core/git/index";
 import { runGit } from "../../../core/git/run";
 import { __observeOpens } from "../../../core/io/observe";
 import type { Ev } from "../../../core/model/events";
@@ -206,18 +206,62 @@ describe("readRepoFiles: the allowlisted repo files, as booleans and counts", ()
     expectNoCanaries(f);
   });
 
-  test("a never-opened name, or a link to one, is present but refused: attempted, never read, counted", async () => {
+  test("a never-opened name, or a link to one inside the repo, is present but refused: attempted, never read, counted", async () => {
     const root = repoWith("r", { ".github/workflows/secrets.yaml": "jobs:\n  a:\n    steps:\n      - run: npm test\n" });
-    const secret = path.join(h.root, "keys", "secrets.json");
-    plant(path.dirname(secret), { "secrets.json": "run: cargo clippy\n" });
-    const linked = link(secret, path.join(root, ".github", "workflows", "ci.yml"));
+    const linked = link("secrets.yaml", path.join(root, ".github", "workflows", "ci.yml"));
     const opened: string[] = [];
     __observeOpens((p) => opened.push(path.basename(p)));
     const f = await read(root);
     __observeOpens(undefined);
     expect(f.ci).toEqual({ present: true, checks: [] }); // neither was read
     expect(f.skipped).toEqual({ "file-refused": linked ? 2 : 1 });
-    expect(opened.sort()).toEqual(linked ? ["ci.yml", "secrets.yaml"] : ["secrets.yaml"]);
+    expect(opened).toEqual(linked ? ["secrets.yaml", "secrets.yaml"] : ["secrets.yaml"]); // a file is opened by its real path
+  });
+
+  test("links: followed only to an allowlisted path inside the worktree; out of it, or to any other file, never opened or listed", async () => {
+    const root = repoWith("r", { "AGENTS.md": "`pytest`", "src/main.ts": "`cargo build`", "src/hook.sh": "make build" });
+    const outside = path.join(h.root, "outside");
+    plant(outside, { "secret-note.md": "`make lint`", "rules/diary.md": "`go vet`", "gh/workflows/ci.yml": "run: tsc --noEmit\n" });
+    const links: [target: string, at: string][] = [
+      ["AGENTS.md", "CLAUDE.md"], // allowed: another allowlisted path inside
+      [path.join("src", "main.ts"), "GEMINI.md"], // inside, but a source file
+      [path.join(outside, "secret-note.md"), ".cursorrules"], // out of the worktree
+      [path.join(outside, "rules"), path.join(".cursor", "rules")], // a folder out of it
+      [path.join(outside, "gh"), ".github"], // a link in a parent component
+      [path.join("..", "src", "hook.sh"), path.join(".husky", "pre-commit")], // a folder entry to a non-allowlisted file
+    ];
+    for (const [target, at] of links) if (!link(target, path.join(root, at))) return;
+    const opened: string[] = [];
+    __observeOpens((p) => opened.push(p));
+    const f = await read(root);
+    __observeOpens(undefined);
+    expect(f.instructions).toMatchObject({ files: ["claude", "agents"], namesChecks: ["test"] });
+    expect([f.ci, f.precommit]).toEqual([{ present: false, checks: [] }, { present: false, checks: [] }]);
+    expect(f.skipped).toEqual({ "file-outside": 5 });
+    const agents = realpathSync.native(path.join(root, "AGENTS.md"));
+    expect(opened).toEqual([agents, agents]);
+  });
+
+  test("the pass stays interruptible: a timer fires between files, and an abort stops it (counted budget)", async () => {
+    const heavy = "`npm test` ".repeat(23_000); // ~250 KiB of command spans per file: slow to scan
+    const files: Record<string, string> = {};
+    for (let i = 0; i < 64; i++) files[`.cursor/rules/r${String(i).padStart(2, "0")}.md`] = heavy;
+    const root = repoWith("r", files);
+    const ac = new AbortController();
+    let fired = 0;
+    const timer = setTimeout(() => { fired = Date.now(); ac.abort(); }, 20);
+    let opens = 0;
+    __observeOpens(() => opens++);
+    const skipped: Record<string, number> = {};
+    const t = Date.now();
+    await readRepoFiles(root, [], { signal: ac.signal, runner: runGit, now: Date.now(), timeoutMs: 10_000,
+      skip: (r) => { skipped[r] = (skipped[r] ?? 0) + 1; } });
+    __observeOpens(undefined);
+    clearTimeout(timer);
+    expect(fired).toBeGreaterThan(0);
+    expect(fired - t).toBeLessThan(500);
+    expect(opens).toBeLessThan(64);
+    expect(skipped).toEqual({ budget: 1 });
   });
 
   test.skipIf(!POSIX)("a FIFO where a repo file goes is no file: never opened, the read never hangs (POSIX)", async () => {
@@ -274,6 +318,22 @@ describe("repo files in a scan", () => {
       for (const [k, v] of Object.entries(saved)) if (v === undefined) Reflect.deleteProperty(process.env, k); else process.env[k] = v;
     }
     expect(r.repos.repos[0]).toMatchObject({ identity: false, commits: [], instructions: { files: ["claude"], namesChecks: ["test"], touched: 1 } });
+  });
+
+  test("a throw in a repo's files pass keeps its commits; the error is counted", async () => {
+    const root = repoWith("r", { "CLAUDE.md": "`pytest`" });
+    const projectKey = "p1";
+    let gets = 0;
+    // the files pass looks the session folder up a second time (discovery is the first): that lookup throws
+    const cwds = new (class extends Map<string, string> {
+      override get(k: string) { if (++gets > 1) throw new Error("boom"); return super.get(k); }
+    })([[projectKey, root]]);
+    const r = await collectRepoSignals({ cwds, recent: new Set([projectKey]), salt: new Uint8Array(32), now: Date.now(), signal: new AbortController().signal });
+    expect(r.status).toBe("ok");
+    expect(r.repos).toHaveLength(1);
+    expect(r.repos[0]!.commits).toHaveLength(1);
+    expect(r.repos[0]!.instructions.files).toEqual([]);
+    expect(r.skipped).toEqual({ "files-error": 1 });
   });
 
   test("repoSignals: false reads no repo file", async () => {

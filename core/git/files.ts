@@ -6,6 +6,7 @@
 import { realpathSync } from "node:fs";
 import path from "node:path";
 import { readTextSmall, safeList } from "../io/fs";
+import { maybeYield } from "../io/yield";
 import type { CheckKind } from "../model/ids";
 import { isObj } from "../sources/common/guards";
 import { parseHooks } from "../sources/common/hooks";
@@ -166,15 +167,36 @@ function real(p: string): string {
   }
 }
 
-/** The session folders strictly inside `root`, as relative paths (links resolved on both sides first), sorted, each once. */
-function foldersInside(root: string, cwds: readonly string[]): string[] {
-  const base = real(root);
-  const out = new Set<string>();
-  for (const cwd of cwds) {
-    const rel = path.relative(base, real(cwd));
-    if (rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel)) out.add(rel);
+/** Whether this platform's file systems compare names case-insensitively by default (paths are compared folded there). */
+const FOLDS_CASE = process.platform === "win32" || process.platform === "darwin";
+const fold = (s: string): string => (FOLDS_CASE ? s.toLowerCase() : s);
+/** A repo-relative path as an allowlist key: `/`-separated, case-folded where the platform folds case. */
+const keyOf = (rel: string): string => fold(rel.split(path.sep).join("/"));
+
+/** Where a path really is (`real`, links resolved in every component): inside the worktree as `rel`, or not. */
+type Located = { state: "missing" } | { state: "error" } | { state: "outside" } | { state: "inside"; real: string; rel: string };
+
+/** Locates `p` against the worktree's real root `base` (with a trailing separator). */
+function locate(base: string, p: string): Located {
+  let r: string;
+  try {
+    r = realpathSync.native(p);
+  } catch (e) {
+    const code = (e as { code?: string }).code;
+    return { state: code === "ENOENT" || code === "ENOTDIR" ? "missing" : "error" };
   }
-  return [...out].sort();
+  if (!fold(r).startsWith(fold(base))) return { state: "outside" };
+  return { state: "inside", real: r, rel: r.slice(base.length) };
+}
+
+/** The session folders strictly inside the real root `base`, as real relative paths, sorted, each once. */
+function foldersInside(base: string, cwds: readonly string[]): string[] {
+  const out = new Map<string, string>();
+  for (const cwd of cwds) {
+    const at = locate(base, cwd);
+    if (at.state === "inside" && at.rel !== "") out.set(keyOf(at.rel), at.rel);
+  }
+  return [...out.values()].sort();
 }
 
 export interface RepoFileOptions {
@@ -184,9 +206,11 @@ export interface RepoFileOptions {
   now: number;
   timeoutMs: number;
   /**
-   * Called per file left unread, by reason: `file-not-file` (a folder, pipe or device where a file goes), `file-too-large`,
-   * `file-refused` (a never-opened name, or a link to one), `file-io-error`, `file-parse` (settings that are no JSON
-   * object), `files-capped` (past MAX_FOLDER_FILES); and `timeout` when the history command timed out.
+   * Called per file left unread, by reason: `file-outside` (its real path — links resolved in every component — leaves
+   * the worktree, or is no allowlisted path there: never opened, never listed, and not present), `file-not-file` (a
+   * folder, pipe or device where a file goes), `file-too-large`, `file-refused` (a never-opened name, or a link to one),
+   * `file-io-error`, `file-parse` (settings that are no JSON object), `files-capped` (past MAX_FOLDER_FILES); `budget`
+   * once when the pass was stopped (abort or budget) before its end; and `timeout` when the history command timed out.
    */
   skip?: (reason: string) => void;
   /** Whether git may read the history by path (default true; false for a partial clone read without paths). */
@@ -195,48 +219,94 @@ export interface RepoFileOptions {
 
 /**
  * The allowlisted files of the worktree at `root`, and `CLAUDE.md` and `AGENTS.md` at each of `cwds` inside it, as
- * facts. A file over MAX_REPO_FILE_BYTES, or refused, counts as present but unread; a missing one, or one that is no
- * regular file, as absent. `instructions.touched`: commits by any author touching an instruction path within the 180
- * days before `now` (at most 50), by `git log` in `root`; `lastTouched`, the newest of them.
+ * facts. Every path is resolved first (links in every component): it is opened, or a folder listed, only when its real
+ * path lies inside the worktree's real path and is itself an allowlisted path there — so `CLAUDE.md` linked to
+ * `AGENTS.md` is read, while a link to a source file or out of the worktree is not (`file-outside`). A file is opened by
+ * its real path. A file over MAX_REPO_FILE_BYTES, or refused, counts as present but unread; a missing one, one that is
+ * no regular file, or one outside, as absent. Between files the pass lets the event loop run, and it stops at an abort.
+ * `instructions.touched`: commits by any author touching an instruction path within the 180 days before `now` (at most
+ * 50), by `git log` in `root`; `lastTouched`, the newest of them.
  */
 export async function readRepoFiles(root: string, cwds: readonly string[], o: RepoFileOptions):
   Promise<Pick<RepoFacts, "instructions" | "hooks" | "ci" | "precommit">> {
   const skip = o.skip ?? (() => {});
-  /** One file: whether it is there, and its text when it was read. */
-  const load = (rel: string): { present: boolean; text?: string } => {
-    const r = readTextSmall(path.join(root, rel), MAX_REPO_FILE_BYTES);
+  let realRoot = real(root);
+  if (!realRoot.endsWith(path.sep)) realRoot += path.sep;
+  const subs = foldersInside(realRoot, cwds).slice(0, MAX_FOLDER_FILES);
+  // what may be opened, by its real repo-relative path: the exact paths, and a folder's accepted entries
+  const exact = new Set([...Object.values(INSTRUCTION_FILES).filter((p) => !p.endsWith("/")), ...REPO_FILES,
+    ...subs.flatMap((sub) => SESSION_FOLDER_FILES.map((n) => path.join(sub, n)))].map(keyOf));
+  const folderOf = new Map(REPO_FOLDERS.map((f) => [keyOf(f.dir.replace(/\/$/, "")), f] as const));
+  const allowed = (rel: string): boolean => {
+    if (exact.has(keyOf(rel))) return true;
+    const folder = folderOf.get(keyOf(path.dirname(rel)));
+    return folder !== undefined && folder.accepts(path.basename(rel));
+  };
+
+  let stopped = false;
+  /** Lets the event loop run; true once the pass is to stop (abort or budget). */
+  const halt = async (): Promise<boolean> => {
+    const pause = maybeYield();
+    if (pause) await pause;
+    stopped ||= o.signal.aborted;
+    return stopped;
+  };
+  /** One file (a path under the worktree, as named): whether it is there, and its text when it was read. */
+  const load = async (p: string): Promise<{ present: boolean; text?: string }> => {
+    if (await halt()) return { present: false };
+    const at = locate(realRoot, p);
+    if (at.state === "missing") return { present: false };
+    if (at.state === "error") {
+      skip("file-io-error");
+      return { present: true };
+    }
+    if (at.state === "outside" || !allowed(at.rel)) {
+      skip("file-outside");
+      return { present: false };
+    }
+    const r = readTextSmall(at.real, MAX_REPO_FILE_BYTES);
     if (r.ok) return { present: true, text: r.text };
     if (r.reason === "missing") return { present: false };
     skip(`file-${r.reason}`);
     return { present: r.reason !== "not-file" };
   };
-  /** A folder's accepted entries, one level deep, by name order, at most MAX_FOLDER_FILES of them. */
-  const list = (folder: RepoFolder): string[] => {
-    const names = safeList(path.join(root, folder.dir)).filter(folder.accepts).sort();
+  /**
+   * A folder's accepted entries, one level deep, by name order, at most MAX_FOLDER_FILES of them, as paths under its real
+   * path; listed only when that real path is the folder itself in the worktree.
+   */
+  const list = async (folder: RepoFolder): Promise<string[]> => {
+    if (await halt()) return [];
+    const at = locate(realRoot, path.join(root, folder.dir));
+    if (at.state === "missing") return [];
+    if (at.state !== "inside" || keyOf(at.rel) !== keyOf(folder.dir.replace(/\/$/, ""))) {
+      skip(at.state === "error" ? "file-io-error" : "file-outside");
+      return [];
+    }
+    const names = safeList(at.real).filter(folder.accepts).sort();
     for (let i = MAX_FOLDER_FILES; i < names.length; i++) skip("files-capped");
-    return names.slice(0, MAX_FOLDER_FILES).map((n) => folder.dir + n);
+    return names.slice(0, MAX_FOLDER_FILES).map((n) => path.join(at.real, n));
   };
-  const [cursorRules, workflows, husky] = REPO_FOLDERS.map(list) as [string[], string[], string[]];
+  const at = (rel: string) => path.join(root, rel);
+  const [cursorRules, workflows, husky] = [await list(REPO_FOLDERS[0]!), await list(REPO_FOLDERS[1]!), await list(REPO_FOLDERS[2]!)];
 
   // instruction files: at the root, the session folders inside it, and the cursor rules folder
   const kinds = new Set<InstructionKind>();
   const named: CheckKind[] = [];
-  const instruction = (kind: InstructionKind, rel: string) => {
-    const f = load(rel);
+  const instruction = async (kind: InstructionKind, p: string) => {
+    const f = await load(p);
     if (!f.present) return;
     kinds.add(kind);
     if (f.text !== undefined) named.push(...mentionedChecks(f.text));
   };
-  for (const kind of ["claude", "agents", "gemini", "cursorrules"] as const) instruction(kind, INSTRUCTION_FILES[kind]);
-  const subs = foldersInside(root, cwds).slice(0, MAX_FOLDER_FILES);
+  for (const kind of ["claude", "agents", "gemini", "cursorrules"] as const) await instruction(kind, at(INSTRUCTION_FILES[kind]));
   for (const sub of subs) {
-    for (const name of SESSION_FOLDER_FILES) instruction(name === "CLAUDE.md" ? "claude" : "agents", path.join(sub, name));
+    for (const name of SESSION_FOLDER_FILES) await instruction(name === "CLAUDE.md" ? "claude" : "agents", path.join(realRoot, sub, name));
   }
-  for (const rel of cursorRules) instruction("cursor-rules", rel);
+  for (const p of cursorRules) await instruction("cursor-rules", p);
 
   // hooks
   let hooks: RepoFacts["hooks"] = { entries: 0, checks: [], disabled: false };
-  const settings = load(CLAUDE_SETTINGS).text;
+  const settings = (await load(at(CLAUDE_SETTINGS))).text;
   if (settings !== undefined) {
     let value: unknown;
     try {
@@ -249,23 +319,29 @@ export async function readRepoFiles(root: string, cwds: readonly string[], o: Re
   }
 
   // CI and pre-commit
-  const checked = (rels: readonly string[], check: (rel: string, text: string) => CheckKind[]): RepoFacts["ci"] => {
+  const checked = async (files: readonly [string, (text: string) => CheckKind[]][]): Promise<RepoFacts["ci"]> => {
     let present = false;
     const found: CheckKind[] = [];
-    for (const rel of rels) {
-      const f = load(rel);
+    for (const [p, check] of files) {
+      const f = await load(p);
       present ||= f.present;
-      if (f.text !== undefined) found.push(...check(rel, f.text));
+      if (f.text !== undefined) found.push(...check(f.text));
     }
     return { present, checks: ordered(found) };
   };
-  const ci = checked(workflows, (_rel, text) => ciChecks(text));
-  const precommit = checked([PRE_COMMIT, LEFTHOOK, ...husky], (rel, text) =>
-    precommitChecks(rel === PRE_COMMIT ? "pre-commit" : rel === LEFTHOOK ? "lefthook" : "husky", text));
+  const ci = await checked(workflows.map((p) => [p, ciChecks]));
+  const precommit = await checked([
+    [at(PRE_COMMIT), (t) => precommitChecks("pre-commit", t)], [at(LEFTHOOK), (t) => precommitChecks("lefthook", t)],
+    ...husky.map((p): [string, (t: string) => CheckKind[]] => [p, (t) => precommitChecks("husky", t)]),
+  ]);
 
   const instructions: RepoFacts["instructions"] = {
     files: (Object.keys(INSTRUCTION_FILES) as InstructionKind[]).filter((k) => kinds.has(k)), namesChecks: ordered(named), touched: 0,
   };
+  if (stopped) {
+    skip("budget");
+    return { instructions, hooks, ci, precommit };
+  }
   if (o.history !== false && !o.signal.aborted) {
     const since = o.now - HISTORY_DAYS * DAY_MS;
     const paths = [...Object.values(INSTRUCTION_FILES), ...subs.flatMap((sub) => SESSION_FOLDER_FILES.map((n) => path.join(sub, n)))]

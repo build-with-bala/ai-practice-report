@@ -39,7 +39,8 @@ export interface RepoFacts { repoKey: string; projectKeys: string[]; identity: b
  * path, held in memory only (for the repo-file pass and display on this machine) and never part of an analysis or an
  * export. `skipped`: session folders or repos left out, by reason (`missing`, `not-a-repo`, `too-many-repos`, `budget`,
  * `timeout`, `error`), and repo files left unread (`file-not-file`, `file-too-large`, `file-refused`, `file-io-error`,
- * `file-parse`, `files-capped`: `readRepoFiles`). `since`: the earliest commit time asked for (epoch ms). `ms`: time taken.
+ * `file-parse`, `file-outside`, `files-capped`: `readRepoFiles`; `files-error`: a files pass that failed, the repo's
+ * commits kept). `since`: the earliest commit time asked for (epoch ms). `ms`: time taken.
  */
 export interface RepoSignals { status: "ok" | "partial" | "off" | "git-missing"; repos: RepoFacts[]; roots: Map<string, string>;
   skipped: Record<string, number>; since?: number; ms: number }

@@ -61,7 +61,10 @@ export const REPO_SIGNALS_DESCRIBE: { reads: string[]; runs: string[] } = {
       "larger ones count as present, unread) and reduced to kinds, check kinds, booleans and counts — their text is never kept: " +
       `${[...Object.values(INSTRUCTION_FILES).filter((p) => !p.endsWith("/")), ...REPO_FILES].join(", ")}; ` +
       `${SESSION_FOLDER_FILES.join(" and ")} also at each session folder inside the repo; and one level deep, at most ${MAX_FOLDER_FILES} files each, ` +
-      `${REPO_FOLDERS.map((f) => `${f.dir} (${f.what})`).join(", ")}. .claude/settings.local.json, source files and any other file are never opened; ` +
+      `${REPO_FOLDERS.map((f) => `${f.dir} (${f.what})`).join(", ")}. ` +
+      "Links are resolved in every path component first: a file is opened, or a folder listed, only when its real path lies inside " +
+      "the worktree and is itself one of these paths there (so CLAUDE.md linked to AGENTS.md is read; a link to a source file or out " +
+      "of the worktree is not). .claude/settings.local.json, source files and any other file are never opened; " +
       "a credential, token or key file name (or a link to one) is refused unopened.",
     "git config: the system-level git config is ignored (GIT_CONFIG_NOSYSTEM); only user.email and, for a git older than 2.44, " +
       "the partial-clone keys are asked for.",
@@ -231,13 +234,19 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
     // the files of the worktree the most detail sessions ran in, never the common dir's parent: a `.git` may be a link to
     // a store elsewhere, and each linked worktree holds its own files
     const tree = repo.trees[0];
+    // the files pass on its own: whatever it throws, the repo keeps its commit facts (its file facts stay empty)
     if (tree !== undefined) {
-      const cwds = tree.projectKeys.map((k) => input.cwds.get(k)).filter((c): c is string => c !== undefined);
-      const filesRunner: GitRunner = async (args, ro) => {
-        const r = await git(args, ro.cwd, ro.timeoutMs, ro.maxBytes);
-        return r === STOPPED ? { code: null, stdout: "", timedOut: false, truncated: false } : r;
-      };
-      Object.assign(facts, await readRepoFiles(tree.root, cwds, { signal, runner: filesRunner, now: input.now, timeoutMs, skip, history: got.names }));
+      try {
+        const cwds = tree.projectKeys.map((k) => input.cwds.get(k)).filter((c): c is string => c !== undefined);
+        const filesRunner: GitRunner = async (args, ro) => {
+          const r = await git(args, ro.cwd, ro.timeoutMs, ro.maxBytes);
+          return r === STOPPED ? { code: null, stdout: "", timedOut: false, truncated: false } : r;
+        };
+        Object.assign(facts, await readRepoFiles(tree.root, cwds, { signal, runner: filesRunner, now: input.now, timeoutMs, skip, history: got.names }));
+      } catch {
+        Object.assign(facts, EMPTY_FACTS());
+        skip("files-error");
+      }
     }
     return { facts, commits: got.commits };
   }
