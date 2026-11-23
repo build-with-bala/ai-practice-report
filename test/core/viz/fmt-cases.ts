@@ -10,4 +10,6 @@ export const fmtCases = (): [string, string][] => [
   ["month", fmt.month("2026-11")], ["week", fmt.week("2026-W47")],
   ["span", fmt.span(Date.UTC(2026, 2, 3), Date.UTC(2026, 10, 18), "UTC")], ["decimal", fmt.decimal(1234.5, 1)],
   ["count big", fmt.count(9_876_543_210)],
+  ["negatives", [fmt.score(-3), fmt.tokens(-1_500_000), fmt.duration(-130 * 60_000), fmt.count(-1234), fmt.decimal(-1.25, 1)].join(" ")],
+  ["count huge", fmt.count(1e21)], ["week 53", fmt.week("2026-W53")], ["week 99", fmt.week("2026-W99")],
 ];

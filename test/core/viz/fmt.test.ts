@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import path from "node:path";
+import { coveredBy, uncoveredChars } from "../../../core/viz/fonts";
 import { fmt } from "../../../core/viz/fmt";
 import { fmtCases } from "./fmt-cases";
 
@@ -52,7 +53,7 @@ describe("fmt: the rest of the rules", () => {
     expect(fmt.decimal(0.125, 2)).toBe((0.125).toFixed(2));
     expect(fmt.decimal(-0.001, 2)).toBe("0.00");
     expect(fmt.decimal(-0, 0)).toBe("0");
-    expect(fmt.decimal(-1.25, 1)).toBe("-1.3");
+    expect(fmt.decimal(-1.25, 1)).toBe("−1.3");
   });
 
   test("signed: + or U+2212, two digits by default, no sign on zero", () => {
@@ -98,6 +99,71 @@ describe("fmt: the rest of the rules", () => {
     }
     expect(fmt.month("Nov")).toBe("—");
     expect(fmt.week("47")).toBe("—");
+  });
+});
+
+describe("fmt: negatives take U+2212 MINUS SIGN, never an ASCII hyphen", () => {
+  const MINUS = "\u2212";
+
+  test("score, tokens, duration, count, signed and decimal agree", () => {
+    expect(fmt.score(-3.4)).toBe(`${MINUS}3`);
+    expect(fmt.tokens(-5)).toBe(`${MINUS}5`);
+    expect(fmt.tokens(-1500)).toBe(`${MINUS}2k`);
+    expect(fmt.tokens(-1_500_000)).toBe(`${MINUS}1.5M`);
+    expect(fmt.duration(-5000)).toBe(`${MINUS}5 s`);
+    expect(fmt.duration(-14 * 60_000)).toBe(`${MINUS}14 min`);
+    expect(fmt.duration(-130 * 60_000)).toBe(`${MINUS}2 h 10 min`);
+    expect(fmt.duration(-3 * 86_400_000)).toBe(`${MINUS}3 d`);
+    expect(fmt.count(-1234)).toBe(`${MINUS}1,234`);
+    expect(fmt.signed(-0.42)).toBe(`${MINUS}0.42`);
+    expect(fmt.decimal(-0.5, 2)).toBe(`${MINUS}0.50`);
+  });
+
+  test("no output for a negative value holds a hyphen, and a value that rounds to zero has no sign", () => {
+    const outs = [-0.4, -3, -999, -1e3, -12_345, -1e7].flatMap((x) => [fmt.score(x), fmt.tokens(x), fmt.duration(x), fmt.count(x),
+      fmt.signed(x), fmt.decimal(x, 1)]);
+    expect(outs.filter((s) => s.includes("-"))).toEqual([]);
+    expect([fmt.score(-0.4), fmt.tokens(-0.4), fmt.duration(-400), fmt.count(-0.4), fmt.decimal(-0.04, 1)]).toEqual(["0", "0", "0 s", "0", "0.0"]);
+  });
+
+  test("the minus sign is covered by every embedded family", () => {
+    expect(uncoveredChars(MINUS)).toEqual([]);
+    for (const family of ["mono", "display", "serif"] as const) expect([family, coveredBy(MINUS, family)]).toEqual([family, true]);
+  });
+});
+
+describe("fmt: edge cases", () => {
+  test("count never prints exponent notation: beyond 2^53 − 1 it clamps to a bound", () => {
+    expect(fmt.count(1e21)).toBe(">9,007,199,254,740,991");
+    expect(fmt.count(-1e21)).toBe("<\u22129,007,199,254,740,991");
+    expect(fmt.count(Number.MAX_VALUE)).toBe(">9,007,199,254,740,991");
+    expect(fmt.count(Number.MAX_SAFE_INTEGER)).toBe("9,007,199,254,740,991");
+    for (const n of [1e16, 1e21, 1e300]) expect(fmt.count(n)).not.toMatch(/e/i);
+  });
+
+  test("an impossible ISO week prints the fallback", () => {
+    for (const w of ["2026-W99", "2026-W00", "2026-W54", "2025-W53", "2026-W5", "2026-w47"]) expect([w, fmt.week(w)]).toEqual([w, "—"]);
+    // 2026 and 2020 have 53 ISO weeks (1 Jan on a Thursday; a leap year starting on a Wednesday).
+    expect(fmt.week("2026-W53")).toBe("W53 2026");
+    expect(fmt.week("2020-W53")).toBe("W53 2020");
+    expect(fmt.week("2026-W01")).toBe("W01 2026");
+  });
+
+  test("dates come from formatToParts, not from splitting a formatted string", () => {
+    const proto = Intl.DateTimeFormat.prototype;
+    const realFormat = Object.getOwnPropertyDescriptor(proto, "format")!;
+    const realParts = proto.formatToParts;
+    let parts = 0;
+    try {
+      Object.defineProperty(proto, "format", { configurable: true, get: () => () => "garbage" });
+      proto.formatToParts = function (this: Intl.DateTimeFormat, d?: Date | number) { parts++; return realParts.call(this, d); };
+      expect(fmt.day(Date.UTC(2026, 10, 17, 23, 30), "Pacific/Auckland")).toBe("18 Nov 2026");
+      expect(fmt.span(Date.UTC(2025, 10, 3), Date.UTC(2026, 2, 18), "Asia/Kolkata")).toBe("Nov 2025–Mar 2026");
+    } finally {
+      Object.defineProperty(proto, "format", realFormat);
+      proto.formatToParts = realParts;
+    }
+    expect(parts).toBeGreaterThan(0);
   });
 });
 
