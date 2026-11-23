@@ -21,6 +21,9 @@ import { cspFor } from "./page";
  *    - **Structure:** after the doctype, exactly one `<html>` holding exactly one `<head>` and then one `<body>`, with
  *      only white space between them and after `</html>`. `<meta>`, `<title>` and `<style>` only as direct children of
  *      that head, and nothing else there. The CSP position check is tied to that head.
+ *    - **Charset:** that head's first element child is exactly `<meta charset="utf-8">`, ending within the first 1,024
+ *      bytes, where browsers look for it; without it they fall back to a legacy encoding or guess one. The CSP meta is
+ *      the second child.
  *    - **No implied tree changes:** `<p>` holds only phrasing elements, headings do not nest, `<a>` and `<button>` do not
  *      nest in themselves, `li`/`dt`/`dd` and table parts have only their proper parents, tables and rows hold only
  *      their parts and white space. So the tree builder never closes, inserts or moves an element.
@@ -35,7 +38,10 @@ import { cspFor } from "./page";
  *    exact `</style>` or `</script>`. No `<style>`, `<script>` or `<foreignObject>` inside `<svg>`. `<title>` text holds
  *    no `<`; inside `<svg>`, `<title>` and `<desc>` (HTML integration points) hold text only, up to their own end tag. CSS holds no backslash escape but those `cssString` writes, and its `url(…)` is exactly `#id` or a font or
  *    image `data:` URL.
- * 7. A `<` in text that does not start an allowed tag, a NUL anywhere, or anything else inside a tag is a finding.
+ *    SVG paint attributes (`PAINT_ATTRS`) hold no `&` and no `\`, so no entity or CSS escape can spell a `url(` that
+ *    the literal check would miss.
+ * 7. A `<` in text that does not start an allowed tag, a NUL anywhere, any other C0 control but tab, LF and CR anywhere
+ *    (text, title, attribute values, style and script text), or anything else inside a tag is a finding.
  *
  * `nonCanonical` holds constant codes with a character offset (`<code> at <offset>`), never document text.
  */
@@ -64,7 +70,8 @@ export interface Audit {
   /** The CSP meta's policy, or null. */
   csp: string | null;
   /**
-   * The page is canonical (`nonCanonical` is empty), the CSP meta is the second element of `<head>`, there is one
+   * The page is canonical (`nonCanonical` is empty), so the head's first element is `<meta charset="utf-8">`; the CSP
+   * meta is the second element of `<head>`, there is one
    * `<style>` and one executable `<script>`, and the CSP pins them.
    */
   cspOk: boolean;
@@ -90,8 +97,9 @@ const URL_ATTRS: ReadonlySet<string> = new Set(["href", "xlink:href", "src", "po
   "cite", "manifest", "srcset"]);
 /** `element attribute` pairs where a `data:image/…` URL may stand: images, which cannot navigate. */
 const DATA_CONTEXTS: ReadonlySet<string> = new Set(["img src", "image href", "image xlink:href"]);
-/** SVG presentation attributes that take a CSS `url(…)`. */
-const PAINT_ATTRS: ReadonlySet<string> = new Set(["fill", "stroke", "clip-path", "mask", "filter", "marker-start", "marker-mid", "marker-end", "cursor"]);
+/** SVG presentation attributes that take a CSS `url(…)`: checked like CSS, and holding no `&` or `\`. */
+const PAINT_ATTRS: ReadonlySet<string> = new Set(["fill", "stroke", "clip-path", "mask", "filter", "marker", "marker-start", "marker-mid", "marker-end",
+  "cursor"]);
 /** Elements that load or redirect something whatever their attributes say. */
 const LOADERS: ReadonlySet<string> = new Set(["link", "iframe", "object", "embed", "base"]);
 const META_NAMES: ReadonlySet<string> = new Set(["viewport", "color-scheme", "referrer"]);
@@ -106,6 +114,11 @@ const CSS_ESCAPE = /\\(?:\\|"|A |3C |3E )/y;
 const ATTR = /[ \n]+([A-Za-z][A-Za-z0-9:-]*)="([^<>"]*)"/y;
 const TAG_NAME = /[A-Za-z][A-Za-z0-9]*/y;
 const END_TAG = /<\/([A-Za-z][A-Za-z0-9]*)>/y;
+/** C0 controls other than tab, LF and CR (NUL has its own code). */
+const CONTROL = /[\u0001-\u0008\u000b\u000c\u000e-\u001f]/g;
+const CHARSET_META = '<meta charset="utf-8">';
+/** Browsers look for the charset meta in the first 1,024 bytes. */
+const CHARSET_BYTES = 1024;
 const MAX_FINDINGS = 50;
 
 const stickyAt = (re: RegExp, s: string, at: number): RegExpMatchArray | null => {
@@ -152,6 +165,7 @@ export function auditHtml(html: string): Audit {
   let cspCount = 0;
   let cspAt = -1;
   let headIndex = 0;
+  let charsetOk = false;
   let preDepth = 0;
   /** The open elements, innermost last. */
   const stack: Open[] = [];
@@ -184,6 +198,7 @@ export function auditHtml(html: string): Audit {
 
   const nul = html.indexOf("\u0000");
   if (nul >= 0) flag("nul", nul);
+  for (const m of html.matchAll(CONTROL)) flag("control", m.index!);
   let i = 0;
   if (html.startsWith("<!doctype html>")) i = "<!doctype html>".length;
   else flag("doctype", 0);
@@ -211,7 +226,10 @@ export function auditHtml(html: string): Audit {
       }
       stack.pop();
       if (name === "pre") preDepth--;
-      else if (name === "head") phase = 3;
+      else if (name === "head") {
+        phase = 3;
+        if (headIndex === 0) flag("charset", lt);
+      }
       else if (name === "body") phase = 5;
       else if (name === "html") phase = 6;
       i = lt + m![0].length;
@@ -262,6 +280,11 @@ export function auditHtml(html: string): Audit {
     } else if (!inSvg) {
       const inHead = phase === 2 && parent?.name === "head";
       if (inHead) headIndex++;
+      if (inHead && headIndex === 1) {
+        const end = lt + CHARSET_META.length;
+        charsetOk = html.startsWith(CHARSET_META, lt) && new TextEncoder().encode(html.slice(0, end)).length <= CHARSET_BYTES;
+        if (!charsetOk) flag("charset", lt);
+      }
       if (HEAD_ONLY.has(name) !== inHead) flag("structure", lt);
       if (!inHead && phase !== 4) flag("structure", lt);
       if (!PHRASING.has(name) && has("p")) flag("content", lt);
@@ -282,7 +305,10 @@ export function auditHtml(html: string): Audit {
         const local = key !== "srcset" && (FRAGMENT.test(value) || (DATA_CONTEXTS.has(`${name} ${key}`) && DATA_IMAGE.test(value)));
         if (!local) externalRefs.push(`${key}=${value}`);
       }
-      if (PAINT_ATTRS.has(key) && /url\(/i.test(value)) css(value, j);
+      if (PAINT_ATTRS.has(key)) {
+        if (/[&\\]/.test(value)) flag("paint-escape", j);
+        if (/url\(/i.test(value)) css(value, j);
+      }
     }
 
     if (name === "meta") {
@@ -355,7 +381,7 @@ export function auditHtml(html: string): Audit {
   if (phase !== 6) flag("structure", html.length);
   if (dropped > 0) nonCanonical.push(`more ${dropped}`);
 
-  const cspOk = nonCanonical.length === 0 && csp !== null && cspCount === 1 && cspAt === 2 && styles.length === 1 && scripts.length === 1
+  const cspOk = nonCanonical.length === 0 && charsetOk && csp !== null && cspCount === 1 && cspAt === 2 && styles.length === 1 && scripts.length === 1
     && csp === cspFor(styles[0]!, scripts[0]!);
   return {
     bytes: new TextEncoder().encode(html).length,

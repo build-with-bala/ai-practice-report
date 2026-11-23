@@ -76,6 +76,22 @@ describe("auditHtml: cspOk", () => {
     expect(auditHtml(doc(`<meta charset="utf-8">${csp(S, J)}<style>${S}</style>`, `<script>${J}</script><!-- x -->`)).cspOk).toBe(false);
   });
 
+  test("false when the head's first child is not exactly the charset meta, even with the CSP second", () => {
+    const head = (first: string): string => doc(`${first}${csp(S, J)}<style>${S}</style>`, `<script>${J}</script>`);
+    expect(auditHtml(head('<meta charset="utf-8">')).cspOk).toBe(true);
+    for (const first of ['<meta name="referrer" content="no-referrer">', '<meta name="color-scheme" content="dark light">', "<title>t</title>",
+      '<meta charset="UTF-8">', '<meta\ncharset="utf-8">']) {
+      const a = auditHtml(head(first));
+      expect([first, a.cspOk, codes(a).includes("charset")]).toEqual([first, false, true]);
+    }
+  });
+
+  test("the charset meta must also end within the first 1,024 bytes", () => {
+    const html = doc(`<meta charset="utf-8">${csp(S, J)}<style>${S}</style>`, `<script>${J}</script>`).replace('<html lang="en">', `<html lang="${"e".repeat(1100)}">`);
+    const a = auditHtml(html);
+    expect([a.cspOk, codes(a)]).toEqual([false, ["charset"]]);
+  });
+
   test("csp holds the policy text", () => {
     expect(auditHtml(doc(`<meta charset="utf-8">${csp(S, J)}`, "")).csp).toBe(cspFor(S, J));
   });
@@ -129,6 +145,17 @@ describe("auditHtml: the canonical subset, rule by rule", () => {
     ["text in a table", doc("", "<table>x<tbody></tbody></table>"), "structure"],
     ["an element in svg title", doc("", "<svg><title><b>x</b></title></svg>"), "svg-text"],
     ["a CSS escape cssString never writes", "<!doctype html><style>\\75 rl(x)</style>", "css-escape"],
+    ["no charset: the head's first child is not the charset meta", doc('<meta name="referrer" content="no-referrer">', ""), "charset"],
+    ["an empty head", doc("", ""), "charset"],
+    ["ESC in text", doc('<meta charset="utf-8">', "<p>a\u001bb</p>"), "control"],
+    ["a C0 control in an attribute value", doc('<meta charset="utf-8">', '<p title="a\u0001b">x</p>'), "control"],
+    ["a C0 control in the title", doc('<meta charset="utf-8"><title>a\u0008b</title>', ""), "control"],
+    ["a C0 control in style text", doc('<meta charset="utf-8"><style>a{}\u001f</style>', ""), "control"],
+    ["a C0 control in script text", doc('<meta charset="utf-8">', "<script>1\u000b</script>"), "control"],
+    ["a form feed", doc('<meta charset="utf-8">', "<p>a\u000cb</p>"), "control"],
+    ["an entity in a paint attribute", doc('<meta charset="utf-8">', '<svg><rect fill="&#117;rl(https://x)"/></svg>'), "paint-escape"],
+    ["a backslash in a paint attribute", doc('<meta charset="utf-8">', '<svg><rect stroke="u\\72l(https://x)"/></svg>'), "paint-escape"],
+    ["an entity in a marker attribute", doc('<meta charset="utf-8">', '<svg><path d="M0 0" marker-end="&#x75;rl(//x)"/></svg>'), "paint-escape"],
   ];
   for (const [label, html, code] of cases) {
     test(label, () => {
@@ -184,6 +211,16 @@ describe("auditHtml: URL attributes match literally", () => {
     expect(auditHtml("<!doctype html><style>a{src:url(data:font/woff2;base64,AA)}</style>").externalRefs).toEqual([]);
     expect(auditHtml('<!doctype html><style>a{src:url("data:font/woff2;base64,AA")}</style>').externalRefs.length).toBe(1);
     expect(auditHtml('<!doctype html><style>a{background:image-set("x" 1x)}</style>').externalRefs.length).toBe(1);
+  });
+
+  test("a paint attribute holding & or \\ is a finding: entity or CSS escapes could spell url(", () => {
+    for (const v of ["&#117;rl(https://x)", "&#x55;RL(//x)", "u&#114;l(x)", "&amp;", "u\\72l(https://x)", "\\75 rl(x)", "url(#a)\\"]) {
+      for (const key of ["fill", "stroke", "mask", "clip-path", "filter", "marker-start", "marker-mid", "marker-end", "marker", "cursor"]) {
+        const a = auditHtml(`<!doctype html><svg><rect ${key}="${v}"/></svg>`);
+        expect([key, v, codes(a).includes("paint-escape")]).toEqual([key, v, true]);
+      }
+    }
+    expect(codes(auditHtml('<!doctype html><svg><rect fill="url(#kit-hatch)" stroke="#000"/></svg>'))).not.toContain("paint-escape");
   });
 
   test("a meta refresh is a reference in any case or quoting", () => {
@@ -253,6 +290,10 @@ describe("auditHtml: property — no hostile insertion into a clean page audits 
     "<svg><title><b>x</b></title></svg>", "<svg><desc><p>x</p></desc></svg>", "<svg><title><title></svg></title></title>",
     "<p>a < b</p>", "<p>a\u0000b</p>", "<div/>", "<p class=x>y</p>", "<p class='x'>y</p>", "<details open>x</details>",
     '<p\tclass="x">y</p>', '<p class="a" class="b">y</p>', '<p a="1"b="2">y</p>', "</p x>", "</P>", "<math><mi>x</mi></math>",
+    // C0 controls and escaped paint url()
+    "<p>a\u001bb</p>", "<p>a\u0001b</p>", '<p title="\u001b[31m">x</p>', "<p>a\u000cb</p>", "<p>a\u007fb\u0019</p>",
+    '<svg><rect fill="&#117;rl(https://x)"/></svg>', '<svg><rect fill="u\\72l(https://x)"/></svg>', '<svg><rect mask="&#x75;rl(x.svg#m)"/></svg>',
+    '<svg><rect filter="\\75 rl(x.svg#f)"/></svg>', '<svg><rect cursor="&#117;rl(x.cur),auto"/></svg>', '<svg><rect clip-path="&amp;"/></svg>',
   ];
 
   test("the table holds about 60 insertions or more", () => {
@@ -262,6 +303,35 @@ describe("auditHtml: property — no hostile insertion into a clean page audits 
   for (const [i, ins] of INSERTIONS.entries()) {
     test(`insertion ${i}`, () => {
       expect(clean(auditHtml(inPage(ins)))).toBe(false);
+    });
+  }
+});
+
+describe("auditHtml: property — no edit of a clean page's head that drops the leading charset audits clean", () => {
+  const base = page({ ...PAGE, body: "<main></main>" });
+  const CHARSET = '<meta charset="utf-8">';
+  const EDITS: [string, (h: string) => string][] = [
+    ["charset swapped for another allowed meta", (h) => h.replace(CHARSET, '<meta name="referrer" content="no-referrer">')],
+    ["charset upper-case", (h) => h.replace(CHARSET, '<meta charset="UTF-8">')],
+    ["charset another encoding", (h) => h.replace(CHARSET, '<meta charset="windows-1252">')],
+    ["charset removed", (h) => h.replace(CHARSET, "")],
+    ["charset moved after the CSP", (h) => h.replace(CHARSET, "").replace("<title>", `${CHARSET}<title>`)],
+    ["a meta before the charset", (h) => h.replace("<head>", '<head><meta name="color-scheme" content="dark light">')],
+    ["charset with a newline separator", (h) => h.replace(CHARSET, '<meta\ncharset="utf-8">')],
+    ["charset pushed past 1,024 bytes", (h) => h.replace('lang="en"', `lang="${"e".repeat(1100)}"`)],
+    ["ESC in the title", (h) => h.replace("<title>", "<title>\u001b")],
+    ["ESC in the style", (h) => h.replace("</style>", "\u001b</style>")],
+  ];
+
+  test("the base page audits clean", () => {
+    expect(clean(auditHtml(base))).toBe(true);
+  });
+
+  for (const [label, edit] of EDITS) {
+    test(label, () => {
+      const html = edit(base);
+      expect(html).not.toBe(base);
+      expect(clean(auditHtml(html))).toBe(false);
     });
   }
 });
