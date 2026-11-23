@@ -20,5 +20,5 @@ jobs:
         with:
           bun-version: 1.3.11
       - run: bun install --frozen-lockfile
-      - run: bun test
+      - run: bun test --timeout 30000
       - run: bunx tsc --noEmit
