@@ -48,7 +48,7 @@ function shareStoreDrift(a: Tally, b: Tally): void {
 async function scanIde(c: Candidate, ctx: ScanCtx): Promise<void> {
   const tally = new Tally(TOOL, IDE_SOURCE);
   const life = new Tally(TOOL, IDE_SOURCE, "lifetime");
-  const legacy = new LegacyKeys(ctx, tally);
+  const legacy = new LegacyKeys(ctx, tally, life);
   const globalStore = path.join(c.root, "globalStorage", "state.vscdb");
   let present = 0;
   let read = 0;
@@ -85,7 +85,8 @@ async function scanIde(c: Candidate, ctx: ScanCtx): Promise<void> {
   const cov = tally.coverage();
   if (present === 0) cov.status = "absent"; // no store at all
   const lcov = life.coverage();
-  if (!safeStat(globalStore)?.isFile()) lcov.status = "absent"; // no global store: no composer index
+  // no global store: no composer index, and the lifetime window is absent unless a workspace store held a prompt log
+  if (!safeStat(globalStore)?.isFile() && lcov.records === 0 && Object.keys(lcov.skipped).length === 0 && Object.keys(lcov.unknownTypes).length === 0) lcov.status = "absent";
   ctx.emit(cov);
   ctx.emit(lcov);
 }

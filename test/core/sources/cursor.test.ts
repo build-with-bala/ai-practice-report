@@ -5,6 +5,7 @@ import path from "node:path";
 import { detectEnv } from "../../../core/env/env";
 import { __observeQueries, MAX_COPY_BYTES } from "../../../core/io/sqlite";
 import type { CoverageEv, Ev, PromptEv, SessionEv, ToolEv } from "../../../core/model/events";
+import { analyze } from "../../../core/analyze";
 import { scan } from "../../../core/scan";
 import { cuAgentCli, cuIde, cuTracking, cursorUserRoot } from "../../../core/sources/cursor";
 import { LEGACY_KEYS } from "../../../core/sources/cursor/itemtable";
@@ -734,7 +735,7 @@ describe("cursor ide: legacy ItemTable fallback", () => {
   ];
   const gen = (id: string, unixMs: unknown, text: Record<string, unknown>) => ({ generationUUID: id, unixMs, type: "composer", ...text });
 
-  test("without cursorDiskKV: the four legacy keys, by exact key only; credentials never selected; sessions and timed prompts", async () => {
+  test("without cursorDiskKV: the four legacy keys, by exact key only; credentials never selected; sessions, and timed prompts as a lifetime prompt log", async () => {
     const at = t0();
     const gens = [
       gen("g1", at + MIN, { textDescription: `Refactor the importer. ${CANARY.prompt}` }),
@@ -762,8 +763,9 @@ describe("cursor ide: legacy ItemTable fallback", () => {
     expect([...LEGACY_KEYS]).toEqual(["aiService.prompts", "aiService.generations", "composer.composerData", "workbench.panel.aichat.view.aichat.chatdata"]);
 
     const prompts = [...r.store.all("prompt")].sort((a, b) => a.ts - b.ts);
+    // the generation list links no session: a prompt log, like Claude Code's history file
     expect(prompts.map((p) => [p.ts - at, p.origin, p.window, p.sessionId])).toEqual([
-      [MIN, "human", "detail", undefined], [2 * MIN, "human", "detail", undefined], [50 * MIN, "human", "detail", undefined], [60 * MIN, "human", "detail", undefined],
+      [MIN, "human", "lifetime", undefined], [2 * MIN, "human", "lifetime", undefined], [50 * MIN, "human", "lifetime", undefined], [60 * MIN, "human", "lifetime", undefined],
     ]);
     expect(prompts.map((p) => p.features.isTaskStart)).toEqual([true, false, true, true]);
     expect(prompts[1]!.textHash).toBe(keyedHash(r.salt, "Now add tests for it"));
@@ -772,10 +774,12 @@ describe("cursor ide: legacy ItemTable fallback", () => {
       [sidOf(cuSid("T1")), "chat", 30 * MIN, 30 * MIN], [sidOf(cuSid("T2")), "chat", 61 * MIN, 61 * MIN],
     ].sort());
     const cov = covOf(r, "cursor.ide");
-    // the global store: the prompt list's presence, 4 generations, the composer index, the chat tabs; the workspace
-    // store: 2 generations and its chat tabs
-    expect(cov).toMatchObject({ status: "ok", files: 2, records: 1 + 4 + 1 + 1 + 2 + 1 });
-    expect(cov.skipped).toEqual({ duplicate: 1, "no-ts": 1, draft: 1, "inline-message": 4 });
+    // detail: the global store's composer index and chat tabs, the workspace store's chat tabs
+    expect(cov).toMatchObject({ status: "ok", files: 2, records: 1 + 1 + 1 });
+    expect(cov.skipped).toEqual({ draft: 1, "inline-message": 4 });
+    // lifetime, the prompt log: the prompt list's presence and 4 generations in the global store, 2 in the workspace store
+    expect(composersCov(r)).toMatchObject({ status: "ok", records: 1 + 4 + 2, from: at + MIN, to: at + 60 * MIN });
+    expect(composersCov(r).skipped).toEqual({ duplicate: 1, "no-ts": 1 });
     expectNoCanaries([...allEvents(r), r.coverage, r.warnings]);
   });
 
@@ -812,7 +816,8 @@ describe("cursor ide: legacy ItemTable fallback", () => {
     writeStateDb(h, workspaceRel(h, "w1"), [], [["aiService.generations", padded(CAP + 1, "Over the cap")]], { kv: false });
     const r = await run([cuIde]);
     expect(r.store.all("prompt").map((p) => p.textHash)).toEqual([keyedHash(r.salt, "At the cap")]);
-    expect(covOf(r, "cursor.ide")).toMatchObject({ note: "too-large", skipped: { "too-large": 1 }, files: 2, records: 2 });
+    expect(covOf(r, "cursor.ide").files).toBe(2);
+    expect(composersCov(r)).toMatchObject({ note: "too-large", skipped: { "too-large": 1 }, records: 2 });
     expect(r.warnings.some((w) => w.code === "too-large" && w.source === "cursor.ide")).toBe(true);
   });
 
@@ -829,14 +834,14 @@ describe("cursor ide: legacy ItemTable fallback", () => {
     expectNoCanaries([...allEvents(r), r.coverage]);
   });
 
-  test("generations that all lack the text field are drift missing-field:text, and zero-yield: a renamed field never passes as a quiet store", async () => {
+  test("generations that all lack the text field are drift missing-field:text in the prompt log's window: a renamed field never passes as a quiet store", async () => {
     const at = t0();
     writeStateDb(h, globalRel(h), [], [["aiService.generations", [
       gen("g1", at, {}), gen("g2", at + MIN, { prompt: "Renamed field" }), gen("g3", at + 2 * MIN, { textDescription: null, text: 7 }),
     ]]], { kv: false });
     const r = await run([cuIde]);
-    const cov = covOf(r, "cursor.ide");
-    expect([cov.status, cov.records, cov.skipped, cov.unknownTypes]).toEqual(["drift", 3, {}, { "missing-field:text": 3, "zero-yield": 1 }]);
+    const cov = composersCov(r);
+    expect([cov.status, cov.records, cov.skipped, cov.unknownTypes]).toEqual(["drift", 3, {}, { "missing-field:text": 3 }]);
     expect(r.store.all("prompt")).toEqual([]);
     expect(r.warnings.filter((w) => w.code === "drift").map((w) => w.source)).toEqual(["cursor.ide"]);
   });
@@ -847,7 +852,7 @@ describe("cursor ide: legacy ItemTable fallback", () => {
       gen("g1", at, { textDescription: "" }), gen("g2", at + MIN, { text: "   " }), gen("g3", at + 2 * MIN, { textDescription: "\n", text: "" }),
     ]]], { kv: false });
     let r = await run([cuIde]);
-    let cov = covOf(r, "cursor.ide");
+    let cov = composersCov(r);
     expect([cov.status, cov.records, cov.skipped, cov.unknownTypes]).toEqual(["ok", 3, { empty: 3 }, {}]);
     expect(r.warnings.filter((w) => w.code === "drift")).toEqual([]);
     // an empty generation list holds no record at all
@@ -855,8 +860,25 @@ describe("cursor ide: legacy ItemTable fallback", () => {
     h = fakeHome();
     writeStateDb(h, globalRel(h), [], [["aiService.generations", []]], { kv: false });
     r = await run([cuIde]);
-    cov = covOf(r, "cursor.ide");
+    cov = composersCov(r);
     expect([cov.status, cov.records, cov.unknownTypes]).toEqual(["empty", 0, {}]);
+  });
+
+  test("through analyze: the generation list's prompts count as lifetime prompts, the tool is present and has active days", async () => {
+    const now = Date.now();
+    const DAYS = 12;
+    const gens = Array.from({ length: DAYS }, (_, i) => gen(`g${i}`, now - (DAYS - i) * DAY, { textDescription: `Refactor module number ${i} and add tests for it` }));
+    const heads = { allComposers: gens.map((g, i) => ({ composerId: cuSid(`H${i}`), createdAt: (g.unixMs as number) - MIN, lastUpdatedAt: (g.unixMs as number) + 10 * MIN, unifiedMode: "agent" })) };
+    writeStateDb(h, globalRel(h), [], [["aiService.generations", gens], ["composer.composerData", heads]], { kv: false });
+    const r = await scan({ env: h.env, plugins: [cuIde], repoSignals: false, handleSignals: false });
+    expect(r.store.all("prompt").map((p) => p.window)).toEqual(Array.from({ length: DAYS }, () => "lifetime"));
+    const a = analyze(r, { timeZone: "UTC", bootstrap: 10, now });
+    const life = a.exposure.tools.find((t) => t.tool === "cursor" && t.window === "lifetime");
+    expect(life?.prompts).toBe(DAYS);
+    expect(a.exposure.rotation.ever).toContain("cursor");
+    expect(a.exposure.weekly.reduce((n, w) => n + w.lifetimePrompts, 0)).toBe(DAYS);
+    expect(a.exposure.weekly.reduce((n, w) => n + w.activeDays, 0)).toBe(DAYS);
+    expect(a.exposure.activeWeeks.lifetime.n).toBe(DAYS);
   });
 
   test("legacy values of the wrong shape are drift; unparsable ones are counted", async () => {
@@ -867,8 +889,9 @@ describe("cursor ide: legacy ItemTable fallback", () => {
     const r = await run([cuIde]);
     const cov = covOf(r, "cursor.ide");
     // values read, nothing usable in them: the shapes are drift, and so is yielding nothing at all
-    expect(cov.unknownTypes).toEqual({ "aiService.generations:shape": 1, "workbench.panel.aichat.view.aichat.chatdata:shape": 1, "zero-yield": 1 });
+    expect(cov.unknownTypes).toEqual({ "workbench.panel.aichat.view.aichat.chatdata:shape": 1, "zero-yield": 1 });
     expect(cov.skipped).toEqual({ parse: 1 });
+    expect(composersCov(r).unknownTypes).toEqual({ "aiService.generations:shape": 1 });
     expect(allEvents(r)).toEqual([]);
   });
 });
@@ -978,8 +1001,14 @@ describe("cursor ide: stores that cannot be read", () => {
     writeStateDb(h, workspaceRel(h, "w1"), [], [["aiService.generations", [{ generationUUID: "g", unixMs: t0(), textDescription: "Hi" }]]], { kv: false });
     h.write(workspaceRel(h, "w2"), "not a database either");
     r = await run([cuIde]);
-    expect(covOf(r, "cursor.ide")).toMatchObject({ status: "ok", files: 1, skipped: { "io-error": 1 } });
-    expect(composersCov(r).status).toBe("absent"); // no global store: no composer index
+    expect(covOf(r, "cursor.ide")).toMatchObject({ status: "empty", files: 1, skipped: { "io-error": 1 } });
+    // no global store: no composer index, but the workspace store's prompt log is read
+    expect(composersCov(r)).toMatchObject({ status: "ok", records: 1 });
+    h.cleanup();
+    h = fakeHome();
+    writeStateDb(h, workspaceRel(h, "w1"), [], [["workbench.panel.aichat.view.aichat.chatdata", { tabs: [{ tabId: cuSid("T2"), lastSendTime: t0(), bubbles: [{ type: "user", text: "Hi" }] }] }]], { kv: false });
+    r = await run([cuIde]);
+    expect(composersCov(r).status).toBe("absent"); // no global store and no prompt log: no lifetime window
   });
 
   test.skipIf(process.platform === "win32")("a locked store above MAX_COPY_BYTES is never copied: too-large note and warning", async () => {

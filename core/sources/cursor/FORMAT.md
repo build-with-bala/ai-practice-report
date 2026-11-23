@@ -212,29 +212,33 @@ conversations live in `cursorDiskKV`.
   read), the four legacy keys are read — by exact key, parameterized (`WHERE key = ?`), from the global store's
   `ItemTable` and then each workspace store's. A value longer than 64 Mi characters is never loaded: skipped
   `too-large` (`note: "too-large"`). `aiService.prompts` is checked for presence only. `aiService.generations` → a
-  PromptEv per entry with a time and text (`textDescription`, else `text`; no session; a `generationUUID` seen in an
-  earlier store is skipped `duplicate`; an entry with neither text field is drift `missing-field:text`, one whose text
-  is blank is skipped `empty`), in time order per store for `isTaskStart`/`simToPrev`. `composer.composerData`
+  PromptEv per entry with a time and text (`textDescription`, else `text`; a `generationUUID` seen in an earlier store
+  is skipped `duplicate`; an entry with neither text field is drift `missing-field:text`, one whose text is blank is
+  skipped `empty`), in time order per store for `isTaskStart`/`simToPrev`. The list links no session, so it is a
+  prompt log, like Claude Code's history file: its prompts are `window: "lifetime"` with no `sessionId`, and the
+  prompt list and the generation list are counted in the `lifetime` coverage. `composer.composerData`
   → a SessionEv per entry (`createdAt`/`lastUpdatedAt`, `surface: "ide"` and `mode` as above, `modelConfig.modelName`; drafts
   skipped `draft`; inline messages counted `inline-message`). `chatdata` → a SessionEv (`mode: "chat"`) per tab with messages at
   its `lastSendTime` (tabs without messages `empty-session`; their messages `inline-message`). A value of another shape
   is drift `<key>:shape`; one that is not JSON `parse`.
 - **Coverage**, one per window; no versions (the stores name none). The source is an error when every store present
   fails to open or read, unless a store was too large to copy.
-  - `lifetime` — the composer index, every conversation: `files`/`bytes` = the global store; `records` = composer rows
-    read; `from`/`to` = the span of every composer's session, both windows'. Skipped: `parse`, `duplicate`,
-    `empty-session`, `no-ts`, `bad-record` (a session the mapping failed on), `io-error`, `too-large`. `absent` without
-    a global store.
-  - `detail` — the bubbles of the composers inside the window, and the legacy keys: `files`/`bytes` = stores whose tables
-    were listed (main file size); `records` = bubble rows read, plus legacy values read (a generation list counts its
-    entries, one record each, in place of its value); `from`/`to` = first/last time of its events and detail sessions.
+  - `lifetime` — the composer index, every conversation, and the legacy prompt log: `files`/`bytes` = the global store;
+    `records` = composer rows read, plus the prompt list's presence and the generation list's entries (one record
+    each); `from`/`to` = the span of every composer's session, both windows', and of the legacy prompts. Skipped:
+    `parse`, `duplicate`, `empty-session`, `no-ts`, `empty`, `bad-record` (a session or prompt the mapping failed on),
+    `io-error`, `too-large`. `absent` without a global store, unless a workspace store holds a prompt log.
+  - `detail` — the bubbles of the composers inside the window, and the legacy session keys: `files`/`bytes` = stores
+    whose tables were listed (main file size); `records` = bubble rows read, plus legacy composer-index and chat-tab
+    values read; `from`/`to` = first/last time of its events and detail sessions.
     Skipped: `parse`, `orphan`, `duplicate`, `unlisted`, `missing-bubbles`, `no-ts`, `empty`, `empty-session`,
     `outside-window` (a composer whose bubbles are not read), `inline-message`, `draft`, `bad-record` (a row or prompt
     the mapping failed on; the warn log `cu.bad-record` counts both windows'), `io-error`, `too-large`. `absent` when
     there is no store at all.
   - Drift of the store itself (`missing-column:<name>`, `missing-table:<name>`, `no-key-index:cursorDiskKV`,
     `table-unreadable:cursorDiskKV`) is in both windows; `missing-bubbles:cursorDiskKV`, `missing-field:text`,
-    `bubble-type:<n>` and `<legacy key>:shape` in the detail window.
+    `bubble-type:<n>` and `<legacy key>:shape` in the detail window (`aiService.generations:shape` and the generations'
+    `missing-field:text` in the lifetime window).
 
 ## ai-code-tracking.db (`cursor.tracking`)
 
@@ -302,5 +306,6 @@ strings are both accepted). One machine reported every line column of `scored_co
 - Token counts (zero in current versions), the context meter and request ids are not mapped; neither are the
   timings Cursor keeps per bubble in some versions.
 - Composers have no project: the workspace index is not read.
-- Legacy generations have no session, and legacy chat-tab messages and inline composer messages no time.
+- Legacy generations have no session (so they are lifetime prompts), and legacy chat-tab messages and inline composer
+  messages no time.
 - cursor-agent sessions are not decoded, so the CLI's activity is not in the report yet.
