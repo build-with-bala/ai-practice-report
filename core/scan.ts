@@ -49,7 +49,9 @@ export interface ScanOptions { env?: Env; plugins?: SourcePlugin[]; tools?: Tool
    * The streaming reader's garbage-collection pacer, default `auto`: on for the scan. `off` turns it off for the scan
    * (an application that manages memory itself). The pacer is shared by every scan in the process: while scans overlap
    * it is on if any of them asked for `auto`, and off only while all of them asked for `off`; when the last ends it is
-   * restored as it was before (`holdStreamGc`). Every scan logs `scan.gc` (debug) once, with the number of collections
+   * restored as it was before (`holdStreamGc`). When its reading is over, a scan collects once more when the pacer is on
+   * and RSS is above its floor (`GcPacer.settle`), so the caller's analysis reuses the pages the scan's garbage holds.
+   * Every scan logs `scan.gc` (debug) once, with the number of collections
    * the pacer ran during the scan's lifetime. The pacer is process-wide, so that count includes collections caused by
    * an overlapping scan's reading.
    */
@@ -217,6 +219,9 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
       repos = await repoPass(store, cwds, { salt, now, signal, options, onProgress: opts.onProgress });
     }
   } finally {
+    // the reading is over: one collection, while the scan's own pacer state still holds, so the caller's analysis
+    // reuses the pages the scan's garbage holds
+    STREAM_GC.settle();
     releaseGc();
     try { opts.onLog?.("debug", "scan.gc", STREAM_GC.collections - collectionsBefore); } catch { /* never fails a scan */ }
     tempClean = temp.close();

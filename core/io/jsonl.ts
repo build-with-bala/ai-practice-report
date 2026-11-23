@@ -11,37 +11,78 @@ export interface GcPacerOptions {
   minRss: number;
   /** The RSS growth over the baseline that a collection waits for. */
   slack: number;
+  /**
+   * The fallback's step: while RSS is no measure of live memory, a collection at least every this many bytes (default
+   * 16 MiB). The garbage one step leaves fills the kept pages, so a smaller step means a lower peak, at the price of
+   * more full collections.
+   */
+  fallbackEvery?: number;
 }
 
 /**
- * Collects garbage when the process has grown by more than `slack` since it last did. Parsed lines leave garbage faster
- * than the engine reclaims it on its own while the event store grows, so without help a long scan's peak RSS climbs
- * with the bytes it streams. Every `checkEvery` bytes reported, the pacer reads the RSS: above `minRss`, and more than
- * `slack` over the baseline, it runs `collect` and takes the RSS after it as the new baseline (the first look sets the
- * first baseline). Every look also lowers the baseline to the RSS it reads when that is lower, so after the RSS falls
- * (a scan's store released, pages returned) growth is measured from the low mark, never from a stale high one. A heap that holds steady is never collected, however much is streamed; one that grows is collected
- * about once per `slack` of growth, so a large live store costs no more collections than a small one.
+ * Collects garbage as the process grows. Parsed lines leave garbage faster than the engine reclaims it on its own while
+ * the event store grows, so without help a long scan's peak RSS climbs with the bytes it streams.
+ *
+ * The adaptive rule. Every `checkEvery` bytes reported, the pacer reads the RSS. Above `minRss`, and more than `slack`
+ * over the baseline, it runs `collect` and takes the RSS after it as the new baseline (the first look sets the first
+ * baseline). Every look also lowers the baseline to the RSS it reads when that is lower, so after the RSS falls (a
+ * scan's store released, pages returned) growth is measured from the low mark, never from a stale high one. A heap that
+ * holds steady is never collected; one whose garbage the allocator hands back is collected about once per `slack` of
+ * growth.
+ *
+ * Why RSS alone is not enough. The allocator keeps the pages a collection frees, so RSS after a collection is no
+ * measure of live memory: often it does not fall at all. The baseline then sits at the high mark, the next garbage
+ * fills the kept pages unseen, and a collection comes only once RSS has climbed `slack` past that mark — the peak
+ * ratchets up by `slack` per collection, while far fewer collections run than the stream needs.
+ *
+ * The fallback. A collection "did not fall" when its RSS fell by less than half of the growth it answered
+ * (`rss before − baseline`; any collection with no growth to answer). A partial fall below that half counts as not
+ * falling. From the first collection that did not fall, the pacer also collects every `fallbackEvery` bytes streamed
+ * since its last collection, above `minRss`, and keeps doing so until a look finds RSS at or below `minRss` (memory
+ * really handed back: a new phase). A later collection that does fall does not turn it off, since a fall can be garbage
+ * that filled kept pages unseen, freed again, while RSS still says nothing of live memory. While RSS falls as it
+ * should, the pacer is the adaptive rule alone, and a small process pays nothing.
  */
 export class GcPacer {
   /** False: `add` does nothing (no look at the RSS, no collection). */
   enabled = true;
   private bytes = 0;
+  private sinceCollect = 0;
   private baseline: number | undefined;
+  private fallback = false;
   private count = 0;
+  private readonly fallbackEvery: number;
   constructor(
     private readonly opts: GcPacerOptions,
     private readonly collect: () => void,
     private readonly rss: () => number = () => process.memoryUsage().rss,
-  ) {}
+  ) {
+    this.fallbackEvery = opts.fallbackEvery ?? 16 * 1024 * 1024;
+  }
 
   /** The collections run so far. */
   get collections(): number {
     return this.count;
   }
 
+  /**
+   * The end of a phase (a scan's reading is over): one collection when enabled and above `minRss`, so what follows
+   * reuses the pages the phase's garbage holds instead of growing RSS past them. The baseline becomes the RSS after it.
+   */
+  settle(): void {
+    if (!this.enabled) return;
+    const now = this.rss();
+    if (now <= this.opts.minRss) return;
+    this.collect();
+    this.count++;
+    this.baseline = Math.min(this.baseline ?? Infinity, this.rss());
+    this.sinceCollect = 0;
+  }
+
   add(n: number): void {
     if (!this.enabled) return;
     this.bytes += n;
+    this.sinceCollect += n;
     if (this.bytes < this.opts.checkEvery) return;
     this.bytes = 0;
     const now = this.rss();
@@ -50,10 +91,20 @@ export class GcPacer {
       return;
     }
     this.baseline = Math.min(this.baseline, now);
-    if (now <= this.opts.minRss || now - this.baseline <= this.opts.slack) return;
+    if (now <= this.opts.minRss) {
+      this.fallback = false;
+      return;
+    }
+    const grew = now - this.baseline > this.opts.slack;
+    const due = this.fallback && this.sinceCollect >= this.fallbackEvery;
+    if (!grew && !due) return;
     this.collect();
     this.count++;
-    this.baseline = this.rss();
+    const after = this.rss();
+    const answered = now - this.baseline;
+    this.fallback ||= answered <= 0 || (now - after) * 2 < answered;
+    this.baseline = after;
+    this.sinceCollect = 0;
   }
 }
 
