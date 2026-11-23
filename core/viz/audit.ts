@@ -15,7 +15,15 @@ import { cspFor } from "./page";
  * 1. The document starts with `<!doctype html>`. No comment, CDATA section, processing instruction or other `<!`
  *    anywhere else.
  * 2. Start tags are `<name` with the name, case and all, in `HTML_ELEMENTS` (outside `<svg>`) or `SVG_ELEMENTS` (inside
- *    `<svg>`); `/>` only inside `<svg>`. End tags are exactly `</name>`, with a name from the same lists.
+ *    `<svg>`); `/>` only inside `<svg>`. End tags are exactly `</name>`.
+ *    - **Strict nesting:** an open-element stack; every non-void element is closed by its own end tag in LIFO order, void
+ *      elements (`meta`, `br`, `hr`) have none; a mismatch, a stray end tag or an element left open is a finding.
+ *    - **Structure:** after the doctype, exactly one `<html>` holding exactly one `<head>` and then one `<body>`, with
+ *      only white space between them and after `</html>`. `<meta>`, `<title>` and `<style>` only as direct children of
+ *      that head, and nothing else there. The CSP position check is tied to that head.
+ *    - **No implied tree changes:** `<p>` holds only phrasing elements, headings do not nest, `<a>` and `<button>` do not
+ *      nest in themselves, `li`/`dt`/`dd` and table parts have only their proper parents, tables and rows hold only
+ *      their parts and white space. So the tree builder never closes, inserts or moves an element.
  * 3. Attributes are only ` name="value"`: separated by ASCII spaces or newlines, the name matching
  *    `[A-Za-z][A-Za-z0-9:-]*`, the value double-quoted with no raw `<`, `>` or `"`, and no name twice in a tag.
  *    `style` and `on…` attributes are counted in `styleAttrs` and `inlineHandlers`.
@@ -25,7 +33,7 @@ import { cspFor } from "./page";
  *    `http-equiv="Content-Security-Policy"` with `content`.
  * 6. Raw text only in `<style>` and `<script>` outside `<svg>`: their text holds no `<!--` and no closer but the real,
  *    exact `</style>` or `</script>`. No `<style>`, `<script>` or `<foreignObject>` inside `<svg>`. `<title>` text holds
- *    no `<`. CSS holds no backslash escape but those `cssString` writes, and its `url(…)` is exactly `#id` or a font or
+ *    no `<`; inside `<svg>`, `<title>` and `<desc>` (HTML integration points) hold text only, up to their own end tag. CSS holds no backslash escape but those `cssString` writes, and its `url(…)` is exactly `#id` or a font or
  *    image `data:` URL.
  * 7. A `<` in text that does not start an allowed tag, a NUL anywhere, or anything else inside a tag is a finding.
  *
@@ -105,6 +113,27 @@ const stickyAt = (re: RegExp, s: string, at: number): RegExpMatchArray | null =>
   return s.match(re);
 };
 
+/** HTML elements with no end tag. */
+const VOID: ReadonlySet<string> = new Set(["meta", "br", "hr"]);
+/** The elements a `<p>` may hold: any other start tag inside a `<p>` would close it implicitly. */
+const PHRASING: ReadonlySet<string> = new Set(["span", "a", "strong", "em", "b", "i", "small", "code", "abbr", "time", "br", "sup", "sub", "kbd",
+  "svg", "button"]);
+const HEADINGS: ReadonlySet<string> = new Set(["h1", "h2", "h3", "h4"]);
+/** Elements valid only as direct children of the one `<head>`. */
+const HEAD_ONLY: ReadonlySet<string> = new Set(["meta", "title", "style"]);
+/** The only parents each element may have, where the tree builder would otherwise insert, close or move elements. */
+const PARENTS: Readonly<Record<string, readonly string[]>> = {
+  li: ["ol", "ul"], dt: ["dl"], dd: ["dl"],
+  caption: ["table"], thead: ["table"], tbody: ["table"], tfoot: ["table"], tr: ["thead", "tbody", "tfoot"], th: ["tr"], td: ["tr"],
+};
+/** Elements whose children are fixed: only these, and only white space as text (no foster parenting, no implied tbody). */
+const CHILDREN: Readonly<Record<string, readonly string[]>> = {
+  table: ["caption", "thead", "tbody", "tfoot"], thead: ["tr"], tbody: ["tr"], tfoot: ["tr"], tr: ["th", "td"],
+};
+const SPACE_ONLY = /^[ \t\n\r\f]*$/;
+
+interface Open { name: string; svg: boolean }
+
 /** Audits one report page against the report rules and the canonical subset. */
 export function auditHtml(html: string): Audit {
   const nonCanonical: string[] = [];
@@ -122,10 +151,12 @@ export function auditHtml(html: string): Audit {
   let csp: string | null = null;
   let cspCount = 0;
   let cspAt = -1;
-  let inHead = false;
   let headIndex = 0;
-  let svgDepth = 0;
   let preDepth = 0;
+  /** The open elements, innermost last. */
+  const stack: Open[] = [];
+  /** 0 before <html>, 1 in html before head, 2 in head, 3 between head and body, 4 in body, 5 after body, 6 after </html>. */
+  let phase = 0;
 
   /** CSS checks on a style text that starts at `base`. */
   const css = (text: string, base: number): void => {
@@ -141,6 +172,16 @@ export function auditHtml(html: string): Audit {
     }
   };
 
+  const top = (): Open | undefined => stack[stack.length - 1];
+  const has = (name: string): boolean => stack.some((o) => o.name === name);
+  /** Text between tags: only white space where the tree builder would move or reparent it. */
+  const text = (from: number, to: number): void => {
+    if (from >= to) return;
+    const t = top();
+    const strict = t === undefined || t.name === "html" || t.name === "head" || Object.hasOwn(CHILDREN, t.name);
+    if (strict && !SPACE_ONLY.test(html.slice(from, to))) flag("structure", from);
+  };
+
   const nul = html.indexOf("\u0000");
   if (nul >= 0) flag("nul", nul);
   let i = 0;
@@ -149,6 +190,7 @@ export function auditHtml(html: string): Audit {
 
   while (i < html.length) {
     const lt = html.indexOf("<", i);
+    text(i, lt < 0 ? html.length : lt);
     if (lt < 0) break;
     const next = html[lt + 1] ?? "";
 
@@ -161,14 +203,17 @@ export function auditHtml(html: string): Audit {
     if (next === "/") {
       const m = stickyAt(END_TAG, html, lt);
       const name = m?.[1];
-      if (name === undefined || !(svgDepth > 0 ? SVG_SET : HTML_SET).has(name)) {
+      const t = top();
+      if (name === undefined || t === undefined || t.name !== name) {
         flag("end-tag", lt);
         i = lt + 2;
         continue;
       }
-      if (name === "svg" && svgDepth > 0) svgDepth--;
-      else if (name === "pre" && preDepth > 0) preDepth--;
-      else if (name === "head") inHead = false;
+      stack.pop();
+      if (name === "pre") preDepth--;
+      else if (name === "head") phase = 3;
+      else if (name === "body") phase = 5;
+      else if (name === "html") phase = 6;
       i = lt + m![0].length;
       continue;
     }
@@ -182,7 +227,8 @@ export function auditHtml(html: string): Audit {
 
     // a start tag
     const name = nm[0];
-    const inSvg = svgDepth > 0;
+    const parent = top();
+    const inSvg = parent?.svg ?? false;
     let j = lt + 1 + name.length;
     const attrs = new Map<string, string>();
     let selfClose = false;
@@ -198,15 +244,36 @@ export function auditHtml(html: string): Audit {
       j += a[0].length;
     }
 
+    // element, context and structure
     if (name === "foreignObject") flag("foreign-object", lt);
     else if (!(inSvg ? SVG_SET : HTML_SET).has(name)) flag("element", lt);
     if (selfClose && !inSvg) flag("self-closing", lt);
     if (LOADERS.has(name.toLowerCase())) externalRefs.push(`<${name.toLowerCase()}>`);
+    if (name === "html") {
+      if (phase !== 0 || parent !== undefined) flag("structure", lt);
+      phase = 1;
+    } else if (name === "head") {
+      if (phase !== 1 || parent?.name !== "html") flag("structure", lt);
+      phase = 2;
+      headIndex = 0;
+    } else if (name === "body") {
+      if (phase !== 3 || parent?.name !== "html") flag("structure", lt);
+      phase = 4;
+    } else if (!inSvg) {
+      const inHead = phase === 2 && parent?.name === "head";
+      if (inHead) headIndex++;
+      if (HEAD_ONLY.has(name) !== inHead) flag("structure", lt);
+      if (!inHead && phase !== 4) flag("structure", lt);
+      if (!PHRASING.has(name) && has("p")) flag("content", lt);
+      if (HEADINGS.has(name) && stack.some((o) => HEADINGS.has(o.name))) flag("content", lt);
+      if ((name === "a" || name === "button") && has(name)) flag("content", lt);
+      const parents = PARENTS[name];
+      if (parents !== undefined && !parents.includes(parent?.name ?? "")) flag("content", lt);
+    }
+    const children = parent === undefined ? undefined : CHILDREN[parent.name];
+    if (children !== undefined && !children.includes(name)) flag("content", lt);
 
     if (preDepth === 0) elements++;
-    if (name === "head") { inHead = true; headIndex = 0; }
-    else if (name === "body") inHead = false;
-    else if (inHead) headIndex++;
 
     for (const [key, value] of attrs) {
       if (key === "style") styleAttrs++;
@@ -228,7 +295,8 @@ export function auditHtml(html: string): Audit {
       if (!allowed) flag("meta", lt);
       if (httpEquiv !== undefined && httpEquiv.trim().toLowerCase() === "content-security-policy") {
         cspCount++;
-        if (csp === null) { csp = attrs.get("content") ?? ""; cspAt = inHead ? headIndex : -1; }
+        // Only a CSP meta that is a child of the one head counts; any other is already a structure finding.
+        if (csp === null && phase === 2 && parent?.name === "head") { csp = attrs.get("content") ?? ""; cspAt = headIndex; }
       }
     }
 
@@ -239,12 +307,22 @@ export function auditHtml(html: string): Audit {
       continue;
     }
     i = j;
-    if (selfClose) continue;
-    if (name === "svg") svgDepth++;
-    if (name === "pre") preDepth++;
+    if (selfClose || (!inSvg && VOID.has(name))) continue;
 
-    const raw = (name === "script" || name === "style") && !inSvg;
     if ((name === "script" || name === "style") && inSvg) flag("raw-text-in-svg", lt);
+    if (inSvg && (name === "title" || name === "desc")) {
+      // An HTML integration point: it may hold text only, up to its own exact end tag.
+      const close = html.indexOf("<", i);
+      const closer = `</${name}>`;
+      if (close < 0 || !html.startsWith(closer, close)) {
+        flag("svg-text", lt);
+        stack.push({ name, svg: true });
+        continue;
+      }
+      i = close + closer.length;
+      continue;
+    }
+    const raw = (name === "script" || name === "style") && !inSvg;
     if (raw || (name === "title" && !inSvg)) {
       const rel = html.slice(i).search(new RegExp(`</${name}`, "i"));
       if (rel < 0) {
@@ -253,23 +331,28 @@ export function auditHtml(html: string): Audit {
         continue;
       }
       const close = i + rel;
-      const text = html.slice(i, close);
+      const body = html.slice(i, close);
       const closer = `</${name}>`;
       if (!html.startsWith(closer, close)) flag("raw-text-closer", close);
       if (name === "title") {
-        if (text.includes("<")) flag("title-text", i);
+        if (body.includes("<")) flag("title-text", i);
       } else {
-        if (text.includes("<!--")) flag("raw-text-comment", i + text.indexOf("<!--"));
+        if (body.includes("<!--")) flag("raw-text-comment", i + body.indexOf("<!--"));
         if (name === "style") {
-          styles.push(text);
-          css(text, i);
+          styles.push(body);
+          css(body, i);
         } else if (attrs.get("type") !== "application/json") {
-          scripts.push(text);
+          scripts.push(body);
         }
       }
       i = close + (html.startsWith(closer, close) ? closer.length : 2);
+      continue;
     }
+    stack.push({ name, svg: inSvg || name === "svg" });
+    if (name === "pre") preDepth++;
   }
+  if (stack.length > 0) flag("unclosed", html.length);
+  if (phase !== 6) flag("structure", html.length);
   if (dropped > 0) nonCanonical.push(`more ${dropped}`);
 
   const cspOk = nonCanonical.length === 0 && csp !== null && cspCount === 1 && cspAt === 2 && styles.length === 1 && scripts.length === 1

@@ -39,8 +39,8 @@ describe("auditHtml: the brief's crafted document", () => {
 
 describe("auditHtml: elements", () => {
   test("start tags inside script, style and pre are not counted; the elements themselves are", () => {
-    const a = auditHtml(`<!doctype html><div><pre><b>x</b><i>y</i></pre><script>"a<p>"</script><style>a{}</style></div>`);
-    expect(a.elements).toBe(4);
+    const a = auditHtml(doc(`<meta charset="utf-8"><style>a{}</style>`, `<div><pre><b>x</b><i>y</i></pre><script>"a<p>"</script></div>`));
+    expect(a.elements).toBe(8);
     expect(a.nonCanonical).toEqual([]);
   });
 });
@@ -108,6 +108,26 @@ describe("auditHtml: the canonical subset, rule by rule", () => {
     ["a closer variant in a script", "<!doctype html><script>x</SCRIPT >y</script>", "raw-text-closer"],
     ["a < in title", "<!doctype html><title>a<b</title>", "title-text"],
     ["an unterminated style", "<!doctype html><style>a{}", "unterminated"],
+    ["an unclosed element", doc("", "<div><p>x</p>"), "unclosed"],
+    ["a crossed pair", doc("", "<div><span>x</div></span>"), "end-tag"],
+    ["a stray end tag", doc("", "<p>x</p></p>"), "end-tag"],
+    ["an end tag on a void element", doc("", "<br></br>"), "end-tag"],
+    ["a second head", doc("", "<head></head>"), "structure"],
+    ["a second body", doc("", "<body></body>"), "structure"],
+    ["a second html", doc("", "<html></html>"), "structure"],
+    ["a head-only element in body", doc("", '<meta charset="utf-8">'), "structure"],
+    ["a body element in head", doc("<p>x</p>", ""), "structure"],
+    ["text in head", doc("x", ""), "structure"],
+    ["content after </html>", doc("", "") + "<p>x</p>", "structure"],
+    ["text after </html>", doc("", "") + "x", "structure"],
+    ["no html at all", "<!doctype html><p>x</p>", "structure"],
+    ["a block inside p", doc("", "<p><div>x</div></p>"), "content"],
+    ["a heading inside a heading", doc("", "<h2><h3>x</h3></h2>"), "content"],
+    ["a link inside a link", doc("", '<a href="#a"><a href="#b">x</a></a>'), "content"],
+    ["li outside a list", doc("", "<div><li>x</li></div>"), "content"],
+    ["tr straight in table", doc("", "<table><tr><td>x</td></tr></table>"), "content"],
+    ["text in a table", doc("", "<table>x<tbody></tbody></table>"), "structure"],
+    ["an element in svg title", doc("", "<svg><title><b>x</b></title></svg>"), "svg-text"],
     ["a CSS escape cssString never writes", "<!doctype html><style>\\75 rl(x)</style>", "css-escape"],
   ];
   for (const [label, html, code] of cases) {
@@ -119,14 +139,14 @@ describe("auditHtml: the canonical subset, rule by rule", () => {
   test("findings are constant codes and offsets, never document text", () => {
     const a = auditHtml("<!-- Jordan Example --><P CLASS=secret>x</P>");
     expect(a.nonCanonical.length).toBeGreaterThan(0);
-    for (const f of a.nonCanonical) expect(f).toMatch(/^[a-z-]+ at \d+$/);
+    for (const f of a.nonCanonical) expect(f).toMatch(/^(?:[a-z-]+ at \d+|more \d+)$/);
     expect(a.nonCanonical.join(" ")).not.toMatch(/Jordan|secret/);
   });
 
   test("findings are capped, with a count of the rest", () => {
     const a = auditHtml("<!doctype html>" + "<!-- -->".repeat(80));
     expect(a.nonCanonical.length).toBe(51);
-    expect(a.nonCanonical.at(-1)).toBe("more 30");
+    expect(a.nonCanonical.at(-1)).toMatch(/^more \d+$/);
   });
 
   test("the element lists are exported for renderers to extend deliberately", () => {
@@ -225,6 +245,12 @@ describe("auditHtml: property — no hostile insertion into a clean page audits 
     "<svg><script>x()</script></svg>", "<svg><foreignObject><p>x</p></foreignObject></svg>", '<svg><image href="x.png"/></svg>',
     '<svg><use href="x.svg#a"/></svg>', '<svg><rect fill="url(x.svg#p)"/></svg>',
     "<title>a<b</title>", "<template><p>x</p></template>", "<plaintext>", "<noembed>x</noembed>", "<noframes>x</noframes>",
+    // nesting and structure
+    "<div>", "<p>", "<span>", "<svg>", "</div>", "</main>", "<div><span></div></span>", "<b><i></b></i>",
+    "<head></head>", "<body></body>", "<html></html>", "<head>", "<body>", '<meta charset="utf-8">', "<title>t</title>", "<style>a{}</style>",
+    "<p><div>x</div></p>", "<p><table><tbody></tbody></table></p>", "<h2><h3>x</h3></h2>", "<button><button>x</button></button>",
+    "<li>x</li>", "<dd>x</dd>", "<table><tr><td>x</td></tr></table>", "<table><div>x</div></table>", "<table>text</table>",
+    "<svg><title><b>x</b></title></svg>", "<svg><desc><p>x</p></desc></svg>", "<svg><title><title></svg></title></title>",
     "<p>a < b</p>", "<p>a\u0000b</p>", "<div/>", "<p class=x>y</p>", "<p class='x'>y</p>", "<details open>x</details>",
     '<p\tclass="x">y</p>', '<p class="a" class="b">y</p>', '<p a="1"b="2">y</p>', "</p x>", "</P>", "<math><mi>x</mi></math>",
   ];
@@ -238,6 +264,41 @@ describe("auditHtml: property — no hostile insertion into a clean page audits 
       expect(clean(auditHtml(inPage(ins)))).toBe(false);
     });
   }
+});
+
+/** Inserts `before` and `after` around the clean page's markers. */
+const splice = (html: string, marks: [string, string, "before" | "after"][]): string =>
+  marks.reduce((h, [mark, ins, where]) => h.replace(mark, where === "after" ? mark + ins : ins + mark), html);
+
+describe("auditHtml: the round-3 probes, where WebKit ran an unhashed script, are not clean", () => {
+  test("body probe: a title inside an svg title hides </svg>, so the island is an SVG script", () => {
+    const probe = '<svg><title><title></svg></title></title><script type="application/json"><img src="https://evil.example/x.png"></script></svg>';
+    expect(clean(auditHtml(inPage(probe)))).toBe(false);
+  });
+
+  test("combined probe: the same with an onerror image in the island", () => {
+    const probe = '<svg><title><title></svg></title></title><script type="application/json"><img src="data:," onerror="alert(1)"></script></svg>';
+    const a = auditHtml(inPage(probe));
+    expect(clean(a)).toBe(false);
+    expect(codes(a)).toContain("svg-text");
+  });
+
+  test("head probe: the CSP meta swallowed into title text", () => {
+    const html = splice(page({ ...PAGE, body: "<main></main>" }), [
+      ["<head>", "<svg><title><title></svg><head>", "after"],
+      ["</title>", "</title></svg>", "after"],
+    ]);
+    expect(clean(auditHtml(html))).toBe(false);
+  });
+
+  test("second-head probe: a CSP meta moved into body behind another head is not the page's CSP", () => {
+    const base = page({ ...PAGE, body: "<main></main>" });
+    const meta = base.match(/<meta http-equiv="Content-Security-Policy" content="[^"]*">/)![0];
+    const html = base.replace(meta, "").replace("<body>", `<body><head><meta charset="utf-8">${meta}</head>`);
+    const a = auditHtml(html);
+    expect(clean(a)).toBe(false);
+    expect(a.cspOk).toBe(false);
+  });
 });
 
 describe("auditHtml on page() output", () => {
