@@ -12,7 +12,8 @@ export const tableOf = (raw: ScanResult, exclude?: Exclusions, timeZone = "UTC")
 /**
  * `results`, after checking that each one's question is exactly what `questionFor` rebuilds from its `id`, `reason` and
  * `values` (the reading side of an export says what the in-memory result says), and that its reason and every `values`
- * key are in the closed vocabularies, with a finite number under every key but `date`, which holds a day. Every helper of the forensics suites
+ * key are in the closed vocabularies, with a finite number under every key but `date`, which holds a day and appears
+ * on the file-time check (C5) only. Every helper of the forensics suites
  * passes its results through this.
  */
 export function asks<T extends CheckResult | readonly CheckResult[]>(results: T): T {
@@ -23,6 +24,8 @@ export function asks<T extends CheckResult | readonly CheckResult[]>(results: T)
       const ok = k in VALUE_KEYS && (k === DATE_KEY ? typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v) : typeof v === "number" && Number.isFinite(v));
       expect([r.id, k, ok]).toEqual([r.id, k, true]);
     }
+    // only the file-time check may carry a day
+    if (DATE_KEY in r.values) expect([r.id, DATE_KEY]).toEqual(["C5", DATE_KEY]);
   }
   return results;
 }

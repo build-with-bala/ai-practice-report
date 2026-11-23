@@ -103,7 +103,7 @@ export function checkFileTimes(raw: ScanResult, t: SessionTable, o: { timeZone: 
   const base = { id: "C5" as const, n: files.length, tools };
   if (cluster) {
     values.date = dayKey(cluster.start, o.timeZone);
-    values.days = Math.round(cluster.spanMs / DAY_MS);
+    values.days = Math.ceil(cluster.spanMs / DAY_MS); // a cluster spans more than 7 days: up
     values.clusterFiles = cluster.files.size;
   } else if (bulk.length > 0) {
     values.date = dayKey(bulk[0]!.start, o.timeZone);

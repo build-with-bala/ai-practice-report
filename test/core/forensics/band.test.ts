@@ -245,6 +245,7 @@ describe("runForensics: the server-backed share", () => {
     const stats = buildSessionStats(t, raw.store, raw.repos, { timeZone: "UTC" });
     const before = JSON.stringify(stats);
     const f = runForensics(raw, t, stats, { now: NOW, timeZone: "UTC", releases: TABLE });
+    asks(f.checks);
     expect(f.band).toBe("inconsistent");
     expect(JSON.stringify(stats)).toBe(before);
     expect(JSON.stringify(buildSessionStats(t, raw.store, raw.repos, { timeZone: "UTC" }))).toBe(before);

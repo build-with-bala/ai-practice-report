@@ -6,7 +6,7 @@ import type { PromptEv } from "../model/events";
 import type { ScanResult } from "../scan";
 import { asked } from "./questions";
 import { forensicScope, type ForensicScope } from "./scope";
-import { round, toolsOf, type CheckId, type CheckResult } from "./types";
+import { roundDown, roundUp, toolsOf, type CheckId, type CheckResult, type CheckValues } from "./types";
 
 /*
  * Soft flags (spec §6.6): patterns genuine histories rarely show, but can — a raised flag is a `note` to ask about,
@@ -71,7 +71,7 @@ function rhythm(prompts: readonly PromptEv[]): CheckResult {
   cvs.sort((a, b) => a - b);
   const m = cvs.length >> 1;
   const median = cvs.length % 2 === 1 ? cvs[m]! : (cvs[m - 1]! + cvs[m]!) / 2;
-  const base = { id: "soft:rhythm" as const, n: cvs.length, values: { sessions: cvs.length, medianCv: round(median, 2) }, tools };
+  const base = { id: "soft:rhythm" as const, n: cvs.length, values: { sessions: cvs.length, medianCv: roundDown(median, 2) } satisfies CheckValues, tools };
   if (median >= RHYTHM_MAX_CV) return { ...base, status: "pass", reason: "ok" };
   return { ...base, status: "note", reason: "regular-rhythm" };
 }
@@ -87,15 +87,14 @@ function repeatedLong(prompts: readonly PromptEv[]): CheckResult {
   const counts = new Map<string, number>();
   for (const p of known) if (p.features.chars! >= LONG_CHARS) counts.set(p.textHash, (counts.get(p.textHash) ?? 0) + 1);
   const repeated = [...counts.values()].filter((c) => c >= LONG_REPEATS).length;
-  const base = { id: "soft:repeated-long" as const, n: known.length, values: { repeated }, tools };
+  const base = { id: "soft:repeated-long" as const, n: known.length, values: { repeated } satisfies CheckValues, tools };
   if (repeated === 0) return { ...base, status: "pass", reason: "ok" };
   return { ...base, status: "note", reason: "repeated-long" };
 }
 
 /**
  * recent-burst: of the lifetime active days, the share in the 14 days up to `now`'s day; raised when it is at least 50%
- * and the days span more than 60 days (first to last); a raised flag also gives the first active day (`date`). n/a
- * without lifetime active days.
+ * and the days span more than 60 days (first to last). n/a without lifetime active days.
  */
 function recentBurst(t: SessionTable, now: number, timeZone: string): CheckResult {
   const days = t.activity.lifetimeDays;
@@ -106,10 +105,9 @@ function recentBurst(t: SessionTable, now: number, timeZone: string): CheckResul
   const before = dayKey(now - BURST_DAYS * DAY_MS, timeZone), today = dayKey(now, timeZone);
   const recentDays = days.filter((d) => d > before && d <= today).length;
   const share = recentDays / days.length;
-  const values = { days: days.length, recentDays, spanDays, share: round(share) };
-  const base = { id: "soft:recent-burst" as const, n: days.length, tools };
-  if (share < BURST_SHARE || spanDays <= BURST_SPAN_DAYS) return { ...base, values, status: "pass", reason: "ok" };
-  return { ...base, values: { ...values, date: first }, status: "note", reason: "recent-burst" };
+  const base = { id: "soft:recent-burst" as const, n: days.length, values: { days: days.length, recentDays, spanDays, share: roundDown(share) } satisfies CheckValues, tools };
+  if (share < BURST_SHARE || spanDays <= BURST_SPAN_DAYS) return { ...base, status: "pass", reason: "ok" };
+  return { ...base, status: "note", reason: "recent-burst" };
 }
 
 /**
@@ -124,7 +122,7 @@ function unclosedTools(s: ForensicScope): CheckResult {
   if (calls.length === 0) return na("soft:unclosed-tools", tools);
   const open = calls.filter((e) => e.ok === undefined && e.outcome === undefined).length;
   const share = open / calls.length;
-  const base = { id: "soft:unclosed-tools" as const, n: calls.length, values: { open, share: round(share) }, tools };
+  const base = { id: "soft:unclosed-tools" as const, n: calls.length, values: { open, share: roundUp(share) } satisfies CheckValues, tools };
   if (share <= UNCLOSED_SHARE) return { ...base, status: "pass", reason: "ok" };
   return { ...base, status: "note", reason: "unclosed-tools" };
 }
@@ -147,7 +145,7 @@ function newConfig(raw: ScanResult, t: SessionTable, now: number, s: ForensicSco
   if (dated.length === 0) return na("soft:new-config", tools);
   const m = dated.length;
   const recent = dated.filter((a) => a.firstSeen! >= now - NEW_CONFIG_MS).length;
-  const base = { id: "soft:new-config" as const, n: m, values: { recent, artifacts: m }, tools };
+  const base = { id: "soft:new-config" as const, n: m, values: { recent, artifacts: m } satisfies CheckValues, tools };
   if (recent < NEW_CONFIG_MIN || recent < NEW_CONFIG_SHARE * m) return { ...base, status: "pass", reason: "ok" };
   return { ...base, status: "note", reason: "new-config" };
 }

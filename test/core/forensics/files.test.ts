@@ -65,9 +65,9 @@ describe("checkFileTimes (C5)", () => {
     })), UTC);
     expect(c.status).toBe("note");
     expect(c.values.date).toBe("2026-11-03");
-    expect(c.values.days).toBe(30);
+    expect(c.values.days).toBe(31); // 30 days and 1 hour, rounded up: the rule is "spanning more than 7 days"
     expect(c.values.violations).toBe(0); // ctime far after mtime is no violation inside the cluster
-    expect(c.askAbout).toBe("Most trace files were created on 2026-11-03 although their activity spans 30 days. Was this history copied or restored from a backup then?");
+    expect(c.askAbout).toBe("Most trace files were created on 2026-11-03 although their activity spans 31 days. Was this history copied or restored from a backup then?");
   });
 
   test("the cluster's date is the local day in the given zone", () => {

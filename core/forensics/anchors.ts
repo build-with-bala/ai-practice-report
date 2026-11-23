@@ -3,7 +3,7 @@ import type { AnchorEv } from "../model/events";
 import type { ScanResult } from "../scan";
 import { forensicScope, type ForensicScope } from "./scope";
 import { asked } from "./questions";
-import { round, toolsOf, type CheckResult, type CheckValues, type Reason } from "./types";
+import { roundDown, roundUp, toolsOf, type CheckResult, type CheckValues, type Reason } from "./types";
 
 /*
  * C1 and C2: Claude Code's server-issued message and request ids (`msg_…`, `req_…`; `AnchorEv.idTail` is what follows
@@ -169,7 +169,7 @@ function naPair(n: number, reason: Reason, values: CheckValues, tools: CheckResu
 function checkKind(anchors: readonly AnchorEv[]): [CheckResult, CheckResult] {
   const tools = toolsOf(anchors);
   const rec = recognize(anchors);
-  const left = { unrecognized: rec.unrecognized, malformed: rec.malformed };
+  const left = { unrecognized: rec.unrecognized, malformed: rec.malformed } satisfies CheckValues;
   if (anchors.length >= MIN_ANCHORS && rec.marked < MARKER_SHARE * anchors.length) return naPair(anchors.length, "unknown-marker", left, tools);
   const malformed = rec.malformed >= MALFORMED_MIN && rec.malformed > MALFORMED_SHARE * rec.marked;
   const ps = rec.points;
@@ -190,7 +190,7 @@ function checkKind(anchors: readonly AnchorEv[]): [CheckResult, CheckResult] {
   const c1Fail = off > OFF_SHARE;
   const c1: CheckResult = {
     id: "C1", status: c1Fail ? "fail" : malformed ? "note" : "pass", n: ps.length, reason: c1Fail ? "off-time" : malformed ? "malformed-ids" : "ok",
-    values: { offShare: round(off), p99Seconds: Math.min(MAX_P99_S, Math.round(quantile(res, 0.99) / 1_000)), ...left }, tools,
+    values: { offShare: roundUp(off), p99Seconds: Math.min(MAX_P99_S, Math.round(quantile(res, 0.99) / 1_000)), ...left }, tools,
   };
 
   const rankSample = stride(ps, RANK_SAMPLE);
@@ -198,7 +198,7 @@ function checkKind(anchors: readonly AnchorEv[]): [CheckResult, CheckResult] {
   if (rho === undefined) return [c1, { id: "C2", status: "n/a", n: rankSample.length, reason: "degenerate", values: { ...left }, tools }];
   const c2Fail = rho < MIN_RHO;
   const c2: CheckResult = { id: "C2", status: c2Fail ? "fail" : "pass", n: rankSample.length, reason: c2Fail ? "out-of-order" : "ok",
-    values: { rho: round(rho), ...left }, tools };
+    values: { rho: roundDown(rho), ...left } satisfies CheckValues, tools };
   return [c1, c2];
 }
 

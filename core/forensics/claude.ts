@@ -7,7 +7,7 @@ import { STATS_SOURCE } from "../sources/claude-code/stats";
 import { TRANSCRIPTS_SOURCE } from "../sources/claude-code/transcripts";
 import { forensicScope, type ForensicScope } from "./scope";
 import { asked } from "./questions";
-import { round, toolsOf, worst, type CheckResult, type CheckStatus, type CheckValues, type Reason } from "./types";
+import { roundDown, roundUp, toolsOf, worst, type CheckResult, type CheckStatus, type CheckValues, type Reason } from "./types";
 
 /*
  * C3 and C4: Claude Code's own records agree with each other. The CLI writes every typed prompt three times over — the
@@ -106,7 +106,7 @@ export function checkClaudeHistory(raw: ScanResult, t: SessionTable, s: Forensic
       const matched = inSpan.length - unmatched.length + pasteMatches(unmatched, history.filter((h) => h.hasPaste === true));
       const share = matched / inSpan.length;
       n = inSpan.length;
-      values.matchShare = round(share);
+      values.matchShare = roundDown(share); // warn below 75%
       values.prompts = inSpan.length;
       parts.push(share < MIN_MATCH
         ? { status: "warn", reason: "history-mismatch" }
@@ -159,7 +159,7 @@ export function checkAccount(raw: ScanResult, t: SessionTable, s: ForensicScope 
   if (sessions.length === 0 || config.size === 0) return { id: "C4", status: "n/a", n: sessions.length, reason: "no-data", values: {}, tools };
   const share = sessions.filter((e) => config.has(e.hash)).length / sessions.length;
   const accounts = new Set(sessions.map((e) => e.hash)).size;
-  const values = { matchShare: round(share), accounts };
+  const values = { matchShare: roundUp(share), accounts } satisfies CheckValues; // fail at exactly 0
   const base = { id: "C4" as const, n: sessions.length, values, tools };
   if (share === 0) {
     return asked({ ...base, status: "fail", reason: "no-match" });

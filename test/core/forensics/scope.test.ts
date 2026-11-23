@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { analyze } from "../../../core/analyze";
+import { analyze, type AnalyzeOptions } from "../../../core/analyze";
+import type { ScanResult } from "../../../core/scan";
 import type { CheckId, CheckResult, Forensics } from "../../../core/forensics";
 import type { ProvenanceKey } from "../../../core/forensics/types";
 import type { Ev, IdentityEv, PromptEv, SessionEv } from "../../../core/model/events";
@@ -10,7 +11,13 @@ import { asks, tableOf } from "./table";
 /* Forensics through `analyze`: the exclusions the person chose reach every check. */
 
 const UTC = { timeZone: "UTC", bootstrap: 10 };
-const byId = (f: Forensics, id: CheckId): CheckResult => asks(f.checks.find((c) => c.id === id)!);
+const byId = (f: Forensics, id: CheckId): CheckResult => f.checks.find((c) => c.id === id)!;
+/** `analyze`'s forensics, every result asserted (`asks`). */
+const forensicsOf = (raw: ScanResult, o: AnalyzeOptions): Forensics => {
+  const f = analyze(raw, o).forensics;
+  asks(f.checks);
+  return f;
+};
 
 describe("analyze: forensics under exclusions", () => {
   test("excluding the only tool leaves nothing to verify", () => {
@@ -21,10 +28,10 @@ describe("analyze: forensics under exclusions", () => {
       { k: "identity", tool: "claude-code", source: "claude-code.transcripts", scope: "session", hash: "acct", sessionId: id },
     ];
     for (const e of ids) raw.store.add(e);
-    const kept = analyze(raw, UTC).forensics;
+    const kept = forensicsOf(raw, UTC);
     expect([byId(kept, "C3").status, byId(kept, "C4").status]).toEqual(["pass", "pass"]);
 
-    const f = analyze(raw, { ...UTC, exclude: { tools: ["claude-code"] } }).forensics;
+    const f = forensicsOf(raw, { ...UTC, exclude: { tools: ["claude-code"] } });
     expect(f.band).toBe("unverifiable");
     expect([byId(f, "C3").status, byId(f, "C3").n]).toEqual(["n/a", 0]);
     expect([byId(f, "C4").status, byId(f, "C4").n]).toEqual(["n/a", 0]);
@@ -57,7 +64,7 @@ describe("analyze: forensics under exclusions", () => {
     const droppedCalls = raw.store.all("tool").filter((e) => e.tool === "claude-code" && detail.has(e.source) && dropped.has(e.sessionId)).length;
     expect(droppedCalls).toBeGreaterThan(0);
 
-    const before = analyze(raw, UTC).forensics, after = analyze(raw, { ...UTC, exclude: { projects: [busiest] } }).forensics;
+    const before = forensicsOf(raw, UTC), after = forensicsOf(raw, { ...UTC, exclude: { projects: [busiest] } });
     const c10a = byId(before, "C10"), c10b = byId(after, "C10");
     expect(c10a.n - c10b.n).toBe(droppedPrompts);
     for (const key of Object.keys(c10a.values) as ProvenanceKey[]) expect([key, c10a.values[key]! - (c10b.values[key] ?? 0)]).toEqual([key, expected.get(key) ?? 0]);
@@ -83,15 +90,15 @@ describe("analyze: forensics under exclusions", () => {
       }
     }
     const raw = scanResultOf(evs);
-    const before = analyze(raw, UTC).forensics;
+    const before = forensicsOf(raw, UTC);
     expect([byId(before, "C3").n, byId(before, "C4").n, byId(before, "C4").values.accounts]).toEqual([20, 4, 2]);
 
-    const after = analyze(raw, { ...UTC, exclude: { from: T0 + 15 * DAY } }).forensics;
+    const after = forensicsOf(raw, { ...UTC, exclude: { from: T0 + 15 * DAY } });
     expect([byId(after, "C3").n, byId(after, "C3").status]).toEqual([10, "pass"]);
     // the later sessions name only the second account, which the config does not: C4 fails on what is left
     expect([byId(after, "C4").n, byId(after, "C4").status, byId(after, "C4").values.accounts]).toEqual([2, "fail", 1]);
 
-    const early = analyze(raw, { ...UTC, exclude: { to: T0 + 15 * DAY } }).forensics;
+    const early = forensicsOf(raw, { ...UTC, exclude: { to: T0 + 15 * DAY } });
     expect([byId(early, "C3").n, byId(early, "C4").n, byId(early, "C4").status]).toEqual([10, 2, "pass"]);
   });
 });

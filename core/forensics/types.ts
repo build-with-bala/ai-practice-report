@@ -17,7 +17,10 @@ export type CheckId = "C1" | "C2" | "C3" | "C4" | "C5" | "C6" | "C7" | "C8" | "C
 /*
  * Closed vocabularies. A result leaves the machine as its `id`, `status`, `n`, `reason` and `values` only, and the
  * reading side rebuilds the question from them (`questionFor`, questions.ts): so every reason code and every `values`
- * key is listed here, and a new one fails the compiler until it is added.
+ * key is listed here. A reason is a closed union, so a new code fails the compiler until it is listed. `CheckValues` is
+ * all-optional, so TypeScript checks a values object's keys only where it is a fresh literal of that type: every check
+ * builds its values as one (`satisfies CheckValues`, or a literal typed `CheckValues`), and types.test.ts pins that an
+ * unlisted key, or a string under a key other than `date`, fails there.
  */
 
 /** Every reason code a check or soft flag can give. */
@@ -98,4 +101,20 @@ export function toolsOf(events: Iterable<{ tool: ToolId }>): ToolId[] {
 export const round = (x: number, digits = 4): number => {
   const f = 10 ** digits;
   return Math.round(x * f) / f;
+};
+
+/*
+ * A stored value a rule compares with a threshold is rounded toward the side its exact value is on, so a result never
+ * shows a number on the passing side of a rule it failed (or the failing side of one it passed): down for a rule "below
+ * T" or "at least T", up for "above T" or "at most T" (T with at most `digits` decimals).
+ */
+/** The largest multiple of 10^−digits that is at most `x`. */
+export const roundDown = (x: number, digits = 4): number => {
+  const f = 10 ** digits, r = Math.round(x * f);
+  return (r / f > x ? r - 1 : r) / f;
+};
+/** The smallest multiple of 10^−digits that is at least `x`. */
+export const roundUp = (x: number, digits = 4): number => {
+  const f = 10 ** digits, r = Math.round(x * f);
+  return (r / f < x ? r + 1 : r) / f;
 };

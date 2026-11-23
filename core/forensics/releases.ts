@@ -4,7 +4,7 @@ import type { ScanResult } from "../scan";
 import shipped from "./releases.json" with { type: "json" };
 import { forensicScope, type ForensicScope } from "./scope";
 import { asked } from "./questions";
-import type { CheckResult } from "./types";
+import type { CheckResult, CheckValues } from "./types";
 
 /*
  * C9: no session used a model or tool version before it was publicly released. The release table ships with each
@@ -77,7 +77,7 @@ export function checkReleases(t: SessionTable, table: ReleaseTable, raw: ScanRes
   }
   const base = { id: "C9" as const, n: checked, tools: [...tools].sort() };
   if (checked === 0) return { ...base, status: "n/a", reason: "no-match", values: {} };
-  const values = { checked, violations, sessions: violating.size };
+  const values = { checked, violations, sessions: violating.size } satisfies CheckValues;
   if (violations === 0) return { ...base, status: "pass", reason: "ok", values };
   return asked({ ...base, status: "fail", reason: "before-release", values });
 }

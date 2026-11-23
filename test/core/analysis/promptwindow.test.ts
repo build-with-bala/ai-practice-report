@@ -10,11 +10,18 @@ const T0 = Date.UTC(2026, 10, 2, 9, 0);
 const MIN = 60_000;
 const features = { words: 5, lenBucket: 1, hasContext: false, fileRefs: 0, listLines: 0, constraintTerms: 0, isTaskStart: false, techCats: {} } as const;
 let k = 0;
+/** A prompt; a detail one belongs to its tool's main session (`windows` adds those sessions), as real transcript prompts do. */
 const prompt = (tool: ToolId, window: Window, origin: Origin = "human", ts = T0 + ++k * MIN): PromptEv =>
-  ({ k: "prompt", tool, source: `${tool}.${window}`, ts, window, origin, intent: "spec", textHash: `h${++k}`, features });
+  ({ k: "prompt", tool, source: `${tool}.${window}`, ts, window, origin, intent: "spec", textHash: `h${++k}`, features,
+    ...(window === "detail" ? { sessionId: `${tool}:main` } : {}) });
 const many = (n: number, f: () => PromptEv): PromptEv[] => Array.from({ length: n }, f);
+const mainSession = (tool: ToolId): SessionEv => ({
+  k: "session", tool, source: `${tool}.detail`, id: `${tool}:main`, window: "detail", origin: "human", start: T0 - 1_000 * MIN, end: T0 + 10_000 * MIN, models: [],
+});
 const windows = (events: Ev[], exclude?: Exclusions) => {
-  const raw = scanResultOf(events);
+  const mains = new Set<ToolId>();
+  for (const e of events) if (e.k === "prompt" && e.sessionId === `${e.tool}:main`) mains.add(e.tool);
+  const raw = scanResultOf([...[...mains].map(mainSession), ...events]);
   return promptWindowByTool(raw, buildSessionTable(raw, { now: raw.finishedAt, timeZone: "UTC", ...(exclude ? { exclude } : {}) }));
 };
 
@@ -82,8 +89,23 @@ describe("promptWindowByTool", () => {
     expect(windows(evs, { from: late }).get("codex")).toBe("lifetime");
   });
 
-  test("with no exclusion every prompt counts: orphans and sessionless prompts too", () => {
-    const evs: Ev[] = [...many(5, () => ({ ...prompt("codex", "detail"), sessionId: "codex:gone" })), ...many(4, () => prompt("codex", "lifetime"))];
-    expect(windows(evs).get("codex")).toBe("detail");
+  test("detail prompts of a session the store does not hold do not count: the window is chosen by what is read", () => {
+    const evs: Ev[] = [...many(10, () => prompt("codex", "detail")), ...many(100, () => ({ ...prompt("codex", "detail"), sessionId: "codex:gone" })),
+      ...many(50, () => prompt("codex", "lifetime"))];
+    expect(windows(evs).get("codex")).toBe("lifetime");
+  });
+
+  test("a tool whose detail prompts are all host copies chooses by its remaining prompts", () => {
+    const relayed = (tool: ToolId, id: string, i: number): PromptEv => ({ ...prompt(tool, "detail", "human", T0 + i * MIN), sessionId: id, textHash: `relayed-${i}` });
+    const evs: Ev[] = [
+      { ...mainSession("claude-code"), id: "claude-code:relayed" },
+      { ...mainSession("copilot"), id: "copilot:host", surface: "vscode" },
+      ...Array.from({ length: 6 }, (_, i) => [relayed("claude-code", "claude-code:relayed", i), relayed("copilot", "copilot:host", i)]).flat(),
+      ...many(2, () => prompt("copilot", "lifetime")),
+    ];
+    const raw = scanResultOf(evs);
+    const t = buildSessionTable(raw, { now: raw.finishedAt, timeZone: "UTC" });
+    expect(t.hosts.has("copilot:host")).toBe(true);
+    expect(promptWindowByTool(raw, t).get("copilot")).toBe("lifetime");
   });
 });

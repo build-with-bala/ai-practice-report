@@ -4,7 +4,7 @@ import type { ScanResult } from "../scan";
 import { THREADS_SOURCE } from "../sources/codex/indexdb";
 import { forensicScope, type ForensicScope } from "./scope";
 import { asked } from "./questions";
-import { toolsOf, type CheckResult } from "./types";
+import { toolsOf, type CheckResult, type CheckValues } from "./types";
 
 /*
  * C6–C8: Codex's own records agree with each other. The CLI enters every thread it starts in its thread index, names
@@ -59,7 +59,7 @@ function checkThreadRows(s: ForensicScope, now: number): CheckResult {
   if (checked.length === 0) return { id: "C6", status: "n/a", n: 0, reason: "before-index", values: { beforeIndex }, tools };
   const have = new Set(rows.map((r) => r.threadId));
   const missing = checked.filter((r) => !have.has(r.threadId)).length;
-  const base = { id: "C6" as const, n: checked.length, values: { missing, rollouts: checked.length, beforeIndex }, tools };
+  const base = { id: "C6" as const, n: checked.length, values: { missing, rollouts: checked.length, beforeIndex } satisfies CheckValues, tools };
   if (missing === 0) return { ...base, status: "pass", reason: "ok" };
   const fail = missing >= Math.max(MISSING_MIN, MISSING_SHARE * checked.length);
   return { ...base, status: fail ? "fail" : "note", reason: "missing-thread-rows" };
@@ -88,7 +88,7 @@ function checkIdTimes(s: ForensicScope): CheckResult {
     if (isZoneShift(d)) zoneShifted++;
     else violations++;
   }
-  const base = { id: "C7" as const, n: rollouts.length, values: { violations, zoneShifted }, tools };
+  const base = { id: "C7" as const, n: rollouts.length, values: { violations, zoneShifted } satisfies CheckValues, tools };
   if (violations > 0) {
     return { ...base, status: "fail", reason: "uuid-after-name" };
   }
@@ -155,7 +155,7 @@ function checkLedger(s: ForensicScope): CheckResult {
     pairs += r.pairs;
     contradictions += r.contradictions;
   }
-  const base = { id: "C8" as const, n: pairs, values: { pairs, contradictions }, tools };
+  const base = { id: "C8" as const, n: pairs, values: { pairs, contradictions } satisfies CheckValues, tools };
   if (pairs < MIN_PAIRS) return { ...base, status: "n/a", reason: "too-few" };
   if (contradictions >= FAIL_MIN && contradictions > FAIL_SHARE * pairs) {
     return { ...base, status: "fail", reason: "ledger-contradictions" };
