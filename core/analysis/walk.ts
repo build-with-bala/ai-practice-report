@@ -39,7 +39,8 @@ export type Hist = Record<number, number>;
  *   earliest-starting one only); `landed` units (rule 18, from owner commits only). A git commit becomes a landed unit
  *   only in a repo with an identity (`RepoFacts.identity`); marker keys count without one.
  * - Date range (`SessionTable.scope`): events, markers and commits outside [from, to] are ignored, even in a kept row
- *   that overlaps the range; `start` and `end` are the row's, clipped to the range.
+ *   that overlaps the range; `start` and `end` are the row's, clipped to the range. A descendant the range cuts with no
+ *   event inside it counts nowhere (not in fan-out, background, types, workflows or depth).
  * - `buckets` (rule 19): the distinct ⌊ts / BUCKET_MS⌋ with an action of the row or its descendants, ascending.
  */
 export interface SessionStats {
@@ -288,6 +289,16 @@ function walkRow(row: SessionRow, t: SessionTable, store: EventStore, cx: WalkCt
     const c = t.rows.get(id);
     if (!c || t.hosts.has(id)) continue;
     const own = store.forSession(id, "tool").filter((e) => inRange(e.ts));
+    const usage = store.forSession(id, "usage").filter((u) => inRange(u.ts));
+    const childMarkers = cx.markersOf(id);
+    // a descendant the date range cuts, with no event inside it, is part of the excluded period: it counts nowhere
+    // (its own descendants are still looked at, under the same top)
+    const cut = c.start < t.scope.from || c.end > t.scope.to;
+    if (cut && own.length === 0 && usage.length === 0 && childMarkers.length === 0
+      && !store.forSession(id, "prompt").some((p) => inRange(p.ts)) && !store.forSession(id, "turn").some((e) => inRange(e.ts))) {
+      for (const g of c.children) stack.push({ id: g, top });
+      continue;
+    }
     const cStart = Math.max(c.start, t.scope.from);
     const child = top ?? { id, start: cStart, tools: [], actions: 0, lastTs: cStart };
     if (!top) direct.push(child);
@@ -303,7 +314,6 @@ function walkRow(row: SessionRow, t: SessionTable, store: EventStore, cx: WalkCt
       s.actions++;
       buckets.add(Math.floor(e.ts / BUCKET_MS));
     }
-    const childMarkers = cx.markersOf(id);
     for (const m of childMarkers) delivery(m);
     if (!top) { // fan-out: direct children only
       s.children++;
@@ -312,8 +322,7 @@ function walkRow(row: SessionRow, t: SessionTable, store: EventStore, cx: WalkCt
       const stopped = childMarkers.some((m) => m.kind === "interrupt" && m.detail === "stopped-by-user");
       if (!stopped && !failedLastTwo) s.finishedChildren++;
     }
-    for (const u of store.forSession(id, "usage")) {
-      if (!inRange(u.ts)) continue;
+    for (const u of usage) {
       s.tokens += u.inTok + u.outTok + u.cacheW;
       s.tokensKnown = true;
       child.lastTs = Math.max(child.lastTs, u.ts);

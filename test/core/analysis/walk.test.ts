@@ -514,13 +514,29 @@ describe("walk: date range, cross-row keys, fan-out, children's ends and markers
       ...reads("c", T0 - 10 * HOUR + 10 * SEC, 4), tool("c", T0 + 30 * SEC),
       usage("s", T0 - 10 * HOUR + SEC, 100, 100), usage("s", T0 + SEC, 5, 5),
       prompt("s", T0), tool("s", T0 + SEC), edit("s", T0 + 2 * SEC, "ts", 2),
+      { k: "totals", tool: "claude-code", source: CC, sessionId: "s", usd: 3 },
     ], "s", { repos, exclude: { from } });
     expect([s.turns, s.episodes, s.actions, s.compactManual, s.tokens]).toEqual([1, 1, 3, 0, 10]);
+    expect([s.usdKnown, s.usd]).toEqual([false, 0]); // totals carry no time: a cut row gives no cost
     expect(s.days).toEqual(["2026-11-02"]);
     expect(s.prKeys).toEqual([]);
     expect(s.buckets).toEqual([Math.floor((T0 + SEC) / (10 * MIN))]);
     expect([s.start, s.end]).toEqual([T0, T0 + HOUR]);
     expect([s.editEpisodesInRepo, s.landedEpisodes, s.landed]).toEqual([1, 1, 1]); // "late" only: "early" lies before the range
+  });
+
+  test("a child that overlaps the range but has no event inside it contributes nothing", () => {
+    const evs = (childTs: number): Ev[] => [
+      sess("s", { start: T0 - 11 * HOUR, end: T0 + HOUR }), prompt("s", T0), tool("s", T0 + SEC),
+      sess("c", { parentId: "s", origin: "subagent", start: T0 - 10 * HOUR, end: T0 + MIN, background: true, agentType: "Explore", workflowId: "w" }),
+      sess("g", { parentId: "c", origin: "subagent", start: T0 - 10 * HOUR, end: T0 + MIN }),
+      ...reads("c", childTs, 3), ...reads("g", childTs, 2),
+    ];
+    const out = one(evs(T0 - 10 * HOUR + SEC), "s", { exclude: { from: T0 } });
+    expect([out.children, out.finishedChildren, out.bgKnown, out.bgChildren, out.workflowRuns, out.maxDepth, out.actions]).toEqual([0, 0, 0, 0, 0, 0, 1]);
+    expect(out.childTypes).toEqual({});
+    const inside = one(evs(T0 + 10 * SEC), "s", { exclude: { from: T0 } });
+    expect([inside.children, inside.finishedChildren, inside.bgKnown, inside.workflowRuns, inside.maxDepth, inside.actions]).toEqual([1, 1, 1, 1, 2, 6]);
   });
 
   test("a PR (and a commit) two rows link belongs to the earlier row only", () => {
