@@ -96,9 +96,17 @@ describe("activity", () => {
     expect(t.activity.detailWeeks).toEqual(["2026-W45", "2026-W46"]);
     expect(t.activity.lifetimeWeeks).toEqual(["2026-W45", "2026-W46", "2026-W47"]);
     expect(t.activity.byTool).toEqual({
-      "claude-code": { detailDays: ["2026-11-02", "2026-11-03"], lifetimeDays: ["2026-11-05", "2026-11-12", "2026-11-20"] },
-      codex: { detailDays: ["2026-11-09"], lifetimeDays: [] },
+      "claude-code": { detailDays: ["2026-11-02", "2026-11-03"], lifetimeDays: ["2026-11-05", "2026-11-12", "2026-11-20"], lifetimeSources: ["claude-code.history", "claude-code.stats"] },
+      codex: { detailDays: ["2026-11-09"], lifetimeDays: [], lifetimeSources: [] },
     });
+  });
+
+  test("lifetime sources are those of the rows the days were made of: a store the date range leaves no row of is not one", () => {
+    const t = buildSessionTable(scanResultOf([
+      prompt(undefined, T0, { window: "lifetime", source: "claude-code.history" }),
+      daily("2026-10-01", 3), // before the range
+    ]), { ...opts, exclude: { from: T0 - DAY } });
+    expect(t.activity.byTool["claude-code"]).toEqual({ detailDays: [], lifetimeDays: ["2026-11-02"], lifetimeSources: ["claude-code.history"] });
   });
 
   test("a DailyEv with count 0 adds no day", () => {

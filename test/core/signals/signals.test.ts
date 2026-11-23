@@ -396,6 +396,41 @@ describe("computeGlobals", () => {
     expect([g.aiCoauthoredShare.value, g.aiCoauthoredShare.n]).toEqual([1 / 3, 3]); // L's commit, of a lifetime-only session, stays out
   });
 
+  test("artifacts: an MCP server evidenced only by a detail call lists that call's transcript source", () => {
+    const { g } = globalsOf([sess("a"), prompt("a", T0), tool("a", T0 + MIN, { name: "mcp", category: "mcp", mcpServer: "m1" }),
+      config("mcp-server", "m1", { provenance: "installed" })]);
+    expect(g.artifacts).toEqual({ window: "lifetime", sources: ["claude-code.config", CC], n: 1, value: 0.3 });
+  });
+
+  test("artifacts: a custom agent whose only child is cut with no event in range is not used", () => {
+    const evs = (childTs: number): Ev[] => [
+      sess("a", { start: T0 - 11 * HOUR, end: T0 + HOUR }), prompt("a", T0), tool("a", T0 + SEC),
+      sess("k", { parentId: "a", origin: "subagent", agentType: keyedHash(new Uint8Array(32), "my-agent"), start: T0 - 10 * HOUR, end: T0 + MIN }),
+      tool("k", childTs), config("agent", "my-agent"),
+    ];
+    expect(globalsOf(evs(T0 - 10 * HOUR + SEC), { exclude: { from: T0 } }).g.artifacts.n).toBe(0);
+    expect(globalsOf(evs(T0 + 30 * SEC), { exclude: { from: T0 } }).g.artifacts.n).toBe(1);
+  });
+
+  test("artifacts: an undated uses counter still counts under a date range, from its config source, with no span", () => {
+    const { g } = globalsOf([sess("a"), prompt("a", T0), config("skill", "s1", { uses: 2 })], { exclude: { from: T0 - HOUR, to: T0 + HOUR } });
+    expect(g.artifacts).toEqual({ window: "lifetime", sources: ["claude-code.config"], n: 1, value: 1 });
+  });
+
+  test("switch sources are the stores of the counted lifetime days: a store the range leaves no row of is not named (R3)", () => {
+    const { g } = globalsOf([
+      sess("a"), prompt("a", T0), prompt(undefined, T0, { source: HIST, window: "lifetime" }),
+      { k: "daily", tool: "claude-code", source: "claude-code.stats", day: "2026-10-01", zone: "local", unit: "prompts", count: 4 },
+      marker("a", T0 + MIN, "model-switch", { source: HIST, detail: "opus" }),
+    ], { exclude: { from: T0 - DAY } });
+    expect([g.switchesPerWeek.sources, g.switchesPerWeek.n]).toEqual([[HIST], 1]);
+    // without the range, the stats store made a day too
+    expect(globalsOf([
+      sess("a"), prompt("a", T0), prompt(undefined, T0, { source: HIST, window: "lifetime" }),
+      { k: "daily", tool: "claude-code", source: "claude-code.stats", day: "2026-10-01", zone: "local", unit: "prompts", count: 4 },
+    ]).g.switchesPerWeek.sources).toEqual([HIST, "claude-code.stats"]);
+  });
+
   test("an empty scan gives null metrics and finite values", () => {
     const { g, stats } = globalsOf([]);
     const s = computeSignals(stats, g);

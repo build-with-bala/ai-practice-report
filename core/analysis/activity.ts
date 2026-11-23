@@ -63,10 +63,10 @@ const weeks = (days: Set<string>): string[] => sorted(new Set([...days].map(isoW
 export function activityOf(input: ActivityInput): Activity {
   const detail = new Set<string>();
   const lifetime = new Set<string>();
-  const perTool = new Map<ToolId, { detail: Set<string>; lifetime: Set<string> }>();
+  const perTool = new Map<ToolId, { detail: Set<string>; lifetime: Set<string>; sources: Set<string> }>();
   const of = (tool: ToolId) => {
     let t = perTool.get(tool);
-    if (!t) perTool.set(tool, (t = { detail: new Set(), lifetime: new Set() }));
+    if (!t) perTool.set(tool, (t = { detail: new Set(), lifetime: new Set(), sources: new Set() }));
     return t;
   };
   for (const p of input.detail) {
@@ -78,16 +78,18 @@ export function activityOf(input: ActivityInput): Activity {
     const day = dayKey(p.ts, input.timeZone);
     lifetime.add(day);
     of(p.tool).lifetime.add(day);
+    of(p.tool).sources.add(p.source);
   }
   for (const d of input.daily) {
     if (d.unit !== "prompts" || d.zone !== "local" || !(d.count >= 1)) continue;
     lifetime.add(d.day);
     of(d.tool).lifetime.add(d.day);
+    of(d.tool).sources.add(d.source);
   }
   const byTool: Activity["byTool"] = {};
   for (const tool of [...perTool.keys()].sort()) {
     const t = perTool.get(tool)!;
-    byTool[tool] = { detailDays: sorted(t.detail), lifetimeDays: sorted(t.lifetime) };
+    byTool[tool] = { detailDays: sorted(t.detail), lifetimeDays: sorted(t.lifetime), lifetimeSources: sorted(t.sources) };
   }
   return { detailDays: sorted(detail), lifetimeDays: sorted(lifetime), detailWeeks: weeks(detail), lifetimeWeeks: weeks(lifetime), byTool };
 }

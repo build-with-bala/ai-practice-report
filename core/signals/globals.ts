@@ -1,6 +1,6 @@
 import { dayEnd, dayStart, isoWeek } from "../analysis/activity";
 import { PR_LINK_TOOLS, SWITCH_TOOLS, type Metric, type SessionTable } from "../analysis/types";
-import type { SessionStats } from "../analysis/walk";
+import { inScope, type SessionStats } from "../analysis/walk";
 import type { CommitFact, RepoFacts } from "../git/types";
 import { BUCKET_MS, DELIVERY_WINDOW_MS, REWORK_WINDOW_MS } from "../model/constants";
 import type { ConfigEv } from "../model/events";
@@ -93,8 +93,7 @@ export function computeGlobals(t: SessionTable, stats: readonly SessionStats[], 
   const switchSpan = new Span();
   if (sw.first !== undefined) { switchSpan.addTs(dayStart(sw.first, t.timeZone)); switchSpan.addTs(dayEnd(sw.last!, t.timeZone)); }
   const switchTool = (tool: ToolId): boolean => SWITCH_TOOLS.has(tool) && !excluded.has(tool);
-  for (const p of raw.store.all("prompt")) if (p.window === "lifetime" && switchTool(p.tool) && inRange(p.ts)) switchSpan.addSource(p.source);
-  for (const e of raw.store.all("daily")) if (e.unit === "prompts" && e.zone === "local" && e.count >= 1 && switchTool(e.tool)) switchSpan.addSource(e.source);
+  for (const tool of SWITCH_TOOLS) if (switchTool(tool)) for (const src of t.activity.byTool[tool]?.lifetimeSources ?? []) switchSpan.addSource(src);
   // markers only from lifetime-window sources: a detail-window emitter is never summed against lifetime weeks
   const detailSources = new Set(raw.coverage.filter((c) => c.window === "detail").map((c) => c.source));
   const lifetimeSources = new Set(raw.coverage.filter((c) => c.window === "lifetime" && !detailSources.has(c.source)).map((c) => c.source));
@@ -185,27 +184,45 @@ export function computeGlobals(t: SessionTable, stats: readonly SessionStats[], 
     }
   }
 
-  // used artifacts, provenance-weighted
-  const mcpNamed = new Set<string>();
+  // used artifacts, provenance-weighted: one count of distinct config entries, each "used at least once" (a lifetime
+  // predicate). Evidence of use: the entry's own `uses` counter, an MCP call naming it, or a custom child of its type.
+  // Dated evidence (the calls, the children) obeys the date range and the exclusions: a call inside the range, of a kept
+  // detail row; a child only when it is in scope (`inScope`, the walk's rule). Undated usage counters are state read at
+  // scan time: a date range cannot limit them, and they are not clipped.
+  const evidence = new Map<string, Set<string>>(); // evidence key → the sources of the events that supplied it
+  const addEvidence = (key: string, source: string): void => {
+    const set = evidence.get(key);
+    if (set) set.add(source);
+    else evidence.set(key, new Set([source]));
+  };
   for (const e of raw.store.all("tool")) {
-    if (e.mcpServer !== undefined && !excluded.has(e.tool) && inRange(e.ts) && kept(e.sessionId) && t.rows.get(e.sessionId)!.window === "detail") mcpNamed.add(e.mcpServer);
+    if (e.mcpServer !== undefined && !excluded.has(e.tool) && inRange(e.ts) && kept(e.sessionId) && t.rows.get(e.sessionId)!.window === "detail") {
+      addEvidence(`mcp-server\u0000${e.mcpServer}`, e.source);
+    }
   }
-  const childTypes = new Set<string>();
-  for (const row of detailRows) if (row.agentType !== undefined && row.parentId !== undefined) childTypes.add(row.agentType);
-  const used = new Map<string, { w: number; source: string }>();
+  const markersOf = (id: string) => raw.store.forSession(id, "marker").filter((m) => detailSources.has(m.source) && inRange(m.ts));
+  for (const row of detailRows) {
+    if (row.agentType === undefined || row.parentId === undefined || !inScope(row, t, raw.store, markersOf)) continue;
+    addEvidence(`agent\u0000${row.agentType}`, row.source);
+  }
+  const used = new Map<string, { w: number; sources: Set<string> }>();
   for (const c of configs) {
     if (!ARTIFACT_KINDS.has(c.kind) || c.name === undefined) continue;
-    const isUsed = (c.uses ?? 0) > 0
-      || (c.kind === "mcp-server" && mcpNamed.has(c.name))
-      || (c.kind === "agent" && (childTypes.has(keyedHash(raw.salt, c.name)) || childTypes.has(c.name)));
-    if (!isUsed) continue;
+    const seen = c.kind === "mcp-server" ? evidence.get(`mcp-server\u0000${c.name}`)
+      : c.kind === "agent" ? new Set([...(evidence.get(`agent\u0000${keyedHash(raw.salt, c.name)}`) ?? []), ...(evidence.get(`agent\u0000${c.name}`) ?? [])])
+      : undefined;
+    const byEvent = seen !== undefined && seen.size > 0;
+    if (!((c.uses ?? 0) > 0) && !byEvent) continue;
     const key = `${c.kind}\u0000${c.name}`;
-    const was = used.get(key);
-    if (!was || weight(c.provenance) > was.w) used.set(key, { w: weight(c.provenance), source: c.source });
+    let u = used.get(key);
+    if (!u) used.set(key, (u = { w: 0, sources: new Set() }));
+    u.w = Math.max(u.w, weight(c.provenance));
+    u.sources.add(c.source);
+    if (byEvent) for (const src of seen!) u.sources.add(src);
   }
-  const artifactSpan = new Span();
+  const artifactSpan = new Span(); // sources only: a state count has no from/to
   let artifactWeight = 0;
-  for (const u of used.values()) { artifactWeight += u.w; artifactSpan.addSource(u.source); }
+  for (const u of used.values()) { artifactWeight += u.w; for (const src of u.sources) artifactSpan.addSource(src); }
 
   const memoryFiles = configs.filter((c) => c.kind === "memory-file").length;
   const commitSpan = { from: detailFrom, to: hi };

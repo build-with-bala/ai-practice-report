@@ -33,10 +33,11 @@ export interface Capabilities { outcomes: ToolId[]; lines: ToolId[]; background:
  * only with at least one human prompt (spec §6.2) — file times and zero-count days never count. `DailyEv` "local" days
  * are days in the scanning machine's zone when the tool wrote them, so they can misalign with the analysis zone; and
  * the date-range exclusion applies to them by whole day (a day is kept when it lies within the range's first and last
- * day in the analysis zone).
+ * day in the analysis zone). `byTool[tool].lifetimeSources`: the sorted sources of the prompts and daily rows that made
+ * that tool's lifetime days (the same filtered inputs).
  */
 export interface Activity { detailDays: string[]; lifetimeDays: string[]; detailWeeks: string[]; lifetimeWeeks: string[];
-  byTool: Partial<Record<ToolId, { detailDays: string[]; lifetimeDays: string[] }>> }
+  byTool: Partial<Record<ToolId, { detailDays: string[]; lifetimeDays: string[]; lifetimeSources: string[] }>> }
 
 /**
  * The first stage of analysis: every session row that survived the exclusions, the detail-window top-level sessions
