@@ -1,6 +1,6 @@
-import { LOG_FORMAT, logRecords, parseLog } from "./commits";
-import { candidates, groupRepos, type Candidate, type Repo } from "./discover";
-import { runGit, type GitResult, type GitRunner } from "./run";
+import { LOG_ARGS, logRecords, parseLog } from "./commits";
+import { candidates, groupRepos, type Found, type Repo } from "./discover";
+import { resolveGit, runGit, type GitResult, type GitRunner } from "./run";
 import type { RepoFacts, RepoSignals } from "./types";
 
 export type { AiTool, CheckFacts, CommitFact, HookFacts, InstructionFacts, InstructionKind, RepoFacts, RepoSignals } from "./types";
@@ -59,12 +59,27 @@ export const REPO_SIGNALS_DESCRIBE: { reads: string[]; runs: string[] } = {
   ],
   runs: [
     "git --version",
-    "git rev-parse --show-toplevel",
+    "git rev-parse --show-toplevel --git-common-dir",
     "git config --get user.email",
     "git config --get extensions.partialClone, git config --get remote.origin.promisor (git older than 2.44 only)",
-    "git log --all --no-merges --no-renames --date-order --since=<date> --max-count=<n> --name-only (commit metadata only)",
+    "git log --all --no-merges --no-renames --date-order --since=<date> --max-count=<n> --name-only -z (commit metadata only)",
+    "every git command: started by its absolute path on PATH (never from the repo folder), with no stdin, no pager and no prompt; " +
+      "no transport at all (-c protocol.allow=never, GIT_ALLOW_PROTOCOL=none) and GIT_NO_LAZY_FETCH=1, so nothing is " +
+      "fetched whatever the repo config says; fsmonitor and signature checks off; no system config; inherited GIT_* variables removed",
   ],
 };
+
+/**
+ * One commit, one repo: two clones of a repo (or anything else whose `log --all` shares commits) report the same commits;
+ * each is kept only in the repo with the smallest repoKey that has it.
+ */
+function dedupeCommits(repos: RepoFacts[]): void {
+  const seen = new Set<string>();
+  for (const r of [...repos].sort((a, b) => (a.repoKey < b.repoKey ? -1 : a.repoKey > b.repoKey ? 1 : 0))) {
+    r.commits = r.commits.filter((c) => !seen.has(c.shaKey));
+    for (const c of r.commits) seen.add(c.shaKey);
+  }
+}
 
 const EMPTY_FACTS = (): Pick<RepoFacts, "instructions" | "hooks" | "ci" | "precommit"> => ({
   instructions: { files: [], namesChecks: [], touched: 0 }, hooks: { entries: 0, checks: [], disabled: false },
@@ -112,7 +127,7 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
   /** One git command; STOPPED when the budget or an abort came first (the runner kills its child on the same signal). */
   const git = async (args: readonly string[], cwd: string, ms = timeoutMs, maxBytes = SMALL_BYTES): Promise<GitResult | typeof STOPPED> => {
     if (signal.aborted) return STOPPED;
-    return Promise.race([runner(args, { cwd, timeoutMs: ms, maxBytes, signal }), stopped]);
+    return Promise.race([runner(args, { cwd, timeoutMs: ms, maxBytes, signal, git: exe }), stopped]);
   };
   const result = (status: RepoSignals["status"]): RepoSignals => {
     clearTimeout(timer);
@@ -133,9 +148,12 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
   };
 
   let version: [number, number] | undefined; // git's, from `git --version`
+  let exe: string | undefined; // git's absolute path, found once per pass
   try {
     const cands = candidates(input.cwds, input.recent, skip);
     if (cands.length === 0) return result("ok");
+    exe = resolveGit(process.env);
+    if (exe === undefined) return result("git-missing");
 
     // git itself: missing (ENOENT), and its version
     try {
@@ -152,15 +170,15 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
     }
 
     // each candidate's root
-    const found: { cand: Candidate; root: string }[] = [];
+    const found: Found[] = [];
     await pool(cands, async (cand) => {
       try {
-        const r = await git(["rev-parse", "--show-toplevel"], cand.dir, REV_PARSE_TIMEOUT_MS);
+        const r = await git(["rev-parse", "--show-toplevel", "--git-common-dir"], cand.dir, REV_PARSE_TIMEOUT_MS);
         if (r === STOPPED) return skip("budget");
-        const root = r.stdout.trim();
+        const [root = "", commonDir = ""] = r.stdout.split("\n").map((l) => l.replace(/\r$/, ""));
         if (r.timedOut) skip("timeout");
-        else if (r.code !== 0 || root === "" || r.truncated) skip("not-a-repo");
-        else found.push({ cand, root });
+        else if (r.code !== 0 || root === "" || commonDir === "" || r.truncated) skip("not-a-repo");
+        else found.push({ cand, root, commonDir });
       } catch {
         skip("error");
       }
@@ -180,6 +198,7 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
       done++;
       try { input.onProgress?.(done, chosen.length); } catch { /* a caller's callback never fails repo signals */ }
     });
+    dedupeCommits(repos);
     return result(partial());
   } catch {
     return result(partial());
@@ -209,7 +228,7 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
     const logArgs = (withNames: boolean): string[] => [
       "log", "--all", "--no-merges", "--no-renames", "--date-order",
       ...(since === undefined ? [] : [`--since=${new Date(since).toISOString()}`]),
-      `--max-count=${maxCommits}`, ...(withNames ? ["--name-only"] : []), LOG_FORMAT,
+      `--max-count=${maxCommits}`, ...(withNames ? ["--name-only"] : []), ...LOG_ARGS,
     ];
     let log = await git(logArgs(names), repo.root, timeoutMs, LOG_BYTES);
     if (log === STOPPED) return STOPPED;
@@ -226,9 +245,9 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
     }
     if (!log.truncated && !log.timedOut && log.code !== 0) return facts; // an empty repo, or a history git cannot read
     // a cut output's last record may be incomplete: it is left out
-    const text = log.truncated || log.timedOut ? log.stdout.slice(0, Math.max(0, log.stdout.lastIndexOf("\x1e"))) : log.stdout;
-    facts.commits = parseLog(text, { salt: input.salt, email, maxFiles });
-    facts.commitsTruncated ||= log.truncated || logRecords(text) >= maxCommits;
+    const cut = log.truncated || log.timedOut;
+    facts.commits = parseLog(log.stdout, { salt: input.salt, email, maxFiles, cut });
+    facts.commitsTruncated ||= log.truncated || logRecords(log.stdout, { cut }).length >= maxCommits;
     return facts;
   }
 }

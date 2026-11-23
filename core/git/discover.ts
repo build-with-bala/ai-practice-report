@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import path from "node:path";
 import { fileState, isDir } from "../io/fs";
 import { keyedHash, normalizePath } from "../text/hash";
@@ -53,17 +54,41 @@ export function candidates(cwds: ReadonlyMap<string, string>, recent: ReadonlySe
 /** A repo: its key, its raw root (memory only), its session projects, and its detail-window session count. */
 export interface Repo { repoKey: string; root: string; projectKeys: string[]; sessions: number }
 
+/** What `git rev-parse --show-toplevel --git-common-dir` said for a candidate: its worktree root and the repo's common dir. */
+export interface Found { cand: Candidate; root: string; commonDir: string }
+
+/** A path with its links resolved, when it can be; as given otherwise. */
+function real(p: string): string {
+  try {
+    return realpathSync(p);
+  } catch {
+    return p;
+  }
+}
+
 /**
- * Groups candidates by the root `git rev-parse --show-toplevel` gave each (`tops`, by candidate dir), and keeps the
- * `max` repos with the most detail-window sessions (ties by key); the rest count as `too-many-repos`.
+ * The repo of each rev-parse answer: the linked worktrees of one repo share its common dir (resolved against the
+ * candidate's folder, links followed), so they are one repo — whose root is the main worktree (the common dir's parent,
+ * when the common dir is a `.git` folder), else the smallest worktree root. Projects are pooled per repo, and the `max`
+ * repos with the most detail-window sessions kept (ties by key); the rest count as `too-many-repos`.
  */
-export function groupRepos(found: { cand: Candidate; root: string }[], salt: Uint8Array, detailSessions: ReadonlyMap<string, number>,
+export function groupRepos(found: readonly Found[], salt: Uint8Array, detailSessions: ReadonlyMap<string, number>,
   max: number, skip: (reason: string) => void): Repo[] {
+  const byCommon = new Map<string, { common: string; roots: string[]; projectKeys: Set<string> }>();
+  for (const { cand, root, commonDir } of found) {
+    const common = real(path.resolve(cand.dir, commonDir));
+    const id = normalizePath(common);
+    const g = byCommon.get(id) ?? { common, roots: [], projectKeys: new Set<string>() };
+    g.roots.push(root);
+    for (const k of cand.projectKeys) g.projectKeys.add(k);
+    byCommon.set(id, g);
+  }
   const byKey = new Map<string, Repo>();
-  for (const { cand, root } of found) {
+  for (const g of byCommon.values()) {
+    const root = path.basename(g.common) === ".git" ? path.dirname(g.common) : [...g.roots].sort()[0]!;
     const repoKey = keyedHash(salt, normalizePath(root));
     const repo = byKey.get(repoKey) ?? { repoKey, root, projectKeys: [], sessions: 0 };
-    for (const k of cand.projectKeys) {
+    for (const k of g.projectKeys) {
       if (repo.projectKeys.includes(k)) continue;
       repo.projectKeys.push(k);
       repo.sessions += detailSessions.get(k) ?? 0;

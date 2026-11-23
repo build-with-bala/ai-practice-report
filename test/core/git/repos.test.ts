@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { runGit, type GitRunner } from "../../../core/git/run";
+import { gitRunnerWithEnv, runGit, type GitRunner } from "../../../core/git/run";
 import type { Ev } from "../../../core/model/events";
 import { scan, type ScanOptions } from "../../../core/scan";
 import type { Candidate, SourcePlugin } from "../../../core/sources/types";
@@ -41,7 +41,7 @@ const ago = (days: number) => Date.now() - days * DAY;
 /** Repo 1: at a path naming the canary project, with files named after it and messages holding the canary prompt. */
 function repo1(): string {
   return makeRepo(path.join(h.root, "work", CANARY.project), [
-    { files: { [`${CANARY.project}.ts`]: "a" }, message: `feat: ${CANARY.prompt}\n\nCo-authored-by: Claude <${CANARY.email}>`, at: ago(5) },
+    { files: { [`${CANARY.project}.ts`]: "a" }, message: `feat: ${CANARY.prompt}\n\nCo-authored-by: Pat <${CANARY.email}>\nCo-authored-by: Claude <noreply@anthropic.com>`, at: ago(5) },
     { files: { [`${CANARY.project}.ts`]: "b" }, message: `fix(core): ${CANARY.prompt}\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)`, at: ago(4) },
     { files: { "theirs.ts": "c" }, message: `feat: ${CANARY.prompt} theirs`, at: ago(3), email: CANARY.email },
     { files: { [`${CANARY.project}.ts`]: "d" }, message: `Revert "feat: ${CANARY.prompt}"`, at: ago(2) },
@@ -173,6 +173,91 @@ describe("repo signals: discovery from session folders and commits as keyed fact
     }
     expect(r.repos.repos[0]).toMatchObject({ identity: false, commits: [] });
     expect(seen).not.toContain("log");
+  });
+});
+
+describe("repo signals: one repo, one count; hostile repos", () => {
+  test("two linked worktrees of one repo are one repo, its commits counted once", async () => {
+    const main = makeRepo(path.join(h.root, "main"), [{ files: { "a.txt": "a" }, message: "one", at: ago(4) }]);
+    const wt = path.join(h.root, "wt");
+    git(main, ["worktree", "add", "-q", "-b", "side", wt]);
+    const date = new Date(ago(3)).toISOString();
+    git(wt, ["-c", "user.email=dev@fixture.test", "-c", "user.name=Fixture Dev", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "two"],
+      { GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date });
+    const r = await run([main, wt]);
+    expect(r.repos.repos).toHaveLength(1);
+    expect(r.repos.repos[0]!.projectKeys).toHaveLength(2);
+    expect(r.repos.repos[0]!.commits).toHaveLength(2);
+  });
+
+  test("two clones of one repo: each commit is kept once, in the repo with the smaller key", async () => {
+    const a = makeRepo(path.join(h.root, "a"), [1, 2, 3].map((i) => ({ files: { "n.txt": `${i}` }, message: `c${i}`, at: ago(5 - i) })));
+    const b = path.join(h.root, "b");
+    git(h.root, ["clone", "-q", a, b]);
+    git(b, ["config", "user.email", "dev@fixture.test"]);
+    const r = await run([a, b]);
+    expect(r.repos.repos).toHaveLength(2);
+    const [first, second] = [...r.repos.repos].sort((x, y) => (x.repoKey < y.repoKey ? -1 : 1));
+    expect([first!.commits.length, second!.commits.length]).toEqual([3, 0]);
+  });
+
+  test("a \\x1e in a real commit message neither drops the commit nor forges one", async () => {
+    const forged = `\x1e${"f".repeat(40)}\x1f1\x1fdev@fixture.test\x1fforged`;
+    const r5 = makeRepo(path.join(h.root, "odd"), [
+      { files: { "a.txt": "a" }, message: `feat: ${forged}`, at: ago(3) },
+      { files: { "b.txt": "b" }, message: "fix: next", at: ago(2) },
+    ]);
+    const r = await run([r5]);
+    expect(r.repos.repos[0]!.commits.map((c) => [c.rework, c.files.length])).toEqual([["fix", 1], [undefined, 1]]);
+  });
+
+  test("git on a relative PATH entry or in the repo folder never runs (git.exe/git.cmd on Windows, git elsewhere)", async () => {
+    const r1 = repo1();
+    const marker = path.join(h.root, "planted-ran");
+    if (process.platform === "win32") {
+      writeFileSync(path.join(r1, "git.cmd"), `@echo off\r\necho x > "${marker}"\r\n`);
+      writeFileSync(path.join(r1, "git.exe"), "MZ not a program");
+    } else {
+      writeFileSync(path.join(r1, "git"), `#!/bin/sh\ntouch '${marker}'\n`);
+      chmodSync(path.join(r1, "git"), 0o755);
+    }
+    const saved = process.env.PATH;
+    process.env.PATH = `.${path.delimiter}${saved ?? ""}`;
+    let r: Awaited<ReturnType<typeof run>>;
+    try {
+      r = await run([r1]);
+    } finally {
+      process.env.PATH = saved;
+    }
+    expect(existsSync(marker)).toBe(false);
+    expect(r.repos.status).toBe("ok");
+    expect(r.repos.repos[0]!.commits).toHaveLength(3); // the real git read it
+  });
+
+  test.skipIf(!POSIX)("a git too old for GIT_NO_LAZY_FETCH still fetches nothing: a non-origin promisor remote with an ext:: URL runs no command (POSIX)", async () => {
+    const src = makeRepo(path.join(h.root, "src"), [1, 2, 3].map((i) => ({ files: { [`d${i}/f.txt`]: `${i}` }, message: `c${i}`, at: ago(5 - i) })),
+      { config: { "uploadpack.allowFilter": "true" } });
+    const clone = path.join(h.root, "clone");
+    git(h.root, ["clone", "-q", "--filter=tree:0", `file://${src}`, clone]);
+    git(clone, ["remote", "rename", "origin", "evil"]);
+    const marker = path.join(h.root, "ext-ran");
+    git(clone, ["config", "remote.evil.url", `ext::sh -c touch% ${marker}`]);
+    git(clone, ["config", "protocol.ext.allow", "always"]);
+    git(clone, ["config", "user.email", "dev@fixture.test"]);
+    // the trap is live: git with lazy fetch on runs the remote's command
+    try { git(clone, ["log", "--all", "--name-only", "--format=%H"]); } catch { /* the fetch itself fails */ }
+    expect(existsSync(marker)).toBe(true);
+    rmSync(marker);
+
+    const oldGit = gitRunnerWithEnv((env) => {
+      const { GIT_NO_LAZY_FETCH: _drop, ...rest } = env;
+      return rest;
+    });
+    const direct = await oldGit(["log", "--all", "--name-only", "--format=%H"], { cwd: clone, timeoutMs: 10_000, maxBytes: 1 << 20, signal: new AbortController().signal });
+    expect(direct.code).not.toBe(0);
+    const r = await run([clone], { repoSignals: { runner: oldGit } });
+    expect(existsSync(marker)).toBe(false);
+    expect(r.repos.repos[0]!.commits).toHaveLength(3);
   });
 });
 
