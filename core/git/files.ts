@@ -149,12 +149,20 @@ export function precommitChecks(kind: "pre-commit" | "lefthook" | "husky", text:
   return ordered(found);
 }
 
-/** A path with its links resolved, when it can be; as given otherwise. */
+/**
+ * A path with its links resolved, by the system's own realpath, when it can be; as given otherwise. The native one also
+ * gives one spelling to what git and a session name differently: macOS's `/var` and `/private/var`, Windows's short
+ * (8.3) and long names.
+ */
 function real(p: string): string {
   try {
-    return realpathSync(p);
+    return realpathSync.native(p);
   } catch {
-    return p;
+    try {
+      return realpathSync(p);
+    } catch {
+      return p;
+    }
   }
 }
 
