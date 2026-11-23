@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { GIT_SAFE_ARGS, gitEnv, runGit } from "../../../core/git/run";
+import { GIT_SAFE_ARGS, gitEnv, resolveGit, runGit } from "../../../core/git/run";
 import { fakeHome, type FakeHome } from "../../kit/home";
 import { makeRepo } from "../../fixtures/repos";
 
@@ -42,10 +42,12 @@ describe("runGit", () => {
   });
 
   test("the safe arguments and environment", () => {
-    expect(GIT_SAFE_ARGS).toEqual(["--no-pager", "-c", "core.fsmonitor=false", "-c", "log.showSignature=false", "-c", "core.quotepath=off", "-c", "color.ui=never"]);
+    expect(GIT_SAFE_ARGS).toEqual(["--no-pager", "-c", "core.fsmonitor=false", "-c", "log.showSignature=false", "-c", "core.quotepath=off", "-c", "color.ui=never",
+      "-c", "protocol.allow=never"]);
     const env = gitEnv({ PATH: "/bin", HOME: "/h", GIT_DIR: "/x", GIT_CONFIG_GLOBAL: "/y", GIT_EXTERNAL_DIFF: "z", UNSET: undefined });
     expect(env).toEqual({
-      PATH: "/bin", HOME: "/h", GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0", GIT_NO_LAZY_FETCH: "1", GIT_CONFIG_NOSYSTEM: "1", GIT_PAGER: "cat", LC_ALL: "C",
+      PATH: "/bin", HOME: "/h", GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0", GIT_NO_LAZY_FETCH: "1", GIT_ALLOW_PROTOCOL: "none", GIT_CONFIG_NOSYSTEM: "1",
+      GIT_PAGER: "cat", LC_ALL: "C",
     });
   });
 
@@ -98,5 +100,42 @@ describe("runGit", () => {
 
   test("a folder that does not exist rejects with ENOENT", async () => {
     expect(runGit(["--version"], opts(path.join(h.root, "gone")))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("git is found by an absolute PATH entry only: relative entries (\".\" among them) and the working folder are never used", () => {
+    const win = process.platform === "win32";
+    const rel = path.join(h.root, "rel");
+    const abs = path.join(h.root, "abs");
+    mkdirSync(rel, { recursive: true });
+    mkdirSync(abs, { recursive: true });
+    const name = win ? "git.exe" : "git";
+    for (const d of [rel, abs]) {
+      writeFileSync(path.join(d, name), win ? "MZ" : "#!/bin/sh\n");
+      if (!win) chmodSync(path.join(d, name), 0o755);
+    }
+    const env = (p: string) => (win ? { Path: p, PATHEXT: ".COM;.EXE;.BAT;.CMD" } : { PATH: p });
+    expect(resolveGit(env([".", "rel", abs].join(path.delimiter)))).toBe(path.join(abs, name));
+    expect(resolveGit(env(["", "."].join(path.delimiter)))).toBeUndefined();
+    expect(resolveGit(env(rel.replace(h.root, ".")))).toBeUndefined();
+  });
+
+  test("on Windows, PATHEXT's .exe and .cmd names are tried in its order", () => {
+    const dir = path.join(h.root, "win");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, "git.cmd"), "@echo off\r\n");
+    const p = resolveGit({ PATH: "C:\\nowhere;" + dir.replace(/\//g, "\\"), PATHEXT: ".BAT;.CMD;.EXE" }, "win32");
+    // a POSIX temp path is not a Windows absolute path, so only a Windows host can find it
+    if (process.platform === "win32") expect(p?.toLowerCase()).toBe(path.join(dir, "git.cmd").toLowerCase());
+    else expect(p).toBeUndefined();
+  });
+
+  test("no git on PATH: the runner rejects with ENOENT", async () => {
+    const saved = process.env.PATH;
+    process.env.PATH = path.join(h.root, "empty");
+    try {
+      await expect(runGit(["--version"], opts(h.root))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      process.env.PATH = saved;
+    }
   });
 });

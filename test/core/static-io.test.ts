@@ -37,7 +37,9 @@ const EXEMPT: readonly Exemption[] = [
   {
     file: "core/git/run.ts", construct: "Bun.spawn",
     why: "the git runner, the one program core runs: read-only subcommands only (--version, rev-parse, config --get, log), async, " +
-      "with a timeout, an output cap and abort; no stdin, no prompt, no pager, no lazy fetch, and repo config that would run a program overridden",
+      "with a timeout, an output cap and abort; git started by its absolute path on PATH, never from the repo folder; no stdin, no prompt, " +
+      "no pager; no transport at all (protocol.allow=never, GIT_ALLOW_PROTOCOL=none) and no lazy fetch, so no fetch whatever the repo " +
+      "config says; and repo config that would run a program (fsmonitor, signature checks) overridden",
   },
 ];
 
