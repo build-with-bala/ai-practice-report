@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { auditHtml } from "../../../core/viz/audit";
+import { attr, esc, jsonIsland } from "../../../core/viz/html";
 import { KIT_CLASSES } from "../../../core/viz/css";
 import { cspFor, page } from "../../../core/viz/page";
 import { KIT_RUNTIME } from "../../../core/viz/runtime";
@@ -98,6 +99,21 @@ describe("page", () => {
     expect(() => page({ ...BASE, css: "</style><script>" })).toThrow();
     expect(() => page({ ...BASE, script: "'</script>'" })).toThrow();
     expect(() => page({ ...BASE, script: "'<!--'" })).toThrow();
+  });
+
+  test("a theme outside auto, ink and paper is refused: it is written before the CSP meta (review fix 2)", () => {
+    expect(() => page({ ...BASE, theme: '"><script>alert(1)</script><x y="' as "auto" })).toThrow();
+  });
+
+  test("one hostile string in the title, footer, text, attribute and island leaves one style, one runtime script and one island", () => {
+    const H = `</script><script>alert(1)</script><style>*{}</style><!-- "'&<img src=https://x onerror=a()>`;
+    const o = page({ ...BASE, title: H, footerLeft: H, body: `<main><p${attr("title", H)}>${esc(H)}</p>${jsonIsland("d", { h: H })}</main>` });
+    expect(o.match(/<script\b/gi)!.length).toBe(2);
+    expect(o.match(/<script type="application\/json" id="d">/g)!.length).toBe(1);
+    expect(o.match(/<style\b/gi)!.length).toBe(1);
+    expect(o.match(/<img\b/gi)).toBeNull();
+    const a = auditHtml(o);
+    expect([a.cspOk, a.externalRefs, a.inlineHandlers, a.styleAttrs]).toEqual([true, [], 0, 0]);
   });
 
   test("the shell uses only kit classes", () => {

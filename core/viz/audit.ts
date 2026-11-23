@@ -11,7 +11,12 @@ export interface Audit {
   csp: string | null;
   /** The CSP meta is the second element of `<head>`, there is one `<style>` and one executable `<script>`, and the CSP pins them. */
   cspOk: boolean;
-  /** Every reference to anything but `#…` or `data:…`, and every `<link>`, `<iframe>`, `<object>`, `<embed>` and `<base>`. */
+  /**
+   * Every URL attribute (`src`, `href`, `action`, `formaction`, `poster`, `srcset`, `xlink:href`, `data`, `ping`,
+   * `background`), CSS `url(…)` and `@import` whose target is not `#…` or `data:…`, as `name=value`, `url(target)` or
+   * `@import target`; every `<link>`, `<iframe>`, `<object>`, `<embed>` and `<base>`, as `<name>`; and every
+   * `<meta http-equiv="refresh">`, as `<meta refresh>`, since CSP does not block that navigation.
+   */
   externalRefs: string[];
   styleAttrs: number;
   inlineHandlers: number;
@@ -22,7 +27,7 @@ export interface Audit {
 interface StartTag { name: string; attrs: [string, string | null][] }
 
 /** The attributes whose value is a URL. */
-const URL_ATTRS: ReadonlySet<string> = new Set(["src", "href", "action", "formaction", "poster", "srcset", "xlink:href", "data"]);
+const URL_ATTRS: ReadonlySet<string> = new Set(["src", "href", "action", "formaction", "poster", "srcset", "xlink:href", "data", "ping", "background"]);
 /** Elements that load or redirect something whatever their attributes say. */
 const LOADERS: ReadonlySet<string> = new Set(["link", "iframe", "object", "embed", "base"]);
 /** Elements whose content is raw text, not markup. */
@@ -47,11 +52,34 @@ const isLocal = (target: string): boolean => {
 };
 
 /**
- * A srcset's candidate URLs. A data: URI holds a comma, so candidates are split only at a comma followed by white
- * space or by something that starts a URL (a scheme, `/`, `.` or `#`): an over-split only lists more.
+ * A srcset's candidate URLs, as the HTML spec parses them: skip white space and commas, read the URL up to white space
+ * (trailing commas end the candidate), then skip the descriptors up to a comma outside parentheses.
  */
-const srcsetTargets = (v: string): string[] =>
-  v.split(/,(?=\s)|,(?=\s*(?:[A-Za-z][A-Za-z0-9+.-]*:|[/.#]))/).map((c) => c.trim().split(/\s+/)[0] ?? "").filter((c) => c !== "");
+function srcsetTargets(v: string): string[] {
+  const out: string[] = [];
+  const space = (c: string): boolean => c === " " || c === "\t" || c === "\n" || c === "\f" || c === "\r";
+  let i = 0;
+  while (i < v.length) {
+    while (i < v.length && (space(v[i]!) || v[i] === ",")) i++;
+    if (i >= v.length) break;
+    let j = i;
+    while (j < v.length && !space(v[j]!)) j++;
+    let url = v.slice(i, j);
+    i = j;
+    if (url.endsWith(",")) url = url.replace(/,+$/, "");
+    else {
+      let depth = 0;
+      for (; i < v.length; i++) {
+        const c = v[i];
+        if (c === "(") depth++;
+        else if (c === ")") depth = Math.max(0, depth - 1);
+        else if (c === "," && depth === 0) { i++; break; }
+      }
+    }
+    if (url !== "") out.push(url);
+  }
+  return out;
+}
 
 /** Every CSS `url(…)` and `@import` target in a text. */
 function cssRefs(text: string): string[] {
@@ -67,8 +95,11 @@ function cssRefs(text: string): string[] {
   return out;
 }
 
-/** One attribute, read from `lastIndex` (sticky): a name, then a double-quoted, single-quoted or bare value, if any. */
-const ATTR = /[\s/]*([^\s"'>/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]*)))?/y;
+/**
+ * One attribute, read from `lastIndex` (sticky): a name, then a double-quoted, single-quoted or bare value, if any. As
+ * in the HTML spec, a name may start with any character but white space, `/` and `>` (a quote or `=` included).
+ */
+const ATTR = /[\s/]*([^\s/>][^\s/>=]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]*)))?/y;
 
 /** The start tag at `at` (which holds `<` and a letter): its name, attributes and the index after its `>`. */
 function startTag(html: string, at: number): { tag: StartTag; end: number } {
@@ -109,8 +140,11 @@ export function auditHtml(html: string): Audit {
     const lt = html.indexOf("<", i);
     if (lt < 0) break;
     if (html.startsWith("<!--", lt)) {
-      const end = html.indexOf("-->", lt + 4);
-      i = end < 0 ? html.length : end + 3;
+      // As browsers do: `<!-->` and `<!--->` close at once, and `--!>` closes like `-->`.
+      if (html.startsWith("<!-->", lt)) { i = lt + 5; continue; }
+      if (html.startsWith("<!--->", lt)) { i = lt + 6; continue; }
+      const m = html.slice(lt + 4).match(/--!?>/);
+      i = m === null ? html.length : lt + 4 + m.index! + m[0].length;
       continue;
     }
     const next = html[lt + 1] ?? "";
@@ -146,12 +180,15 @@ export function auditHtml(html: string): Audit {
       if (csp === null) { csp = attrOf(tag, "content") ?? ""; cspAt = inHead ? headIndex : -1; }
     }
     if (LOADERS.has(tag.name)) externalRefs.push(`<${tag.name}>`);
+    if (tag.name === "meta" && (attrOf(tag, "http-equiv") ?? "").trim().toLowerCase() === "refresh") externalRefs.push("<meta refresh>");
     for (const [name, value] of tag.attrs) {
       if (name === "style") styleAttrs++;
       if (name.startsWith("on") && value !== null) inlineHandlers++;
       if (value === null) continue;
       if (name === "srcset") {
         if (srcsetTargets(value).some((t) => !isLocal(t))) externalRefs.push(`srcset=${value}`);
+      } else if (name === "ping") {
+        if (value.split(/[\t\n\f\r ]+/).some((t) => t !== "" && !isLocal(t))) externalRefs.push(`ping=${value}`);
       } else if (URL_ATTRS.has(name) && !isLocal(value)) {
         externalRefs.push(`${name}=${value.trim()}`);
       }

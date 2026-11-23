@@ -39,13 +39,16 @@ const KIT_DEFS = '<svg class="kit-defs" aria-hidden="true" focusable="false"><de
  * the print footer fallback and the runtime. Deterministic: the same options give the same bytes.
  */
 export function page(o: PageOptions): string {
+  // The theme is written before the CSP meta, which does not cover what is parsed ahead of it: only the three values pass.
+  const theme = o.theme ?? "auto";
+  if (theme !== "auto" && theme !== "ink" && theme !== "paper") throw new Error("page: theme must be auto, ink or paper");
   const style = lf([...(o.fonts === "none" ? [] : [fontFaceCss()]), kitCss({ footerLeft: o.footerLeft }), ...(o.css ? [o.css] : [])].join("\n"));
   const script = lf([KIT_RUNTIME, ...(o.script ? [o.script] : [])].join("\n"));
   if (/<\/style/i.test(style)) throw new Error("page: the CSS holds </style");
   if (/<\/script|<!--/i.test(script)) throw new Error("page: the script holds </script or <!--");
   const csp = cspFor(style, script);
   const body = typeof o.body === "function" ? o.body({ csp }) : o.body;
-  return '<!doctype html><html lang="en" data-theme="' + (o.theme ?? "auto") + '"><head>'
+  return '<!doctype html><html lang="en" data-theme="' + theme + '"><head>'
     + '<meta charset="utf-8">'
     // The policy holds only keywords, single quotes and base64, so it needs no escaping in a double-quoted attribute.
     + `<meta http-equiv="Content-Security-Policy" content="${csp}">`

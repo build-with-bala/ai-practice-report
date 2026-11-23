@@ -107,3 +107,45 @@ describe("auditHtml on page() output, fonts embedded", () => {
     expect(auditHtml("<p>a→b</p>").uncovered).toEqual(["→"]);
   });
 });
+
+describe("auditHtml: the tokenizer stays in step with the browser (review fix 1)", () => {
+  test("abrupt empty comments <!--> and <!---> close at once", () => {
+    for (const open of ["<!-->", "<!--->"]) {
+      const a = auditHtml(`${open}<img src="https://evil"><!-- -->`);
+      expect([open, a.externalRefs, a.elements]).toEqual([open, ["src=https://evil"], 1]);
+    }
+    expect(auditHtml(`<!-- x --!><img src="https://evil">`).externalRefs).toEqual(["src=https://evil"]);
+  });
+
+  test("an attribute name may start with a quote or an equals sign", () => {
+    const a = auditHtml(`<img "x" src="https://evil" onerror="a()" style="c">`);
+    expect([a.externalRefs, a.inlineHandlers, a.styleAttrs]).toEqual([["src=https://evil"], 1, 1]);
+    expect(auditHtml(`<img = src="https://evil">`).externalRefs).toEqual(["src=https://evil"]);
+    // As the browser reads it: the name `'y'` takes the bare value `src="https://evil"`, so nothing loads.
+    expect(auditHtml(`<img 'y' = src="https://evil">`).externalRefs).toEqual([]);
+  });
+
+  test("srcset candidates are parsed as the spec reads them: URL up to white space, descriptors up to a comma", () => {
+    expect(auditHtml(`<img srcset="data:image/png;base64,AA 1x,evil.png 2x">`).externalRefs)
+      .toEqual(["srcset=data:image/png;base64,AA 1x,evil.png 2x"]);
+    expect(auditHtml(`<img srcset="data:image/png;base64,AA 1x, data:image/png;base64,BB 2x">`).externalRefs).toEqual([]);
+    expect(auditHtml(`<img srcset="#a, evil.png">`).externalRefs).toEqual(["srcset=#a, evil.png"]);
+    // One candidate with no white space is one URL, commas and all: a fragment here.
+    expect(auditHtml(`<img srcset="#a,,evil.png">`).externalRefs).toEqual([]);
+  });
+});
+
+describe("auditHtml: navigation CSP does not block (ruled addition)", () => {
+  test("a meta refresh is reported in any case or quoting", () => {
+    for (const m of [`<meta http-equiv="refresh" content="0;url=https://x">`, `<META HTTP-EQUIV=Refresh CONTENT="0">`, `<meta http-equiv='REFRESH ' content='5'>`]) {
+      expect([m, auditHtml(m).externalRefs]).toEqual([m, ["<meta refresh>"]]);
+    }
+  });
+
+  test("ping and background are URL attributes", () => {
+    expect(auditHtml(`<a href="#x" ping="https://track">x</a>`).externalRefs).toEqual(["ping=https://track"]);
+    expect(auditHtml(`<a href="#x" ping="#a https://track">x</a>`).externalRefs).toEqual(["ping=#a https://track"]);
+    expect(auditHtml(`<body background="bg.png"></body>`).externalRefs).toEqual(["background=bg.png"]);
+    expect(auditHtml(`<td background="data:image/png;base64,AA"></td>`).externalRefs).toEqual([]);
+  });
+});
