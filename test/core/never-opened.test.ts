@@ -216,8 +216,11 @@ describe("repo files: only the allowlisted ones are opened", () => {
     const { r, opens } = await recordScan({ env: h.env, plugins: [sessionIn(path.join(repo, "pkg"))], handleSignals: false });
 
     expect(r.repos.status).toBe("ok");
-    expect(violations(opens, h.root)).toEqual([]);
-    const inRepo = opens.map((o) => path.relative(real(repo), real(o.path)).split(path.sep).join("/")).filter((rel) => !rel.startsWith(".."));
+    // git names the repo by its long path; on Windows the temp home may be spelled with a short (8.3) name, which only the
+    // native realpath expands
+    const native = (p: string) => { try { return realpathSync.native(p); } catch { return p; } };
+    expect(violations(opens.map((o) => ({ ...o, path: native(o.path) })), native(h.root))).toEqual([]);
+    const inRepo = opens.map((o) => path.relative(native(repo), native(o.path)).split(path.sep).join("/")).filter((rel) => !rel.startsWith(".."));
     expect(inRepo.sort()).toEqual([...allowed].sort());
     expect(opens.every((o) => o.how === "read")).toBe(true);
   });
