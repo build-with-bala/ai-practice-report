@@ -1,9 +1,9 @@
 import { dayKey } from "../analysis/activity";
+import { artifactUse } from "../analysis/artifacts";
 import { promptWindowByTool } from "../analysis/promptwindow";
 import type { SessionTable } from "../analysis/types";
-import type { ConfigEv, PromptEv } from "../model/events";
+import type { PromptEv } from "../model/events";
 import type { ScanResult } from "../scan";
-import { keyedHash } from "../text/hash";
 import { round, toolsOf, type CheckId, type CheckResult } from "./types";
 
 /*
@@ -25,7 +25,6 @@ const UNCLOSED_SHARE = 0.1;
 const NEW_CONFIG_MS = 7 * DAY_MS;
 const NEW_CONFIG_MIN = 3;
 const NEW_CONFIG_SHARE = 0.5;
-const ARTIFACT_KINDS: ReadonlySet<ConfigEv["kind"]> = new Set<ConfigEv["kind"]>(["skill", "command", "agent", "plugin", "mcp-server"]);
 
 const na = (id: CheckId, tools: CheckResult["tools"], n = 0): CheckResult => ({ id, status: "n/a", n, reason: "no-data", values: {}, tools });
 const pct = (x: number): number => Math.round(x * 100);
@@ -135,43 +134,26 @@ function unclosedTools(raw: ScanResult, t: SessionTable): CheckResult {
 }
 
 /**
- * new-config: the used artifacts (skills, commands, agents, plugins, MCP servers — used as the Context dimension counts
- * them: `uses` > 0, an MCP server a detail-window call names, an agent a subagent ran as) whose first-seen time (the
- * earliest of their reports) is at or after `now` − 7 days. A first-seen time can be a file's change time where the
- * system keeps no creation time, which a migration or a tool update resets: the question allows for both. Raised when
- * at least 3, and at least half, of the used artifacts with a first-seen time are that recent: one newly added skill
- * says nothing. n/a without a used artifact with a first-seen time. `values`: `recent`, `artifacts` (those with a
- * first-seen time).
+ * new-config: the used artifacts (`artifactUse`, the rule the Context dimension's `artifacts` signal counts: skills,
+ * commands, agents, plugins and MCP servers with use evidence) whose first-seen time (the earliest of their reports) is
+ * at or after `now` − 7 days. A first-seen time can be a file's change time where the system keeps no creation time,
+ * which a migration or a tool update resets: the question allows for both. Raised when at least 3, and at least half,
+ * of the used artifacts with a first-seen time are that recent: one newly added skill says nothing. n/a without a used
+ * artifact with a first-seen time. `values`: `recent`, `artifacts` (those with a first-seen time); `tools`: the tools
+ * whose config entries report those artifacts.
  */
 function newConfig(raw: ScanResult, t: SessionTable, now: number): CheckResult {
-  const excluded = t.scope.tools;
-  const mcpNamed = new Set<string>();
-  const childTypes = new Set<string>();
-  for (const e of raw.store.all("tool")) {
-    const row = t.rows.get(e.sessionId);
-    if (e.mcpServer !== undefined && row?.window === "detail" && !t.hosts.has(e.sessionId) && e.ts >= t.scope.from && e.ts <= t.scope.to) mcpNamed.add(e.mcpServer);
-  }
-  for (const row of t.rows.values()) if (row.window === "detail" && row.parentId !== undefined && row.agentType !== undefined) childTypes.add(row.agentType);
-  const firstSeen = new Map<string, number>();
-  const used: ConfigEv[] = [];
-  // A copy of the used-artifact rule in core/signals/globals.ts: it will be replaced by the shared helper.
-  for (const c of raw.store.all("config")) {
-    if (excluded.has(c.tool) || !ARTIFACT_KINDS.has(c.kind) || c.name === undefined) continue;
-    const isUsed = (c.uses ?? 0) > 0 || (c.kind === "mcp-server" && mcpNamed.has(c.name))
-      || (c.kind === "agent" && (childTypes.has(keyedHash(raw.salt, c.name)) || childTypes.has(c.name)));
-    if (!isUsed || c.firstSeen === undefined) continue;
-    used.push(c);
-    const key = `${c.kind}\u0000${c.name}`;
-    firstSeen.set(key, Math.min(firstSeen.get(key) ?? Infinity, c.firstSeen));
-  }
-  const tools = toolsOf(used);
-  if (firstSeen.size === 0) return na("soft:new-config", tools);
-  const recent = [...firstSeen.values()].filter((ts) => ts >= now - NEW_CONFIG_MS).length;
-  const base = { id: "soft:new-config" as const, n: firstSeen.size, values: { recent, artifacts: firstSeen.size }, tools };
-  const m = firstSeen.size;
+  const dated = artifactUse(raw, t).filter((a) => a.used && a.firstSeen !== undefined);
+  const keys = new Set(dated.map((a) => `${a.kind}\u0000${a.name}`));
+  const tools = toolsOf(raw.store.all("config").filter((c) => !t.scope.tools.has(c.tool) && c.name !== undefined && keys.has(`${c.kind}\u0000${c.name}`)));
+  if (dated.length === 0) return na("soft:new-config", tools);
+  const m = dated.length;
+  const recent = dated.filter((a) => a.firstSeen! >= now - NEW_CONFIG_MS).length;
+  const base = { id: "soft:new-config" as const, n: m, values: { recent, artifacts: m }, tools };
   if (recent < NEW_CONFIG_MIN || recent < NEW_CONFIG_SHARE * m) return { ...base, status: "pass", reason: "ok" };
+  // raised means recent ≥ 3, so both counts are plural
   return { ...base, status: "note", reason: "new-config",
-    askAbout: `${recent} of the ${m} ${m === 1 ? "tool or skill" : "tools and skills"} in use ${recent === 1 ? "was" : "were"} first seen in the 7 days before this scan. Was this machine set up or migrated, or were its tools updated, in that week?` };
+    askAbout: `${recent} of the ${m} tools and skills in use were first seen in the 7 days before this scan. Was this machine set up or migrated, or were its tools updated, in that week?` };
 }
 
 /** The five soft flags, in order: rhythm, repeated-long, recent-burst, unclosed-tools, new-config. */

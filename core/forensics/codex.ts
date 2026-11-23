@@ -28,9 +28,11 @@ const FAIL_SHARE = 0.005;
  * the CLI may not have written their row yet. n/a without a read thread index (coverage of `codex.threads` `ok` or
  * `drift` with records), or without rollouts. Rollouts missing their row: at least max(2, 1% of the rollouts checked) →
  * fail; fewer, but at least 1 → note with the same question (a genuine machine can hold a stray one). The index cannot
- * vouch for sessions older than itself: when a row carries `createdAt`, rollouts named before the earliest one are not
- * checked (`beforeIndex`; without any `createdAt` every rollout is). `n`: the rollouts checked; `values`: `missing`,
- * `rollouts` (checked), `beforeIndex`.
+ * vouch for sessions older than itself: when a row carries `createdAt`, rollouts that began before the earliest one are
+ * not checked (`beforeIndex`; without any `createdAt` every rollout is). `createdAt` is an absolute time and a file name
+ * a local one, so a rollout's start is read on the same clock: its id's time (`uuidTs`) where it has one, else its file
+ * name's (`fileTs`). When every rollout began before the index: n/a, reason `before-index`. `n`: the rollouts checked;
+ * `values`: `missing`, `rollouts` (checked), `beforeIndex`.
  */
 function checkThreadRows(raw: ScanResult, now: number): CheckResult {
   const rollouts = raw.store.all("codex-rollout").filter((r) => r.fileTs === undefined || r.fileTs < now - RECENT_MS);
@@ -42,9 +44,12 @@ function checkThreadRows(raw: ScanResult, now: number): CheckResult {
   let since = Infinity;
   for (const r of rows) if (r.createdAt !== undefined && r.createdAt < since) since = r.createdAt;
   if (since === Infinity) since = -Infinity; // no row carries a creation time: every rollout is checked
-  const checked = rollouts.filter((r) => r.fileTs === undefined || r.fileTs >= since);
+  const checked = rollouts.filter((r) => {
+    const began = r.uuidTs ?? r.fileTs;
+    return began === undefined || began >= since;
+  });
   const beforeIndex = rollouts.length - checked.length;
-  if (checked.length === 0) return { id: "C6", status: "n/a", n: 0, reason: "no-rollouts", values: { beforeIndex }, tools };
+  if (checked.length === 0) return { id: "C6", status: "n/a", n: 0, reason: "before-index", values: { beforeIndex }, tools };
   const have = new Set(rows.map((r) => r.threadId));
   const missing = checked.filter((r) => !have.has(r.threadId)).length;
   const base = { id: "C6" as const, n: checked.length, values: { missing, rollouts: checked.length, beforeIndex }, tools };

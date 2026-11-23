@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { buildSessionTable } from "../../../core/analysis/sessions";
+import { buildSessionStats } from "../../../core/analysis/walk";
 import { softFlags } from "../../../core/forensics/soft";
 import type { CheckResult } from "../../../core/forensics/types";
+import { computeGlobals } from "../../../core/signals/globals";
 import type { ConfigEv, CoverageEv, Ev, PromptEv, SessionEv, ToolEv } from "../../../core/model/events";
 import type { Window } from "../../../core/model/ids";
 import { scanResultOf } from "../../kit/scanresult";
@@ -230,6 +232,31 @@ describe("softFlags", () => {
       expect(flag([config({ uses: 0, firstSeen: NOW - DAY })], "soft:new-config").status).toBe("n/a");
       expect(flag([config({ kind: "feature", name: "prompt-queue", firstSeen: NOW - DAY })], "soft:new-config").status).toBe("n/a");
       expect(flag([config({})], "soft:new-config").status).toBe("n/a");
+    });
+
+    test("the flag treats as used exactly the artifacts the artifacts signal counts", () => {
+      const at = { firstSeen: NOW - 2 * DAY };
+      const evs: Ev[] = [
+        sess("c", { parentId: "s", agentType: "reviewer", start: T0, end: T0 + HOUR }),
+        sess("h", { window: "lifetime", source: "claude-code.history" }),
+        toolEv(1, { name: "mcp__docs__q", category: "mcp", mcpServer: "docs" }),
+        toolEv(2, { sessionId: "h", source: "claude-code.history", name: "mcp__lifetime__q", category: "mcp", mcpServer: "lifetime" }),
+        config({ name: "used-skill", ...at }),
+        config({ name: "unused-skill", uses: 0, ...at }),
+        config({ kind: "mcp-server", name: "docs", uses: undefined, ...at }),
+        config({ kind: "mcp-server", name: "lifetime", uses: undefined, ...at }),
+        config({ kind: "mcp-server", name: "never-called", uses: undefined, ...at }),
+        config({ kind: "agent", name: "reviewer", uses: undefined, ...at }),
+        config({ kind: "agent", name: "idle", uses: undefined, ...at }),
+        config({ kind: "feature", name: "prompt-queue", ...at }),
+      ];
+      const raw = scanResultOf([cov(CC, "detail"), cov("claude-code.history", "lifetime"), sess("s"), ...evs], { finishedAt: NOW });
+      const t = buildSessionTable(raw, { now: NOW, timeZone: "UTC" });
+      const g = computeGlobals(t, buildSessionStats(t, raw.store, raw.repos, { timeZone: "UTC" }), raw, { now: NOW });
+      const f = softFlags(raw, t, { now: NOW, timeZone: "UTC" }).find((x) => x.id === "soft:new-config")!;
+      expect(g.evidence.artifacts).toBe(3); // used-skill, docs, reviewer
+      expect(f.values).toEqual({ recent: g.evidence.artifacts, artifacts: g.evidence.artifacts });
+      expect(f.status).toBe("note");
     });
   });
 

@@ -72,6 +72,28 @@ describe("checkRollouts: C6, every rollout has a thread row", () => {
     expect([m.status, m.values.missing, m.values.beforeIndex]).toEqual(["note", 1, 5]);
   });
 
+  test("the index rule compares on one clock: the id's time where there is one, else the file name's", () => {
+    const createdAt = T0 + 10 * HOUR;
+    const dated = (i: number): ThreadRowEv => ({ ...row(i), createdAt });
+    // named in a zone 5 h behind: the local file-name time reads before the index, the id's absolute time after it
+    const behind = rollout(30, { fileTs: createdAt - 3 * HOUR, uuidTs: createdAt + 2 * HOUR });
+    // no id time: the file name's time decides
+    const nameOnlyEarly = rollout(31, { fileTs: createdAt - HOUR, uuidTs: undefined });
+    const nameOnlyLate = rollout(32, { fileTs: createdAt + HOUR, uuidTs: undefined });
+    // an id time before the index: not checked, whatever the file name says (it has a row, so checking it hides a miss)
+    const idEarly = rollout(33, { fileTs: createdAt + HOUR, uuidTs: createdAt - HOUR });
+    const [c6] = run([threadsCov(), dated(0), behind, nameOnlyEarly, nameOnlyLate, idEarly, dated(33)]);
+    expect(c6.values).toEqual({ missing: 2, rollouts: 2, beforeIndex: 2 });
+    expect(c6.status).toBe("fail");
+  });
+
+  test("every rollout before the index is n/a, with its own reason", () => {
+    const dated = (i: number): ThreadRowEv => ({ ...row(i), createdAt: T0 + 10 * HOUR });
+    const [c6] = run([threadsCov(), dated(0), rollout(0), rollout(1, { uuidTs: undefined })]);
+    expect([c6.status, c6.reason, c6.n]).toEqual(["n/a", "before-index", 0]);
+    expect(c6.values).toEqual({ beforeIndex: 2 });
+  });
+
   test("without any createdAt every rollout is checked", () => {
     const [c6] = run([threadsCov(), rollout(0), rollout(1), row(2)]);
     expect([c6.status, c6.values.beforeIndex]).toEqual(["fail", 0]);
