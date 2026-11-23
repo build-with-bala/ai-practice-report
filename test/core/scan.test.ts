@@ -9,6 +9,7 @@ import type { CoverageEv, Ev } from "../../core/model/events";
 import type { ToolId } from "../../core/model/ids";
 import { scan } from "../../core/scan";
 import { ccHistory, ccTranscripts } from "../../core/sources/claude-code";
+import { cxHistory, cxRollouts } from "../../core/sources/codex";
 import type { Candidate, ScanCtx, SourcePlugin } from "../../core/sources/types";
 import { CC_S1, CC_S2, CcTranscript, ccHistoryLine, fixtureStart, MIN, slug } from "../fixtures/claude-code";
 import { fakeHome, type FakeHome } from "../kit/home";
@@ -333,6 +334,47 @@ describe("zero-yield guard", () => {
       ["detail", "error", "aborted", 5, {}], ["lifetime", "error", "aborted", 5, {}],
     ]);
     expect(r.warnings.filter((w) => w.code === "drift" && w.source === "z")).toEqual([]);
+  });
+
+  test("files found whose lines could not be used (parse, oversize) and no primary kind: drift zero-yield, even with no records; with no such lines, or no files, empty", async () => {
+    const r = await scan({ env, plugins: [
+      guarded((c) => { c.emit(cov("codex", "z", { records: 0, status: "empty", skipped: { parse: 3 } })); c.emit(cov("codex", "z", { window: "lifetime", records: 0, status: "empty", skipped: { oversize: 1 } })); }),
+      { ...guarded((c) => { c.emit(cov("codex", "y", { records: 0, status: "empty", files: 0, skipped: { parse: 2 } })); c.emit(cov("codex", "y", { window: "lifetime", records: 0, status: "empty", skipped: { "io-error": 1 } })); }), id: "y" },
+    ] });
+    expect(r.coverage.map((c) => [c.source, c.window, c.status, c.unknownTypes])).toEqual([
+      ["z", "detail", "drift", { "zero-yield": 1 }], ["z", "lifetime", "drift", { "zero-yield": 1 }],
+      ["y", "detail", "empty", {}], ["y", "lifetime", "empty", {}],
+    ]);
+  });
+
+  describe("JSONL sources whose files hold only lines that are not JSON", () => {
+    let h: FakeHome;
+    beforeEach(() => { h = fakeHome(); });
+    afterEach(() => h.cleanup());
+
+    test("each is drift zero-yield, not empty; a source whose files hold no lines at all stays empty", async () => {
+      const garbage = Array.from({ length: 200 }, (_, i) => `\u0001line ${i} that is not JSON`).join("\n") + "\n";
+      h.write(path.join(".claude", "projects", "-work-app", "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee.jsonl"), garbage);
+      h.write(path.join(".claude", "history.jsonl"), garbage);
+      h.write(path.join(".codex", "sessions", "2026", "11", "20", "rollout-2026-11-20T10-00-00-019a0000-0000-7000-8000-000000000001.jsonl"), garbage);
+      h.write(path.join(".codex", "history.jsonl"), garbage);
+      const r = await scan({ env: h.env, plugins: [ccTranscripts, ccHistory, cxRollouts, cxHistory], repoSignals: false, handleSignals: false });
+      const read = r.coverage.filter((c) => c.files > 0);
+      expect(read.map((c) => c.source).sort()).toEqual([ccHistory.id, ccTranscripts.id, cxHistory.id, cxRollouts.id].sort());
+      for (const c of read) {
+        expect([c.source, c.status, c.skipped.parse, c.unknownTypes["zero-yield"]]).toEqual([c.source, "drift", 200, 1]);
+      }
+      expect(r.warnings.filter((w) => w.code === "drift").length).toBeGreaterThanOrEqual(4);
+
+      const h2 = fakeHome();
+      try {
+        h2.write(path.join(".claude", "history.jsonl"), "");
+        const r2 = await scan({ env: h2.env, plugins: [ccHistory], repoSignals: false, handleSignals: false });
+        expect(r2.coverage.map((c) => [c.status, c.unknownTypes])).toEqual([["empty", {}]]);
+      } finally {
+        h2.cleanup();
+      }
+    });
   });
 
   describe("records read on purpose that yield nothing (skipped copied or empty) are no zero-yield", () => {

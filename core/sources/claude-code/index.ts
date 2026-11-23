@@ -76,7 +76,6 @@ export const ccConfig: SourcePlugin = {
   tier: "P0",
   beta: false,
   windows: ["lifetime"],
-  primary: { lifetime: ["config", "marker", "identity"] },
   describe: {
     reads: [
       "~/.claude.json ($CLAUDE_CONFIG_DIR/.claude.json when set) — promptQueueUseCount, firstStartTime, lastPlanModeUse, skillUsage and pluginUsage counts, MCP server names, oauthAccount.accountUuid (kept only as a keyed hash)",

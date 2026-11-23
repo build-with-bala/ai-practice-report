@@ -9,11 +9,12 @@ Evidence: **(verified locally)** = the type or field was confirmed with the stru
 **(CLI program)** = read from the CLI program's code (2.1.326), not confirmed with the probe.
 This file records names and value types only, never values.
 
-**Zero-yield.** A coverage window that read records but yielded none of its reader's primary events is drift
-`zero-yield` (set by the scan), except records skipped as `copied` or `empty`, and coverage stamped `aborted`, so a
-renamed field never passes as a quiet store. Primary events: `claude-code.transcripts` — a session,
-prompt or tool call; `claude-code.history` — a prompt; `claude-code.stats` — a day; `claude-code.config` — a
-setting, marker or identity.
+**Zero-yield.** A coverage window that read records, or found files whose lines it could not use (skipped `parse` or
+`oversize`), but yielded none of its reader's primary events is drift `zero-yield` (set by the scan), except records
+skipped as `copied` or `empty`, and coverage stamped `aborted`, so a renamed field or a changed container never passes
+as a quiet store; files with no lines at all stay `empty`. Primary events: `claude-code.transcripts` — a session,
+prompt or tool call; `claude-code.history` — a prompt; `claude-code.stats` — a day. `claude-code.config` is not
+guarded: its records are its own events, so it cannot read one without yielding one.
 
 **io-error.** A file or store that cannot be opened or read counts as skipped `io-error`, and so does a never-opened
 file — a credential, token or key file, by its name or by the name of the file behind a link (`core/io/observe.ts`):

@@ -92,6 +92,12 @@ const WINDOWED: ReadonlySet<string> = new Set(["session", "prompt", "turn"]);
 const yieldKey = (k: string, window: string): string => (WINDOWED.has(k) ? `${k}@${window}` : k);
 /** The records of a coverage that should have yielded events: all those read, but for the ones skipped on purpose. */
 const yielding = (c: CoverageEv): number => c.records - INERT_SKIPS.reduce((n, r) => n + (c.skipped[r] ?? 0), 0);
+/**
+ * Lines a stream found but could not use (`parse`, `oversize`): not records, yet a file made only of them is a format the
+ * reader no longer reads, never a quiet store.
+ */
+const UNUSABLE_SKIPS: readonly string[] = ["parse", "oversize"];
+const unusable = (c: CoverageEv): number => (c.files > 0 ? UNUSABLE_SKIPS.reduce((n, r) => n + (c.skipped[r] ?? 0), 0) : 0);
 
 /** Coverage the orchestrator writes for a plugin (absent, error, aborted): one per window the plugin reports. */
 function emptyCoverage(p: SourcePlugin, status: CoverageEv["status"], note?: string): CoverageEv[] {
@@ -165,9 +171,11 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
           // a coverage written after the abort may describe a source read only in part, so it never looks complete: the
           // abort stamp alone decides it
           if (signal.aborted) Object.assign(cov, { status: "error", note: "aborted" });
-          // records read, but none of the window's primary kinds yielded: the format moved under the reader. Records read
-          // on purpose that yield nothing (INERT_SKIPS) do not count.
-          else if (kinds && (cov.status === "ok" || cov.status === "drift") && yielding(cov) > 0 && !kinds.some((k) => (yielded.get(yieldKey(k, cov.window)) ?? 0) > 0)) {
+          // records read, or lines in files found that could not be used, but none of the window's primary kinds yielded:
+          // the format moved under the reader. Records read on purpose that yield nothing (INERT_SKIPS) do not count; files
+          // with no lines at all stay empty.
+          else if (kinds && (cov.status === "ok" || cov.status === "drift" || cov.status === "empty") && yielding(cov) + unusable(cov) > 0
+            && !kinds.some((k) => (yielded.get(yieldKey(k, cov.window)) ?? 0) > 0)) {
             cov.status = "drift";
             cov.unknownTypes = { ...cov.unknownTypes, "zero-yield": 1 };
           }

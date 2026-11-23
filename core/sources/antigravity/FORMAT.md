@@ -9,11 +9,12 @@ or by count-only smoke runs of the readers. **(program)** = read from the Antigr
 protobuf descriptors and database column tags built into the CLI and into the IDE's language server — not confirmed in
 data. This file records names and value types only, never values.
 
-**Zero-yield.** A coverage window that read records but yielded none of its reader's primary events is drift
-`zero-yield` (set by the scan), except records skipped as `copied` or `empty`, and coverage stamped `aborted`, so a
-renamed field never passes as a quiet store. Primary events: `antigravity.cli` (`detail`) — a session,
+**Zero-yield.** A coverage window that read records, or found files whose lines it could not use (skipped `parse` or
+`oversize`), but yielded none of its reader's primary events is drift `zero-yield` (set by the scan), except records
+skipped as `copied` or `empty`, and coverage stamped `aborted`, so a renamed field or a changed container never passes
+as a quiet store; files with no lines at all stay `empty`. Primary events: `antigravity.cli` (`detail`) — a session,
 prompt or tool call (its `lifetime` window is checked by its columns); `antigravity.history` — a prompt;
-`antigravity.ide` — a session; `antigravity.brain` — a plan artifact's marker.
+`antigravity.ide` — a session. `antigravity.brain` is not guarded: its records are its own markers.
 
 **io-error.** A file or store that cannot be opened or read counts as skipped `io-error`, and so does a never-opened
 file — a credential, token or key file, by its name or by the name of the file behind a link (`core/io/observe.ts`):
