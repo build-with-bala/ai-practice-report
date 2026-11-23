@@ -24,18 +24,21 @@ export const EVIDENCE: Readonly<Record<DimensionId, EvidenceRule>> = Object.free
   delivery: all({ field: "editEpisodesInRepo", min: 10 }),
 });
 
+/** The binding evidence part: its `Evidence` field, count, minimum and count/minimum. */
+export interface BindingEvidence { part: keyof Evidence; n: number; needs: number; ratio: number }
+
 /**
  * The binding part of a dimension's evidence (builder's call 4): for `all`, the part with the smallest n/minimum; for
  * `any`, the largest (the first such part on a tie). `ratio` is its n/minimum, and both shrinkage and confidence use it.
  */
-export function bindingEvidence(id: DimensionId, ev: Evidence): { n: number; needs: number; ratio: number } {
+export function bindingEvidence(id: DimensionId, ev: Evidence): BindingEvidence {
   const rule = EVIDENCE[id];
-  let best: { n: number; needs: number; ratio: number } | undefined;
+  let best: BindingEvidence | undefined;
   for (const p of rule.parts) {
     const raw = ev[p.field];
     const n = Number.isFinite(raw) && raw > 0 ? raw : 0;
     const ratio = n / p.min;
-    if (!best || (rule.mode === "all" ? ratio < best.ratio : ratio > best.ratio)) best = { n, needs: p.min, ratio };
+    if (!best || (rule.mode === "all" ? ratio < best.ratio : ratio > best.ratio)) best = { part: p.field, n, needs: p.min, ratio };
   }
   return best!;
 }

@@ -1,5 +1,5 @@
 import type { MetricMeta } from "../analysis/types";
-import type { Signals } from "../signals/types";
+import type { Evidence, Signals } from "../signals/types";
 import { COMPONENTS, repoSignalsOff, scoreComponent, type ComponentResult } from "./components";
 import { bindingEvidence, confidenceOf, DIMENSION_IDS, type Confidence, type DimensionId } from "./dimensions";
 import { phi } from "./normal";
@@ -14,16 +14,20 @@ export type { Confidence, DimensionId } from "./dimensions";
  *   falls below half its weight measured only because of repo components that are not measured); `not-measurable`
  *   (below half its weight measured otherwise, builder's call 3); `insufficient` (measurable, but below the low
  *   confidence bar: under 1× the minimum evidence or no distinct week).
- * - `z`: the shrunk z' = z·r/(r+1) of the weighted mean of the component z's (builder's call 4); null unless scored.
- *   `score` and `openTail` come from it by `displayScore`. `interval` is the bootstrap's (Task 8), null here.
- * - `n`, `needs`, `ratio`: the binding evidence part's count, minimum and n/minimum, whatever the status. `weeks`: the
- *   evidence's distinct weeks.
+ * - `zRaw`: the unshrunk weighted mean of the measured components' z, with the components' effective weights (so it
+ *   reconciles with the component table); set when `scored` or `insufficient`, else null.
+ * - `z`: the shown, shrunk z' = zRaw·r/(r+1) (builder's call 4); null unless scored. `score` and `openTail` come from
+ *   it by `displayScore`. `interval` is the bootstrap's (Task 8), null here.
+ * - `part`, `n`, `needs`, `ratio`: the binding evidence part (its `Evidence` field), its count, minimum and n/minimum,
+ *   whatever the status: the smallest ratio of "and" parts, the largest of Context's "or" parts. When the ratio is met
+ *   but there is no distinct week (insufficient), the weeks bind: `part` "weeks", `n` = weeks, `needs` 1, `ratio` = weeks.
+ * - `weeks`: the evidence's distinct weeks.
  * - `meta`: window `detail`; `sources`, `from` and `to` derived from the measured components (the union of their
  *   sources, sorted; the earliest `from`; the latest `to`); `n` the binding part's count.
  */
 export interface DimensionResult { id: DimensionId; status: "scored" | "insufficient" | "not-measurable" | "not-measured";
-  z: number | null; score: number | null; interval: [number, number] | null; openTail: boolean; confidence: Confidence | null;
-  n: number; needs: number; ratio: number; weeks: number; components: ComponentResult[]; meta: MetricMeta }
+  z: number | null; zRaw: number | null; score: number | null; interval: [number, number] | null; openTail: boolean; confidence: Confidence | null;
+  part: keyof Evidence; n: number; needs: number; ratio: number; weeks: number; components: ComponentResult[]; meta: MetricMeta }
 
 /** A dimension needs at least this share of its pinned weight measured (builder's call 3); the slack absorbs float sums. */
 const MIN_WEIGHT = 0.5 - 1e-9;
@@ -47,21 +51,24 @@ export function scoreDimensions(s: Signals, ref: ReferenceTable): DimensionResul
       else if (comps[i]!.status === "not-measured") missingRepo += c.weight;
     });
     let zMean = 0;
-    specs.forEach((c, i) => {
-      const r = comps[i]!;
-      if (r.status !== "ok" || measured <= 0) return;
-      r.weight = c.weight / measured;
-      zMean += r.weight * r.z!;
-    });
+    if (measured > 0) specs.forEach((c, i) => { const r = comps[i]!; if (r.status === "ok") zMean += (c.weight / measured) * r.z!; });
     const ev = bindingEvidence(id, s.evidence);
-    const base = { id, z: null, score: null, interval: null, openTail: false, confidence: null, ...ev, weeks, components: comps,
+    const base = { id, z: null, zRaw: null, score: null, interval: null, openTail: false, confidence: null, ...ev, weeks, components: comps,
       meta: metaOf(comps, ev.n) };
     if (id === "delivery" && repoSignalsOff(s)) return { ...base, status: "not-measured" };
     if (measured < MIN_WEIGHT) return { ...base, status: measured + missingRepo >= MIN_WEIGHT ? "not-measured" : "not-measurable" };
+    if (!Number.isFinite(zMean)) return { ...base, status: "not-measurable" };
+    // From here on the dimension is scored or insufficient: its measured components carry their effective weights.
+    specs.forEach((c, i) => { const r = comps[i]!; if (r.status === "ok") r.weight = c.weight / measured; });
     const confidence = confidenceOf(ev.ratio, weeks);
-    if (!confidence) return { ...base, status: "insufficient" };
-    const z = zMean * ev.ratio / (ev.ratio + 1);
-    return { ...base, status: "scored", z, ...displayScore(z), confidence };
+    if (!confidence) {
+      // The ratio is met but there is no distinct week: the weeks are what binds.
+      const short = ev.ratio >= 1 ? { part: "weeks" as const, n: weeks, needs: 1, ratio: weeks, meta: metaOf(comps, weeks) } : {};
+      return { ...base, ...short, zRaw: zMean, status: "insufficient" };
+    }
+    const z = zMean * (ev.ratio / (ev.ratio + 1)); // the fraction first: z·r overflows for huge r
+    if (!Number.isFinite(z)) return { ...base, status: "not-measurable" };
+    return { ...base, status: "scored", z, zRaw: zMean, ...displayScore(z), confidence };
   });
 }
 

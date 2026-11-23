@@ -80,6 +80,7 @@ describe("scoreDimensions at the anchors", () => {
     for (const d of scoreDimensions(signalsAt("p90"), ref)) {
       expect(d.score).toBe(88);
       expect(d.z!).toBeCloseTo(1.2816 * 10 / 11, 6);
+      expect(d.zRaw!).toBeCloseTo(1.2816, 6);
       for (const c of d.components) expect(c.z!).toBeCloseTo(1.2816, 6);
     }
   });
@@ -158,7 +159,10 @@ describe("missing data (builder's call 3)", () => {
     const d = dim(scoreDimensions(signalsAt("p50", { stickyMean: empty() }), ref), "leverage");
     expect(d.status).toBe("not-measurable");
     expect(d.z).toBeNull();
+    expect(d.zRaw).toBeNull();
     expect(d.score).toBeNull();
+    expect(d.components.map((c) => c.status)).toEqual(["not-measurable", "ok"]);
+    expect(d.components.map((c) => c.weight)).toEqual([0, 0]); // weights only when scored or insufficient (R4)
   });
   test("it is not-measured instead when repo signals would have made up the weight", () => {
     const r = metric(null, { n: 0, source: "git", reason: "repo-signals-off" });
@@ -176,13 +180,15 @@ describe("missing data (builder's call 3)", () => {
 describe("evidence, confidence and shrinkage", () => {
   test("Leverage with 59 turns is insufficient, with the binding part's n and needs", () => {
     const d = dim(scoreDimensions(signalsAt("p90", { evidence: evidence(10, 6, { typedTurns: 59 }) }), ref), "leverage");
-    expect(d).toMatchObject({ status: "insufficient", n: 59, needs: 60, z: null, score: null, confidence: null });
+    expect(d).toMatchObject({ status: "insufficient", part: "typedTurns", n: 59, needs: 60, z: null, score: null, confidence: null });
+    expect(d.zRaw!).toBeCloseTo(1.2816, 6); // the unshrunk mean is kept, and the components keep their weights
+    expect(d.components.map((c) => c.weight)).toEqual([0.6, 0.4]);
     expect(d.ratio).toBeCloseTo(59 / 60, 12);
     expect(d.components.every((c) => c.status === "ok")).toBe(true);
   });
   test("Context with 3 repos and 5 episodes: ratio 1, low", () => {
     const d = dim(scoreDimensions(signalsAt("p90", { evidence: evidence(10, 6, { repos: 3, episodes: 5 }) }), ref), "context");
-    expect(d).toMatchObject({ status: "scored", n: 3, needs: 3, ratio: 1, confidence: "low" });
+    expect(d).toMatchObject({ status: "scored", part: "repos", n: 3, needs: 3, ratio: 1, confidence: "low" });
     expect(d.z!).toBeCloseTo(1.2816 / 2, 6);
   });
   test("confidence needs both the ratio and the weeks", () => {
@@ -198,26 +204,61 @@ describe("evidence, confidence and shrinkage", () => {
   });
   test("the smallest 'and' part binds", () => {
     const d = dim(scoreDimensions(signalsAt("p50", { evidence: evidence(10, 6, { sessions: 15, days: 30 }) }), ref), "leverage");
-    expect(d).toMatchObject({ n: 15, needs: 5, ratio: 3, confidence: "medium" });
+    expect(d).toMatchObject({ part: "sessions", n: 15, needs: 5, ratio: 3, confidence: "medium" });
+  });
+  test("when the ratio is met but no week is, the weeks bind (R2)", () => {
+    const d = dim(scoreDimensions(signalsAt("p50", { evidence: evidence(10, 0, { repos: 5, episodes: 0 }) }), ref), "context");
+    expect(d).toMatchObject({ status: "insufficient", part: "weeks", n: 0, needs: 1, ratio: 0, confidence: null, z: null });
+    expect(d.meta.n).toBe(0);
+  });
+  test("every dimension names its binding part", () => {
+    const parts = scoreDimensions(signalsAt("p50"), ref).map((d) => d.part);
+    expect(parts).toEqual(["typedTurns", "days", "editTurns", "followUps", "episodes", "tierEpisodes", "editEpisodesInRepo"]);
   });
 });
 
 describe("degenerate input (Review Focus 2)", () => {
-  test("rates at 0 with n 10,000, counts at 0, rho null: finite z or not-measurable, never NaN", () => {
+  test("rates at 0 with n 10,000, counts at 0, rho degenerate: real, finite values, rho not-measurable", () => {
     const s = signalsAt("p50");
     for (const c of COMPONENTS) {
       const e = ref.components[c.id]!;
-      s[c.signal] = metric(e.transform === "atanh" ? null : 0, { n: 10_000, reason: "degenerate" });
+      // rho with a constant side is null and degenerate (Task 6); every other signal is a measured 0.
+      s[c.signal] = e.transform === "atanh" ? metric(null, { n: 10_000, reason: "degenerate" }) : metric(0, { n: 10_000 });
     }
     const ds = scoreDimensions(s, ref);
     expect(finiteDeep(ds)).toBe(true);
     expect(JSON.stringify(ds)).not.toMatch(/NaN|Infinity/);
-    for (const d of ds) {
-      if (d.status === "scored") { expect(Number.isFinite(d.z!)).toBe(true); expect(d.score!).toBeGreaterThanOrEqual(1); }
-      else expect(d.status).toBe("not-measurable");
-      for (const c of d.components) if (c.status === "ok") expect(Number.isFinite(c.z!)).toBe(true);
-    }
-    expect(dim(ds, "judgment").components.find((c) => c.id === "jud.rho")!.status).toBe("not-measurable");
+    const logit02 = Math.log(0.02 / 0.98);
+    const comp = (id: string) => ds.flatMap((d) => d.components).find((c) => c.id === id)!;
+    expect(comp("ver.vae").x!).toBeCloseTo(logit02, 12); // (0·n + 0.5)/(n + 1) clamps to 0.02
+    expect(comp("del.rework").x!).toBeCloseTo(-logit02, 12); // lower is better: a zero rework rate is the best
+    expect(comp("lev.run").x).toBe(0); // log1p(0)
+    expect(comp("lev.sticky").x).toBe(0); // identity
+    expect(comp("jud.cost").x).toBe(0);
+    expect(comp("jud.rho")).toMatchObject({ status: "not-measurable", raw: null, x: null, z: null, weight: 0, n: 10_000 });
+    const e = ref.components["ver.vae"]!;
+    expect(comp("ver.vae").z!).toBeCloseTo((logit02 - e.p50) / ((e.p90 - e.p50) / 1.2816), 12);
+    for (const d of ds) expect(d.status).toBe("scored"); // Judgment scores on switches and cost (0.6 of its weight)
+    const j = dim(ds, "judgment");
+    const zs = j.components.filter((c) => c.status === "ok");
+    expect(j.zRaw!).toBeCloseTo(zs.reduce((a, c) => a + c.weight * c.z!, 0), 12);
+    expect(j.z!).toBeCloseTo(j.zRaw! * 10 / 11, 12);
+  });
+  test("overflowing inputs stay finite (R1): component z is guarded to [-8, 8] and shrinkage cannot overflow", () => {
+    const hi = dim(scoreDimensions(signalsAt("p50", { stickyMean: metric(1e308) }), ref), "leverage");
+    expect(hi.components[0]!.z).toBe(8);
+    expect(hi.status).toBe("scored");
+    expect(Number.isFinite(hi.z!)).toBe(true);
+    const lo = dim(scoreDimensions(signalsAt("p50", { stickyMean: metric(-1e308) }), ref), "leverage");
+    expect(lo.components[0]!.z).toBe(-8);
+    expect(lo.score).toBe(1);
+    const big = 1e300;
+    const ev = evidence(1, 6, { typedTurns: big, sessions: big, days: big, episodes: big, editTurns: big, followUps: big,
+      tierEpisodes: big, editEpisodesInRepo: big, repos: big });
+    const ds = [hi, lo, ...scoreDimensions(signalsAt("p90", { evidence: ev, stickyMean: metric(1e308) }), ref)];
+    expect(finiteDeep(ds)).toBe(true);
+    expect(JSON.stringify(ds)).not.toMatch(/NaN|Infinity/);
+    for (const d of ds.slice(2)) expect(d.status).toBe("scored");
   });
   test("an empty home: every dimension not-measurable, with n and needs, and nothing non-finite", () => {
     const s = signalsAt("p50", { evidence: evidence(0, 0) });

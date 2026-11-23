@@ -47,14 +47,22 @@ export const COMPONENTS: readonly ComponentSpec[] = Object.freeze([
  * A component as scored. `status` (builder's call 3): `ok` for a value; `not-measured` when it needs repo signals that
  * are off (a null with reason `repo-signals-off`, or any repo component while repo signals are `off` or `git-missing`);
  * otherwise a null is `not-measurable`. `raw` is the signal's value, `x` its transformed, oriented value, `z` the
- * unshrunk z against the reference. `weight` is the effective weight in its dimension: the pinned weight spread over the
- * measured components (0 when not measured; `COMPONENTS` keeps the pinned one). `n` and `meta` are the signal's own.
+ * unshrunk z against the reference, clamped to [-Z_GUARD, Z_GUARD]. `weight` is the effective weight in its dimension:
+ * the pinned weight spread over the measured components when the dimension is `scored` or `insufficient`, else 0 (and 0
+ * for an unmeasured component; `COMPONENTS` keeps the pinned one). `n` and `meta` are the signal's own.
  */
 export interface ComponentResult { id: string; weight: number; status: "ok" | "not-measurable" | "not-measured"; raw: number | null;
   x: number | null; z: number | null; n: number; meta: MetricMeta }
 
 /** True when repo signals are switched off or git is missing: no repo component can be measured. */
 export const repoSignalsOff = (s: Signals): boolean => s.repoSignals === "off" || s.repoSignals === "git-missing";
+
+/**
+ * A numeric guard, not a scoring rule: a component's z is clamped to [-Z_GUARD, Z_GUARD]. No realistic input reaches it
+ * (it is 8 reference sigmas out), but it keeps every later weighted sum finite, Task 8's overall included.
+ */
+export const Z_GUARD = 8;
+const clampZ = (z: number): number => (Number.isNaN(z) ? z : Math.min(Z_GUARD, Math.max(-Z_GUARD, z)));
 
 /** Scores one component against the reference, with weight 0 (the dimension sets the effective weights). */
 export function scoreComponent(spec: ComponentSpec, s: Signals, ref: ReferenceTable): ComponentResult {
@@ -68,7 +76,7 @@ export function scoreComponent(spec: ComponentSpec, s: Signals, ref: ReferenceTa
   if (m.value === null || !Number.isFinite(m.value) || !e) return { ...base, status: "not-measurable", raw: null, x: null, z: null };
   const t = transform(e.transform, m.value, m.n);
   const x = spec.negate ? 0 - t : t; // 0 - t, not -t: no -0
-  const z = (x - e.p50) / ((e.p90 - e.p50) / Z90);
+  const z = clampZ((x - e.p50) / ((e.p90 - e.p50) / Z90));
   if (!Number.isFinite(z)) return { ...base, status: "not-measurable", raw: null, x: null, z: null };
   return { ...base, status: "ok", raw: m.value, x, z };
 }

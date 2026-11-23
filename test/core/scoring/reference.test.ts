@@ -30,6 +30,13 @@ describe("reference v0", () => {
     expect(sums.size).toBe(7);
     for (const s of sums.values()) expect(s).toBeCloseTo(1, 12);
   });
+  test("anchors stated as fractions equal their fractions, to 4 decimals (R3)", () => {
+    const logit = (p: number): number => Math.round(Math.log(p / (1 - p)) * 1e4) / 1e4;
+    expect(ref.components["ver.closure"]!.p50).toBe(logit(2 / 3));
+    expect(ref.components["ctx.hygiene"]!.p50).toBe(logit(1 / 3));
+    expect(ref.components["ctx.hygiene"]!.p90).toBe(logit(2 / 3));
+    expect(ref.components["ver.guardrails"]!.p50).toBe(logit(1 / 3));
+  });
   test("the table is frozen", () => {
     expect(Object.isFrozen(ref.components["lev.run"])).toBe(true);
   });
