@@ -183,8 +183,15 @@ const rows: [string, ToolCategory, CheckKind[], Toolchain?][] = [
   ["npm exec vitest", "test", ["test"], "js"],
   ["bun x tsc --noEmit", "typecheck", ["typecheck"], "js"],
   ["pnpm tsc --noEmit", "typecheck", ["typecheck"], "js"],
-  ["npm run tsc", "build", ["build"], "js"],
   ["npm run eslint", "lint", ["lint"], "js"],
+  // a script reached through run/run-script whose name the script rule already reads keeps that reading; a tool used
+  // directly, or through exec or x, keeps the tool's rule
+  ["npm run tsc", "typecheck", ["typecheck"], "js"],
+  ["npm run-script tsc", "typecheck", ["typecheck"], "js"],
+  ["pnpm tsc", "build", ["build"], "js"],
+  ["bun x tsc", "build", ["build"], "js"],
+  ["npm exec tsc", "build", ["build"], "js"],
+  ["npm run make", "build", ["build"], "any"],
   ["yarn workspace web jest --ci", "test", ["test"], "js"],
   ["npm x -- playwright test", "test", ["test"], "js"],
   ["pnpm exec python -m pytest", "test", ["test"], "py"],

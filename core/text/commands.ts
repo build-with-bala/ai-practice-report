@@ -150,17 +150,24 @@ function afterFlags(t: string[], valued: ReadonlySet<string>): string[] {
   return t.slice(i);
 }
 
+/** The verbs that run a package script by name. */
+const SCRIPT_VERBS = new Set(["run", "run-script"]);
+
 /**
  * Where a JS package runner names a tool of the toolchain table — after `workspace <name>` and one of `run`,
  * `run-script`, `exec`, `x` — the index of that tool among the runner's tokens (`t[0]`), else -1: `pnpm vitest run`,
  * `npm exec eslint .`, `bun x tsc`, and a package script named like the tool (`npm run eslint`), which runs as that tool.
+ * A script reached through `run`/`run-script` whose name `scriptCheck` already reads keeps that reading (`npm run tsc`
+ * is the project's typecheck script), so it is no tool here.
  */
 function runnerTool(t: string[]): number {
   const at = positionalIndexes(t).filter((i) => i > 0);
   let k = t[at[0] ?? -1] === "workspace" ? 2 : 0;
-  if (RUNNER_VERBS.has(t[at[k] ?? -1] ?? "")) k++;
+  const verb = t[at[k] ?? -1] ?? "";
+  if (RUNNER_VERBS.has(verb)) k++;
   const i = at[k];
-  return i !== undefined && RUNNER_TOOLS.has(baseName(t[i]!)) ? i : -1;
+  if (i === undefined || !RUNNER_TOOLS.has(baseName(t[i]!))) return -1;
+  return SCRIPT_VERBS.has(verb) && scriptCheck(t[i]!).length > 0 ? -1 : i;
 }
 
 /** Strip env assignments, wrappers (with their flags) and runners; `python -m <x>` is read as x. */
@@ -209,7 +216,7 @@ function jsScript(args: string[]): string | undefined {
 function scriptCheck(s: string): Check[] {
   if (s === "t" || /^test([:-].*)?$/.test(s)) return ["test"];
   if (/^lint([:-].*)?$/.test(s)) return ["lint"];
-  if (/^(typecheck|type-check|check-types)([:-].*)?$/.test(s) || ["types", "check"].includes(s)) return ["typecheck"];
+  if (/^(typecheck|type-check|check-types)([:-].*)?$/.test(s) || ["tsc", "types", "check"].includes(s)) return ["typecheck"];
   if (/^build([:-].*)?$/.test(s)) return ["build"];
   return [];
 }
