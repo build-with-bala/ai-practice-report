@@ -3,6 +3,7 @@ import path from "node:path";
 import { analyze, type Analysis } from "../../../core/analyze";
 import { canonicalJson, exportPayload, scan } from "../../../core/index";
 import { ExportError, RevealError } from "../../../core/privacy/export";
+import { questionFor, type CheckResult } from "../../../core/forensics/index";
 import type { ConfigEv, CoverageEv, Ev, FileFactEv, PromptEv, SessionEv } from "../../../core/model/events";
 import { MCP_PUBLIC, mcpExportName, mcpLabels, MODEL_WORDS, modelExportId } from "../../../core/privacy/allowlists";
 import type { ScanResult } from "../../../core/scan";
@@ -20,6 +21,11 @@ const OPTS = { schema: "aiprof/2" } as const;
 const DAY = 86_400_000;
 
 type Json = Record<string, unknown>;
+/**
+ * A hostile value forced into a typed field. The forensic types are closed (a `Reason`, `CheckValues` over `ValueKey`),
+ * so a test that plants what no check can produce casts it here, on purpose, to prove the exporter rejects it at run time.
+ */
+const hostile = <T>(x: unknown): T => x as T;
 const parsed = (a: Analysis, o: Parameters<typeof exportPayload>[1] = OPTS): Json => JSON.parse(exportPayload(a, o).json) as Json;
 
 /** A persona scan with extra events. */
@@ -250,11 +256,30 @@ describe("exportPayload: no fine timestamps", () => {
     c5.values = { violations: 0, date: "2026-11-02", days: 40, clusterFiles: 9 };
     c5.askAbout = "Most trace files were created on 2026-11-02 although their activity spans 40 days. Was this history copied or restored from a backup then?";
     const checks = (parsed(a).forensics as Json).checks as Json[];
-    expect(checks.find((c) => c.id === "C5")).toEqual({ id: "C5", status: "note", n: c5.n, reason: "restore-cluster", values: c5.values, askAbout: c5.askAbout, tools: c5.tools });
+    expect(checks.find((c) => c.id === "C5")).toEqual({ id: "C5", status: "note", n: c5.n, reason: "restore-cluster", values: c5.values, tools: c5.tools });
     const c1 = a.forensics.checks.findIndex((c) => c.id === "C1");
-    a.forensics.checks[c1]!.values = { ...a.forensics.checks[c1]!.values, when: "2026-11-03" };
-    expect(() => exportPayload(a, OPTS)).toThrow(`$.forensics.checks[${c1}].values.when`);
-    expect(() => exportPayload(a, OPTS)).not.toThrow("2026-11-03");
+    const pathOf = (mutate: (x: Analysis) => void): string[] => {
+      const b = structuredClone(a);
+      mutate(b);
+      try { exportPayload(b, OPTS); } catch (e) { return [...(e as ExportError).paths]; }
+      return [];
+    };
+    // the date key only on C5, and only a real day there
+    expect(pathOf((b) => { b.forensics.checks[c1]!.values = { ...b.forensics.checks[c1]!.values, date: "2026-11-03" }; }))
+      .toEqual([`$.forensics.checks[${c1}].values.<key>`]);
+    const at5 = a.forensics.checks.findIndex((c) => c.id === "C5");
+    expect(pathOf((b) => { b.forensics.checks[at5]!.values.date = "2026-02-30"; })).toEqual([`$.forensics.checks[${at5}].values.date`]);
+    expect(pathOf((b) => { b.forensics.checks[c1]!.values = hostile({ ...b.forensics.checks[c1]!.values, when: "2026-11-03" }); }))
+      .toEqual([`$.forensics.checks[${c1}].values.<key>`]);
+  });
+
+  test("each exported check is exactly { id, status, reason, n, tools, values }, and no English text leaves", () => {
+    const a = analyze(personaScan("expert"), UTC);
+    a.forensics.checks[0]!.askAbout = CANARY.prompt;
+    const json = exportPayload(a, OPTS).json;
+    expect(json).not.toContain("askAbout");
+    expect(json).not.toContain(CANARY.prompt);
+    for (const c of (JSON.parse(json).forensics as Json).checks as Json[]) expect(Object.keys(c).sort()).toEqual(["id", "n", "reason", "status", "tools", "values"]);
   });
 
   test("every check exports its n and its tools", () => {
@@ -263,16 +288,20 @@ describe("exportPayload: no fine timestamps", () => {
     expect(checks.map((c) => [c.id, c.n, c.tools])).toEqual(a.forensics.checks.map((c) => [c.id, c.n, c.tools]));
   });
 
-  test("an askAbout or reason outside its character set or form fails the export, naming paths only", () => {
+  test("a reason outside REASONS, an unknown check id or a value outside its kind fails the export, naming paths only", () => {
     const a = analyze(personaScan("expert"), UTC);
-    a.forensics.checks[0]!.askAbout = `Ask about ${String.fromCodePoint(0x1f600)}?`;
-    a.forensics.checks[1]!.reason = "Free Text!";
-    a.forensics.checks[2]!.askAbout = "x".repeat(1_000);
+    a.forensics.checks[1]!.reason = hostile("Free Text!");
+    a.forensics.checks[2]!.id = hostile("C99");
+    a.forensics.checks[3]!.values = hostile({ matchShare: 1.5 });
+    a.forensics.checks[4]!.values = hostile({ violations: -1 });
+    a.forensics.checks[5]!.values = hostile({ rho: -1.5 });
+    a.forensics.checks[6]!.values = hostile({ medianCv: -0.1 });
     let err: unknown;
     try { exportPayload(a, OPTS); } catch (e) { err = e; }
     expect(err).toBeInstanceOf(ExportError);
-    expect((err as ExportError).paths).toEqual(["$.forensics.checks[0].askAbout", "$.forensics.checks[1].reason", "$.forensics.checks[2].askAbout"]);
-    expect((err as Error).message).not.toMatch(/Ask about|Free Text|xxxx/);
+    expect((err as ExportError).paths).toEqual(["$.forensics.checks[1].reason", "$.forensics.checks[2].id", "$.forensics.checks[3].values.matchShare",
+      "$.forensics.checks[4].values.violations", "$.forensics.checks[5].values.rho", "$.forensics.checks[6].values.medianCv"]);
+    expect((err as Error).message).not.toMatch(/Free Text|C99/);
   });
 });
 
@@ -322,7 +351,7 @@ describe("exportPayload: the preview contract and deny by default", () => {
     (a.forensics.checks[3]!.values as Json).zzUnexpected = "LEAKVALUE";
     let err: unknown;
     try { exportPayload(a, OPTS); } catch (e) { err = e; }
-    expect((err as ExportError).paths).toEqual(["$.forensics.checks[3].values.zzUnexpected"]);
+    expect((err as ExportError).paths).toEqual(["$.forensics.checks[3].values.<key>"]); // the values are closed: an unlisted key is no key
     expect((err as Error).message).not.toContain("LEAK");
   });
 
@@ -501,14 +530,53 @@ describe("exportPayload: the preview contract and deny by default", () => {
     expect((err as Error).message).not.toContain("LEAK");
   });
 
-  test("an error path shows a record key only when it fits that record's key pattern (R3)", () => {
+  test("an error path never shows an unlisted key: only declared fields, and record keys that fit their pattern (R3)", () => {
     const a = analyze(personaScan("expert"), UTC);
     (a.forensics.checks[3]!.values as Json)["clients/jdoe acme payroll"] = 1;
-    (a.forensics.checks[4]!.values as Json).okKey = "text";
+    (a.forensics.checks[4]!.values as Json).matchShare = "text";
     let err: unknown;
     try { exportPayload(a, OPTS); } catch (e) { err = e; }
-    expect((err as ExportError).paths).toEqual(["$.forensics.checks[3].values.<key>", "$.forensics.checks[4].values.okKey"]);
+    expect((err as ExportError).paths).toEqual(["$.forensics.checks[3].values.<key>", "$.forensics.checks[4].values.matchShare"]);
     expect((err as Error).message).not.toMatch(/jdoe|acme|payroll|text/);
+  });
+
+  test("a time that is not a number fails, even a string already in the target form", () => {
+    const base = analyze(personaScan("expert"), UTC);
+    const cases: Array<[(a: Analysis) => void, string]> = [
+      [(a) => { a.signals.vae.from = hostile("2026-11"); }, "$.signals.vae.from"],
+      [(a) => { a.coverage.rows[0]!.from = hostile("2026-11"); }, "$.coverage[0].from"],
+      [(a) => { a.exposure.firstSeen.subagents = hostile("2026-W40"); }, "$.exposure.firstSeen.subagents"],
+    ];
+    for (const [mutate, path] of cases) {
+      const a = structuredClone(base);
+      mutate(a);
+      let err: unknown;
+      try { exportPayload(a, OPTS); } catch (e) { err = e; }
+      expect(`${path} ${(err as ExportError | undefined)?.paths?.join(",")}`).toBe(`${path} ${path}`);
+    }
+  });
+
+  test("bad options fail as ExportError at the options stage", () => {
+    const a = analyze(personaScan("novice"), UTC);
+    for (const o of [undefined, null, {}, { schema: "aiprof/1" }, "aiprof/2"]) {
+      let err: unknown;
+      try { exportPayload(a, hostile(o)); } catch (e) { err = e; }
+      expect(err).toBeInstanceOf(ExportError);
+      expect((err as ExportError).stage).toBe("options");
+    }
+  });
+
+  test("a spoofed ExportError thrown from inside the analysis does not pass through: it becomes a build-stage ExportError", () => {
+    const a = analyze(personaScan("novice"), UTC);
+    const spoof = Object.create(ExportError.prototype) as ExportError;
+    Object.assign(spoof, { message: CANARY.secret, paths: [CANARY.secret] });
+    Object.defineProperty(a.identity, "hashes", { get() { throw spoof; } });
+    let err: unknown;
+    try { exportPayload(a, OPTS); } catch (e) { err = e; }
+    expect(err).not.toBe(spoof);
+    expect((err as ExportError).stage).toBe("build");
+    expect((err as ExportError).paths).toEqual([]);
+    expect(String((err as Error).message)).not.toContain(CANARY.secret);
   });
 
   test("a coverage row exports one status per source, sorted, and no source names", () => {
@@ -544,6 +612,62 @@ describe("exportPayload: the preview contract and deny by default", () => {
     a.risk.sandbox = { "workspace-write": 5, other: 1, [CANARY.project]: 1 };
     expect(parsed(a).risk).toEqual({ permission: { default: 2, acceptEdits: 1, other: 7 }, approval: { never: 1, other: 2 }, sandbox: { "workspace-write": 5, other: 2 } });
   });
+});
+
+describe("the reading side rebuilds every question from the export", () => {
+  /** Every exported check's question, rebuilt from the payload, equals the in-memory one; returns how many asked. */
+  function rebuildAll(a: Analysis): number {
+    const out = JSON.parse(exportPayload(a, OPTS).json) as { forensics: { checks: Array<{ id: unknown; reason: unknown; values: unknown }> } };
+    expect(out.forensics.checks.length).toBe(a.forensics.checks.length);
+    let asked = 0;
+    out.forensics.checks.forEach((c, i) => {
+      const mine: CheckResult = a.forensics.checks[i]!;
+      expect(c.id).toBe(mine.id);
+      expect(`${mine.id} ${questionFor(c.id, c.reason, c.values)}`).toBe(`${mine.id} ${mine.askAbout}`);
+      if (mine.askAbout !== undefined) asked++;
+    });
+    return asked;
+  }
+
+  test("the personas and a hand-made scan that raises several checks and flags", () => {
+    for (const kind of ["novice", "intermediate", "expert"] as const) rebuildAll(analyze(personaScan(kind, { canaries: true }), UTC));
+    // file facts of a restored history (C5 restore cluster), and a regular prompt rhythm, repeated long prompts and a
+    // recent burst raised by hand-made scripted-looking sessions
+    const raw = personaScan("expert");
+    const born = Date.UTC(2026, 10, 2, 9, 30);
+    const files: FileFactEv[] = Array.from({ length: 8 }, (_, i) => ({
+      k: "file", tool: "claude-code", source: "claude-code.transcripts", pathHash: `f${String(i).padStart(15, "0")}`, bytes: 1_000 + i,
+      mtime: born + 60_000, birth: born + i * 1_000, ctime: born + 60_000, firstTs: Date.UTC(2026, 8, 1) + i * DAY, lastTs: Date.UTC(2026, 9, 20) + i * DAY,
+    }));
+    const a = analyze(withEvents(raw, files), UTC);
+    // and checks raised directly with the values their rules give, through the same question function
+    const ids = a.forensics.checks.map((c) => c.id);
+    const set = (id: CheckResult["id"], r: Partial<CheckResult>): void => {
+      const c = a.forensics.checks[ids.indexOf(id)]!;
+      Object.assign(c, r);
+      const q = questionFor(c.id, c.reason, c.values);
+      if (q === undefined) delete c.askAbout;
+      else c.askAbout = q;
+    };
+    set("C1", { status: "fail", reason: "off-time", values: { offShare: 0.0123, p99Seconds: 900, unrecognized: 0, malformed: 0, unverifiedKinds: 0 } });
+    set("C2", { status: "fail", reason: "out-of-order", values: { rho: 0.9871, unrecognized: 0, malformed: 0, unverifiedKinds: 0 } });
+    set("C3", { status: "warn", reason: "history-mismatch", values: { matchShare: 0.7349, prompts: 120 } });
+    set("C4", { status: "note", reason: "several-accounts", values: { matchShare: 1, accounts: 2 } });
+    set("soft:recent-burst", { status: "note", reason: "recent-burst", values: { days: 40, recentDays: 22, spanDays: 90, share: 0.55 } });
+    set("soft:unclosed-tools", { status: "note", reason: "unclosed-tools", values: { open: 31, share: 0.1033 } });
+    expect(rebuildAll(a)).toBeGreaterThanOrEqual(7);
+  });
+
+  test("the end-to-end scan of every fixture", async () => {
+    const h = fakeHome();
+    try {
+      buildAll(h);
+      const a = analyze(await scan({ env: h.env }), UTC);
+      expect(rebuildAll(a)).toBeGreaterThan(0);
+    } finally {
+      h.cleanup();
+    }
+  }, 30_000);
 });
 
 describe("exportPayload: golden bytes", () => {

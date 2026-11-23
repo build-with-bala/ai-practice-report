@@ -74,6 +74,48 @@ export const VALUE_KEYS: Readonly<Record<ValueKey, true>> = (() => {
   return out as Record<ValueKey, true>;
 })();
 
+/**
+ * What each `values` key holds, the one table both readers of a result use (`questionFor` and the export schema), so
+ * they cannot disagree: `count` a non-negative safe integer; `share` a finite number in [0, 1]; `corr` a correlation,
+ * finite in [−1, 1]; `ratio` a non-negative finite number without an upper bound (a coefficient of variation); `date`
+ * a real calendar day "YYYY-MM-DD" (`isDay`). Typed by `ValueKey`, so a new key fails the compiler until it has a kind.
+ */
+export type ValueKind = "count" | "share" | "corr" | "ratio" | "date";
+const FIXED_KINDS: Readonly<Record<FixedKey, ValueKind>> = {
+  date: "date", unrecognized: "count", malformed: "count", offShare: "share", p99Seconds: "count", rho: "corr", unverifiedKinds: "count",
+  matchShare: "share", prompts: "count", missingDays: "count", days: "count", accounts: "count", violations: "count", clusterFiles: "count",
+  bulkFiles: "count", missing: "count", rollouts: "count", beforeIndex: "count", zoneShifted: "count", pairs: "count", contradictions: "count",
+  checked: "count", sessions: "count", medianCv: "ratio", repeated: "count", recentDays: "count", spanDays: "count", share: "share", open: "count",
+  recent: "count", artifacts: "count",
+};
+/** The kind of every `values` key: the fixed ones as listed, every C10 `<tool>/<origin>/<window>` a count. */
+export const VALUE_KINDS: Readonly<Record<ValueKey, ValueKind>> = (() => {
+  const out: Record<string, ValueKind> = {};
+  for (const k of Object.keys(VALUE_KEYS) as ValueKey[]) out[k] = Object.hasOwn(FIXED_KINDS, k) ? FIXED_KINDS[k as FixedKey] : "count";
+  return out as Record<ValueKey, ValueKind>;
+})();
+
+/** A real calendar day "YYYY-MM-DD", years 1970–9999. */
+export function isDay(x: unknown): x is string {
+  if (typeof x !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(x)) return false;
+  const y = Number(x.slice(0, 4)), m = Number(x.slice(5, 7)), d = Number(x.slice(8, 10));
+  const leap = (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+  const len = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][m - 1];
+  return y >= 1970 && len !== undefined && d >= 1 && d <= len;
+}
+
+/** True when `x` is a valid value of `kind` (see `ValueKind`). Pure; reads nothing but `x`. */
+export function isValueOf(kind: ValueKind, x: unknown): boolean {
+  if (kind === "date") return isDay(x);
+  if (typeof x !== "number" || !Number.isFinite(x)) return false;
+  switch (kind) {
+    case "count": return Number.isSafeInteger(x) && x >= 0;
+    case "share": return x >= 0 && x <= 1;
+    case "corr": return x >= -1 && x <= 1;
+    case "ratio": return x >= 0;
+  }
+}
+
 /** `n`: the evidence the check measured; `tools`: the tools whose data it read (sorted). */
 export interface CheckResult { id: CheckId; status: CheckStatus; n: number; reason: Reason; values: CheckValues; askAbout?: string; tools: ToolId[] }
 

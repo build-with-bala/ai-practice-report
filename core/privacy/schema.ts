@@ -1,7 +1,8 @@
 import type { Feature, DurationArc, PromptArc } from "../analysis/exposure";
 import type { ConfigEv, CoverageEv } from "../model/events";
-import type { Origin, TechCategory, Toolchain, ToolId, Window } from "../model/ids";
+import type { TechCategory, Toolchain, ToolId, Window } from "../model/ids";
 import type { CheckId, CheckStatus, Forensics } from "../forensics/index";
+import { DATE_KEY, isDay, REASONS, VALUE_KEYS, VALUE_KINDS, type Reason, type ValueKey, type ValueKind } from "../forensics/types";
 import { COMPONENTS, type MetricKey } from "../scoring/components";
 import { DIMENSION_IDS } from "../scoring/dimensions";
 import type { Band } from "../scoring/overall";
@@ -20,7 +21,8 @@ export type Sensitivity = "public" | "aggregate" | "pseudonymous" | "revealed";
 /**
  * One declared field of the export. Leaves carry their sensitivity class: `count` is a non-negative safe integer (every
  * count of the payload), `integer` a signed one (no payload field needs a sign today), `number` any finite number,
- * `bounded` a finite number in [min, max] (shares, weights, correlations).
+ * `bounded` a finite number in [min, max] (shares, weights, correlations), `day` a real calendar day "YYYY-MM-DD"
+ * (`isDay`). A `variant` is an object whose string field `tag` picks the spec in `cases` it must fit.
  * `nullable`, `optional`, `array` (at most `max` elements),
  * `tuple` (exactly one element per spec in `of`, all or nothing), `object` (exactly the declared `fields`) and `record`
  * (keys matching `key`, at most `maxKeys`, each value by `of`, or by its own spec in `fields` for a declared key) compose
@@ -29,7 +31,7 @@ export type Sensitivity = "public" | "aggregate" | "pseudonymous" | "revealed";
  */
 export type FieldSpec =
   | { t: "number" | "integer" | "count" | "boolean"; s: Sensitivity } | { t: "bounded"; min: number; max: number; s: Sensitivity }
-  | { t: "optional"; of: FieldSpec } | { t: "enum"; values: readonly string[]; s: Sensitivity }
+  | { t: "day"; s: Sensitivity } | { t: "optional"; of: FieldSpec } | { t: "variant"; tag: string; cases: Readonly<Record<string, FieldSpec>> } | { t: "enum"; values: readonly string[]; s: Sensitivity }
   | { t: "string"; pattern: RegExp; s: Sensitivity } | { t: "nullable"; of: FieldSpec }
   | { t: "array"; of: FieldSpec; max: number } | { t: "tuple"; of: readonly FieldSpec[] } | { t: "object"; fields: Readonly<Record<string, FieldSpec>> }
   | { t: "record"; key: RegExp; of: FieldSpec; maxKeys: number; fields?: Readonly<Record<string, FieldSpec>> };
@@ -51,7 +53,12 @@ export function sanitize(value: unknown, spec: FieldSpec): unknown {
     case "integer": return typeof value === "number" && Number.isSafeInteger(value) ? value + 0 : undefined;
     case "bounded": return typeof value === "number" && Number.isFinite(value) && value >= spec.min && value <= spec.max ? value + 0 : undefined;
     case "count": return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value + 0 : undefined;
+    case "day": return isDay(value) ? value : undefined;
     case "optional": return sanitize(value, spec.of);
+    case "variant": {
+      const c = variantCase(value, spec);
+      return c === undefined ? undefined : sanitize(value, c);
+    }
     case "boolean": return typeof value === "boolean" ? value : undefined;
     case "enum": return typeof value === "string" && spec.values.includes(value) ? value : undefined;
     case "string": return typeof value === "string" && spec.pattern.test(value) ? value : undefined;
@@ -122,6 +129,12 @@ const keyAt = (at: string, k: string, shown: boolean): string => (shown ? `${at}
 export function violations(value: unknown, spec: FieldSpec, at = "$", out: string[] = []): string[] {
   switch (spec.t) {
     case "optional": return violations(value, spec.of, at, out);
+    case "variant": {
+      if (!isPlainObject(value)) { out.push(at); return out; }
+      const c = variantCase(value, spec);
+      if (c === undefined) { out.push(`${at}.${spec.tag}`); return out; }
+      return violations(value, c, at, out);
+    }
     case "nullable": return value === null ? out : violations(value, spec.of, at, out);
     case "array":
       if (!Array.isArray(value)) out.push(at);
@@ -159,6 +172,13 @@ export function violations(value: unknown, spec: FieldSpec, at = "$", out: strin
   }
 }
 
+/** The case a variant's tag picks, or undefined (not a plain object, no string tag, no such case). */
+function variantCase(value: unknown, spec: Extract<FieldSpec, { t: "variant" }>): FieldSpec | undefined {
+  if (!isPlainObject(value) || !Object.hasOwn(value, spec.tag)) return undefined;
+  const tag = value[spec.tag];
+  return typeof tag === "string" && Object.hasOwn(spec.cases, tag) ? spec.cases[tag] : undefined;
+}
+
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   if (v === null || typeof v !== "object" || Array.isArray(v)) return false;
   const proto = Object.getPrototypeOf(v);
@@ -180,7 +200,6 @@ const TOOL_IDS = keysOf<ToolId>({
   "qwen-code": true, crush: true, aider: true, continue: true, "jetbrains-ai": true,
 });
 const WINDOWS = keysOf<Window>({ detail: true, lifetime: true });
-const ORIGINS = keysOf<Origin>({ human: true, scripted: true, subagent: true, scheduled: true, peer: true, system: true });
 const COVERAGE_STATUS = keysOf<CoverageEv["status"]>({ ok: true, empty: true, absent: true, drift: true, error: true, "present-undecodable": true });
 const METRIC_REASONS = keysOf<NonNullable<Metric["reason"]>>({ "no-data": true, degenerate: true, "not-captured": true, "repo-signals-off": true });
 const EVIDENCE_PARTS = keysOf<keyof Evidence>({
@@ -238,8 +257,6 @@ const counts = (keys: readonly string[], of: FieldSpec = int()): FieldSpec => ({
 const MONTH = str(/^\d{4}-(?:0[1-9]|1[0-2])$/, "aggregate");
 /** "YYYY-Www": an ISO week. */
 const WEEK = str(/^\d{4}-W(?:0[1-9]|[1-4]\d|5[0-3])$/, "aggregate");
-/** "YYYY-MM-DD": C5's date, the one value finer than an ISO week the export holds. */
-const DATE = str(/^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])$/, "aggregate");
 const KEYED_HASH = str(/^[0-9a-f]{8,64}$/, "pseudonymous");
 const TOOL = en(TOOL_IDS);
 const WINDOW = en(WINDOWS);
@@ -264,10 +281,27 @@ export const SHARE_METRICS: ReadonlySet<MetricKey> = new Set<MetricKey>(["vae", 
   "guardrails"]);
 const metricSpec = (k: MetricKey): FieldSpec => (SHARE_METRICS.has(k) ? metricOf(share()) : k === "rho" ? metricOf(bounded(-1, 1)) : METRIC);
 
-/** A forensic check's `values` key: a camel-case name, or C10's `<tool>/<origin>/<window>`. */
-const CHECK_VALUE_KEY = new RegExp(`^(?:[a-z][A-Za-z0-9]{0,31}|(?:${TOOL_IDS.map(esc).join("|")})/(?:${ORIGINS.join("|")})/(?:${WINDOWS.join("|")}))$`);
-/** The characters forensic texts use (Plan 3's fonts: U+0020–00FF, U+2000–206F, U+2212), at most 400 of them. */
-const ASK_ABOUT = str(/^[ -ÿ -⁯−]{1,400}$/, "aggregate");
+/** The spec of each kind of forensic value (`VALUE_KINDS`, owned by core/forensics: `questionFor` reads the same table). */
+export const KIND_SPECS: Readonly<Record<ValueKind, FieldSpec>> = {
+  count: { t: "count", s: "aggregate" }, share: bounded(0, 1), corr: bounded(-1, 1), ratio: bounded(0, Infinity), date: { t: "day", s: "aggregate" },
+};
+/** The checks whose values may hold the date: only the file-time check (C5). */
+const DATED_CHECKS: ReadonlySet<CheckId> = new Set<CheckId>(["C5"]);
+const valuesSpec = (dated: boolean): FieldSpec => obj(Object.fromEntries((Object.keys(VALUE_KEYS) as ValueKey[])
+  .filter((k) => dated || k !== DATE_KEY).map((k) => [k, opt(KIND_SPECS[VALUE_KINDS[k]])])));
+/**
+ * A check, exactly `{ id, status, n, reason, tools, values }` (no English text leaves the machine: the reading side
+ * rebuilds the question with `questionFor`). `reason` is one of `REASONS`; `values` is closed over `VALUE_KEYS`, each by
+ * its kind; the date only on C5.
+ */
+const CHECK: FieldSpec = (() => {
+  const VALUES = valuesSpec(false), DATED = valuesSpec(true);
+  const caseOf = (id: CheckId): FieldSpec => obj({
+    id: en([id]), status: en(CHECK_STATUS), n: int(), reason: en(Object.keys(REASONS) as Reason[]), tools: arr(TOOL, TOOL_IDS.length),
+    values: DATED_CHECKS.has(id) ? DATED : VALUES,
+  });
+  return { t: "variant", tag: "id", cases: Object.fromEntries(CHECK_IDS.map((id) => [id, caseOf(id)])) };
+})();
 
 /** An MCP server's export label: a public name, or "custom #n". */
 const MCP_LABEL = str(new RegExp(`^(?:${[...MCP_PUBLIC].map(esc).join("|")}|custom #[1-9]\\d{0,3})$`), "pseudonymous");
@@ -331,11 +365,7 @@ export const AIPROF2: FieldSpec = obj({
   otherProjects: obj({ projects: int(), sessions: int() }),
   forensics: obj({
     band: en(FORENSIC_BANDS), serverBacked: nullable(share()), anchorable: arr(TOOL, TOOL_IDS.length), notAnchorable: arr(TOOL, TOOL_IDS.length),
-    checks: arr(obj({
-      id: en(CHECK_IDS), status: en(CHECK_STATUS), n: int(), reason: str(/^[a-z0-9-]{1,40}$/, "public"),
-      values: { t: "record", key: CHECK_VALUE_KEY, of: num(), maxKeys: TOOL_IDS.length * ORIGINS.length * WINDOWS.length + 64, fields: { date: DATE } },
-      askAbout: opt(ASK_ABOUT), tools: arr(TOOL, TOOL_IDS.length),
-    }), 32),
+    checks: arr(CHECK, 32),
   }),
   identity: obj({ accounts: int(), bindings: arr(KEYED_HASH, 64) }),
   exclusions: obj({ tools: int(), projects: int(), sessions: int() }),

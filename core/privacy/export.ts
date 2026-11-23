@@ -18,7 +18,8 @@ export interface ExportResult { schema: "aiprof/2"; value: unknown; json: string
  * The analysis does not fit the `aiprof/2` schema: some value would have been dropped or changed (a malformed interval,
  * an unknown status, a non-integer score, a text outside its form…). Nothing is exported then, since a payload that
  * claims more than the data supports must never be signed. Every failure of `exportPayload` is one (fail closed, one
- * error type): `stage` says where — `reveal` (a `RevealError`), `build` (the analysis could not be read: an unexpected
+ * error type): `stage` says where — `options` (no options object, or a schema other than aiprof/2), `reveal` (a
+ * `RevealError`), `build` (the analysis could not be read: an unexpected
  * exception, whose own message is not kept since it may quote data), `check` (the draft does not fit the schema),
  * `serialize` (the canonical bytes could not be made). `paths` (and the message) name JSON paths only, never a value.
  */
@@ -29,9 +30,22 @@ export class ExportError extends Error {
     super(message ?? (paths.length > 0
       ? `exportPayload: the analysis does not fit aiprof/2 at ${shown.join(", ")}${paths.length > shown.length ? ` and ${paths.length - shown.length} more` : ""}`
       : `exportPayload: the export failed at the ${stage} stage`));
+    OURS.add(this);
   }
 }
-export type ExportStage = "reveal" | "build" | "check" | "serialize";
+export type ExportStage = "options" | "reveal" | "build" | "check" | "serialize";
+/**
+ * The errors this module made (a module-private brand): only those pass through a stage as they are. `instanceof` alone
+ * could be spoofed by an object with a forged prototype; a WeakSet lookup runs no code of the value it is given.
+ */
+const OURS = new WeakSet<object>();
+const ours = (e: unknown): boolean => {
+  try {
+    return typeof e === "object" && e !== null && OURS.has(e);
+  } catch {
+    return false;
+  }
+};
 
 /** A `reveal` label that names no exported project. The message quotes the label only when it has a label's shape, and never the name. */
 export class RevealError extends ExportError {
@@ -85,7 +99,9 @@ function pick<T>(h: Partial<Record<string, T>>, keys: readonly string[]): Record
  * `private` and `diagnostics` are never read, but for the allowlisted model ids and MCP labels. Pure and synchronous.
  */
 export function exportPayload(a: Analysis, o: ExportOptions): ExportResult {
-  if (o.schema !== "aiprof/2") throw new RangeError("exportPayload: the only schema is aiprof/2");
+  stage("options", () => {
+    if (typeof o !== "object" || o === null || o.schema !== "aiprof/2") throw new ExportError([], "options", "exportPayload: the only schema is aiprof/2");
+  });
   const draft = stage("build", () => normalize(build(a, o)));
   const found = stage("check", () => violations(draft, AIPROF2));
   if (found.length > 0) throw new ExportError(found);
@@ -101,7 +117,7 @@ function stage<T>(name: ExportStage, f: () => T): T {
   try {
     return f();
   } catch (e) {
-    if (e instanceof ExportError) throw e;
+    if (ours(e)) throw e;
     throw new ExportError([], name);
   }
 }
@@ -114,9 +130,10 @@ const addCount = (acc: number | undefined, n: unknown): number => (acc === undef
 /** The payload draft (see `exportPayload`). */
 function build(a: Analysis, o: ExportOptions): Record<string, unknown> {
   const tz = a.meta.timeZone;
-  // a time that is no finite number is passed on as it is, so the schema check fails on it (never silently absent)
-  const month = (ms: unknown): unknown => (ms === undefined ? undefined : typeof ms === "number" && Number.isFinite(ms) ? dayKey(ms, tz).slice(0, 7) : ms);
-  const week = (ms: unknown): unknown => (typeof ms === "number" && Number.isFinite(ms) ? isoWeek(dayKey(ms, tz)) : ms);
+  // a time that is no finite number (a string already in the target form included) becomes NaN, so the schema check
+  // fails on it: never silently absent, never passed through
+  const month = (ms: unknown): unknown => (ms === undefined ? undefined : typeof ms === "number" && Number.isFinite(ms) ? dayKey(ms, tz).slice(0, 7) : NaN);
+  const week = (ms: unknown): unknown => (typeof ms === "number" && Number.isFinite(ms) ? isoWeek(dayKey(ms, tz)) : NaN);
   const metric = (m: Metric): Record<string, unknown> => ({
     value: roundOrNull(m.value), n: m.n, window: m.window, from: month(m.from), to: month(m.to), reason: m.reason,
   });
@@ -175,7 +192,7 @@ function build(a: Analysis, o: ExportOptions): Record<string, unknown> {
     forensics: {
       band: a.forensics.band, serverBacked: roundOrNull(a.forensics.serverBacked), anchorable: a.forensics.anchorable, notAnchorable: a.forensics.notAnchorable,
       checks: a.forensics.checks.map((c) => ({
-        id: c.id, status: c.status, n: c.n, reason: c.reason, values: roundValues(c.values), askAbout: c.askAbout, tools: c.tools,
+        id: c.id, status: c.status, n: c.n, reason: c.reason, values: copyValues(c.values), tools: c.tools, // never askAbout: no English text
       })),
     },
     identity: { accounts: a.identity.accounts, bindings: a.identity.hashes.slice(0, MAX_BINDINGS) },
@@ -232,10 +249,13 @@ function mcpServers(a: Analysis): string[] {
   return [...new Set(mcpLabels(a.private.config).values())].sort((x, y) => custom(x) - custom(y) || cmp(x, y));
 }
 
-/** A check's values with numbers rounded; anything else as it is (the schema check decides). */
-function roundValues(values: Record<string, unknown>): Record<string, unknown> {
+/**
+ * A check's values as they are: core/forensics stores them rounded toward the side of their rule, and the reading side
+ * rebuilds the question from exactly these numbers (`questionFor`), so they are not rounded again here.
+ */
+function copyValues(values: Record<string, unknown>): Record<string, unknown> {
   const out = dict<unknown>();
-  for (const [k, v] of Object.entries(values)) out[k] = typeof v === "number" ? round(v) : v;
+  for (const [k, v] of Object.entries(values)) out[k] = v;
   return out;
 }
 

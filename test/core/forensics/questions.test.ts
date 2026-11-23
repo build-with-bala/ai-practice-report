@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { DATE_KEY, questionFor, REASONS, VALUE_KEYS, type CheckId, type CheckValues, type Reason } from "../../../core/forensics";
-import { roundDown, roundUp } from "../../../core/forensics/types";
+import { isValueOf, roundDown, roundUp, VALUE_KINDS } from "../../../core/forensics/types";
 
 const IDS: CheckId[] = ["C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10",
   "soft:rhythm", "soft:repeated-long", "soft:recent-burst", "soft:unclosed-tools", "soft:new-config"];
@@ -94,6 +94,36 @@ describe("questionFor", () => {
       }
     }
     expect(shown).toBeGreaterThan(0);
+  });
+
+  test("hardened: non-string ids and reasons, changing or throwing conversions, and throwing getters give undefined", () => {
+    let calls = 0;
+    const shifty = { toString: () => (calls++ === 0 ? "C6" : "constructor") };
+    expect(questionFor(shifty, "missing-thread-rows", valid(3))).toBeUndefined();
+    expect(calls).toBe(0); // never converted at all
+    const throwing = { toString: () => { throw new Error("boom"); } };
+    expect(questionFor(throwing, "missing-thread-rows", valid(3))).toBeUndefined();
+    expect(questionFor("C6", throwing, valid(3))).toBeUndefined();
+    expect(questionFor(6, "missing-thread-rows", valid(3))).toBeUndefined();
+    expect(questionFor("C6", ["missing-thread-rows"], valid(3))).toBeUndefined();
+    const getter = Object.defineProperty({}, "missing", { get() { throw new Error("boom"); }, enumerable: true });
+    expect(questionFor("C6", "missing-thread-rows", getter)).toBeUndefined();
+    const proxy = new Proxy({}, { get() { throw new Error("boom"); }, has() { throw new Error("boom"); } });
+    expect(questionFor("C6", "missing-thread-rows", proxy)).toBeUndefined();
+    expect(questionFor("C6", "missing-thread-rows", valid(3))).toContain("3 Codex session files");
+  });
+
+  test("each question checks a value by the kind the shared table gives its key", () => {
+    // a ratio-kind or count-kind key never takes a share's range, and the date only a real day: read from VALUE_KINDS
+    expect(VALUE_KINDS.matchShare).toBe("share");
+    expect(VALUE_KINDS.rho).toBe("corr");
+    expect(VALUE_KINDS.medianCv).toBe("ratio");
+    expect(VALUE_KINDS.date).toBe("date");
+    expect(VALUE_KINDS["codex/human/lifetime"]).toBe("count");
+    expect(isValueOf("count", 2.5)).toBe(false);
+    expect(questionFor("C3", "history-mismatch", { matchShare: 1.2 })).toBeUndefined();
+    expect(questionFor("C2", "out-of-order", { rho: -0.5 })).toContain("-0.5");
+    expect(questionFor("C5", "restore-cluster", { date: "2026-02-30", days: 9 })).toBeUndefined();
   });
 
   test("the vocabularies are closed lists", () => {

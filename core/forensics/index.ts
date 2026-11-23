@@ -14,8 +14,8 @@ import { round, type CheckResult } from "./types";
 
 export type { ReleaseTable } from "./releases";
 export { questionFor } from "./questions";
-export { DATE_KEY, REASONS, VALUE_KEYS } from "./types";
-export type { CheckId, CheckResult, CheckStatus, CheckValues, ProvenanceKey, Reason, ValueKey } from "./types";
+export { DATE_KEY, isDay, isValueOf, REASONS, VALUE_KEYS, VALUE_KINDS } from "./types";
+export type { CheckId, CheckResult, CheckStatus, CheckValues, ProvenanceKey, Reason, ValueKey, ValueKind } from "./types";
 
 /**
  * The integrity summary (spec §6.6). `band`: the verdict over every check; `serverBacked`: the share of typed turns

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { AIPROF2, sanitize, violations, type FieldSpec } from "../../../core/privacy/schema";
+import { AIPROF2, KIND_SPECS, sanitize, violations, type FieldSpec } from "../../../core/privacy/schema";
+import { isValueOf, VALUE_KEYS, VALUE_KINDS, type ValueKind } from "../../../core/forensics/types";
 
 /** A field that may be absent. */
 const opt = (of: FieldSpec): FieldSpec => ({ t: "optional", of });
@@ -123,6 +124,7 @@ describe("required fields, counts and violations", () => {
     const walk = (s: FieldSpec, at: string): void => {
       if (s.t === "integer") signed.push(at);
       else if (s.t === "optional" || s.t === "nullable" || s.t === "array") walk(s.of, at);
+      else if (s.t === "variant") for (const c of Object.values(s.cases)) walk(c, at);
       else if (s.t === "tuple") s.of.forEach((f) => walk(f, at));
       else if (s.t === "object") for (const [k, f] of Object.entries(s.fields)) walk(f, `${at}.${k}`);
       else if (s.t === "record") { walk(s.of, at); for (const f of Object.values(s.fields ?? {})) walk(f, at); }
@@ -135,6 +137,7 @@ describe("required fields, counts and violations", () => {
     const optional: string[] = [];
     const walk = (s: FieldSpec, at: string): void => {
       if (s.t === "optional") { optional.push(at); walk(s.of, at); }
+      else if (s.t === "variant") for (const c of Object.values(s.cases)) walk(c, at);
       else if (s.t === "nullable" || s.t === "array") walk(s.of, `${at}[]`);
       else if (s.t === "tuple") s.of.forEach((f, i) => walk(f, `${at}[${i}]`));
       else if (s.t === "object") for (const [k, f] of Object.entries(s.fields)) walk(f, `${at}.${k}`);
@@ -142,10 +145,11 @@ describe("required fields, counts and violations", () => {
     };
     walk(AIPROF2, "$");
     const metric = (p: string) => [`${p}.from`, `${p}.to`, `${p}.reason`];
-    expect(optional.filter((p) => !/^\$\.(signals|exposure\.(tenureWeeks|activeWeeks))\./.test(p)).sort()).toEqual([
+    const VALUES = "$.forensics.checks[].values.";
+    expect(new Set(optional.filter((p) => p.startsWith(VALUES)).map((p) => p.slice(VALUES.length)))).toEqual(new Set(Object.keys(VALUE_KEYS)));
+    expect(optional.filter((p) => !p.startsWith(VALUES) && !/^\$\.(signals|exposure\.(tenureWeeks|activeWeeks))\./.test(p)).sort()).toEqual([
       "$.coverage[].from", "$.coverage[].to", // CoveragePanel row from?/to?
       "$.exposure.tools[].from", "$.exposure.tools[].to", // Exposure.tools from?/to?
-      "$.forensics.checks[].askAbout", // CheckResult.askAbout?
       "$.projects[].lastWeek", // ProjectSummary.lastWeek?
       "$.projects[].name", // only through reveal
     ].sort());
@@ -158,6 +162,7 @@ describe("AIPROF2", () => {
   function leaves(s: FieldSpec, at = "$", out: Array<[string, FieldSpec]> = []): Array<[string, FieldSpec]> {
     switch (s.t) {
       case "optional": return leaves(s.of, at, out);
+      case "variant": for (const c of Object.values(s.cases)) leaves(c, at, out); return out;
       case "nullable": case "array": return leaves(s.of, at + "[]", out);
       case "tuple": s.of.forEach((f, i) => leaves(f, `${at}[${i}]`, out)); return out;
       case "object": for (const [k, f] of Object.entries(s.fields)) leaves(f, `${at}.${k}`, out); return out;
@@ -173,6 +178,7 @@ describe("AIPROF2", () => {
     out.push(s);
     if (s.t === "nullable" || s.t === "array" || s.t === "optional") nodes(s.of, out);
     else if (s.t === "tuple") for (const f of s.of) nodes(f, out);
+    else if (s.t === "variant") for (const c of Object.values(s.cases)) nodes(c, out);
     else if (s.t === "object") for (const f of Object.values(s.fields)) nodes(f, out);
     else if (s.t === "record") { nodes(s.of, out); for (const f of Object.values(s.fields ?? {})) nodes(f, out); }
     return out;
@@ -198,6 +204,7 @@ describe("AIPROF2", () => {
     const walk = (s: FieldSpec, at: string): void => {
       if (s.t === "string") out.push([at, s.pattern]);
       else if (s.t === "optional") walk(s.of, at);
+      else if (s.t === "variant") for (const c of Object.values(s.cases)) walk(c, at);
       else if (s.t === "nullable" || s.t === "array") walk(s.of, `${at}[]`);
       else if (s.t === "tuple") s.of.forEach((f, i) => walk(f, `${at}[${i}]`));
       else if (s.t === "object") for (const [k, f] of Object.entries(s.fields)) walk(f, `${at}.${k}`);
@@ -246,6 +253,30 @@ describe("AIPROF2", () => {
 
   test("only `projects[].name` is revealed, and nothing else holds a free-form name", () => {
     expect(leaves(AIPROF2).filter(([, s]) => "s" in s && s.s === "revealed").map(([at]) => at)).toEqual(["$.projects[].name"]);
+  });
+
+  test("the schema and questionFor read one kind table: each kind's spec accepts exactly what isValueOf accepts", () => {
+    const samples: unknown[] = [0, 1, 2, 0.5, -0, -0.5, -1, -1.0001, 1.0001, 3.7, 1e9, 2 ** 53, -3, NaN, Infinity, -Infinity, "1", null, undefined, {}, [],
+      "2026-11-02", "2024-02-29", "2023-02-29", "2026-13-01", "1969-12-31", "2026-11-2", " 2026-11-02", "2026-11-02\n", true];
+    for (const kind of ["count", "share", "corr", "ratio", "date"] as ValueKind[]) {
+      for (const x of samples) {
+        const label = `${kind} ${typeof x === "string" ? JSON.stringify(x) : String(x)}`;
+        expect(`${label} ${sanitize(x, KIND_SPECS[kind]) !== undefined}`).toBe(`${label} ${isValueOf(kind, x)}`);
+      }
+    }
+    expect(Object.keys(VALUE_KINDS).sort()).toEqual(Object.keys(VALUE_KEYS).sort());
+  });
+
+  test("a check is a variant on its id: closed fields, values closed by kind, the date on C5 only", () => {
+    const checks = ((AIPROF2 as Extract<FieldSpec, { t: "object" }>).fields.forensics as Extract<FieldSpec, { t: "object" }>).fields.checks!;
+    const ok = { id: "C1", status: "pass", n: 3, reason: "ok", tools: ["claude-code"], values: { rho: 0.5, unrecognized: 0 } };
+    expect(violations([ok], checks)).toEqual([]);
+    expect(violations([{ ...ok, askAbout: "Why?" }], checks)).toEqual(["$[0].<key>"]);
+    expect(violations([{ ...ok, values: { date: "2026-11-02" } }], checks)).toEqual(["$[0].values.<key>"]);
+    expect(violations([{ ...ok, id: "C5", values: { date: "2026-11-02", days: 3 } }], checks)).toEqual([]);
+    expect(violations([{ ...ok, id: "C5", values: { date: "2026-02-30" } }], checks)).toEqual(["$[0].values.date"]);
+    expect(violations([{ ...ok, id: "C42" }, { ...ok, reason: "Free text" }], checks)).toEqual(["$[0].id", "$[1].reason"]);
+    expect(sanitize([{ ...ok, id: 5 }], checks)).toEqual([]);
   });
 
   test("the payload never declares the private, diagnostics or meta parts of an analysis", () => {
