@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { attr, displayText, esc, jsonIsland } from "../../../core/viz/html";
+import { auditHtml } from "../../../core/viz/audit";
+import { attr, cite, displayText, esc, jsonIsland } from "../../../core/viz/html";
+import { page } from "../../../core/viz/page";
 import { icon, type IconName } from "../../../core/viz/icons";
 
 describe("esc and attr", () => {
@@ -10,6 +12,28 @@ describe("esc and attr", () => {
 
   test("attr gives a leading space, the name and the escaped, quoted value", () => {
     expect(attr("aria-label", `a"b<c`)).toBe(' aria-label="a&quot;b&lt;c"');
+  });
+
+  test("attr refuses a name outside [A-Za-z][A-Za-z0-9:-]*", () => {
+    for (const ok of ["id", "data-cite", "xlink:href", "aria-pressed", "x1"]) expect(attr(ok, "v")).toBe(` ${ok}="v"`);
+    for (const bad of ["", "1a", "-a", "a b", 'a"', "a=b", "a>", "a/", "\u00e9", "a\u0000", "on click", "data_cite", ":a"]) {
+      expect(() => attr(bad, "v")).toThrow();
+    }
+  });
+});
+
+describe("cite", () => {
+  test("a cite is a type=button button with data-cite and aria-pressed false, never a link", () => {
+    expect(cite("ex-c", "Ex. C")).toBe('<button type="button" class="cite" data-cite="ex-c" aria-pressed="false">Ex. C</button>');
+    expect(cite("ex-c", "Ex. C")).not.toContain("<a");
+  });
+
+  test("the id and the label are escaped, and a page with cites audits clean", () => {
+    const out = cite('a"b', "<b>&");
+    expect(out).toBe('<button type="button" class="cite" data-cite="a&quot;b" aria-pressed="false">&lt;b&gt;&amp;</button>');
+    const a = auditHtml(page({ title: "t", footerLeft: "f", fonts: "none",
+      body: `<main><p>See ${cite("ex-c", "Ex. C")}.</p><figure id="ex-c"><figcaption>c</figcaption></figure></main>` }));
+    expect([a.cspOk, a.nonCanonical, a.externalRefs]).toEqual([true, [], []]);
   });
 });
 

@@ -195,7 +195,7 @@ function components(): string[] {
     // tags, dots, cites
     rule(".tag", [...MONO_12_CAPS, `color:${v("faint")}`]),
     rule(".dots", ["display:inline-flex", "gap:3px", "vertical-align:middle"]),
-    // A cite link is neutral; the exhibit it points at takes the goldHi outline (`is-cited`), and focus the goldHi ring.
+    // A cite (a button, see `cite` in html.ts) is neutral; the exhibit it points at takes the goldHi outline (`is-cited`), and focus the goldHi ring.
     rule(".cite", [`color:${v("ink")}`, "text-decoration:none", `border-bottom:1px solid ${v("axis")}`]),
     rule(".cite:hover,.cite:focus-visible,.cite[aria-pressed=\"true\"]", [`border-bottom-color:${v("ink")}`]),
     // exhibit frame

@@ -3,11 +3,20 @@
  *
  * - **Theme:** a `<button data-kit-theme aria-pressed>` switches between ink and paper; `aria-pressed` is true while the
  *   paper theme shows (chosen or by `prefers-color-scheme`). The choice is kept in `localStorage`, inside try/catch.
+ *   The saved choice is applied when this script runs, at the end of `<body>`: under this CSP the page has exactly one
+ *   script, so it cannot also run one in `<head>`, and a reader whose saved theme differs from `prefers-color-scheme`
+ *   sees a brief flash of the other theme first. That flash is inherent to the one-script design.
  * - **Print:** a `<button data-kit-print>` opens the print dialog. `beforeprint` opens every closed `<details>` outside
  *   `[data-print="skip"]`, switches to the paper theme (the print tokens then apply through `@media print`) and adds
- *   `no-margin-boxes` to `<html>` unless the browser is Chromium 131 or later; `afterprint` restores all three.
- * - **Cites:** hovering or focusing a `[data-cite="<id>"]` gives the element with that id `is-cited`; a tap, a click or
- *   Enter pins it (`aria-pressed="true"` on the cite) until the cite is activated again or another is pinned.
+ *   `no-margin-boxes` to `<html>` unless the browser is Chromium 131 or later; `afterprint` restores all three (the
+ *   theme only if it still reads paper). Some browsers can skip `afterprint` (a cancelled or crashed dialog), so the
+ *   guard never latches: a `beforeprint` that finds a print still in progress first restores it, then starts afresh.
+ *   There is deliberately no timeout: a timer could undo the paper theme while a slow print dialog is still rendering.
+ * - **Cites:** the canonical cite is `cite(id, label)` from `core/viz/html.ts`:
+ *   `<button type="button" class="cite" data-cite="<id>" aria-pressed="false">label</button>`, never an `<a>` with
+ *   `aria-pressed`. Only `button[data-cite]` is handled. Hovering or focusing one gives the element with that id
+ *   `is-cited`; a tap or a click pins it (`aria-pressed="true"`) until it is activated again or another is pinned. The
+ *   keyboard needs no handler here: Enter and Space on a button are its own click.
  * - **Scroll boxes:** every `.scroll-x[data-scroll="end"]` scrolls to its end on load.
  *
  * It makes no requests, builds no code from strings and writes no HTML.
@@ -45,7 +54,8 @@ function pin(c) {
   c.setAttribute("aria-pressed", "true");
   mark(c, true);
 }
-function citeOf(e) { return e.target instanceof Element ? e.target.closest("[data-cite]") : null; }
+var CITE = "button[data-cite]";
+function citeOf(e) { return e.target instanceof Element ? e.target.closest(CITE) : null; }
 function hover(e, on) {
   var c = citeOf(e);
   if (!c) return;
@@ -56,12 +66,6 @@ doc.addEventListener("mouseover", function (e) { hover(e, true); });
 doc.addEventListener("mouseout", function (e) { hover(e, false); });
 doc.addEventListener("focusin", function (e) { hover(e, true); });
 doc.addEventListener("focusout", function (e) { hover(e, false); });
-doc.addEventListener("keydown", function (e) {
-  if (e.key !== "Enter") return;
-  var c = citeOf(e);
-  // A link or a button already turns Enter into a click.
-  if (c && !c.closest("a[href],button")) { e.preventDefault(); pin(c); }
-});
 doc.addEventListener("click", function (e) {
   var t = e.target instanceof Element ? e.target : null;
   if (!t) return;
@@ -73,7 +77,7 @@ doc.addEventListener("click", function (e) {
     return;
   }
   if (t.closest("[data-kit-print]")) { window.print(); return; }
-  var c = t.closest("[data-cite]");
+  var c = t.closest(CITE);
   if (c) pin(c);
 });
 
@@ -84,8 +88,20 @@ function chromium131() {
   return m !== null && Number(m[1]) >= 131;
 }
 var printing = false, opened = [], themeBefore = null;
+function restore() {
+  printing = false;
+  opened.forEach(function (d) { d.open = false; });
+  opened = [];
+  // A reader who changed the theme while a lost print left paper showing keeps that choice.
+  if (root.getAttribute("data-theme") === "paper") {
+    if (themeBefore === null) root.removeAttribute("data-theme"); else root.setAttribute("data-theme", themeBefore);
+  }
+  root.classList.remove("no-margin-boxes");
+  sync();
+}
 window.addEventListener("beforeprint", function () {
-  if (printing) return;
+  // A print whose afterprint never came is restored first, so the guard cannot latch.
+  if (printing) restore();
   printing = true;
   opened = [];
   doc.querySelectorAll("details:not([open])").forEach(function (d) {
@@ -97,15 +113,7 @@ window.addEventListener("beforeprint", function () {
   root.setAttribute("data-theme", "paper");
   if (!chromium131()) root.classList.add("no-margin-boxes");
 });
-window.addEventListener("afterprint", function () {
-  if (!printing) return;
-  printing = false;
-  opened.forEach(function (d) { d.open = false; });
-  opened = [];
-  if (themeBefore === null) root.removeAttribute("data-theme"); else root.setAttribute("data-theme", themeBefore);
-  root.classList.remove("no-margin-boxes");
-  sync();
-});
+window.addEventListener("afterprint", function () { if (printing) restore(); });
 
 function toEnd() { doc.querySelectorAll('.scroll-x[data-scroll="end"]').forEach(function (el) { el.scrollLeft = el.scrollWidth; }); }
 toEnd();

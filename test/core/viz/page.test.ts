@@ -101,6 +101,11 @@ describe("page", () => {
     expect(() => page({ ...BASE, script: "'<!--'" })).toThrow();
   });
 
+  test("extra CSS or script holding a NUL is refused", () => {
+    expect(() => page({ ...BASE, css: ".x{}\u0000" })).toThrow();
+    expect(() => page({ ...BASE, script: "'\u0000'" })).toThrow();
+  });
+
   test("a theme outside auto, ink and paper is refused: it is written before the CSP meta (review fix 2)", () => {
     expect(() => page({ ...BASE, theme: '"><script>alert(1)</script><x y="' as "auto" })).toThrow();
   });

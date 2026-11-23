@@ -44,8 +44,8 @@ export function page(o: PageOptions): string {
   if (theme !== "auto" && theme !== "ink" && theme !== "paper") throw new Error("page: theme must be auto, ink or paper");
   const style = lf([...(o.fonts === "none" ? [] : [fontFaceCss()]), kitCss({ footerLeft: o.footerLeft }), ...(o.css ? [o.css] : [])].join("\n"));
   const script = lf([KIT_RUNTIME, ...(o.script ? [o.script] : [])].join("\n"));
-  if (/<\/style/i.test(style)) throw new Error("page: the CSS holds </style");
-  if (/<\/script|<!--/i.test(script)) throw new Error("page: the script holds </script or <!--");
+  if (/<\/style|\u0000/i.test(style)) throw new Error("page: the CSS holds </style or a NUL");
+  if (/<\/script|<!--|\u0000/i.test(script)) throw new Error("page: the script holds </script, <!-- or a NUL");
   const csp = cspFor(style, script);
   const body = typeof o.body === "function" ? o.body({ csp }) : o.body;
   return '<!doctype html><html lang="en" data-theme="' + theme + '"><head>'
