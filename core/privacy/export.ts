@@ -3,7 +3,7 @@ import type { Metric } from "../analysis/types";
 import type { Analysis } from "../analyze";
 import { mcpLabels, modelExportId, riskExportToken, RISK_TOKENS } from "./allowlists";
 import { canonicalJson } from "./jcs";
-import { AIPROF2, CONFIG_KINDS, DURATION_ARCS, EDIT_LANGS, FEATURES, METRIC_KEYS, PROMPT_ARCS, sanitize, TECH_CATEGORIES, TOOLCHAINS } from "./schema";
+import { AIPROF2, CONFIG_KINDS, DURATION_ARCS, EDIT_LANGS, FEATURES, METRIC_KEYS, PROMPT_ARCS, sanitize, TECH_CATEGORIES, TOOLCHAINS, violations } from "./schema";
 
 /**
  * How to export. `schema`: the payload schema (`aiprof/2`, the only one). `reveal`: projects the person chose to name,
@@ -74,16 +74,18 @@ function pick<T>(h: Partial<Record<string, T>>, keys: readonly string[]): Record
  * 1. a builder maps the analysis to the payload's form (spans by month, first-seen times by ISO week, raw channels
  *    through the allowlists, fractions rounded to 4 decimals) and applies every cap (100 projects, the rest in
  *    `otherProjects`; 64 model ids, the rest in "other"; the latest 52 weeks);
- * 2. the draft is checked against `AIPROF2` (deny by default): if the schema would drop or change anything, an
- *    `ExportError` names the paths and nothing is exported;
+ * 2. the draft is checked against `AIPROF2` (deny by default): a required field missing or undefined, or anything the
+ *    schema would drop or change, is an `ExportError` naming the paths (`violations`), and nothing is exported;
  * 3. the payload is serialized canonically (RFC 8785).
  * `private` and `diagnostics` are never read, but for the allowlisted model ids and MCP labels. Pure and synchronous.
  */
 export function exportPayload(a: Analysis, o: ExportOptions): ExportResult {
   if (o.schema !== "aiprof/2") throw new RangeError("exportPayload: the only schema is aiprof/2");
   const draft = normalize(build(a, o));
+  const found = violations(draft, AIPROF2);
+  if (found.length > 0) throw new ExportError(found);
   const value = sanitize(draft, AIPROF2);
-  const paths = differences(draft, value, "$", []);
+  const paths = differences(draft, value, "$", []); // a second check: what the schema kept must be the draft, exactly
   if (paths.length > 0) throw new ExportError(paths);
   const json = canonicalJson(value);
   return { schema: "aiprof/2", value, json, bytes: new TextEncoder().encode(json).length };
@@ -177,9 +179,8 @@ function firstSeen(a: Analysis, week: (ms: number) => string | undefined): Recor
 function models(raw: Record<string, number>): Record<string, number> {
   const acc = new Map<string, number>();
   for (const [id, n] of Object.entries(raw)) {
-    if (typeof n !== "number") continue;
     const k = modelExportId(id);
-    acc.set(k, (acc.get(k) ?? 0) + n);
+    acc.set(k, typeof n === "number" ? (acc.get(k) ?? 0) + n : NaN); // a count that is no number fails the schema check
   }
   const out = dict<number>();
   if (acc.size <= MAX_MODELS) {
@@ -198,9 +199,8 @@ function models(raw: Record<string, number>): Record<string, number> {
 function risk(kind: keyof typeof RISK_TOKENS, h: Record<string, number>): Record<string, number> {
   const out = dict<number>();
   for (const [raw, n] of Object.entries(h)) {
-    if (typeof n !== "number") continue;
     const k = riskExportToken(kind, raw);
-    out[k] = (out[k] ?? 0) + n;
+    out[k] = typeof n === "number" ? (out[k] ?? 0) + n : NaN; // a count that is no number fails the schema check
   }
   return out;
 }
@@ -233,10 +233,10 @@ function normalize(v: unknown): unknown {
   return out;
 }
 
-/** A path segment for a key: the key itself when it is short and plain, else a placeholder (paths never carry text). */
-const segment = (k: string): string => (/^[A-Za-z0-9_:#<>+\/-][A-Za-z0-9_.:#<>+\/ -]{0,47}$/.test(k) ? `.${k}` : ".<key>");
-
-/** The paths at which `got` (the sanitized draft) differs from `want` (the draft). */
+/**
+ * The paths at which `got` (the sanitized draft) differs from `want` (the draft). It runs only after `violations` found
+ * none, as a second check; it knows no key patterns, so every key is shown as "<key>".
+ */
 function differences(want: unknown, got: unknown, at: string, out: string[]): string[] {
   if (Array.isArray(want)) {
     if (!Array.isArray(got) || got.length !== want.length) out.push(at);
@@ -245,7 +245,7 @@ function differences(want: unknown, got: unknown, at: string, out: string[]): st
     if (got === null || typeof got !== "object" || Array.isArray(got)) out.push(at);
     else {
       for (const k of Object.keys(want)) {
-        const p = at + segment(k);
+        const p = `${at}.<key>`;
         if (!Object.hasOwn(got, k)) out.push(p);
         else differences((want as Record<string, unknown>)[k], (got as Record<string, unknown>)[k], p, out);
       }

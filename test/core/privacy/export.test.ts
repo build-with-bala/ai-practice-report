@@ -3,7 +3,7 @@ import path from "node:path";
 import { analyze, type Analysis } from "../../../core/analyze";
 import { canonicalJson, exportPayload, scan } from "../../../core/index";
 import { ExportError, RevealError } from "../../../core/privacy/export";
-import type { ConfigEv, Ev, FileFactEv, SessionEv } from "../../../core/model/events";
+import type { ConfigEv, CoverageEv, Ev, FileFactEv, PromptEv, SessionEv } from "../../../core/model/events";
 import { MCP_PUBLIC, mcpExportName, mcpLabels, MODEL_WORDS, modelExportId } from "../../../core/privacy/allowlists";
 import type { ScanResult } from "../../../core/scan";
 import { CcTranscript, ccSid, fixtureStart, slug } from "../../fixtures/claude-code";
@@ -93,6 +93,17 @@ describe("exportPayload: raw channels", () => {
     expect(modelExportId(`deepseek${"0123456789abcdef0123456789abcdef01234567"}`)).toBe("deepseek-other");
     expect(modelExportId(`deepseek-${"0123456789abcdef0123456789abcdef01234567"}`)).toBe("deepseek-other");
     expect(modelExportId("gpt--4")).toBe("gpt-other");
+    // R2: no letters spelled one version at a time, at most 6 tokens, one real date in a public form
+    expect(modelExportId("gpt-1a-1c-1m-1e")).toBe("gpt-other");
+    expect(modelExportId("claude-20250805-12345678-12345678-12345678-1234")).toBe("claude-other");
+    for (const kept of ["claude-opus-4-1-20250805", "claude-sonnet-4-5", "gpt-4o-mini", "gpt-4o-2024-08-06", "gpt-4-0613", "gpt-5-codex", "gemini-2.5-pro",
+      "o3-mini", "deepseek-chat", "llama-3-70b"]) expect(`${kept} → ${modelExportId(kept)}`).toBe(`${kept} → ${kept}`);
+    for (const [id, out] of [["gpt-4-20251301", "gpt-other"], ["gpt-4-1332", "gpt-other"], ["gpt-4-2024-02-30", "gpt-other"], ["gpt-4-0613-0613", "gpt-other"],
+      ["gpt-4-20240101-2024-01-01", "gpt-other"], ["claude-opus-4-1-2-3-4-5", "claude-other"], ["claude-opus-4-1-2-3-4", "claude-opus-4-1-2-3-4"],
+      ["gpt-4x", "gpt-other"], ["gpt-1234", "gpt-other"], ["gpt-4.123", "gpt-other"], ["gpt-4-2024-08", "gpt-other"], ["gpt-4-2024-02-29", "gpt-4-2024-02-29"],
+      ["gpt-4-2023-02-29", "gpt-other"]]) {
+      expect(`${id} → ${modelExportId(id)}`).toBe(`${id} → ${out}`);
+    }
     for (const other of ["Claude-Opus-4", "acme/claude-opus", "claude-opus\n4", "claude opus", `claude-${"4-".repeat(40)}4`, `${CANARY.slug}-opus`, "gemma-2", ""]) {
       expect(`${JSON.stringify(other)} → ${modelExportId(other)}`).toBe(`${JSON.stringify(other)} → other`);
     }
@@ -276,7 +287,8 @@ describe("exportPayload: the preview contract and deny by default", () => {
 
   test("an unexpected key added at every depth of a real analysis never survives", () => {
     const a = analyze(personaScan("expert", { canaries: true }), UTC);
-    const checkValues = new Set<unknown>(a.forensics.checks.map((c) => c.values)); // open records: planted text there fails the export (next test)
+    // open records whose entries all pass on: text planted there fails the export instead (tests below)
+    const checkValues = new Set<unknown>([...a.forensics.checks.map((c) => c.values), a.private.models, a.risk.permission, a.risk.approval, a.risk.sandbox]);
     let planted = 0;
     const plant = (v: unknown): void => {
       if (Array.isArray(v)) { for (const x of v) plant(x); return; }
@@ -308,8 +320,8 @@ describe("exportPayload: the preview contract and deny by default", () => {
     const base = analyze(personaScan("expert"), UTC);
     const cases: Array<[(a: Analysis) => void, string[]]> = [
       [(a) => { (a.overall as unknown as Json).status = "SCORED"; }, ["$.overall.status"]],
-      [(a) => { a.overall.interval = [NaN, 78]; }, ["$.overall.interval"]],
-      [(a) => { a.dimensions[0]!.interval = [62.5, 78]; }, ["$.dimensions[0].interval"]],
+      [(a) => { a.overall.interval = [NaN, 78]; }, ["$.overall.interval[0]"]],
+      [(a) => { a.dimensions[0]!.interval = [62.5, 78]; }, ["$.dimensions[0].interval[0]"]],
       [(a) => { a.dimensions[1]!.score = 71.5; }, ["$.dimensions[1].score"]],
       [(a) => { (a.dimensions[2]!.components[0] as unknown as Json).x = Infinity; }, ["$.dimensions[2].components[0].x"]],
       [(a) => { (a.coverage.rows[0]!.sources[0] as Json).status = "SECRET-STATUS"; }, ["$.coverage[0].statuses[0]", "$.coverage[0].statuses"]],
@@ -325,10 +337,81 @@ describe("exportPayload: the preview contract and deny by default", () => {
     }
   });
 
-  test("the three personas and an empty scan export without throwing", () => {
+  test("the three personas, an empty scan and a lifetime-only scan export without throwing", () => {
     for (const kind of ["novice", "intermediate", "expert"] as const) {
       for (const canaries of [false, true]) expect(() => exportPayload(analyze(personaScan(kind, { canaries }), UTC), OPTS)).not.toThrow();
     }
+    expect(() => exportPayload(analyze(scanResultOf([], { finishedAt: Date.UTC(2026, 10, 16) }), UTC), OPTS)).not.toThrow();
+    const now = Date.UTC(2026, 10, 16);
+    const HIST = "claude-code.history";
+    const cov: CoverageEv = { k: "coverage", tool: "claude-code", source: HIST, window: "lifetime", status: "ok", beta: false, files: 1, bytes: 1,
+      records: 30, skipped: {}, unknownTypes: {}, versions: [] };
+    const prompt = (i: number): PromptEv => ({ k: "prompt", tool: "claude-code", source: HIST, ts: now - (90 - 3 * i) * DAY, window: "lifetime",
+      origin: "human", intent: "spec", textHash: `h${i}`,
+      features: { words: 8, lenBucket: 1, hasContext: false, fileRefs: 0, listLines: 0, constraintTerms: 0, isTaskStart: true, techCats: {} } });
+    const life = analyze(scanResultOf([cov, ...Array.from({ length: 30 }, (_, i) => prompt(i))], { finishedAt: now }), UTC);
+    const out = parsed(life);
+    expect(((out.exposure as Json).tenureWeeks as Json).window).toBe("lifetime");
+    expect(((out.exposure as Json).activeWeeks as Json).detail).toMatchObject({ value: null, window: "detail" });
+  });
+
+  test("required fields: missing or undefined throws with its path; a nullable field stays present as null (I4)", () => {
+    const base = analyze(personaScan("expert"), UTC);
+    const cases: Array<[(a: Analysis) => void, string]> = [
+      [(a) => { (a.overall as unknown as Json).status = undefined; }, "$.overall.status"],
+      [(a) => { delete (a.overall as unknown as Json).status; }, "$.overall.status"],
+      [(a) => { (a.dimensions[0] as unknown as Json).score = undefined; }, "$.dimensions[0].score"],
+      [(a) => { (a.coverage.rows[0] as unknown as Json).tool = undefined; }, "$.coverage[0].tool"],
+      [(a) => { (a.forensics.checks[2] as unknown as Json).status = undefined; }, "$.forensics.checks[2].status"],
+      [(a) => { (a.dimensions[1]!.components[0] as unknown as Json).x = undefined; }, "$.dimensions[1].components[0].x"],
+      [(a) => { (a.dimensions[3] as unknown as Json).interval = undefined; }, "$.dimensions[3].interval"],
+      [(a) => { (a.signals.vae as unknown as Json).value = undefined; }, "$.signals.vae.value"],
+      [(a) => { (a.exposure.tenureWeeks as unknown as Json).n = undefined; }, "$.exposure.tenureWeeks.n"],
+      [(a) => { (a.projects[0] as unknown as Json).sessions = undefined; }, "$.projects[0].sessions"],
+    ];
+    for (const [mutate, path] of cases) {
+      const a = structuredClone(base);
+      mutate(a);
+      let err: unknown;
+      try { exportPayload(a, OPTS); } catch (e) { err = e; }
+      expect(`${path} ${err instanceof ExportError}`).toBe(`${path} true`);
+      expect((err as ExportError).paths).toEqual([path]);
+    }
+    const a = structuredClone(base);
+    a.dimensions[0]!.score = null;
+    a.dimensions[0]!.interval = null;
+    const d = (parsed(a).dimensions as Json[])[0]!;
+    expect([d.score, d.interval]).toEqual([null, null]);
+  });
+
+  test("a count is never negative (R5)", () => {
+    const a = analyze(personaScan("expert"), UTC);
+    a.forensics.checks[0]!.n = -1;
+    a.exposure.weekly[51]!.activeDays = -2;
+    expect(() => exportPayload(a, OPTS)).toThrow(ExportError);
+    try { exportPayload(a, OPTS); } catch (e) {
+      expect((e as ExportError).paths).toEqual(["$.exposure.weekly[51].activeDays", "$.forensics.checks[0].n"]);
+    }
+  });
+
+  test("a bad model or risk count is passed on, so the export throws instead of skipping it (R4)", () => {
+    const a = analyze(personaScan("expert"), UTC);
+    (a.private.models as Json)["gpt-4o"] = "LEAKVALUE";
+    (a.risk.permission as unknown as Json).default = "LEAKVALUE";
+    let err: unknown;
+    try { exportPayload(a, OPTS); } catch (e) { err = e; }
+    expect((err as ExportError).paths).toEqual(["$.exposure.models.gpt-4o", "$.risk.permission.default"]);
+    expect((err as Error).message).not.toContain("LEAK");
+  });
+
+  test("an error path shows a record key only when it fits that record's key pattern (R3)", () => {
+    const a = analyze(personaScan("expert"), UTC);
+    (a.forensics.checks[3]!.values as Json)["clients/jdoe acme payroll"] = 1;
+    (a.forensics.checks[4]!.values as Json).okKey = "text";
+    let err: unknown;
+    try { exportPayload(a, OPTS); } catch (e) { err = e; }
+    expect((err as ExportError).paths).toEqual(["$.forensics.checks[3].values.<key>", "$.forensics.checks[4].values.okKey"]);
+    expect((err as Error).message).not.toMatch(/jdoe|acme|payroll|text/);
   });
 
   test("a coverage row exports one status per source, sorted, and no source names", () => {

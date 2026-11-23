@@ -1,19 +1,22 @@
 import { describe, expect, test } from "bun:test";
-import { AIPROF2, sanitize, type FieldSpec } from "../../../core/privacy/schema";
+import { AIPROF2, sanitize, violations, type FieldSpec } from "../../../core/privacy/schema";
 
+/** A field that may be absent. */
+const opt = (of: FieldSpec): FieldSpec => ({ t: "optional", of });
+/** Every field of the test spec is optional, so each test looks at one field; `required` below covers the default. */
 const spec: FieldSpec = {
   t: "object", fields: {
-    name: { t: "string", pattern: /^[a-z]{1,8}$/, s: "public" },
-    kind: { t: "enum", values: ["a", "b"], s: "public" },
-    n: { t: "integer", s: "aggregate" },
-    x: { t: "number", s: "aggregate" },
-    ok: { t: "boolean", s: "public" },
-    maybe: { t: "nullable", of: { t: "integer", s: "aggregate" } },
-    list: { t: "array", of: { t: "integer", s: "aggregate" }, max: 3 },
-    counts: { t: "record", key: /^[a-z]{1,4}$/, of: { t: "integer", s: "aggregate" }, maxKeys: 2 },
-    tagged: { t: "record", key: /^[a-z]{1,4}$/, of: { t: "number", s: "aggregate" }, maxKeys: 9, fields: { date: { t: "string", pattern: /^\d{4}-\d{2}-\d{2}$/, s: "aggregate" } } },
-    inner: { t: "object", fields: { a: { t: "integer", s: "aggregate" } } },
-    pair: { t: "nullable", of: { t: "tuple", of: [{ t: "integer", s: "aggregate" }, { t: "integer", s: "aggregate" }] } },
+    name: opt({ t: "string", pattern: /^[a-z]{1,8}$/, s: "public" }),
+    kind: opt({ t: "enum", values: ["a", "b"], s: "public" }),
+    n: opt({ t: "integer", s: "aggregate" }),
+    x: opt({ t: "number", s: "aggregate" }),
+    ok: opt({ t: "boolean", s: "public" }),
+    maybe: opt({ t: "nullable", of: { t: "integer", s: "aggregate" } }),
+    list: opt({ t: "array", of: { t: "integer", s: "aggregate" }, max: 3 }),
+    counts: opt({ t: "record", key: /^[a-z]{1,4}$/, of: { t: "integer", s: "aggregate" }, maxKeys: 2 }),
+    tagged: opt({ t: "record", key: /^[a-z]{1,4}$/, of: { t: "number", s: "aggregate" }, maxKeys: 9, fields: { date: { t: "string", pattern: /^\d{4}-\d{2}-\d{2}$/, s: "aggregate" } } }),
+    inner: opt({ t: "object", fields: { a: { t: "integer", s: "aggregate" } } }),
+    pair: opt({ t: "nullable", of: { t: "tuple", of: [{ t: "integer", s: "aggregate" }, { t: "integer", s: "aggregate" }] } }),
   },
 };
 
@@ -72,10 +75,82 @@ describe("sanitize: deny by default", () => {
   });
 });
 
+describe("required fields, counts and violations", () => {
+  const req: FieldSpec = { t: "object", fields: {
+    status: { t: "enum", values: ["scored", "insufficient"], s: "public" },
+    score: { t: "nullable", of: { t: "count", s: "aggregate" } },
+    name: opt({ t: "string", pattern: /^[a-z]{1,8}$/, s: "revealed" }),
+  } };
+
+  test("a required field missing, undefined or not allowed drops the object; null is a value for nullable", () => {
+    expect(sanitize({ status: "scored", score: 3 }, req)).toEqual({ status: "scored", score: 3 });
+    expect(sanitize({ status: "scored", score: null }, req)).toEqual({ status: "scored", score: null });
+    for (const bad of [{ score: 3 }, { status: undefined, score: 3 }, { status: "SCORED", score: 3 }, { status: "scored" }, { status: "scored", score: 71.5 }]) {
+      expect(sanitize(bad, req)).toBeUndefined();
+    }
+  });
+
+  test("an optional field may be absent; when present and not allowed it is left out", () => {
+    expect(sanitize({ status: "scored", score: 1, name: "lib" }, req)).toEqual({ status: "scored", score: 1, name: "lib" });
+    expect(sanitize({ status: "scored", score: 1, name: undefined }, req)).toEqual({ status: "scored", score: 1 });
+    expect(sanitize({ status: "scored", score: 1, name: "Not OK" }, req)).toEqual({ status: "scored", score: 1 });
+  });
+
+  test("a count is a non-negative safe integer; an integer may be signed", () => {
+    expect(sanitize(0, { t: "count", s: "aggregate" })).toBe(0);
+    for (const bad of [-1, 1.5, 2 ** 53, NaN]) expect(sanitize(bad, { t: "count", s: "aggregate" })).toBeUndefined();
+    expect(sanitize(-1, { t: "integer", s: "aggregate" })).toBe(-1);
+  });
+
+  test("violations names each failing path: missing, wrong form, undeclared; record keys only when they fit their pattern", () => {
+    const rec: FieldSpec = { t: "object", fields: { ...((req as Extract<FieldSpec, { t: "object" }>).fields),
+      counts: { t: "record", key: /^[a-z]{1,8}$/, of: { t: "count", s: "aggregate" }, maxKeys: 4 },
+      pair: { t: "tuple", of: [{ t: "count", s: "aggregate" }, { t: "count", s: "aggregate" }] } } };
+    expect(violations({ status: "scored", score: null, counts: {}, pair: [1, 2] }, rec)).toEqual([]);
+    expect(violations({ score: -1, name: "Bad Name", counts: { ok: -2, "clients/jdoe acme payroll": 1 }, pair: [1], extra: "x", "/secret/key": 1 }, rec))
+      .toEqual(["$.status", "$.score", "$.name", "$.counts.<key>", "$.counts.ok", "$.pair", "$.<key>", "$.<key>"]);
+  });
+
+  test("AIPROF2 holds no signed integer: every integer is a count", () => {
+    const signed: string[] = [];
+    const walk = (s: FieldSpec, at: string): void => {
+      if (s.t === "integer") signed.push(at);
+      else if (s.t === "optional" || s.t === "nullable" || s.t === "array") walk(s.of, at);
+      else if (s.t === "tuple") s.of.forEach((f) => walk(f, at));
+      else if (s.t === "object") for (const [k, f] of Object.entries(s.fields)) walk(f, `${at}.${k}`);
+      else if (s.t === "record") { walk(s.of, at); for (const f of Object.values(s.fields ?? {})) walk(f, at); }
+    };
+    walk(AIPROF2, "$");
+    expect(signed).toEqual([]);
+  });
+
+  test("the optional fields of AIPROF2 are exactly the optional properties of the analysis types", () => {
+    const optional: string[] = [];
+    const walk = (s: FieldSpec, at: string): void => {
+      if (s.t === "optional") { optional.push(at); walk(s.of, at); }
+      else if (s.t === "nullable" || s.t === "array") walk(s.of, `${at}[]`);
+      else if (s.t === "tuple") s.of.forEach((f, i) => walk(f, `${at}[${i}]`));
+      else if (s.t === "object") for (const [k, f] of Object.entries(s.fields)) walk(f, `${at}.${k}`);
+      else if (s.t === "record") { walk(s.of, `${at}{}`); for (const [k, f] of Object.entries(s.fields ?? {})) walk(f, `${at}.${k}`); }
+    };
+    walk(AIPROF2, "$");
+    const metric = (p: string) => [`${p}.from`, `${p}.to`, `${p}.reason`];
+    expect(optional.filter((p) => !/^\$\.(signals|exposure\.(tenureWeeks|activeWeeks))\./.test(p)).sort()).toEqual([
+      "$.coverage[].from", "$.coverage[].to", // CoveragePanel row from?/to?
+      "$.exposure.tools[].from", "$.exposure.tools[].to", // Exposure.tools from?/to?
+      "$.forensics.checks[].askAbout", // CheckResult.askAbout?
+      "$.projects[].lastWeek", // ProjectSummary.lastWeek?
+      "$.projects[].name", // only through reveal
+    ].sort());
+    expect(optional.filter((p) => p.startsWith("$.signals.vae."))).toEqual(metric("$.signals.vae")); // Metric from?/to?/reason?
+  });
+});
+
 describe("AIPROF2", () => {
   /** Every leaf spec of a spec, with its path. */
   function leaves(s: FieldSpec, at = "$", out: Array<[string, FieldSpec]> = []): Array<[string, FieldSpec]> {
     switch (s.t) {
+      case "optional": return leaves(s.of, at, out);
       case "nullable": case "array": return leaves(s.of, at + "[]", out);
       case "tuple": s.of.forEach((f, i) => leaves(f, `${at}[${i}]`, out)); return out;
       case "object": for (const [k, f] of Object.entries(s.fields)) leaves(f, `${at}.${k}`, out); return out;
@@ -89,7 +164,7 @@ describe("AIPROF2", () => {
   /** Every spec node of a spec. */
   function nodes(s: FieldSpec, out: FieldSpec[] = []): FieldSpec[] {
     out.push(s);
-    if (s.t === "nullable" || s.t === "array") nodes(s.of, out);
+    if (s.t === "nullable" || s.t === "array" || s.t === "optional") nodes(s.of, out);
     else if (s.t === "tuple") for (const f of s.of) nodes(f, out);
     else if (s.t === "object") for (const f of Object.values(s.fields)) nodes(f, out);
     else if (s.t === "record") { nodes(s.of, out); for (const f of Object.values(s.fields ?? {})) nodes(f, out); }
@@ -115,6 +190,7 @@ describe("AIPROF2", () => {
     const out: Array<[string, RegExp]> = [];
     const walk = (s: FieldSpec, at: string): void => {
       if (s.t === "string") out.push([at, s.pattern]);
+      else if (s.t === "optional") walk(s.of, at);
       else if (s.t === "nullable" || s.t === "array") walk(s.of, `${at}[]`);
       else if (s.t === "tuple") s.of.forEach((f, i) => walk(f, `${at}[${i}]`));
       else if (s.t === "object") for (const [k, f] of Object.entries(s.fields)) walk(f, `${at}.${k}`);
@@ -149,7 +225,7 @@ describe("AIPROF2", () => {
       if (s.t === "array") expect(s.max).toBeGreaterThan(0);
       if (s.t === "record") expect(s.maxKeys).toBeGreaterThan(0);
       if (s.t === "object" && "interval" in s.fields) {
-        const iv = s.fields.interval!;
+        const iv = s.fields.interval!; // required: never optional
         expect(iv.t === "nullable" && iv.of.t === "tuple" && iv.of.of.length === 2).toBe(true);
       }
     }

@@ -57,17 +57,54 @@ export const MODEL_WORDS: ReadonlySet<string> = new Set([
   "opus", "sonnet", "haiku", "mini", "nano", "pro", "flash", "ultra", "max", "turbo", "preview", "latest", "codex", "instant", "large", "medium",
   "small", "lite", "plus", "thinking", "high", "low", "coder", "chat", "vision", "exp",
 ]);
-/** A short version number: "4", "4o", "3.5", "4.1", "2.5". */
-const VERSION = /^\d{1,2}(?:\.\d{1,2})?[a-z]?$/;
-/** A date or a part of one: "20250805", or the "YYYY", "MM", "DD" of "YYYY-MM-DD". */
-const DATE_PART = /^(?:\d{8}|\d{4}|\d{2})$/;
-const modelToken = (t: string): boolean => VERSION.test(t) || DATE_PART.test(t) || MODEL_WORDS.has(t);
+/** The letters a version may end in, from public ids: "o" (gpt-4o, "omni") and "b" (a parameter count: llama-3-70b). */
+export const VERSION_SUFFIXES: ReadonlySet<string> = new Set(["o", "b"]);
+/** A version: 1–3 digits, an optional fraction of 1–2 digits, an optional suffix of `VERSION_SUFFIXES` ("4", "4o", "3.5", "70b"). */
+const VERSION = /^\d{1,3}(?:\.\d{1,2})?([a-z]?)$/;
+/** At most this many tokens after the family. */
+const MAX_MODEL_TOKENS = 6;
+
+/** True when year, month and day make a real date (years 2000–2099). */
+function realDate(y: number, m: number, d: number): boolean {
+  if (y < 2000 || y > 2099 || m < 1 || m > 12 || d < 1) return false;
+  return d <= new Date(Date.UTC(y, m, 0)).getUTCDate();
+}
+/** True when month and day can be a real day of some year ("0613"; "0229" too). */
+const realMonthDay = (m: number, d: number): boolean => realDate(2000, m, d);
+
+/**
+ * True when the tokens after a family are a public model id's: at most 6 of them, each a version, a word of
+ * `MODEL_WORDS`, or part of the one date the id may hold, in a public form — one "YYYYMMDD" token, the three tokens
+ * "YYYY", "MM", "DD" in a row, or one "MMDD" token — with real month and day ranges.
+ */
+function publicTokens(tokens: readonly string[]): boolean {
+  if (tokens.length > MAX_MODEL_TOKENS) return false;
+  let dates = 0;
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i]!;
+    const v = VERSION.exec(t);
+    if (v) {
+      if (v[1] !== "" && !VERSION_SUFFIXES.has(v[1]!)) return false;
+      continue;
+    }
+    if (MODEL_WORDS.has(t)) continue;
+    let date = false;
+    if (/^\d{8}$/.test(t)) date = realDate(+t.slice(0, 4), +t.slice(4, 6), +t.slice(6, 8));
+    else if (/^\d{4}$/.test(t) && /^\d{2}$/.test(tokens[i + 1] ?? "") && /^\d{2}$/.test(tokens[i + 2] ?? "")
+      && realDate(+t, +tokens[i + 1]!, +tokens[i + 2]!)) {
+      date = true;
+      i += 2;
+    } else if (/^\d{4}$/.test(t)) date = realMonthDay(+t.slice(0, 2), +t.slice(2, 4));
+    if (!date || ++dates > 1) return false;
+  }
+  return true;
+}
 
 /**
  * A model id as exported:
  * - "ft:…" (a fine-tuned model) → "fine-tuned";
- * - an id of a known family (`MODEL_FAMILY_PATTERN`) whose every "-"-separated token after the family is a short version
- *   number, a date part or a word of `MODEL_WORDS` → the id as is ("claude-opus-4-1-20250805", "gpt-4o-mini");
+ * - an id of a known family (`MODEL_FAMILY_PATTERN`) whose "-"-separated tokens after the family pass `publicTokens`
+ *   (at most 6 versions, `MODEL_WORDS` words and one real date) → the id as is ("claude-opus-4-1-20250805", "gpt-4o-mini");
  * - another id of a known family → "<family>-other" ("gpt-4o-contoso-prod" → "gpt-other");
  * - anything else, or an id with characters other than a–z, 0–9, "." and "-", or longer than 64 → "other".
  * Ids that map to one export id have their counts summed by the caller.
@@ -80,7 +117,7 @@ export function modelExportId(raw: string): string {
   const family = m[0];
   const rest = raw.slice(family.length);
   if (rest === "") return family;
-  if (rest.startsWith("-") && rest.slice(1).split("-").every(modelToken)) return raw;
+  if (rest.startsWith("-") && publicTokens(rest.slice(1).split("-"))) return raw;
   return `${family}-other`;
 }
 

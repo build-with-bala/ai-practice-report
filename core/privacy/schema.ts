@@ -18,24 +18,28 @@ import { MCP_PUBLIC, MODEL_FAMILY_PATTERN, RISK_TOKENS } from "./allowlists";
 export type Sensitivity = "public" | "aggregate" | "pseudonymous" | "revealed";
 
 /**
- * One declared field of the export. Leaves carry their sensitivity class; `nullable`, `array` (at most `max` elements),
+ * One declared field of the export. Leaves carry their sensitivity class: `count` is a non-negative safe integer (every
+ * count of the payload), `integer` a signed one (no payload field needs a sign today), `number` any finite number.
+ * `nullable`, `optional`, `array` (at most `max` elements),
  * `tuple` (exactly one element per spec in `of`, all or nothing), `object` (exactly the declared `fields`) and `record`
  * (keys matching `key`, at most `maxKeys`, each value by `of`, or by its own spec in `fields` for a declared key) compose
- * them. Every pattern is anchored at both ends.
+ * them. A field of an object spec is required: present, not undefined, and allowed. Only `optional` marks a field that
+ * may be absent (`null` is a value, for `nullable`). Every pattern is anchored at both ends.
  */
 export type FieldSpec =
-  | { t: "number" | "integer" | "boolean"; s: Sensitivity } | { t: "enum"; values: readonly string[]; s: Sensitivity }
+  | { t: "number" | "integer" | "count" | "boolean"; s: Sensitivity } | { t: "optional"; of: FieldSpec } | { t: "enum"; values: readonly string[]; s: Sensitivity }
   | { t: "string"; pattern: RegExp; s: Sensitivity } | { t: "nullable"; of: FieldSpec }
   | { t: "array"; of: FieldSpec; max: number } | { t: "tuple"; of: readonly FieldSpec[] } | { t: "object"; fields: Readonly<Record<string, FieldSpec>> }
   | { t: "record"; key: RegExp; of: FieldSpec; maxKeys: number; fields?: Readonly<Record<string, FieldSpec>> };
 
 /**
  * A value as the schema allows it (deny by default), or `undefined` when it is not allowed at all:
- * - an object keeps only its declared, own fields whose values are allowed; a record only own keys matching its key
+ * - an object keeps only its declared, own fields; it is dropped whole when a required field is missing, undefined or
+ *   not allowed, and an optional field that is not allowed is left out; a record keeps only own keys matching its key
  *   pattern (in key order, at most `maxKeys`) whose values are allowed; anything that is not a plain object is dropped;
  * - an array keeps its allowed elements, at most `max` of them; a tuple is kept whole or not at all: it must have
  *   exactly its length, and every element must be allowed;
- * - a number must be finite (an integer a safe integer), -0 becomes 0; a string must match its pattern, an enum be one
+ * - a number must be finite (an integer a safe integer, a count a non-negative one), -0 becomes 0; a string must match its pattern, an enum be one
  *   of its values; a boolean be a boolean.
  * The result is fresh plain data: nothing of the input is shared with it. Pure and synchronous.
  */
@@ -43,6 +47,8 @@ export function sanitize(value: unknown, spec: FieldSpec): unknown {
   switch (spec.t) {
     case "number": return typeof value === "number" && Number.isFinite(value) ? value + 0 : undefined;
     case "integer": return typeof value === "number" && Number.isSafeInteger(value) ? value + 0 : undefined;
+    case "count": return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value + 0 : undefined;
+    case "optional": return sanitize(value, spec.of);
     case "boolean": return typeof value === "boolean" ? value : undefined;
     case "enum": return typeof value === "string" && spec.values.includes(value) ? value : undefined;
     case "string": return typeof value === "string" && spec.pattern.test(value) ? value : undefined;
@@ -71,9 +77,14 @@ export function sanitize(value: unknown, spec: FieldSpec): unknown {
       if (!isPlainObject(value)) return undefined;
       const out: Record<string, unknown> = {};
       for (const [k, f] of Object.entries(spec.fields)) {
-        if (!Object.hasOwn(value, k)) continue;
+        const present = Object.hasOwn(value, k) && value[k] !== undefined;
+        if (!present) {
+          if (f.t === "optional") continue;
+          return undefined;
+        }
         const y = sanitize(value[k], f);
         if (y !== undefined) define(out, k, y);
+        else if (f.t !== "optional") return undefined;
       }
       return out;
     }
@@ -92,6 +103,56 @@ export function sanitize(value: unknown, spec: FieldSpec): unknown {
       }
       return out;
     }
+  }
+}
+
+/** How a path names a key: the key itself when `shown`, else a fixed placeholder (paths never carry data). */
+const keyAt = (at: string, k: string, shown: boolean): string => (shown ? `${at}.${k}` : `${at}.<key>`);
+
+/**
+ * Every place where `value` does not fit `spec`, as JSON paths ("$.overall.status", "$.dimensions[0].interval"): a
+ * required field missing or undefined, a value of the wrong type, form or enum, a tuple of the wrong length, an array
+ * or record over its bound, an undeclared key. A declared field's name is shown; a record key only when it matches the
+ * record's own key pattern, else "<key>"; an undeclared key is always "<key>". Empty when `sanitize` keeps `value`
+ * whole. Pure and synchronous.
+ */
+export function violations(value: unknown, spec: FieldSpec, at = "$", out: string[] = []): string[] {
+  switch (spec.t) {
+    case "optional": return violations(value, spec.of, at, out);
+    case "nullable": return value === null ? out : violations(value, spec.of, at, out);
+    case "array":
+      if (!Array.isArray(value)) out.push(at);
+      else {
+        if (value.length > spec.max) out.push(at);
+        value.forEach((x, i) => violations(x, spec.of, `${at}[${i}]`, out));
+      }
+      return out;
+    case "tuple":
+      if (!Array.isArray(value) || value.length !== spec.of.length) out.push(at);
+      else spec.of.forEach((f, i) => violations(value[i], f, `${at}[${i}]`, out));
+      return out;
+    case "object":
+      if (!isPlainObject(value)) { out.push(at); return out; }
+      for (const [k, f] of Object.entries(spec.fields)) {
+        if (Object.hasOwn(value, k) && value[k] !== undefined) violations(value[k], f, `${at}.${k}`, out);
+        else if (f.t !== "optional") out.push(`${at}.${k}`);
+      }
+      for (const k of Object.keys(value)) if (!Object.hasOwn(spec.fields, k)) out.push(keyAt(at, k, false));
+      return out;
+    case "record": {
+      if (!isPlainObject(value)) { out.push(at); return out; }
+      const keys = Object.keys(value).sort();
+      if (keys.length > spec.maxKeys) out.push(at);
+      for (const k of keys) {
+        if (!spec.key.test(k)) { out.push(keyAt(at, k, false)); continue; }
+        const f = spec.fields !== undefined && Object.hasOwn(spec.fields, k) ? spec.fields[k]! : spec.of;
+        violations(value[k], f, keyAt(at, k, true), out);
+      }
+      return out;
+    }
+    default:
+      if (sanitize(value, spec) === undefined) out.push(at);
+      return out;
   }
 }
 
@@ -156,7 +217,10 @@ const ROLES: readonly string[] = Object.freeze([...Object.values(PRACTICE_ROLES)
 const esc = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const oneOf = (values: readonly string[]): RegExp => new RegExp(`^(?:${values.map(esc).join("|")})$`);
 
-const int = (s: Sensitivity = "aggregate"): FieldSpec => ({ t: "integer", s });
+/** A count: a non-negative safe integer. Every integer of the payload is one (scores and interval ends included). */
+const int = (s: Sensitivity = "aggregate"): FieldSpec => ({ t: "count", s });
+/** A field that may be absent (its type in `Analysis` is optional). */
+const opt = (of: FieldSpec): FieldSpec => ({ t: "optional", of });
 const num = (s: Sensitivity = "aggregate"): FieldSpec => ({ t: "number", s });
 const bool = (s: Sensitivity = "aggregate"): FieldSpec => ({ t: "boolean", s });
 const en = (values: readonly string[], s: Sensitivity = "public"): FieldSpec => ({ t: "enum", values, s });
@@ -180,7 +244,7 @@ const WINDOW = en(WINDOWS);
 const INTERVAL = nullable({ t: "tuple", of: [int(), int()] });
 
 /** A metric: its value (null with a reason when not measurable), sample size, window and span by month. */
-const METRIC = obj({ value: nullable(num()), n: int(), window: WINDOW, from: MONTH, to: MONTH, reason: en(METRIC_REASONS) });
+const METRIC = obj({ value: nullable(num()), n: int(), window: WINDOW, from: opt(MONTH), to: opt(MONTH), reason: opt(en(METRIC_REASONS)) });
 
 /** A forensic check's `values` key: a camel-case name, or C10's `<tool>/<origin>/<window>`. */
 const CHECK_VALUE_KEY = new RegExp(`^(?:[a-z][A-Za-z0-9]{0,31}|(?:${TOOL_IDS.map(esc).join("|")})/(?:${ORIGINS.join("|")})/(?:${WINDOWS.join("|")}))$`);
@@ -203,7 +267,7 @@ export const AIPROF2: FieldSpec = obj({
   core: str(/^(?=.{1,64}$)(?:0|[1-9]\d{0,3})\.(?:0|[1-9]\d{0,3})\.(?:0|[1-9]\d{0,3})(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/, "public"),
   reference: en(["v0"]),
   coverage: arr(obj({
-    tool: TOOL, window: WINDOW, statuses: arr(en(COVERAGE_STATUS), 64), beta: bool("public"), from: MONTH, to: MONTH,
+    tool: TOOL, window: WINDOW, statuses: arr(en(COVERAGE_STATUS), 64), beta: bool("public"), from: opt(MONTH), to: opt(MONTH),
     sessions: int(), prompts: int(), formatChanged: bool(),
   }), 64),
   overall: obj({
@@ -224,7 +288,7 @@ export const AIPROF2: FieldSpec = obj({
     tenureWeeks: METRIC,
     activeWeeks: obj({ detail: METRIC, lifetime: METRIC }),
     weekly: arr(obj({ week: WEEK, activeDays: int(), detailPrompts: int(), lifetimePrompts: int() }), 52),
-    tools: arr(obj({ tool: TOOL, window: WINDOW, sessions: int(), prompts: int(), actions: int(), from: MONTH, to: MONTH }), 64),
+    tools: arr(obj({ tool: TOOL, window: WINDOW, sessions: int(), prompts: int(), actions: int(), from: opt(MONTH), to: opt(MONTH) }), 64),
     rotation: obj({ active90d: arr(TOOL, TOOL_IDS.length), ever: arr(TOOL, TOOL_IDS.length) }),
     arcs: obj({
       prompts: obj(Object.fromEntries(PROMPT_ARCS.map((k) => [k, int()]))), medianPrompts: nullable(num()),
@@ -243,8 +307,8 @@ export const AIPROF2: FieldSpec = obj({
     hooksDisabled: bool(), memoryFiles: int(), mcpServers: arr(MCP_LABEL, 256),
   }),
   projects: arr(obj({
-    label: str(/^P-[0-9A-F]{4,6}$/, "pseudonymous"), name: REVEALED_NAME, sessions: int(), activeWeeks: int(), tools: arr(TOOL, TOOL_IDS.length),
-    inRepo: bool(), lastWeek: WEEK,
+    label: str(/^P-[0-9A-F]{4,6}$/, "pseudonymous"), name: opt(REVEALED_NAME), sessions: int(), activeWeeks: int(), tools: arr(TOOL, TOOL_IDS.length),
+    inRepo: bool(), lastWeek: opt(WEEK),
   }), 100),
   otherProjects: obj({ projects: int(), sessions: int() }),
   forensics: obj({
@@ -252,7 +316,7 @@ export const AIPROF2: FieldSpec = obj({
     checks: arr(obj({
       id: en(CHECK_IDS), status: en(CHECK_STATUS), n: int(), reason: str(/^[a-z0-9-]{1,40}$/, "public"),
       values: { t: "record", key: CHECK_VALUE_KEY, of: num(), maxKeys: TOOL_IDS.length * ORIGINS.length * WINDOWS.length + 64, fields: { date: DATE } },
-      askAbout: ASK_ABOUT, tools: arr(TOOL, TOOL_IDS.length),
+      askAbout: opt(ASK_ABOUT), tools: arr(TOOL, TOOL_IDS.length),
     }), 32),
   }),
   identity: obj({ accounts: int(), bindings: arr(KEYED_HASH, 64) }),
