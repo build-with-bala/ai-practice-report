@@ -29,3 +29,12 @@ export type { ExportStage } from "./privacy/export";
 export { exportPayload } from "./privacy/export";
 export type { ExportOptions, ExportResult } from "./privacy/export";
 export { canonicalJson } from "./privacy/jcs";
+
+// ── Task 16: the final exports. The values Plans 4 and 5b import through `ai-practice-report/core` (P5 pre-flight J5),
+// and the export's errors, which a caller of exportPayload catches.
+export { buildSessionTable } from "./analysis/sessions";
+export type { Exclusions, SessionRow, SessionTable } from "./analysis/types";
+export { isAction } from "./analysis/walk";
+export { childType } from "./analysis/tiers";
+export { modelExportId } from "./privacy/allowlists";
+export { ExportError, RevealError } from "./privacy/export";
