@@ -28,10 +28,11 @@ import { cspFor } from "./page";
  *      nest in themselves, `li`/`dt`/`dd` and table parts have only their proper parents, tables and rows hold only
  *      their parts and white space. So the tree builder never closes, inserts or moves an element.
  * 3. Attributes are only ` name="value"`: separated by ASCII spaces or newlines, the name matching
- *    `[A-Za-z][A-Za-z0-9:-]*`, the value double-quoted with no raw `<`, `>` or `"`, and no name twice in a tag. No two
- *    elements on the page, HTML or SVG, share an `id` value (`duplicate-id`).
+ *    `[A-Za-z][A-Za-z0-9:-]*`, the value double-quoted with no raw `<`, `>` or `"`, and no name twice in a tag. An `id`
+ *    is an ASCII letter followed by ASCII letters, digits, `_` and `-` (`id-form`: so no character reference, space or
+ *    empty id), and no two elements on the page, HTML or SVG, share one (`duplicate-id`).
  *    `style` and `on…` attributes are counted in `styleAttrs` and `inlineHandlers`.
- * 4. URL attributes (`URL_ATTRS`) hold exactly a `#fragment`, or a `data:image/…` URL on an image (`DATA_CONTEXTS`),
+ * 4. URL attributes (`URL_ATTRS`) hold exactly a `#fragment` whose id has the id form of rule 3, or a `data:image/…` URL on an image (`DATA_CONTEXTS`),
  *    matched literally: no trimming and no entity decoding. `srcset` is never allowed. A violation is an external ref.
  * 5. `<meta>` is only `charset="utf-8"`, `name` viewport, color-scheme or referrer with `content`, or
  *    `http-equiv="Content-Security-Policy"` with `content`.
@@ -105,7 +106,10 @@ const PAINT_ATTRS: ReadonlySet<string> = new Set(["fill", "stroke", "clip-path",
 const LOADERS: ReadonlySet<string> = new Set(["link", "iframe", "object", "embed", "base"]);
 const META_NAMES: ReadonlySet<string> = new Set(["viewport", "color-scheme", "referrer"]);
 
-const FRAGMENT = /^#[A-Za-z][\w:.-]*$/;
+/** The one form of an id: an ASCII letter, then ASCII letters, digits, `_` and `-`. No character reference can occur in it. */
+const ID_FORM = /^[A-Za-z][A-Za-z0-9_-]*$/;
+/** A fragment reference: `#` and an id in that same form. */
+const FRAGMENT = /^#[A-Za-z][A-Za-z0-9_-]*$/;
 const DATA_IMAGE = /^data:image\/[a-z0-9.+-]+(?:;base64)?,[A-Za-z0-9+/=%]*$/;
 /** A canonical CSS `url(`: an id, or a woff2 font or image as base64 or percent-encoded data. */
 const CSS_URL = /url\((?:#[A-Za-z][\w-]*|data:(?:font\/woff2|image\/[a-z0-9.+-]+)(?:;base64)?,[A-Za-z0-9+/=%]*)\)/y;
@@ -303,7 +307,9 @@ export function auditHtml(html: string): Audit {
 
     const id = attrs.get("id");
     if (id !== undefined) {
-      if (ids.has(id)) flag("duplicate-id", lt);
+      // Only the one form is compared, so two ids a browser reads as equal are equal here too: no decoding needed.
+      if (!ID_FORM.test(id)) flag("id-form", lt);
+      else if (ids.has(id)) flag("duplicate-id", lt);
       ids.add(id);
     }
     for (const [key, value] of attrs) {

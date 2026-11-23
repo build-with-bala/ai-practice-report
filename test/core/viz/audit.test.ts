@@ -395,3 +395,33 @@ describe("auditHtml: ids", () => {
     expect([clean(a), codes(a)]).toEqual([false, ["duplicate-id"]]);
   });
 });
+
+describe("auditHtml: ids have one canonical form (fix round 2)", () => {
+  test("character references cannot make two equal ids look different: each is a finding", () => {
+    for (const body of ['<p id="a">x</p><p id="&#97;">y</p>', '<p id="ab">x</p><svg><path id="a&#x62;" d="M0 0"/></svg>',
+      '<p id="a&amp;b">x</p><p id="a&#38;b">y</p>']) {
+      const a = auditHtml(inPage(body));
+      expect([body, clean(a), codes(a).includes("id-form")]).toEqual([body, false, true]);
+    }
+  });
+
+  test("an empty id, an id with a space and an id starting with a digit are findings", () => {
+    for (const id of ["", "a b", "1a", "a.b", "a:b", "é"]) {
+      const a = auditHtml(inPage(`<p id="${id}">x</p>`));
+      expect([id, codes(a)]).toEqual([id, ["id-form"]]);
+    }
+  });
+
+  test("ASCII letters first, then letters, digits, _ and -: clean", () => {
+    expect(clean(auditHtml(inPage('<p id="Ex_c-1">x</p><a href="#Ex_c-1">x</a>')))).toBe(true);
+  });
+
+  test("a fragment reference uses the same form: a character reference or other characters after # are external", () => {
+    for (const ref of ["#&#97;", "#a.b", "#a:b", "#"]) {
+      const a = auditHtml(inPage(`<p id="a">x</p><a href="${ref}">x</a>`));
+      expect([ref, clean(a), a.externalRefs]).toEqual([ref, false, [`href=${ref}`]]);
+    }
+    const svg = auditHtml(inPage('<svg><path id="p" d="M0 0"/><use href="#&#112;"/></svg>'));
+    expect(svg.externalRefs).toEqual(["href=#&#112;"]);
+  });
+});
