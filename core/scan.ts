@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { detectEnv, type Env } from "./env/env";
 import { homesToScan } from "./env/paths";
+import { collectRepoSignals, type RepoSignalOptions, type RepoSignals } from "./git/index";
 import { enterScanTrap } from "./io/signals";
 import { ScanTemp } from "./io/temp";
 import { maybeYield } from "./io/yield";
@@ -37,13 +38,43 @@ export interface ScanOptions { env?: Env; plugins?: SourcePlugin[]; tools?: Tool
    */
   handleSignals?: boolean;
   onLog?: (level: "debug" | "info" | "warn", code: string, n?: number) => void;
+  /**
+   * Repo signals, default true: after the sources are read, the repos holding recent sessions' folders (found by
+   * ancestor checks, never by crawling) are read with read-only git (`ScanResult.repos`). False switches them off — no
+   * git runs; options tune them. Progress is reported as plugin `repo-signals`.
+   */
+  repoSignals?: boolean | RepoSignalOptions;
   /** @internal test hook: builds the temp registry inside the scan's temp folder, when a private copy first needs one. */
   tempFactory?: (base: string) => TempDirs }
 export interface Warning { code: "drift" | "error" | "too-large" | "temp-leftover" | "beta"; tool: ToolId | "scan"; source: string; detail: string }
 export interface ScanResult { store: EventStore; coverage: CoverageEv[]; warnings: Warning[]; cwds: Map<string, string>;
-  salt: Uint8Array; startedAt: number; finishedAt: number; tempClean: boolean }
+  salt: Uint8Array; startedAt: number; finishedAt: number; tempClean: boolean;
+  /** Repo signals: status `off` when switched off, `partial` when the scan was aborted before or during them. */
+  repos: RepoSignals }
 
 const DEFAULT_CONCURRENCY = 4;
+/** Sessions that ended within this long before the scan are recent: only their folders are looked at for repos. */
+const RECENT_MS = 180 * 86_400_000;
+const repoSignalsOff = (status: "off" | "partial"): RepoSignals => ({ status, repos: [], roots: new Map(), skipped: {}, ms: 0 });
+
+/**
+ * The repo-signal after-pass over what the sources found: the projectKeys of recent sessions (any window), the
+ * detail-window sessions per projectKey, and the earliest detail-window start.
+ */
+async function repoPass(store: EventStore, cwds: ReadonlyMap<string, string>, o: { salt: Uint8Array; now: number; signal: AbortSignal;
+  options: RepoSignalOptions; onProgress?: ScanOptions["onProgress"] }): Promise<RepoSignals> {
+  const recent = new Set<string>();
+  const detailSessions = new Map<string, number>();
+  let detailFrom: number | undefined;
+  for (const s of store.all("session")) {
+    if (s.window === "detail") detailFrom = detailFrom === undefined ? s.start : Math.min(detailFrom, s.start);
+    if (s.projectKey === undefined) continue;
+    if (s.end >= o.now - RECENT_MS) recent.add(s.projectKey);
+    if (s.window === "detail") detailSessions.set(s.projectKey, (detailSessions.get(s.projectKey) ?? 0) + 1);
+  }
+  const progress = (done: number, total: number) => { try { o.onProgress?.({ plugin: "repo-signals", done, total }); } catch { /* never fails a scan */ } };
+  return collectRepoSignals({ cwds, recent, detailSessions, detailFrom, salt: o.salt, now: o.now, signal: o.signal, onProgress: progress }, o.options);
+}
 /** Event kinds that say their window; every other kind counts toward any window of its plugin. */
 const WINDOWED: ReadonlySet<string> = new Set(["session", "prompt", "turn"]);
 const yieldKey = (k: string, window: string): string => (WINDOWED.has(k) ? `${k}@${window}` : k);
@@ -76,6 +107,7 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
   const temp = new ScanTemp(env.tmp, opts.tempFactory);
   const trap = opts.handleSignals === false ? undefined : enterScanTrap({ abort: () => stop.abort(), closeSync: () => { temp.close(); } });
   let tempClean = false;
+  let repos = repoSignalsOff(opts.repoSignals === false ? "off" : "partial");
 
   try {
     const aborted = new Set<SourcePlugin>();
@@ -167,6 +199,11 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
     for (const [plugin, count] of nonCoverage) {
       if (plugin.beta && count > 0) warnings.push({ code: "beta", tool: plugin.tool, source: plugin.id, detail: "beta reader" });
     }
+
+    if (opts.repoSignals !== false && !signal.aborted) {
+      const options = typeof opts.repoSignals === "object" ? opts.repoSignals : {};
+      repos = await repoPass(store, cwds, { salt, now, signal, options, onProgress: opts.onProgress });
+    }
   } finally {
     tempClean = temp.close();
     // cleaned up: a trapped SIGINT/SIGTERM, one caught at the tail included, now ends the process by that signal once
@@ -192,5 +229,5 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
   }
   for (const [source, tool] of tooLarge) warnings.push({ code: "too-large", tool, source, detail: "too-large" });
   if (!tempClean) warnings.push({ code: "temp-leftover", tool: "scan", source: "scan", detail: "cleanup-failed" });
-  return { store, coverage, warnings, cwds, salt, startedAt, finishedAt: Date.now(), tempClean };
+  return { store, coverage, warnings, cwds, salt, startedAt, finishedAt: Date.now(), tempClean, repos };
 }

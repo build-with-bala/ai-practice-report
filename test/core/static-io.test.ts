@@ -32,12 +32,14 @@ const PROCESS_MEMBERS = ["env", "platform"];
 const CONSTRUCTS: Readonly<Record<string, RegExp>> = {
   "Bun.spawn": /\bBun\s*(?:\?\.|\.)\s*spawn\b/,
 };
-/**
- * The exemptions: one file, the one construct it may hold, and why; every rule still applies to the rest of the file.
- * The git runner, once it exists, is the one file that spawns:
- *   { file: "core/git/run.ts", construct: "Bun.spawn", why: "the git runner: read-only subcommands, async, with a timeout" }
- */
-const EXEMPT: readonly Exemption[] = [];
+/** The exemptions: one file, the one construct it may hold, and why; every rule still applies to the rest of the file. */
+const EXEMPT: readonly Exemption[] = [
+  {
+    file: "core/git/run.ts", construct: "Bun.spawn",
+    why: "the git runner, the one program core runs: read-only subcommands only (--version, rev-parse, config --get, log), async, " +
+      "with a timeout, an output cap and abort; no stdin, no prompt, no pager, no lazy fetch, and repo config that would run a program overridden",
+  },
+];
 
 interface Exemption { file: string; construct: string; why: string }
 /** Which files a rule checks: `readers`, every core file outside core/io; `all`, every core file. */
@@ -222,5 +224,8 @@ describe("static I/O rule: deny by default", () => {
     expect(violations("core/git/run.ts", "Bun.file(p)", runner)).toEqual(["core/git/run.ts: Bun: Bun"]);
     expect(violations("core/git/other.ts", "Bun.spawn(['git'])", runner)).toEqual(["core/git/other.ts: Bun: Bun", "core/git/other.ts: Bun.spawn: Bun.spawn"]);
     for (const e of EXEMPT) expect([e.file, FILES.includes(e.file), Object.hasOwn(CONSTRUCTS, e.construct), e.why !== ""]).toEqual([e.file, true, true, true]);
+    // the git runner is the only file that spawns
+    const spawning = FILES.filter((f) => CONSTRUCTS["Bun.spawn"]!.test(readFileSync(path.join(ROOT, f), "utf8")));
+    expect(spawning).toEqual(["core/git/run.ts"]);
   });
 });
