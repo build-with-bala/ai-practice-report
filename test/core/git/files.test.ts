@@ -11,11 +11,13 @@ import { parseHooks } from "../../../core/sources/common/hooks";
 import type { Candidate, SourcePlugin } from "../../../core/sources/types";
 import { CANARY, expectNoCanaries } from "../../kit/canary";
 import { fakeHome, type FakeHome } from "../../kit/home";
-import { git, isolateGitHome, makeRepo } from "../../fixtures/repos";
+import { git, gitVersion, isolateGitHome, makeRepo } from "../../fixtures/repos";
 
 const POSIX = process.platform !== "win32";
 const DAY = 86_400_000;
 const ago = (days: number) => Date.now() - days * DAY;
+/** git 2.37 has `--since-as-filter`. */
+const GIT_37 = (([a, b]) => a > 2 || (a === 2 && b >= 37))(gitVersion());
 
 let h: FakeHome;
 let restoreHome: () => void = () => {};
@@ -66,7 +68,7 @@ const repoWith = (name: string, files: Record<string, string>) =>
 /** readRepoFiles of one folder, with real git; `skipped` collects the skip reasons. */
 async function read(root: string, cwds: string[] = [], now = Date.now()) {
   const skipped: Record<string, number> = {};
-  const facts = await readRepoFiles(root, cwds, { signal: new AbortController().signal, runner: runGit, now, timeoutMs: 10_000,
+  const facts = await readRepoFiles(root, cwds, { signal: new AbortController().signal, runner: runGit, now, timeoutMs: 10_000, sinceAsFilter: GIT_37,
     skip: (reason) => { skipped[reason] = (skipped[reason] ?? 0) + 1; } });
   return { ...facts, skipped };
 }
@@ -281,6 +283,20 @@ describe("readRepoFiles: the allowlisted repo files, as booleans and counts", ()
     expect([f.instructions.files, f.ci.present, f.precommit.present]).toEqual([[], false, false]);
     expect(f.skipped).toEqual({ "file-not-file": 4 });
   }, 30_000);
+});
+
+describe("the instruction-file history", () => {
+  test.skipIf(!GIT_37)("HEAD's newest commit dated years back hides none of the recent instruction commits (git >= 2.37)", async () => {
+    const root = makeRepo(path.join(h.root, "r"), [1, 2, 3].map((i) => ({ files: { "CLAUDE.md": `v${i}` }, message: `docs ${i}`, at: ago(10 - i) })));
+    const date = new Date(Date.UTC(2015, 0, 1)).toISOString();
+    git(root, ["-c", "user.email=dev@fixture.test", "-c", "user.name=Fixture Dev", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "skewed clock"],
+      { GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date });
+    const f = await read(root, [root]);
+    expect(f.instructions.touched).toBe(3);
+    // and through a scan, which passes the git version's choice itself
+    const r = await run([root]);
+    expect(r.repos.repos[0]!.instructions.touched).toBe(3);
+  });
 });
 
 describe("repo files in a scan", () => {

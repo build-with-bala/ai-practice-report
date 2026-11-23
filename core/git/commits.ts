@@ -119,6 +119,17 @@ const FIELD = "\x1f";
  */
 export const LOG_ARGS: readonly string[] = ["-z", "--format=%x00%x1e%H%x1f%ct%x1f%ae%x1f%B"];
 
+/** The first git with `--since-as-filter`. */
+export const SINCE_AS_FILTER_SINCE: readonly [number, number] = [2, 37];
+
+/**
+ * The window start of a `git log` (epoch ms, formatted here): `--since-as-filter` on a git that has it (`asFilter`), which
+ * walks the whole history and leaves out only the commits older than the window; `--since` otherwise. Plain `--since`
+ * stops walking at a commit whose recorded date is older than the window, so on a git before 2.37 such a commit (a
+ * skewed clock, a rebase that keeps old dates) hides its ancestors that no other branch reaches.
+ */
+export const sinceArg = (ms: number, asFilter: boolean): string => `${asFilter ? "--since-as-filter" : "--since"}=${new Date(ms).toISOString()}`;
+
 /** One commit record of `git log` output of LOG_ARGS (in memory only). */
 export interface LogRecord { sha: string; ct: number; email: string; message: string; files: string[] }
 

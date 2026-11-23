@@ -1,4 +1,4 @@
-import { commitStream, LOG_ARGS, type ParsedCommit } from "./commits";
+import { commitStream, LOG_ARGS, SINCE_AS_FILTER_SINCE, sinceArg, type ParsedCommit } from "./commits";
 import { candidates, groupRepos, type Found, type Repo } from "./discover";
 import { INSTRUCTION_FILES, MAX_FOLDER_FILES, MAX_REPO_FILE_BYTES, readRepoFiles, REPO_FILES, REPO_FOLDERS, SESSION_FOLDER_FILES } from "./files";
 import { resolveGit, runGit, type GitResult, type GitRunner } from "./run";
@@ -79,8 +79,10 @@ export const REPO_SIGNALS_DESCRIBE: { reads: string[]; runs: string[] } = {
     "git rev-parse --show-toplevel --git-common-dir",
     "git config --get user.email",
     "git config --get extensions.partialClone, git config --get remote.origin.promisor (git older than 2.44 only)",
-    "git log --all --no-merges --no-renames --date-order --since=<date> --max-count=<n> --name-only -z (commit metadata only)",
-    "git log -n50 --since=<180 days ago> --format=%ct -- <instruction file paths> (commit times only; not for a partial clone read without paths)",
+    "git log --all --no-merges --no-renames --since-as-filter=<date> --max-count=<n> --name-only -z (commit metadata only)",
+    "git log -n50 --since-as-filter=<180 days ago> --format=%ct -- <instruction file paths> (commit times only; not for a partial clone read without paths)",
+    "on a git older than 2.37, --since instead of --since-as-filter: there, a commit whose recorded date is older than the window " +
+      "hides the ancestors no other branch reaches, so their commits are not read",
     "every git command: started by its absolute path on PATH (never from the repo folder), with no stdin, no pager and no prompt; " +
       "no transport at all (-c protocol.allow=never, GIT_ALLOW_PROTOCOL=none) and GIT_NO_LAZY_FETCH=1, so nothing is " +
       "fetched whatever the repo config says; fsmonitor and signature checks off; no system config; inherited GIT_* variables removed",
@@ -102,6 +104,10 @@ function assignOwners(read: readonly { repo: Repo; facts: RepoFacts; commits: re
     }
   }
 }
+
+/** Commits newest first, then by key: the order every repo's list is returned in, whatever order git printed. */
+const byNewest = (a: ParsedCommit, b: ParsedCommit): number =>
+  b.fact.ts - a.fact.ts || (a.fact.shaKey < b.fact.shaKey ? -1 : a.fact.shaKey > b.fact.shaKey ? 1 : 0);
 
 const EMPTY_FACTS = (): Pick<RepoFacts, "instructions" | "hooks" | "ci" | "precommit"> => ({
   instructions: { files: [], namesChecks: [], touched: 0 }, hooks: { entries: 0, checks: [], disabled: false },
@@ -253,7 +259,8 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
           const r = await git(args, ro.cwd, ro.timeoutMs, ro.maxBytes);
           return r === STOPPED ? { code: null, stdout: "", timedOut: false, truncated: false } : r;
         };
-        Object.assign(facts, await readRepoFiles(tree.root, cwds, { signal, runner: filesRunner, now: input.now, timeoutMs, skip, history: got.names }));
+        Object.assign(facts, await readRepoFiles(tree.root, cwds, { signal, runner: filesRunner, now: input.now, timeoutMs, skip, history: got.names,
+          sinceAsFilter: atLeast(version, SINCE_AS_FILTER_SINCE) }));
       } catch {
         Object.assign(facts, EMPTY_FACTS());
         skip("files-error");
@@ -284,9 +291,12 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
     if (email === "") return { commits: [], names };
     facts.identity = true;
 
+    // no `--date-order`: with a window start it stops at the first commit older than the window, on every ref. The
+    // window start is `--since-as-filter` where git has it; on an older git, `--since` (see `sinceArg`) still lets a
+    // commit whose recorded date is older than the window hide the ancestors no other branch reaches.
     const logArgs = (withNames: boolean): string[] => [
-      "log", "--all", "--no-merges", "--no-renames", "--date-order",
-      ...(since === undefined ? [] : [`--since=${new Date(since).toISOString()}`]),
+      "log", "--all", "--no-merges", "--no-renames",
+      ...(since === undefined ? [] : [sinceArg(since, atLeast(version, SINCE_AS_FILTER_SINCE))]),
       `--max-count=${maxCommits}`, ...(withNames ? ["--name-only"] : []), ...LOG_ARGS,
     ];
     /**
@@ -319,6 +329,8 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
     const cut = r.truncated || r.timedOut;
     const { commits, records } = parse.end(cut);
     if (!r.truncated && !r.timedOut && r.code !== 0) return { commits: [], names }; // an empty repo, or a history git cannot read
+    // git lists commits in no strict date order without `--date-order`: one stable order for every consumer
+    commits.sort(byNewest);
     facts.commits = commits.map((c) => c.fact);
     facts.commitsTruncated ||= r.truncated || records >= maxCommits;
     return { commits, names };

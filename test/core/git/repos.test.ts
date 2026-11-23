@@ -13,6 +13,14 @@ import { git, gitVersion, isolateGitHome, makeRepo } from "../../fixtures/repos"
 const POSIX = process.platform !== "win32";
 const DAY = 86_400_000;
 const GIT_44 = (([a, b]) => a > 2 || (a === 2 && b >= 44))(gitVersion());
+/** git 2.37 has `--since-as-filter`: an old-dated commit then hides nothing below it. */
+const GIT_37 = (([a, b]) => a > 2 || (a === 2 && b >= 37))(gitVersion());
+/** A commit made at `at` (author and committer date) in `dir`, by the fixture's person. */
+const commitAt = (dir: string, message: string, at: number) => {
+  const date = new Date(at).toISOString();
+  git(dir, ["-c", "user.email=dev@fixture.test", "-c", "user.name=Fixture Dev", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", message],
+    { GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date });
+};
 
 let h: FakeHome;
 let restoreHome: () => void = () => {};
@@ -167,6 +175,46 @@ describe("repo signals: discovery from session folders and commits as keyed fact
     expect(r.repos.repos[0]).toMatchObject({ identity: false, commits: [] });
     // no commit log: only the instruction-file history (commit times by any author, Task 3) runs `log`
     expect(seen.filter((c) => c.startsWith("log ")).map((c) => c.split(" ").slice(0, 2).join(" "))).toEqual(["log -n50"]);
+  });
+});
+
+describe("repo signals: an old-dated commit hides no history", () => {
+  test.skipIf(!GIT_37)("one commit dated years back on another branch, on top of recent ones: every recent commit is read (git >= 2.37)", async () => {
+    const r1 = makeRepo(path.join(h.root, "dated"), [1, 2, 3, 4, 5, 6].map((i) => ({ files: { "n.txt": `${i}` }, message: `c${i}`, at: ago(7 - i) })));
+    git(r1, ["checkout", "-q", "-b", "skewed"]);
+    commitAt(r1, "a commit whose clock was years off", Date.UTC(2015, 0, 1));
+    git(r1, ["checkout", "-q", "main"]);
+    const r = await run([r1]);
+    expect(r.repos.status).toBe("ok");
+    expect(r.repos.repos[0]!.commits).toHaveLength(6);
+    expect(r.repos.repos[0]!.commitsTruncated).toBe(false);
+  });
+
+  test.skipIf(!GIT_37)("a rebase that keeps the author dates of a year-old branch hides none of the recent commits below it (git >= 2.37)", async () => {
+    const r1 = makeRepo(path.join(h.root, "rebased"), [1, 2, 3, 4, 5].map((i) => ({ files: { "n.txt": `${i}` }, message: `c${i}`, at: ago(6 - i) })));
+    git(r1, ["checkout", "-q", "-b", "topic"]);
+    // the topic's tip as a date-keeping rebase leaves it: committed with an old date on top of today's main
+    commitAt(r1, "topic work from last year", ago(400));
+    const r = await run([r1]);
+    expect(r.repos.repos[0]!.commits).toHaveLength(5);
+  });
+});
+
+describe("repo signals: the window start by git version", () => {
+  test("git 2.37 or later filters by --since-as-filter, an older git by --since; never --date-order", async () => {
+    const r1 = makeRepo(path.join(h.root, "v"), [{ files: { "CLAUDE.md": "x" }, message: "one", at: ago(2) }]);
+    const asked = async (version: string) => {
+      const logs: string[][] = [];
+      const runner: GitRunner = async (a, o) => {
+        if (a[0] === "--version") return { code: 0, stdout: `git version ${version}\n`, timedOut: false, truncated: false };
+        if (a[0] === "log") logs.push([...a]);
+        return runGit(a, o);
+      };
+      await run([r1], { repoSignals: { runner } });
+      return logs.map((a) => a.filter((x) => /^--(since|date-order)/.test(x)).map((x) => x.replace(/=.*/, "")));
+    };
+    expect(await asked("2.37.0")).toEqual([["--since-as-filter"], ["--since-as-filter"]]);
+    expect(await asked("2.36.9")).toEqual([["--since"], ["--since"]]);
   });
 });
 
