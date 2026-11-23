@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { dayKey, dayStart } from "../../../core/analysis/activity";
 import { buildSessionTable } from "../../../core/analysis/sessions";
 import type { SessionTable } from "../../../core/analysis/types";
 import { checkAccount, checkClaudeHistory } from "../../../core/forensics/claude";
@@ -90,19 +91,19 @@ describe("checkClaudeHistory (C3)", () => {
     expect(historyOf(raw, t).values.matchShare).toBe(0.9);
   });
 
-  test("3 transcript days missing from the stats span fail", () => {
+  test("2 transcript days missing from the stats span, neither with a neighbour in it, fail", () => {
     const evs = promptsWithHistory(10);
-    for (let i = 0; i < 10; i++) if (i < 2 || i > 4) evs.push(stats(day(T0 + i * DAY)));
+    for (let i = 0; i < 10; i++) if (i === 0 || i === 4 || i === 5 || i === 9) evs.push(stats(day(T0 + i * DAY)));
     const { raw, t } = tableOf(evs);
     const c = historyOf(raw, t);
     expect(c.status).toBe("fail");
-    expect(c.values.missingDays).toBe(3);
-    expect(c.askAbout).toContain("3 days");
+    expect(c.values.missingDays).toBe(2);
+    expect(c.askAbout).toContain("2 days");
   });
 
   test("a single missing day is a note", () => {
     const evs = promptsWithHistory(10);
-    for (let i = 0; i < 10; i++) if (i !== 4) evs.push(stats(day(T0 + i * DAY)));
+    for (let i = 0; i < 10; i++) if (i < 3 || i > 5) evs.push(stats(day(T0 + i * DAY)));
     const { raw, t } = tableOf(evs);
     const c = historyOf(raw, t);
     expect(c.status).toBe("note");
@@ -118,7 +119,7 @@ describe("checkClaudeHistory (C3)", () => {
     expect(c.values.missingDays).toBe(0);
   });
 
-  test("days are UTC days", () => {
+  test("transcript days are UTC days, whatever the analysis zone", () => {
     // 23:30 UTC: the next day in Auckland, the same day in UTC
     const ts = Date.UTC(2026, 9, 7, 23, 30);
     const evs: Ev[] = [sess("s", ts), tPrompt("s", ts, "p"), stats("2026-10-06"), stats("2026-10-07"), stats("2026-10-09")];
@@ -169,12 +170,72 @@ describe("checkClaudeHistory (C3): pasted prompts and one-part results", () => {
     const both = tableOf([...promptsWithHistory(10), ...Array.from({ length: 10 }, (_, i) => stats(day(T0 + i * DAY)))]);
     expect(historyOf(both.raw, both.t).reason).toBe("ok");
   });
+});
 
-  test("only utc stats days are read", () => {
-    const evs: Ev[] = [sess("s", T0), tPrompt("s", T0, "p"), tPrompt("s", T0 + 2 * DAY, "q"), tPrompt("s", T0 + 4 * DAY, "r"),
-      stats(day(T0)), stats(day(T0 + 4 * DAY)), { ...stats(day(T0 + 2 * DAY)), zone: "local" }];
+describe("checkClaudeHistory (C3): the stats cache's day may be the UTC day or the local one", () => {
+  const HOUR = 3_600_000;
+  /**
+   * A weekday worker over four weeks in `zone`, one prompt every 30 min from `from` to `to` local hours, in one
+   * session a day; and the stats cache's days for those prompts, keyed by `key` (each prompt's local day, its UTC day,
+   * or UTC in the first two weeks and local after, as a cache written before and after the tool changed its key).
+   */
+  function worker(zone: string, key: "local" | "utc" | "mixed", from = 9, to = 18): Ev[] {
+    const evs: Ev[] = [];
+    const statsDays = new Set<string>();
+    const first = Date.UTC(2026, 8, 7); // a Monday
+    for (let d = 0; d < 28; d++) {
+      const date = new Date(first + d * DAY);
+      if (date.getUTCDay() === 0 || date.getUTCDay() === 6) continue;
+      const local = date.toISOString().slice(0, 10);
+      const start = dayStart(local, zone);
+      const id = `s${d}`;
+      evs.push({ ...sess(id, start + from * HOUR), end: start + to * HOUR });
+      for (let ts = start + from * HOUR; ts < start + to * HOUR; ts += 30 * MIN) {
+        evs.push(tPrompt(id, ts, `p${d}-${ts}`));
+        const utc = key === "utc" || (key === "mixed" && d < 14);
+        statsDays.add(utc ? day(ts) : dayKey(ts, zone));
+      }
+    }
+    for (const s of statsDays) evs.push(stats(s));
+    return evs;
+  }
+
+  for (const [zone, from, to] of [["America/Los_Angeles", 9, 18], ["Australia/Sydney", 9, 18], ["Pacific/Auckland", 9, 18], ["America/New_York", 9, 22]] as const) {
+    for (const key of ["local", "utc", "mixed"] as const) {
+      test(`an honest weekday worker in ${zone}, ${from} to ${to}, with the cache keyed ${key}, passes`, () => {
+        const { raw, t } = tableOf(worker(zone, key, from, to));
+        const c = historyOf(raw, t);
+        expect([c.status, c.reason, c.values.missingDays]).toEqual(["pass", "ok-stats-only", 0]);
+      });
+    }
+  }
+
+  /** A prompt every 2 h on each of 30 days, UTC-keyed stats for every day but those in `gone`. */
+  const daily = (gone: number[]): Ev[] => {
+    const evs: Ev[] = [sess("s", T0)];
+    for (let d = 0; d < 30; d++) {
+      for (let h = 0; h < 4; h++) evs.push(tPrompt("s", T0 + d * DAY + h * 2 * HOUR, `p${d}-${h}`));
+      if (!gone.includes(d)) evs.push(stats(day(T0 + d * DAY)));
+    }
+    return evs;
+  };
+
+  test("a day missing with both neighbours present counts as present", () => {
+    const { raw, t } = tableOf(daily([5, 12]));
+    expect(historyOf(raw, t).values.missingDays).toBe(0);
+  });
+
+  test("a day truly missing, with no neighbour in the cache, still counts as missing", () => {
+    const one = tableOf(daily([5, 6, 7]));
+    expect([historyOf(one.raw, one.t).status, historyOf(one.raw, one.t).values.missingDays]).toEqual(["note", 1]);
+    const two = tableOf(daily([5, 6, 7, 15, 16, 17]));
+    expect([historyOf(two.raw, two.t).status, historyOf(two.raw, two.t).values.missingDays]).toEqual(["fail", 2]);
+  });
+
+  test("the day's zone label is not read: a stats day labelled local counts like one labelled utc", () => {
+    const evs = daily([5, 6, 7]).map((e) => (e.k === "daily" ? { ...e, zone: "local" as const } : e));
     const { raw, t } = tableOf(evs);
-    expect(historyOf(raw, t).values.missingDays).toBe(1);
+    expect([historyOf(raw, t).status, historyOf(raw, t).values.missingDays]).toEqual(["note", 1]);
   });
 });
 

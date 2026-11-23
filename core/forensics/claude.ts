@@ -19,6 +19,13 @@ const MATCH_MS = 10_000;
 const MIN_MATCH = 0.75;
 const FAIL_DAYS = 2;
 const FAIL_DAY_SHARE = 0.02;
+const DAY_MS = 86_400_000;
+
+/** The day before and the day after a day "YYYY-MM-DD". */
+function neighbours(day: string): [string, string] {
+  const at = Date.parse(`${day}T00:00:00Z`);
+  return [new Date(at - DAY_MS).toISOString().slice(0, 10), new Date(at + DAY_MS).toISOString().slice(0, 10)];
+}
 
 interface Part { status: CheckStatus; reason: Reason }
 
@@ -74,8 +81,12 @@ function pasteMatches(prompts: readonly PromptEv[], pasted: readonly PromptEv[])
  *   placeholder, so a prompt with a paste never hash-matches: a transcript prompt left unmatched also matches a history
  *   prompt with `hasPaste` within 10 s (the earliest unused one; the same session where both name one), and each such history prompt
  *   matches at most one transcript prompt.
- * - Missing days: UTC days with human transcript prompts, inside the span of the stats cache's `utc` days, that the
- *   stats cache has no day for; at least 2 such days and 2% of those days → fail, fewer → note.
+ * - Missing days: UTC days with human transcript prompts, inside the span of the stats cache's days, for which the
+ *   stats cache holds neither that day nor the day before or after it; at least 2 such days and 2% of those days →
+ *   fail, fewer → note. The CLI keyed its days by the UTC date in older releases and by the local date in newer ones,
+ *   so one cache can hold both; at any instant the local date is the UTC date or a day either side of it, so a day
+ *   either side counts as present (this covers travel across zones too). The day's `zone` label is not read: no
+ *   label can be trusted to say which key a day was written under.
  * Each part needs its own side; n/a without human transcript prompts, or with neither part measurable. A pass says which
  * parts ran: `ok` (both), `ok-history-only`, `ok-stats-only`. `n`: the transcript prompts in the history's span when the
  * match part ran, else the transcript days in the stats span.
@@ -83,7 +94,7 @@ function pasteMatches(prompts: readonly PromptEv[], pasted: readonly PromptEv[])
 export function checkClaudeHistory(raw: ScanResult, t: SessionTable, s: ForensicScope = forensicScope(raw, t)): CheckResult {
   const transcript = s.prompts().filter((p) => p.source === TRANSCRIPTS_SOURCE && s.human(p));
   const history = s.prompts().filter((p) => p.source === HISTORY_SOURCE);
-  const stats = s.daily().filter((d) => d.source === STATS_SOURCE && d.zone === "utc");
+  const stats = s.daily().filter((d) => d.source === STATS_SOURCE);
   const tools = toolsOf([...transcript, ...history, ...stats]);
   const values: CheckValues = {};
   const parts: Part[] = [];
@@ -128,7 +139,7 @@ export function checkClaudeHistory(raw: ScanResult, t: SessionTable, s: Forensic
       if (day >= first && day <= last) days.add(day);
     }
     if (days.size > 0) {
-      const missing = [...days].filter((d) => !have.has(d)).length;
+      const missing = [...days].filter((d) => !have.has(d) && !neighbours(d).some((x) => have.has(x))).length;
       if (n === 0) n = days.size;
       values.missingDays = missing;
       values.days = days.size;

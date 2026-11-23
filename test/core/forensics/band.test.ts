@@ -270,7 +270,7 @@ describe("wording: every reason and question the forensic checks produce", () =>
     scrambled(anchors(), 3),
     claudeDays(6),
     claudeDays(10, (_, i) => i === 0 || i === 9),
-    claudeDays(10, (_, i) => i !== 4),
+    claudeDays(10, (_, i) => i < 3 || i > 5),
     [sess("a"), identity("session", "a"), identity("config", "b")],
     [sess("a"), identity("session", "a"), identity("session", "c"), identity("config", "a")],
     files(20, (i) => (i < 3 ? file(i, { mtime: T0 }) : file(i))),
