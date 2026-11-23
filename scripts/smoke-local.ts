@@ -1,13 +1,14 @@
-// Local acceptance run: scans this machine's real stores with every P0 plugin and prints COUNTS ONLY — never names,
-// paths, ids or text, and no date finer than a month. Every `key=value` value is a number, a ratio, `n/a` or `-`, a
-// boolean, a month span or a short code (the grammar test/scripts/smoke.test.ts pins); a key holds no `=`. Exit code 1
-// when a P0 plugin errors, the scan leaves temp files, a budget is exceeded, or too few Codex command events had a
-// command line to classify.
+// Local acceptance run: scans this machine's real stores with every P0 plugin, analyzes and exports the result, and
+// prints COUNTS ONLY — never names, paths, ids, text, scores or bands, and no date finer than a month. Every
+// `key=value` value is a number, a ratio, `n/a` or `-`, a boolean, a month span, a short code or `PASS`/`FAIL` (the
+// grammar test/scripts/smoke.test.ts pins); a key holds no `=`. Exit code 1 when a P0 plugin errors, the scan leaves
+// temp files, an analysis check fails, scan plus analyze takes over 60 s, the peak RSS exceeds 1 GiB, or too few Codex
+// command events had a command line to classify.
 //   bun scripts/smoke-local.ts [--concurrency <n>]
 import path from "node:path";
 import { detectEnv, type Env } from "../core/env/env";
 import { homesToScan } from "../core/env/paths";
-import { registry, scan, type CoverageEv, type ScanResult } from "../core/index";
+import { analyze, ExportError, exportPayload, registry, scan, type Analysis, type CoverageEv, type ScanResult } from "../core/index";
 import { safeList, walk } from "../core/io/fs";
 import { ccTranscripts } from "../core/sources/claude-code";
 import { SHELL_TOOLS } from "../core/sources/codex/tools";
@@ -16,6 +17,11 @@ const MiB = 1024 * 1024;
 const BUDGET_SECONDS = 60;
 const BUDGET_RSS = 1024 * MiB;
 const MIN_EXTRACTED_SHARE = 0.9;
+/** The export's size bound, in bytes (pre-flight P19). */
+const MAX_EXPORT_BYTES = 300_000;
+const BANDS: ReadonlySet<string> = new Set(["consistent", "consistent-with-notes", "inconsistent", "unverifiable"]);
+/** The forensic checks that always run, C1–C10 (the soft flags follow them). */
+const FORENSIC_CHECKS = ["C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10"];
 /** The first day of VS Code's journal format for chat sessions, as the spec's acceptance check names it. */
 const COPILOT_JOURNAL_SINCE = Date.UTC(2026, 1, 23);
 const DAY_MS = 86_400_000;
@@ -101,19 +107,96 @@ function startSampler(): Sampler {
   return { stop, kill };
 }
 
-interface Run { r: ScanResult; seconds: number; peakRss: number; samples: number; osPeakRss?: number; logs: Map<string, number>; before: number; after: number }
+/** The export's outcome: its canonical bytes, or (when the schema refuses the analysis) how many paths it named. */
+export type Exported = { ok: true; json: string; bytes: number } | { ok: false; violations: number };
 
+/** Exports `a`; an `ExportError` becomes a count of its paths (never the paths), and any other error is thrown. */
+export function exportOf(a: Analysis): Exported {
+  try {
+    const { json, bytes } = exportPayload(a, { schema: "aiprof/2" });
+    return { ok: true, json, bytes };
+  } catch (e) {
+    if (e instanceof ExportError) return { ok: false, violations: e.paths.length };
+    throw e;
+  }
+}
+
+/** Every object in `v` with a `value` key holding a number or null (a metric) that lacks a window or a finite count. */
+function metricsWithoutMeta(v: unknown, out = { metrics: 0, bad: 0 }): typeof out {
+  if (v === null || typeof v !== "object") return out;
+  const o = v as Record<string, unknown>;
+  if (!Array.isArray(v) && "value" in o && (o.value === null || typeof o.value === "number")) {
+    out.metrics++;
+    if (!(o.window === "detail" || o.window === "lifetime") || typeof o.n !== "number" || !Number.isFinite(o.n)) out.bad++;
+  }
+  for (const x of Object.values(o)) metricsWithoutMeta(x, out);
+  return out;
+}
+
+/**
+ * The raw paths an export must never hold: the home, every session cwd and every repo root, as written and as JSON
+ * escapes them. A file-system root (`/`, `C:\`) is no path of anyone's, so it is left out.
+ */
+function rawPaths(r: ScanResult, home: string): string[] {
+  const out = new Set<string>();
+  for (const p of [home, ...r.cwds.values(), ...r.repos.roots.values()]) {
+    if (p === "" || path.parse(p).root === p) continue;
+    out.add(p);
+    out.add(JSON.stringify(p).slice(1, -1));
+  }
+  return [...out];
+}
+
+const passFail = (ok: boolean): string => (ok ? "PASS" : "FAIL");
+
+/**
+ * The analysis checks (Task 16), as lines of counts and PASS/FAIL, and the names of those that failed. A refused export
+ * prints the count of the paths it named and fails both export checks.
+ */
+export function analysisLines(r: ScanResult, a: Analysis, exported: Exported, home: string): { lines: string[]; failures: string[] } {
+  const lines: string[] = [];
+  const failures: string[] = [];
+  const check = (key: string, ok: boolean): void => {
+    lines.push(`${key}=${passFail(ok)}`);
+    if (!ok) failures.push(key);
+  };
+  const scored = a.dimensions.filter((d) => d.status === "scored");
+  lines.push(`dimensions scored=${scored.length}/${a.dimensions.length}`);
+  check("not-saturated", scored.every((d) => d.score !== 99 || d.openTail));
+  const m = metricsWithoutMeta(a);
+  check("metrics-have-window-and-n", m.metrics > 0 && m.bad === 0);
+  if (!exported.ok) lines.push(`export-violations=${exported.violations}`);
+  const needles = rawPaths(r, home);
+  check("export-no-raw-paths", exported.ok && !needles.some((p) => exported.json.includes(p)));
+  check("export-under-300kb", exported.ok && exported.bytes <= MAX_EXPORT_BYTES);
+  const ids = new Set<string>(a.forensics.checks.map((c) => c.id));
+  check("forensics-ran", BANDS.has(a.forensics.band) && FORENSIC_CHECKS.every((id) => ids.has(id)));
+  lines.push(`repo-signals=${code(r.repos.status)} repos=${r.repos.repos.length}`);
+  return { lines, failures };
+}
+
+interface Run { r: ScanResult; a: Analysis; exported: Exported; seconds: number; analysisSeconds: number; peakRss: number; samples: number;
+  osPeakRss?: number; logs: Map<string, number>; before: number; after: number }
+
+/** Scans, analyzes and exports, sampling the RSS across all three. */
 async function run(env: Env, concurrency: number | undefined): Promise<Run> {
   const before = tempLeftovers(env);
   const sampler = startSampler();
   const logs = new Map<string, number>();
-  const started = performance.now();
   let r: ScanResult;
+  let a: Analysis;
+  let exported: Exported;
   let sampled: Samples;
   let seconds: number;
+  let analysisSeconds: number;
   try {
+    const started = performance.now();
     r = await scan({ env, wsl: false, concurrency, onLog: (level, c, n) => tally(logs, `${level} ${code(c)}`, n ?? 1) });
     seconds = (performance.now() - started) / 1000;
+    const analyzing = performance.now();
+    a = analyze(r);
+    analysisSeconds = (performance.now() - analyzing) / 1000;
+    exported = exportOf(a);
     sampled = await sampler.stop();
   } finally {
     sampler.kill(); // a scan that throws must not leave the worker holding the process open
@@ -122,7 +205,7 @@ async function run(env: Env, concurrency: number | undefined): Promise<Run> {
   // getrusage's high-water mark — bytes on macOS, KiB on Linux (Bun passes it through) — cross-checks the samples
   const maxRss = process.resourceUsage().maxRSS;
   const osPeakRss = process.platform === "darwin" ? maxRss : process.platform === "linux" ? maxRss * 1024 : undefined;
-  return { r, seconds, peakRss, samples: sampled.samples, osPeakRss, logs, before, after: tempLeftovers(env) };
+  return { r, a, exported, seconds, analysisSeconds, peakRss, samples: sampled.samples, osPeakRss, logs, before, after: tempLeftovers(env) };
 }
 
 export async function main(argv: string[]): Promise<number> {
@@ -130,7 +213,7 @@ export async function main(argv: string[]): Promise<number> {
   const concurrency = i >= 0 ? Number(argv[i + 1]) : undefined;
   if (concurrency !== undefined && !(Number.isInteger(concurrency) && concurrency > 0)) throw new Error("--concurrency takes a positive integer");
   const env = detectEnv();
-  const { r, seconds, peakRss, samples, osPeakRss, logs, before, after } = await run(env, concurrency);
+  const { r, a, exported, seconds, analysisSeconds, peakRss, samples, osPeakRss, logs, before, after } = await run(env, concurrency);
   const out: string[] = [];
   const failures: string[] = [];
 
@@ -172,13 +255,18 @@ export async function main(argv: string[]): Promise<number> {
   for (const w of r.warnings) tally(warnings, `${w.code}:${w.source}`);
   out.push(`warnings: ${pairs(warnings)}`, `logs: ${pairs(logs)}`);
 
+  out.push("== analysis", `analysis elapsed=${analysisSeconds.toFixed(1)}`);
+  const analysis = analysisLines(r, a, exported, env.home);
+  out.push(...analysis.lines);
+  if (analysis.failures.length > 0) failures.push(`analysis check(s) failed: ${analysis.failures.join(", ")}`);
+
   out.push("== budgets");
   const read = r.coverage.reduce((n, c) => n + c.bytes, 0);
   const files = r.coverage.reduce((n, c) => n + c.files, 0);
-  out.push(`elapsed=${seconds.toFixed(1)} s (budget ${BUDGET_SECONDS} s) concurrency=${concurrency ?? "default"} read=${mib(read)} in ${files} files`);
+  out.push(`elapsed=${seconds.toFixed(1)} s (budget ${BUDGET_SECONDS} s for scan plus analysis) concurrency=${concurrency ?? "default"} read=${mib(read)} in ${files} files`);
   out.push(`peak RSS sampled every 250 ms=${mib(peakRss)} (${samples} samples)${osPeakRss === undefined ? "" : ` os-reported peak=${mib(osPeakRss)}`} (budget ${mib(BUDGET_RSS)})`);
   out.push(`tempClean=${r.tempClean} $TMPDIR/aipr-* before=${before} after=${after}`);
-  if (seconds > BUDGET_SECONDS) failures.push("elapsed over budget");
+  if (seconds + analysisSeconds > BUDGET_SECONDS) failures.push("scan plus analysis over budget");
   if (Math.max(peakRss, osPeakRss ?? 0) > BUDGET_RSS) failures.push("peak RSS over budget");
   if (!r.tempClean) failures.push("temp not clean");
   if (after > 0) failures.push("aipr-* temp dirs left in $TMPDIR");
