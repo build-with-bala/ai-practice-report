@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { GIT_SAFE_ARGS, gitEnv, resolveGit, runGit } from "../../../core/git/run";
 import { fakeHome, type FakeHome } from "../../kit/home";
@@ -47,7 +47,7 @@ describe("runGit", () => {
     const env = gitEnv({ PATH: "/bin", HOME: "/h", GIT_DIR: "/x", GIT_CONFIG_GLOBAL: "/y", GIT_EXTERNAL_DIFF: "z", UNSET: undefined });
     expect(env).toEqual({
       PATH: "/bin", HOME: "/h", GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0", GIT_NO_LAZY_FETCH: "1", GIT_ALLOW_PROTOCOL: "none", GIT_CONFIG_NOSYSTEM: "1",
-      GIT_PAGER: "cat", LC_ALL: "C",
+      GIT_PAGER: "cat", LC_ALL: "C", NoDefaultCurrentDirectoryInExePath: "1",
     });
   });
 
@@ -127,6 +127,22 @@ describe("runGit", () => {
     // a POSIX temp path is not a Windows absolute path, so only a Windows host can find it
     if (process.platform === "win32") expect(p?.toLowerCase()).toBe(path.join(dir, "git.cmd").toLowerCase());
     else expect(p).toBeUndefined();
+  });
+
+  // Windows paths: only a Windows host can stat them
+  test.skipIf(process.platform !== "win32")("on Windows, git.exe anywhere on PATH wins over git.cmd, whatever PATHEXT's order", () => {
+    const first = path.join(h.root, "first");
+    const later = path.join(h.root, "later");
+    mkdirSync(first, { recursive: true });
+    mkdirSync(later, { recursive: true });
+    writeFileSync(path.join(first, "git.cmd"), "@echo off\r\n");
+    writeFileSync(path.join(first, "git.exe"), "MZ");
+    expect(resolveGit({ PATH: first, PATHEXT: ".CMD;.EXE" }, "win32")?.toLowerCase()).toBe(path.join(first, "git.exe").toLowerCase());
+    rmSync(path.join(first, "git.exe"));
+    writeFileSync(path.join(later, "git.exe"), "MZ");
+    expect(resolveGit({ PATH: `${first};${later}`, PATHEXT: ".CMD;.EXE" }, "win32")?.toLowerCase()).toBe(path.join(later, "git.exe").toLowerCase());
+    // PATHEXT still decides which extensions run at all
+    expect(resolveGit({ PATH: first, PATHEXT: ".EXE" }, "win32")).toBeUndefined();
   });
 
   test("no git on PATH: the runner rejects with ENOENT", async () => {
