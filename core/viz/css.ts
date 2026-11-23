@@ -18,9 +18,10 @@ import { PRINT_SCALE_PT, SPACE, THEMES, TYPE_SCALE, type ColorToken, type ThemeN
  * - layout `layout`, `rail`, `chapter-bar`, `masthead`, `kit-controls`, `chapter`, `skip-link`, `scroll-x` with `mw-960`
  *   and `mw-888` (`data-print="fit"` lets a marks-only SVG scale to the printed column), `kit-defs` and `kit-hatch-line` (the hatch pattern's stroke), `print-footer`, `icon`;
  * - components `exhibit` (`exhibit__head`, `exhibit__letter`, `exhibit__tag`, `exhibit__note`, `exhibit__placeholder`,
- *   `exhibit--thin`, `exhibit--empty`, `is-cited`), `cite`, `ledger` (`ledger-row`, `ledger-row__label`, `__rule`,
- *   `__value`, `__dots`, `__window`, `ledger-components`), `seal` (`seal--struck|provisional|flagged`, `seal-ring`,
- *   `seal-disc`, `seal-text`, `seal-outline`, `seal-ringtext`, `seal__meta`), `tree`, `dots`, `tag`.
+ *   `exhibit--thin`, `exhibit--empty`, `is-cited`), `cite`, `ledger` (`ledger-group`, `ledger-row`, `ledger-row--unscored`,
+ *   `ledger-row__label`, `__rule`, `__value`, `__interval`, `__note`, `__dots`, `__window`, `ledger-components`,
+ *   `ledger-legend`), `seal` (`seal--struck|provisional|flagged` on the seal's <svg>, `seal-ring`, `seal-disc`, `seal-text`,
+ *   `seal-band`, `seal-outline`, `seal-ringtext`, `seal__meta`, `seal__interval`), `tree`, `dots`, `tag`.
  */
 
 /**
@@ -41,9 +42,10 @@ export const KIT_CLASSES: readonly string[] = [
   // components
   "num", "tag", "dots", "cite",
   "exhibit", "exhibit__head", "exhibit__letter", "exhibit__tag", "exhibit__note", "exhibit__placeholder", "exhibit--thin", "exhibit--empty", "is-cited",
-  "ledger", "ledger-group", "ledger-row", "ledger-row__label", "ledger-row__rule", "ledger-row__value", "ledger-row__dots", "ledger-row__window",
-  "ledger-components",
-  "seal", "seal--struck", "seal--provisional", "seal--flagged", "seal-ring", "seal-disc", "seal-text", "seal-outline", "seal-ringtext", "seal__meta",
+  "ledger", "ledger-group", "ledger-row", "ledger-row--unscored", "ledger-row__label", "ledger-row__rule", "ledger-row__value",
+  "ledger-row__interval", "ledger-row__note", "ledger-row__dots", "ledger-row__window", "ledger-components", "ledger-legend",
+  "seal", "seal--struck", "seal--provisional", "seal--flagged", "seal-ring", "seal-disc", "seal-text", "seal-band", "seal-outline",
+  "seal-ringtext", "seal__meta", "seal__interval",
   "tree",
 ];
 
@@ -211,33 +213,46 @@ function components(): string[] {
     rule(".exhibit__note", [`border:1.5px solid ${v("gold")}`, `padding:var(--s3) var(--s4)`, `color:${v("muted")}`]),
     rule(".exhibit__placeholder", ["display:block", "width:100%", "height:48px"]),
     rule(".exhibit--thin .exhibit__note", ["margin-bottom:var(--s5)"]),
-    rule(".exhibit--empty .exhibit__note", ["margin-top:var(--s4)"]),
+    // An empty exhibit is not thin evidence: its note is outlined in the hatch colour, not gold.
+    rule(".exhibit--empty .exhibit__note", ["margin-top:var(--s4)", `border-color:${v("ref")}`]),
     // assay ledger
-    rule(".ledger", ["display:grid", "gap:var(--s3)"]),
+    rule(".ledger", ["display:grid", "grid-template-columns:minmax(0,1fr)", "gap:var(--s3)"]),
     rule(".ledger-group>h3,.ledger-group>.tag", ["margin:var(--s5) 0 var(--s2)"]),
     rule(".ledger-row>summary", ["display:grid", "grid-template-columns:minmax(0,160px) minmax(0,1fr) 128px 36px 64px",
       "grid-template-areas:\"label rule value dots window\"", "align-items:center", "gap:var(--s4)", "padding:var(--s1) 0"]),
     rule(".ledger-row__label", ["grid-area:label"]),
-    rule(".ledger-row__rule", ["grid-area:rule", "display:block", "width:100%", "height:24px"]),
+    // The rule has no text, so it scales freely with its column (viewBox 400 × 24, aspect kept).
+    rule(".ledger-row__rule", ["grid-area:rule", "display:block", "min-width:0"]),
+    rule(".ledger-row__rule>svg", ["display:block", "width:100%", "height:auto", "overflow:visible"]),
     rule(".ledger-row__value", ["grid-area:value", "white-space:nowrap"]),
-    rule(".ledger-row__dots", ["grid-area:dots"]),
+    rule(".ledger-row__interval", [`color:${v("muted")}`]),
+    rule(".ledger-row__dots", ["grid-area:dots", "display:block"]),
     rule(".ledger-row__window", ["grid-area:window", "text-align:right"]),
+    // A row that is not scored: the note takes the score's place and the dots' column.
+    rule(".ledger-row--unscored>summary", ["grid-template-areas:\"label rule value value window\""]),
+    rule(".ledger-row__note", ["white-space:normal", `color:${v("muted")}`]),
     rule(".ledger-row[open]>summary,.ledger-row>summary:hover", [`background:${v("raised")}`]),
-    rule(".ledger-components", ["margin:var(--s2) 0 var(--s4)"]),
+    rule(".ledger-components", ["margin:var(--s2) 0 var(--s4)", "overflow-x:auto", "overscroll-behavior-x:contain"]),
+    rule(".ledger-legend", ["display:flex", "flex-wrap:wrap", "align-items:center", "gap:var(--s2) var(--s5)", "margin-bottom:var(--s4)", ...MONO_12_CAPS, `color:${v("faint")}`]),
+    rule(".ledger-legend>span", ["display:inline-flex", "align-items:center", "gap:var(--s2)"]),
     // seal
     rule(".seal", ["display:inline-grid", "justify-items:center", "gap:var(--s2)", `color:${v("gold")}`]),
+    // The state class sits on the seal's <svg> (sealSvg), so the share card's nested seal keeps its state.
     rule(".seal>svg", ["display:block", "width:192px", "height:192px", "overflow:visible"]),
     rule(".seal-ring", ["fill:none", "stroke:currentColor"]),
     rule(".seal-disc", ["fill:none"]),
     rule(".seal-text", ["fill:currentColor"]),
-    rule(".seal-outline", ["fill:none", "stroke:currentColor", "stroke-width:1"]),
-    rule(".seal-ringtext", ["fill:currentColor", "font-size:12px", "letter-spacing:.12em", "text-transform:uppercase"]),
+    rule(".seal-band", ["letter-spacing:.08em", "text-transform:uppercase"]),
+    rule(".seal-ringtext", ["fill:currentColor", `font-family:${FONT_STACK.mono}`, "font-size:12px", "font-weight:500", "letter-spacing:.12em",
+      "text-transform:uppercase", "font-variant-numeric:tabular-nums slashed-zero", "font-synthesis:none"]),
     rule(".seal--struck .seal-disc", ["fill:currentColor"]),
     rule(".seal--struck .seal-text", [`fill:${v("onAccent")}`]),
-    rule(".seal--struck>svg", ["animation:kit-strike 420ms cubic-bezier(.2,.8,.2,1)"]),
-    rule(".seal--provisional .seal-disc", ["fill:none"]),
+    rule("svg.seal--struck", ["animation:kit-strike 420ms cubic-bezier(.2,.8,.2,1)", "transform-origin:50% 50%"]),
+    // Provisional: nothing is struck, so the disc stays open and the numerals are drawn as an outline.
+    rule(".seal--provisional .seal-outline", ["fill:none", "stroke:currentColor", "stroke-width:1"]),
     rule(".seal--flagged", [`color:${v("vermilion")}`]),
     rule(".seal__meta", ["display:grid", "justify-items:center", "gap:var(--s1)", `color:${v("muted")}`]),
+    rule(".seal__interval", [`color:${v("ink")}`]),
     // delegation outline: branches are borders
     rule("ol.tree,.tree ol", ["list-style:none", "margin:0", "padding:0"]),
     rule(".tree", [`font-family:${FONT_STACK.mono}`, "font-size:14px", "line-height:1.45", "font-variant-numeric:tabular-nums slashed-zero",
@@ -251,9 +266,12 @@ function components(): string[] {
     media("(max-width:639px)", [
       rule(".page", ["padding:0 var(--s4) var(--s8)"]),
       rule(".chapter + .chapter", ["margin-top:var(--s8)"]),
-      rule(".ledger-row>summary", ["grid-template-columns:minmax(0,1fr) auto auto", "grid-template-areas:\"label value dots\" \"rule rule rule\" \"window window window\"",
+      // Ledger rows stack: label, value and dots above; the rule with the window tag below.
+      rule(".ledger-row>summary", ["grid-template-columns:minmax(0,1fr) auto 72px", "grid-template-areas:\"label value dots\" \"rule rule window\"",
         "gap:var(--s1) var(--s3)"]),
-      rule(".ledger-row__window", ["text-align:left"]),
+      rule(".ledger-row--unscored>summary", ["grid-template-areas:\"label label label\" \"value value value\" \"rule rule window\""]),
+      rule(".ledger-row__dots", ["justify-self:end"]),
+      rule(".exhibit__tag", ["margin-left:0"]),
       rule(".seal>svg", ["width:144px", "height:144px"]),
       rule(".seal-ringtext", ["display:none"]),
       rule("figure.exhibit", ["padding:var(--s4)"]),
@@ -295,11 +313,18 @@ function print(footerLeft: string): string[] {
     `@page{margin:14mm;@bottom-left{${[`content:${cssString(footerLeft)}`, ...box].join(";")}}@bottom-right{${[
       'content:"p " counter(page) "/" counter(pages)', ...box].join(";")}}}`,
     media("print", [
-      // `:is()` takes its most specific argument, so this outranks every screen theme rule, with or without the attribute.
-      rule(":root:is([data-theme],:not([data-theme]))", [...themeVars("print"), scheme("print")]),
+      // Specificity (0,2,1): `html` adds a type to `:root` and the `:is()` argument (0,1,0 either way), so this outranks
+      // every screen theme rule, (0,2,0) at most, whatever the attribute says and wherever it stands. A test pins it.
+      rule("html:root:is([data-theme],:not([data-theme]))", [...themeVars("print"), scheme("print")]),
       rule("*", ["print-color-adjust:exact", "-webkit-print-color-adjust:exact"]),
       rule("body", ["font-size:10pt"]),
       ...TYPE_ROLES.map((r) => rule(`.${r.cls}`, [`font-size:${printPt(r.px)}pt`])),
+      // SVG text is sized in user units and scales with its SVG (the seal prints at 48 mm), so a type role there keeps its screen size.
+      ...TYPE_ROLES.map((r) => rule(`svg .${r.cls}`, [`font-size:${r.px}px`])),
+      // The non-role text that the screen sets on the type scale.
+      rule(".tag,th,.skip-link,.kit-controls button,.rail a,.chapter-bar a,.ledger-legend", [`font-size:${printPt(12)}pt`]),
+      rule("table,.tree", [`font-size:${printPt(14)}pt`]),
+      rule(".exhibit figcaption", [`font-size:${printPt(16)}pt`]),
       rule(".rail,.chapter-bar,.kit-controls,[data-print=\"skip\"]", ["display:none!important"]),
       rule(".layout", ["display:block"]),
       rule(".page", ["max-width:none", "padding:0"]),

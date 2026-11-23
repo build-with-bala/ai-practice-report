@@ -140,3 +140,117 @@ describe("KIT_CLASSES", () => {
     expect([...styled].filter((c) => !KIT_CLASSES.includes(c)).sort()).toEqual([]);
   });
 });
+
+/** The selector specificity (ids, classes/attributes/pseudo-classes, types) of one complex selector; `:is`/`:not` count their most specific argument, `:where` nothing. */
+function specificity(selector: string): [number, number, number] {
+  const out: [number, number, number] = [0, 0, 0];
+  let s = selector;
+  for (;;) {
+    const m = s.match(/:(is|not|where)\(/);
+    if (!m) break;
+    let depth = 1;
+    let j = m.index! + m[0].length;
+    for (; j < s.length && depth > 0; j++) depth += s[j] === "(" ? 1 : s[j] === ")" ? -1 : 0;
+    const args = s.slice(m.index! + m[0].length, j - 1);
+    if (m[1] !== "where") {
+      const best = splitList(args).map(specificity).sort((a, b) => b[0] - a[0] || b[1] - a[1] || b[2] - a[2])[0]!;
+      out[0] += best[0]; out[1] += best[1]; out[2] += best[2];
+    }
+    s = s.slice(0, m.index!) + " " + s.slice(j);
+  }
+  out[0] += (s.match(/#[\w-]+/g) ?? []).length;
+  out[1] += (s.match(/\.[\w-]+|\[[^\]]*\]|(?<!:):[\w-]+/g) ?? []).length;
+  out[2] += (s.replace(/\[[^\]]*\]/g, "").match(/(?:^|[\s>+~])[a-zA-Z][\w-]*|::[\w-]+/g) ?? []).length;
+  return out;
+}
+/** A selector list split at its top-level commas. */
+function splitList(list: string): string[] {
+  const parts: string[] = [];
+  let depth = 0, from = 0;
+  for (let i = 0; i < list.length; i++) {
+    if (list[i] === "(") depth++;
+    else if (list[i] === ")") depth--;
+    else if (list[i] === "," && depth === 0) { parts.push(list.slice(from, i).trim()); from = i + 1; }
+  }
+  return [...parts, list.slice(from).trim()];
+}
+const outranks = (a: [number, number, number], b: [number, number, number]): boolean =>
+  a[0] !== b[0] ? a[0] > b[0] : a[1] !== b[1] ? a[1] > b[1] : a[2] > b[2];
+
+describe("print theme", () => {
+  const printBlock = css.slice(css.indexOf("@media print{"));
+  /** The rule in the print block that sets the print ground. */
+  const printTheme = RULES.find((r) => r.decls.includes(`--bg:${THEMES.print.bg}`))!;
+
+  test("the specificity calculator agrees with the CSS spec on known selectors", () => {
+    expect(specificity(':root[data-theme="paper"]')).toEqual([0, 2, 0]);
+    expect(specificity(":root:is([data-theme],:not([data-theme]))")).toEqual([0, 2, 0]);
+    expect(specificity("html:root:is([data-theme],:not([data-theme]))")).toEqual([0, 2, 1]);
+    expect(specificity("figure.exhibit.is-cited")).toEqual([0, 2, 1]);
+    expect(specificity(":where(.a) b")).toEqual([0, 0, 1]);
+  });
+
+  test("the print tokens outrank every screen theme selector by specificity, not by source order", () => {
+    expect(printBlock).toContain(printTheme.selector + "{");
+    const screen = RULES.filter((r) => r !== printTheme && r.decls.includes("--bg:")).flatMap((r) => splitList(r.selector));
+    expect(screen.length).toBeGreaterThanOrEqual(3);
+    for (const sel of splitList(printTheme.selector)) {
+      for (const other of screen) expect([sel, other, outranks(specificity(sel), specificity(other))]).toEqual([sel, other, true]);
+    }
+  });
+});
+
+describe("print type sizes", () => {
+  const PX_TO_PT: Readonly<Record<string, string>> = { "12": "7.5", "14": "9", "16": "10", "20": "12", "28": "16", "44": "24", "64": "32" };
+  const printStart = css.indexOf("@media print{");
+  const screenRules = [...css.slice(0, printStart).matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((m) => ({ selector: m[1]!.trim(), decls: m[2]! }));
+  const printRules = [...css.slice(printStart).matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((m) => ({ selector: m[1]!.trim(), decls: m[2]! }));
+  /** The print font size each selector of the print block sets. */
+  const printSize = new Map<string, string>();
+  for (const r of printRules) {
+    const fs = r.decls.match(/font-size:([\d.]+)pt/)?.[1];
+    if (fs) for (const s of splitList(r.selector)) printSize.set(s, fs);
+  }
+  /** SVG text is sized in user units and scales with its SVG, so it keeps its screen size in print. */
+  const SVG_TEXT = [".seal-ringtext"];
+
+  test("every screen rule that sets a scale size in px has its print size in pt", () => {
+    const sized = screenRules.filter((r) => /font-size:\d+px/.test(r.decls) && !SVG_TEXT.includes(r.selector));
+    expect(sized.length).toBeGreaterThan(15);
+    const missing: string[] = [];
+    for (const r of sized) {
+      const px = r.decls.match(/font-size:(\d+)px/)![1]!;
+      for (const sel of splitList(r.selector)) if (printSize.get(sel) !== PX_TO_PT[px]) missing.push(`${sel} ${px}px -> ${printSize.get(sel)}`);
+    }
+    expect(missing).toEqual([]);
+  });
+
+  test("captions, tags, table heads, rail links and tables follow the print scale", () => {
+    for (const [sel, pt] of [[".exhibit figcaption", "10"], [".tag", "7.5"], ["th", "7.5"], [".rail a", "7.5"], ["table", "9"]] as const) {
+      expect([sel, printSize.get(sel)]).toEqual([sel, pt]);
+    }
+  });
+
+  test("type roles set as SVG text keep their size in user units in print", () => {
+    expect(printRules.some((r) => r.selector === "svg .t-mono-64" && r.decls.includes("font-size:64px"))).toBe(true);
+  });
+});
+
+describe("seal states", () => {
+  test("the ring text is mono 12 caps at 0.12em, weight 500, with no synthesis", () => {
+    const r = ruleOf(".seal-ringtext")!;
+    for (const d of ['font-family:"JetBrains Mono Variable", monospace', "font-size:12px", "font-weight:500", "letter-spacing:.12em",
+      "text-transform:uppercase", "font-synthesis:none"]) expect([d, r.includes(d)]).toEqual([d, true]);
+  });
+
+  test("provisional outlines the numerals: a rule only the provisional state triggers, not a duplicate of the base", () => {
+    expect(ruleOf(".seal--provisional .seal-outline")).toBe("fill:none;stroke:currentColor;stroke-width:1");
+    expect(ruleOf(".seal--provisional .seal-disc")).toBeUndefined();
+  });
+
+  test("struck fills the disc and sets the numerals in onAccent; flagged turns the seal vermilion", () => {
+    expect(ruleOf(".seal--struck .seal-disc")).toBe("fill:currentColor");
+    expect(ruleOf(".seal--struck .seal-text")).toBe("fill:var(--on-accent)");
+    expect(ruleOf(".seal--flagged")).toBe("color:var(--vermilion)");
+  });
+});
