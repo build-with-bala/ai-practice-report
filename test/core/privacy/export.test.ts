@@ -99,10 +99,20 @@ describe("exportPayload: raw channels", () => {
     for (const kept of ["claude-opus-4-1-20250805", "claude-sonnet-4-5", "gpt-4o-mini", "gpt-4o-2024-08-06", "gpt-4-0613", "gpt-5-codex", "gemini-2.5-pro",
       "o3-mini", "deepseek-chat", "llama-3-70b"]) expect(`${kept} → ${modelExportId(kept)}`).toBe(`${kept} → ${kept}`);
     for (const [id, out] of [["gpt-4-20251301", "gpt-other"], ["gpt-4-1332", "gpt-other"], ["gpt-4-2024-02-30", "gpt-other"], ["gpt-4-0613-0613", "gpt-other"],
-      ["gpt-4-20240101-2024-01-01", "gpt-other"], ["claude-opus-4-1-2-3-4-5", "claude-other"], ["claude-opus-4-1-2-3-4", "claude-opus-4-1-2-3-4"],
+      ["gpt-4-20240101-2024-01-01", "gpt-other"], ["claude-opus-4-1-2-3-4-5", "claude-other"], ["claude-opus-4-1-2-3-4", "claude-other"],
       ["gpt-4x", "gpt-other"], ["gpt-1234", "gpt-other"], ["gpt-4.123", "gpt-other"], ["gpt-4-2024-08", "gpt-other"], ["gpt-4-2024-02-29", "gpt-4-2024-02-29"],
       ["gpt-4-2023-02-29", "gpt-other"]]) {
       expect(`${id} → ${modelExportId(id)}`).toBe(`${id} → ${out}`);
+    }
+    // round 3: numbers in the shape public ids have (at most 2 versions, 1–2 digits or a 1–3 digit size, a 1-digit fraction, no leading zero)
+    for (const [id, out] of [["claude-3-5-sonnet-417", "claude-other"], ["gpt-4o-2024-08-06-417", "gpt-other"], ["gpt-4o-12-345", "gpt-other"],
+      ["gpt-04", "gpt-other"], ["gpt-4.25", "gpt-other"], ["gpt-1.3-13.5", "gpt-1.3-13.5"], ["gpt-1.3-13.5-7", "gpt-other"], ["llama-1000b", "llama-other"],
+      ["llama-070b", "llama-other"], ["gpt-4b-mini", "gpt-4b-mini"], ["gpt-4ob", "gpt-other"]]) {
+      expect(`${id} → ${modelExportId(id)}`).toBe(`${id} → ${out}`);
+    }
+    for (const kept of ["claude-opus-4-1-20250805", "claude-sonnet-4-5", "gpt-4o-mini", "gpt-4o-2024-08-06", "gpt-4-0613", "gpt-5-codex", "gemini-2.5-pro",
+      "o3-mini", "deepseek-chat", "llama-3-70b", "gpt-5.1-codex", "claude-3-5-sonnet-20241022", "llama-3-405b", "gemini-2.5-flash-lite", "qwen-2.5-0.5b"]) {
+      expect(`${kept} → ${modelExportId(kept)}`).toBe(`${kept} → ${kept}`);
     }
     for (const other of ["Claude-Opus-4", "acme/claude-opus", "claude-opus\n4", "claude opus", `claude-${"4-".repeat(40)}4`, `${CANARY.slug}-opus`, "gemma-2", ""]) {
       expect(`${JSON.stringify(other)} → ${modelExportId(other)}`).toBe(`${JSON.stringify(other)} → other`);
@@ -382,6 +392,93 @@ describe("exportPayload: the preview contract and deny by default", () => {
     a.dimensions[0]!.interval = null;
     const d = (parsed(a).dimensions as Json[])[0]!;
     expect([d.score, d.interval]).toEqual([null, null]);
+  });
+
+  test("counts that fold into one key must each be counts: a negative or fractional input fails the export (R5)", () => {
+    const base = analyze(personaScan("expert"), UTC);
+    const tail: Record<string, number> = {};
+    for (let i = 0; i < 70; i++) tail[`gpt-${1 + Math.floor(i / 10)}.${i % 10}`] = i === 69 ? -5 : 100 - i;
+    const cases: Array<[(a: Analysis) => void, string]> = [
+      [(a) => { a.private.models = { "gpt-acme": 10, "gpt-zz": -5 }; }, "$.exposure.models.gpt-other"],
+      [(a) => { a.private.models = { "gpt-acme": 1.5, "gpt-zz": 1.5 }; }, "$.exposure.models.gpt-other"],
+      [(a) => { a.risk.permission = { weirdA: 4, weirdB: -4 }; }, "$.risk.permission.other"],
+      [(a) => { a.private.models = tail; }, "$.exposure.models.other"],
+    ];
+    for (const [mutate, path] of cases) {
+      const a = structuredClone(base);
+      mutate(a);
+      let err: unknown;
+      try { exportPayload(a, OPTS); } catch (e) { err = e; }
+      expect(`${path} ${(err as ExportError | undefined)?.paths?.join(",")}`).toBe(`${path} ${path}`);
+    }
+    // the projects past 100 sum into otherProjects the same way
+    const evs: SessionEv[] = [];
+    for (let i = 0; i < 101; i++) {
+      evs.push({ k: "session", tool: "codex", source: "codex.rollouts", id: `codex:p${i}`, window: "detail", origin: "human", projectKey: `key${i}`,
+        start: Date.UTC(2026, 10, 1) + i * 60_000, end: Date.UTC(2026, 10, 1) + i * 60_000 + 1_000, models: [] });
+    }
+    const b = analyze(scanResultOf(evs), UTC);
+    b.projects[100]!.sessions = -1;
+    expect(() => exportPayload(b, OPTS)).toThrow("$.otherProjects.sessions");
+  });
+
+  test("a time that is not finite fails the export, even in an optional field (R6)", () => {
+    const base = analyze(personaScan("expert"), UTC);
+    const cases: Array<[(a: Analysis) => void, string]> = [
+      [(a) => { a.signals.vae.from = NaN; }, "$.signals.vae.from"],
+      [(a) => { a.coverage.rows[0]!.to = Infinity; }, "$.coverage[0].to"],
+      [(a) => { a.exposure.firstSeen.subagents = NaN; }, "$.exposure.firstSeen.subagents"],
+      [(a) => { a.exposure.tools[0]!.from = NaN; }, "$.exposure.tools[0].from"],
+    ];
+    for (const [mutate, path] of cases) {
+      const a = structuredClone(base);
+      mutate(a);
+      let err: unknown;
+      try { exportPayload(a, OPTS); } catch (e) { err = e; }
+      expect(`${path} ${(err as ExportError | undefined)?.paths?.join(",")}`).toBe(`${path} ${path}`);
+    }
+  });
+
+  test("any unexpected exception while building surfaces as ExportError naming the stage, never a value (R6)", () => {
+    const base = analyze(personaScan("expert"), UTC);
+    const cases: Array<(a: Analysis) => void> = [
+      (a) => { (a.forensics.checks[0] as unknown as Json).values = undefined; },
+      (a) => { (a.identity as unknown as Json).hashes = undefined; },
+      (a) => { (a as unknown as Json).projects = "LEAKVALUE"; },
+      (a) => { a.signals.vae.from = 1e300; }, // Intl cannot place it
+    ];
+    for (const mutate of cases) {
+      const a = structuredClone(base);
+      mutate(a);
+      let err: unknown;
+      try { exportPayload(a, OPTS); } catch (e) { err = e; }
+      expect(err).toBeInstanceOf(ExportError);
+      expect((err as ExportError).stage).toBe("build");
+      expect((err as Error).message).toBe("exportPayload: the export failed at the build stage");
+    }
+    expect(new RevealError("P-0000")).toBeInstanceOf(ExportError);
+  });
+
+  test("shares and weights lie in [0, 1], the correlation in [-1, 1] (R6)", () => {
+    const base = analyze(personaScan("expert"), UTC);
+    const cases: Array<[(a: Analysis) => void, string]> = [
+      [(a) => { a.forensics.serverBacked = 1.2; }, "$.forensics.serverBacked"],
+      [(a) => { a.dimensions[0]!.components[0]!.weight = -0.1; }, "$.dimensions[0].components[0].weight"],
+      [(a) => { a.signals.vae.value = 1.5; }, "$.signals.vae.value"],
+      [(a) => { a.signals.parallelShare.value = -0.5; }, "$.signals.parallelShare.value"],
+      [(a) => { a.signals.rho.value = -1.2; }, "$.signals.rho.value"],
+    ];
+    for (const [mutate, path] of cases) {
+      const a = structuredClone(base);
+      mutate(a);
+      let err: unknown;
+      try { exportPayload(a, OPTS); } catch (e) { err = e; }
+      expect(`${path} ${(err as ExportError | undefined)?.paths?.join(",")}`).toBe(`${path} ${path}`);
+    }
+    const ok = structuredClone(base);
+    ok.signals.rho.value = -0.5;
+    ok.signals.tokensPerLanded.value = 12_345.6789; // a rate: unbounded
+    expect(() => exportPayload(ok, OPTS)).not.toThrow();
   });
 
   test("a count is never negative (R5)", () => {

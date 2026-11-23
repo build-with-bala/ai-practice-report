@@ -17,23 +17,28 @@ export interface ExportResult { schema: "aiprof/2"; value: unknown; json: string
 /**
  * The analysis does not fit the `aiprof/2` schema: some value would have been dropped or changed (a malformed interval,
  * an unknown status, a non-integer score, a text outside its form…). Nothing is exported then, since a payload that
- * claims more than the data supports must never be signed. `paths` (and the message) name the JSON paths that differed,
- * never a value.
+ * claims more than the data supports must never be signed. Every failure of `exportPayload` is one (fail closed, one
+ * error type): `stage` says where — `reveal` (a `RevealError`), `build` (the analysis could not be read: an unexpected
+ * exception, whose own message is not kept since it may quote data), `check` (the draft does not fit the schema),
+ * `serialize` (the canonical bytes could not be made). `paths` (and the message) name JSON paths only, never a value.
  */
 export class ExportError extends Error {
-  override readonly name = "ExportError";
-  constructor(readonly paths: readonly string[]) {
+  override readonly name: string = "ExportError";
+  constructor(readonly paths: readonly string[], readonly stage: ExportStage = "check", message?: string) {
     const shown = paths.slice(0, MAX_PATHS_SHOWN);
-    super(`exportPayload: the analysis does not fit aiprof/2 at ${shown.join(", ")}${paths.length > shown.length ? ` and ${paths.length - shown.length} more` : ""}`);
+    super(message ?? (paths.length > 0
+      ? `exportPayload: the analysis does not fit aiprof/2 at ${shown.join(", ")}${paths.length > shown.length ? ` and ${paths.length - shown.length} more` : ""}`
+      : `exportPayload: the export failed at the ${stage} stage`));
   }
 }
+export type ExportStage = "reveal" | "build" | "check" | "serialize";
 
 /** A `reveal` label that names no exported project. The message quotes the label only when it has a label's shape, and never the name. */
-export class RevealError extends RangeError {
-  override readonly name = "RevealError";
+export class RevealError extends ExportError {
+  override readonly name: string = "RevealError";
   constructor(label: string) {
     const shown = /^P-[0-9A-Fa-f]{4,6}$/.test(label) ? ` "${label}"` : "";
-    super(`exportPayload: the reveal label${shown} names no exported project`);
+    super([], "reveal", `exportPayload: the reveal label${shown} names no exported project`);
   }
 }
 
@@ -81,21 +86,37 @@ function pick<T>(h: Partial<Record<string, T>>, keys: readonly string[]): Record
  */
 export function exportPayload(a: Analysis, o: ExportOptions): ExportResult {
   if (o.schema !== "aiprof/2") throw new RangeError("exportPayload: the only schema is aiprof/2");
-  const draft = normalize(build(a, o));
-  const found = violations(draft, AIPROF2);
+  const draft = stage("build", () => normalize(build(a, o)));
+  const found = stage("check", () => violations(draft, AIPROF2));
   if (found.length > 0) throw new ExportError(found);
-  const value = sanitize(draft, AIPROF2);
-  const paths = differences(draft, value, "$", []); // a second check: what the schema kept must be the draft, exactly
+  const value = stage("check", () => sanitize(draft, AIPROF2));
+  const paths = stage("check", () => differences(draft, value, "$", [])); // a second check: what the schema kept must be the draft, exactly
   if (paths.length > 0) throw new ExportError(paths);
-  const json = canonicalJson(value);
+  const json = stage("serialize", () => canonicalJson(value));
   return { schema: "aiprof/2", value, json, bytes: new TextEncoder().encode(json).length };
 }
+
+/** Runs one stage: an `ExportError` passes through; any other exception becomes one naming the stage (and no value). */
+function stage<T>(name: ExportStage, f: () => T): T {
+  try {
+    return f();
+  } catch (e) {
+    if (e instanceof ExportError) throw e;
+    throw new ExportError([], name);
+  }
+}
+
+/** A count to add: a non-negative safe integer, else NaN, so a sum it enters fails the schema check (never absorbed). */
+const countOf = (n: unknown): number => (typeof n === "number" && Number.isSafeInteger(n) && n >= 0 ? n : NaN);
+/** `acc + n` over counts: NaN as soon as either is not a count. */
+const addCount = (acc: number | undefined, n: unknown): number => (acc === undefined ? countOf(n) : acc + countOf(n));
 
 /** The payload draft (see `exportPayload`). */
 function build(a: Analysis, o: ExportOptions): Record<string, unknown> {
   const tz = a.meta.timeZone;
-  const month = (ms: number | undefined): string | undefined => (ms === undefined || !Number.isFinite(ms) ? undefined : dayKey(ms, tz).slice(0, 7));
-  const week = (ms: number): string | undefined => (Number.isFinite(ms) ? isoWeek(dayKey(ms, tz)) : undefined);
+  // a time that is no finite number is passed on as it is, so the schema check fails on it (never silently absent)
+  const month = (ms: unknown): unknown => (ms === undefined ? undefined : typeof ms === "number" && Number.isFinite(ms) ? dayKey(ms, tz).slice(0, 7) : ms);
+  const week = (ms: unknown): unknown => (typeof ms === "number" && Number.isFinite(ms) ? isoWeek(dayKey(ms, tz)) : ms);
   const metric = (m: Metric): Record<string, unknown> => ({
     value: roundOrNull(m.value), n: m.n, window: m.window, from: month(m.from), to: month(m.to), reason: m.reason,
   });
@@ -150,7 +171,7 @@ function build(a: Analysis, o: ExportOptions): Record<string, unknown> {
       label: p.label, name: reveal.get(p.label.toUpperCase()), sessions: p.sessions, activeWeeks: p.activeWeeks, tools: p.tools, inRepo: p.inRepo,
       lastWeek: p.lastWeek,
     })),
-    otherProjects: { projects: rest.length, sessions: rest.reduce((s, p) => s + p.sessions, 0) },
+    otherProjects: { projects: rest.length, sessions: rest.reduce<number>((s, p) => addCount(s, p.sessions), 0) },
     forensics: {
       band: a.forensics.band, serverBacked: roundOrNull(a.forensics.serverBacked), anchorable: a.forensics.anchorable, notAnchorable: a.forensics.notAnchorable,
       checks: a.forensics.checks.map((c) => ({
@@ -163,8 +184,8 @@ function build(a: Analysis, o: ExportOptions): Record<string, unknown> {
 }
 
 /** Each feature's first evidence as its ISO week. */
-function firstSeen(a: Analysis, week: (ms: number) => string | undefined): Record<string, string | undefined> {
-  const out = dict<string | undefined>();
+function firstSeen(a: Analysis, week: (ms: unknown) => unknown): Record<string, unknown> {
+  const out = dict<unknown>();
   for (const f of FEATURES) {
     const ms = a.exposure.firstSeen[f];
     if (ms !== undefined) out[f] = week(ms);
@@ -180,7 +201,7 @@ function models(raw: Record<string, number>): Record<string, number> {
   const acc = new Map<string, number>();
   for (const [id, n] of Object.entries(raw)) {
     const k = modelExportId(id);
-    acc.set(k, typeof n === "number" ? (acc.get(k) ?? 0) + n : NaN); // a count that is no number fails the schema check
+    acc.set(k, addCount(acc.get(k), n)); // a negative, fractional or non-number count fails the schema check
   }
   const out = dict<number>();
   if (acc.size <= MAX_MODELS) {
@@ -200,7 +221,7 @@ function risk(kind: keyof typeof RISK_TOKENS, h: Record<string, number>): Record
   const out = dict<number>();
   for (const [raw, n] of Object.entries(h)) {
     const k = riskExportToken(kind, raw);
-    out[k] = typeof n === "number" ? (out[k] ?? 0) + n : NaN; // a count that is no number fails the schema check
+    out[k] = addCount(out[k], n); // a negative, fractional or non-number count fails the schema check
   }
   return out;
 }

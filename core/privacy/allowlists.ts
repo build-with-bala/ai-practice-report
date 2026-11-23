@@ -59,10 +59,15 @@ export const MODEL_WORDS: ReadonlySet<string> = new Set([
 ]);
 /** The letters a version may end in, from public ids: "o" (gpt-4o, "omni") and "b" (a parameter count: llama-3-70b). */
 export const VERSION_SUFFIXES: ReadonlySet<string> = new Set(["o", "b"]);
-/** A version: 1–3 digits, an optional fraction of 1–2 digits, an optional suffix of `VERSION_SUFFIXES` ("4", "4o", "3.5", "70b"). */
-const VERSION = /^\d{1,3}(?:\.\d{1,2})?([a-z]?)$/;
-/** At most this many tokens after the family. */
+/**
+ * A version, in the shape public ids have: 1 or 2 digits with no leading zero ("4", "12", "0"), an optional 1-digit
+ * fraction ("3.5", "0.5"), and optionally the omni suffix "o" ("4o"); or a parameter count, 1 to 3 digits with the size
+ * suffix "b" ("70b", "405b", "0.5b"). No other letter (`VERSION_SUFFIXES`).
+ */
+const VERSION = /^(?:(?:0|[1-9]\d?)(?:\.\d)?o?|(?:0|[1-9]\d{0,2})(?:\.\d)?b)$/;
+/** At most this many tokens after the family, and at most this many versions among them. */
 const MAX_MODEL_TOKENS = 6;
+const MAX_VERSIONS = 2;
 
 /** True when year, month and day make a real date (years 2000–2099). */
 function realDate(y: number, m: number, d: number): boolean {
@@ -73,18 +78,19 @@ function realDate(y: number, m: number, d: number): boolean {
 const realMonthDay = (m: number, d: number): boolean => realDate(2000, m, d);
 
 /**
- * True when the tokens after a family are a public model id's: at most 6 of them, each a version, a word of
- * `MODEL_WORDS`, or part of the one date the id may hold, in a public form — one "YYYYMMDD" token, the three tokens
- * "YYYY", "MM", "DD" in a row, or one "MMDD" token — with real month and day ranges.
+ * True when the tokens after a family are a public model id's: at most 6 of them, each a word of `MODEL_WORDS`, one of
+ * at most 2 versions (`VERSION`), or part of the one date the id may hold, in a public form — one "YYYYMMDD" token,
+ * the three tokens "YYYY", "MM", "DD" in a row, or one "MMDD" token (its leading zero kept: "0613") — with real month
+ * and day ranges.
  */
 function publicTokens(tokens: readonly string[]): boolean {
   if (tokens.length > MAX_MODEL_TOKENS) return false;
   let dates = 0;
+  let versions = 0;
   for (let i = 0; i < tokens.length; i++) {
     const t = tokens[i]!;
-    const v = VERSION.exec(t);
-    if (v) {
-      if (v[1] !== "" && !VERSION_SUFFIXES.has(v[1]!)) return false;
+    if (VERSION.test(t)) {
+      if (++versions > MAX_VERSIONS) return false;
       continue;
     }
     if (MODEL_WORDS.has(t)) continue;
@@ -101,10 +107,13 @@ function publicTokens(tokens: readonly string[]): boolean {
 }
 
 /**
- * A model id as exported:
+ * A model id as exported. The rule guards against the ACCIDENTAL disclosure of a deployment or customer name riding on
+ * a public family prefix ("gpt-4o-contoso-prod"); it is not a defence against a person who deliberately encodes data in
+ * their own model ids — they control their own machine and their own export. A list of every public version was
+ * rejected: each new model would read "<family>-other" until the tool is updated; the shape rules below are used instead.
  * - "ft:…" (a fine-tuned model) → "fine-tuned";
  * - an id of a known family (`MODEL_FAMILY_PATTERN`) whose "-"-separated tokens after the family pass `publicTokens`
- *   (at most 6 versions, `MODEL_WORDS` words and one real date) → the id as is ("claude-opus-4-1-20250805", "gpt-4o-mini");
+ *   (at most 6 tokens: `MODEL_WORDS` words, at most 2 versions and one real date) → the id as is ("claude-opus-4-1-20250805", "gpt-4o-mini");
  * - another id of a known family → "<family>-other" ("gpt-4o-contoso-prod" → "gpt-other");
  * - anything else, or an id with characters other than a–z, 0–9, "." and "-", or longer than 64 → "other".
  * Ids that map to one export id have their counts summed by the caller.

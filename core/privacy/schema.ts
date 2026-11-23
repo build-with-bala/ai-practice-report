@@ -19,7 +19,8 @@ export type Sensitivity = "public" | "aggregate" | "pseudonymous" | "revealed";
 
 /**
  * One declared field of the export. Leaves carry their sensitivity class: `count` is a non-negative safe integer (every
- * count of the payload), `integer` a signed one (no payload field needs a sign today), `number` any finite number.
+ * count of the payload), `integer` a signed one (no payload field needs a sign today), `number` any finite number,
+ * `bounded` a finite number in [min, max] (shares, weights, correlations).
  * `nullable`, `optional`, `array` (at most `max` elements),
  * `tuple` (exactly one element per spec in `of`, all or nothing), `object` (exactly the declared `fields`) and `record`
  * (keys matching `key`, at most `maxKeys`, each value by `of`, or by its own spec in `fields` for a declared key) compose
@@ -27,7 +28,8 @@ export type Sensitivity = "public" | "aggregate" | "pseudonymous" | "revealed";
  * may be absent (`null` is a value, for `nullable`). Every pattern is anchored at both ends.
  */
 export type FieldSpec =
-  | { t: "number" | "integer" | "count" | "boolean"; s: Sensitivity } | { t: "optional"; of: FieldSpec } | { t: "enum"; values: readonly string[]; s: Sensitivity }
+  | { t: "number" | "integer" | "count" | "boolean"; s: Sensitivity } | { t: "bounded"; min: number; max: number; s: Sensitivity }
+  | { t: "optional"; of: FieldSpec } | { t: "enum"; values: readonly string[]; s: Sensitivity }
   | { t: "string"; pattern: RegExp; s: Sensitivity } | { t: "nullable"; of: FieldSpec }
   | { t: "array"; of: FieldSpec; max: number } | { t: "tuple"; of: readonly FieldSpec[] } | { t: "object"; fields: Readonly<Record<string, FieldSpec>> }
   | { t: "record"; key: RegExp; of: FieldSpec; maxKeys: number; fields?: Readonly<Record<string, FieldSpec>> };
@@ -47,6 +49,7 @@ export function sanitize(value: unknown, spec: FieldSpec): unknown {
   switch (spec.t) {
     case "number": return typeof value === "number" && Number.isFinite(value) ? value + 0 : undefined;
     case "integer": return typeof value === "number" && Number.isSafeInteger(value) ? value + 0 : undefined;
+    case "bounded": return typeof value === "number" && Number.isFinite(value) && value >= spec.min && value <= spec.max ? value + 0 : undefined;
     case "count": return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value + 0 : undefined;
     case "optional": return sanitize(value, spec.of);
     case "boolean": return typeof value === "boolean" ? value : undefined;
@@ -243,8 +246,23 @@ const WINDOW = en(WINDOWS);
 /** A bootstrap interval: both ends or none (a one-point interval would claim more than the data holds). */
 const INTERVAL = nullable({ t: "tuple", of: [int(), int()] });
 
+/** A finite number in [min, max]. */
+const bounded = (min: number, max: number, s: Sensitivity = "aggregate"): FieldSpec => ({ t: "bounded", min, max, s });
+/** A share (or a weight): a fraction in [0, 1]. */
+const share = (): FieldSpec => bounded(0, 1);
+
 /** A metric: its value (null with a reason when not measurable), sample size, window and span by month. */
-const METRIC = obj({ value: nullable(num()), n: int(), window: WINDOW, from: opt(MONTH), to: opt(MONTH), reason: opt(en(METRIC_REASONS)) });
+const metricOf = (value: FieldSpec): FieldSpec =>
+  obj({ value: nullable(value), n: int(), window: WINDOW, from: opt(MONTH), to: opt(MONTH), reason: opt(en(METRIC_REASONS)) });
+const METRIC = metricOf(num());
+/**
+ * The metrics whose value is a share in [0, 1] (a ratio of a part to its whole, or a mean of such ratios), and the
+ * one correlation in [-1, 1]; every other metric is a rate or a count per unit, unbounded above.
+ */
+export const SHARE_METRICS: ReadonlySet<MetricKey> = new Set<MetricKey>(["vae", "closure", "parallelShare", "backgroundShare", "correctionRate",
+  "healthyInterruptShare", "maintainedShare", "briefScore", "hygiene", "landedShare", "reworkShare", "aiCoauthoredShare", "commitAfterSession",
+  "guardrails"]);
+const metricSpec = (k: MetricKey): FieldSpec => (SHARE_METRICS.has(k) ? metricOf(share()) : k === "rho" ? metricOf(bounded(-1, 1)) : METRIC);
 
 /** A forensic check's `values` key: a camel-case name, or C10's `<tool>/<origin>/<window>`. */
 const CHECK_VALUE_KEY = new RegExp(`^(?:[a-z][A-Za-z0-9]{0,31}|(?:${TOOL_IDS.map(esc).join("|")})/(?:${ORIGINS.join("|")})/(?:${WINDOWS.join("|")}))$`);
@@ -279,11 +297,11 @@ export const AIPROF2: FieldSpec = obj({
     openTail: bool(), confidence: nullable(en(["low", "medium", "high"])), n: int(), needs: int(), part: en(EVIDENCE_PARTS), window: WINDOW,
     components: arr(obj({
       id: en(COMPONENTS.map((c) => c.id)), status: en(["ok", "not-measurable", "not-measured"]), x: nullable(num()), z: nullable(num()), n: int(),
-      weight: num(),
+      weight: share(),
     }), 16),
   }), DIMENSION_IDS.length),
   personas: arr(en(ROLES), 3),
-  signals: obj(Object.fromEntries(METRIC_KEYS.map((k) => [k, METRIC]))),
+  signals: obj(Object.fromEntries(METRIC_KEYS.map((k) => [k, metricSpec(k)]))),
   exposure: obj({
     tenureWeeks: METRIC,
     activeWeeks: obj({ detail: METRIC, lifetime: METRIC }),
@@ -312,7 +330,7 @@ export const AIPROF2: FieldSpec = obj({
   }), 100),
   otherProjects: obj({ projects: int(), sessions: int() }),
   forensics: obj({
-    band: en(FORENSIC_BANDS), serverBacked: nullable(num()), anchorable: arr(TOOL, TOOL_IDS.length), notAnchorable: arr(TOOL, TOOL_IDS.length),
+    band: en(FORENSIC_BANDS), serverBacked: nullable(share()), anchorable: arr(TOOL, TOOL_IDS.length), notAnchorable: arr(TOOL, TOOL_IDS.length),
     checks: arr(obj({
       id: en(CHECK_IDS), status: en(CHECK_STATUS), n: int(), reason: str(/^[a-z0-9-]{1,40}$/, "public"),
       values: { t: "record", key: CHECK_VALUE_KEY, of: num(), maxKeys: TOOL_IDS.length * ORIGINS.length * WINDOWS.length + 64, fields: { date: DATE } },

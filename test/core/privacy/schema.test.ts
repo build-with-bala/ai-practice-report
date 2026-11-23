@@ -96,6 +96,13 @@ describe("required fields, counts and violations", () => {
     expect(sanitize({ status: "scored", score: 1, name: "Not OK" }, req)).toEqual({ status: "scored", score: 1 });
   });
 
+  test("a bounded number lies in [min, max], ends included", () => {
+    const share: FieldSpec = { t: "bounded", min: 0, max: 1, s: "aggregate" };
+    for (const ok of [0, 0.5, 1, -0]) expect(sanitize(ok, share)).toBe(ok + 0);
+    for (const bad of [-0.0001, 1.0001, NaN, Infinity, "0.5"]) expect(sanitize(bad, share)).toBeUndefined();
+    expect(violations({ w: 2 }, { t: "object", fields: { w: share } })).toEqual(["$.w"]);
+  });
+
   test("a count is a non-negative safe integer; an integer may be signed", () => {
     expect(sanitize(0, { t: "count", s: "aggregate" })).toBe(0);
     for (const bad of [-1, 1.5, 2 ** 53, NaN]) expect(sanitize(bad, { t: "count", s: "aggregate" })).toBeUndefined();
