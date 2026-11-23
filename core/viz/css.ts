@@ -232,8 +232,9 @@ function components(): string[] {
     rule(".ledger-row__dots", ["grid-area:dots", "display:block"]),
     rule(".ledger-row__window", ["grid-area:window", "text-align:right"]),
     // A row that is not scored: a short token for the value, and the full note on its own line under the rule.
-    rule(".ledger-row--unscored>summary,.ledger-row--unscored>.ledger-row__line", ["grid-template-areas:\"label rule value dots window\" \". note note note note\"", "row-gap:0"]),
-    rule(".ledger-row__note", ["grid-area:note", `color:${v("muted")}`]),
+    rule(".ledger-row--unscored>summary,.ledger-row--unscored>.ledger-row__line", ["grid-template-areas:\"label rule value dots window\" \". note . . .\"", "row-gap:0"]),
+    // The note takes the rule's column, inset like the drawn axis (x 8 of 400), so their left edges meet.
+    rule(".ledger-row__note", ["grid-area:note", "padding-left:2%", `color:${v("muted")}`]),
     rule(".ledger-row[open]>summary,.ledger-row>summary:hover", [`background:${v("raised")}`]),
     rule(".ledger-components", ["margin:var(--s2) 0 var(--s4)", "overflow-x:auto", "overscroll-behavior-x:contain"]),
     rule(".ledger-legend", ["display:flex", "flex-wrap:wrap", "align-items:center", "gap:var(--s2) var(--s5)", "margin-bottom:var(--s4)", ...MONO_12_CAPS, `color:${v("faint")}`]),
@@ -275,7 +276,7 @@ function components(): string[] {
       // Ledger rows stack: label, value and dots above; the rule with the window tag below.
       rule(".ledger-row>summary,.ledger-row>.ledger-row__line", ["grid-template-columns:minmax(0,1fr) auto 72px",
         "grid-template-areas:\"label value dots\" \"rule rule window\"", "gap:var(--s1) var(--s3)"]),
-      rule(".ledger-row--unscored>summary,.ledger-row--unscored>.ledger-row__line", ["grid-template-areas:\"label value value\" \"rule rule window\" \"note note note\"", "row-gap:var(--s1)"]),
+      rule(".ledger-row--unscored>summary,.ledger-row--unscored>.ledger-row__line", ["grid-template-areas:\"label value value\" \"rule rule window\" \"note note .\"", "row-gap:var(--s1)"]),
       // Components stack: label and weight, then value, z and n, then the evidence. The head stays for assistive technology.
       rule(".ledger-components thead", ["position:absolute", "width:1px", "height:1px", "overflow:hidden", "clip:rect(0 0 0 0)", "white-space:nowrap"]),
       rule(".ledger-components tr", ["display:grid", "grid-template-columns:minmax(0,1fr) auto auto",

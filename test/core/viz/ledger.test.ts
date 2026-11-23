@@ -141,7 +141,7 @@ describe("ledger", () => {
 
   test("insufficient with a note: the hatch, no diamond, a short token for the value and the note on its own line", () => {
     const note = "insufficient (n=12, needs 60) — not enough data yet";
-    const out = ledger([group([row({ status: "insufficient", score: null, interval: null, confidence: null, note })])]);
+    const out = ledger([group([row({ status: "insufficient", score: null, interval: null, confidence: null, note, n: 12, needs: 60 })])]);
     expect(out).toContain('class="m-hatch"');
     expect(out).not.toContain("L285.64 12");
     expect(out).toContain('<span class="ledger-row__value t-mono-14 c-muted">n=12/60</span>');
@@ -150,7 +150,19 @@ describe("ledger", () => {
     expect(out).toContain(`aria-label="Leverage, ${note}"`);
   });
 
-  test("an unscored row whose note gives no counts shows — as its value", () => {
+  test("the token comes from n and needs, never from the note's wording", () => {
+    const base = { status: "insufficient" as const, score: null, interval: null, confidence: null };
+    const token = (o: Partial<LedgerRow>): string | undefined => ledger([group([row({ ...base, ...o })])]).match(/ledger-row__value t-mono-14 c-muted">([^<]*)</)?.[1];
+    expect(token({ note: "insufficient (n=12, needs 60) — not enough data yet" })).toBe("—");
+    expect(token({ note: "anything at all", n: 7, needs: 40 })).toBe("n=7/40");
+    expect(token({ note: "n=1, needs 2 and n=3, needs 4", n: 3, needs: 4 })).toBe("n=3/4");
+    expect(token({ n: 1200, needs: 60 })).toBe("n=1,200/60");
+    for (const [n, needs] of [[12, undefined], [undefined, 60], [-1, 60], [1.5, 60], [12, Number.NaN], [12, Number.POSITIVE_INFINITY]] as const) {
+      expect([n, needs, token({ n, needs })]).toEqual([n, needs, "—"]);
+    }
+  });
+
+  test("an unscored row without counts shows — as its value", () => {
     const out = ledger([group([row({ status: "not-measured", score: null, interval: null, confidence: null, note: "not measured: no hook data" })])]);
     expect(out).toContain('<span class="ledger-row__value t-mono-14 c-muted">—</span>');
   });
@@ -217,7 +229,7 @@ describe("ledger", () => {
       group([
         row({ id: "verification", label: "Verification", score: 34, interval: [22, 47], confidence: "low", window: "lifetime" }),
         row({ id: "hygiene", label: "Context hygiene", status: "insufficient", score: null, interval: null, confidence: null,
-          note: "insufficient (n=12, needs 60) — not enough data yet" }),
+          note: "insufficient (n=12, needs 60) — not enough data yet", n: 12, needs: 60 }),
         row({ id: "setup", label: "Setup", score: 97, interval: [90, 100], openTail: true, confidence: "high" }),
       ], "Quality · setup & judgment"),
       group([

@@ -99,13 +99,14 @@ function reading(r: LedgerRow, v: Resolved | null): string {
   return parts.join(", ");
 }
 
+const count = (x: number | undefined): x is number => x !== undefined && Number.isInteger(x) && x >= 0;
 /**
- * An unscored row's short value token: `n=12/60` when its note carries the kit's "n=<count>, needs <count>" wording,
- * else `—`. The full note goes on its own line under the rule and into the row's accessible name.
+ * An unscored row's short value token, from its structured fields: `n=<n>/<needs>` when both are finite non-negative
+ * integers, else `—`. The note is free text and is never parsed; it goes on its own line under the rule and into the
+ * row's accessible name.
  */
-function unscoredToken(note: string): string {
-  const m = note.match(/\bn=([\d,]+), needs ([\d,]+)/);
-  return m ? `n=${m[1]}/${m[2]}` : "—";
+function unscoredToken(r: LedgerRow): string {
+  return count(r.n) && count(r.needs) ? `n=${fmt.count(r.n)}/${fmt.count(r.needs)}` : "—";
 }
 
 /** An exhibit id's cite label: `ex-c` → `Ex. C`; any other id is its own label. */
@@ -141,7 +142,7 @@ function ledgerRow(r: LedgerRow, idPrefix: string): string {
   const v = resolve(r);
   const cls = v === null ? "ledger-row ledger-row--unscored" : "ledger-row";
   const value = v === null
-    ? `<span class="ledger-row__value t-mono-14 c-muted">${esc(unscoredToken(noteOf(r)))}</span>`
+    ? `<span class="ledger-row__value t-mono-14 c-muted">${esc(unscoredToken(r))}</span>`
     : `<span class="ledger-row__value"><span class="t-mono-16">${esc(fmt.score(v.score))}</span>`
       + (v.interval === null ? "" : ` <span class="t-mono-14 ledger-row__interval">${esc(fmt.interval(v.interval))}</span>`) + "</span>";
   const dots = v === null ? "" : `<span class="ledger-row__dots">${confidenceDots(r.confidence)}</span>`;

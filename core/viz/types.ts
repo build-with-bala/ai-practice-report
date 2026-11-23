@@ -28,7 +28,11 @@ export interface LedgerRow {
   openTail: boolean;
   confidence: "low" | "medium" | "high" | null;
   window: "detail" | "lifetime";
+  /** Free text shown under an unscored row's rule; never parsed. */
   note?: string;
+  /** For an unscored row: the evidence count and the count it needs. Both finite non-negative integers give the value token `n=<n>/<needs>`. */
+  n?: number;
+  needs?: number;
   components: LedgerComponent[];
 }
 

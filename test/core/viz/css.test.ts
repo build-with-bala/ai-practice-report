@@ -280,3 +280,10 @@ describe("fix round 1: print, the seal dash, keep-case and the stacked component
     expect(mobile).not.toMatch(/\.ledger-components thead\{[^}]*display:none/);
   });
 });
+
+describe("fix round 2: the unscored note aligns with the drawn axis", () => {
+  test("the note takes only the rule's column and is inset by the axis margin, 8 of 400 units", () => {
+    expect(ruleOf(".ledger-row__note")).toContain("padding-left:2%");
+    expect(css).toContain('grid-template-areas:"label rule value dots window" ". note . . ."');
+  });
+});
