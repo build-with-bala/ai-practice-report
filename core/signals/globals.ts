@@ -1,18 +1,17 @@
 import { dayEnd, dayStart, isoWeek } from "../analysis/activity";
+import { analysisScope, artifactUse } from "../analysis/artifacts";
 import { PR_LINK_TOOLS, SWITCH_TOOLS, type Metric, type SessionTable } from "../analysis/types";
-import { inScope, type SessionStats } from "../analysis/walk";
+import type { SessionStats } from "../analysis/walk";
 import type { CommitFact, RepoFacts } from "../git/types";
 import { BUCKET_MS, DELIVERY_WINDOW_MS, REWORK_WINDOW_MS } from "../model/constants";
 import type { ConfigEv } from "../model/events";
 import type { ToolId } from "../model/ids";
 import type { ScanResult } from "../scan";
-import { keyedHash } from "../text/hash";
 import { fixedMetric, Span, type Globals } from "./types";
 
 const DAY_MS = 86_400_000;
 /** Rework counts own commits from this long before the detail window's start: their fixes can land inside it. */
 const REWORK_LEAD_MS = 3 * DAY_MS;
-const ARTIFACT_KINDS: ReadonlySet<ConfigEv["kind"]> = new Set<ConfigEv["kind"]>(["skill", "command", "agent", "plugin", "mcp-server"]);
 const weight = (p: ConfigEv["provenance"]): number => (p === "authored" ? 1 : 0.3);
 const ratio = (num: number, den: number): number | null => (den > 0 ? num / den : null);
 const mean = (v: readonly number[]): number | null => (v.length > 0 ? v.reduce((a, b) => a + b, 0) / v.length : null);
@@ -47,11 +46,10 @@ function toolDays(t: SessionTable, tools: ReadonlySet<ToolId>, window: "detailDa
  *   of them has a week, never 0.
  */
 export function computeGlobals(t: SessionTable, stats: readonly SessionStats[], raw: ScanResult, o: { now: number }): Globals {
-  const { from, to, tools: excluded } = t.scope;
-  const inRange = (ts: number): boolean => ts >= from && ts <= to;
+  const scope = analysisScope(raw, t);
+  const { inRange, excluded, kept, detailSources, detailRows, configs } = scope;
   const repoStatus = raw.repos.status;
   const repoOff = repoStatus === "off" || repoStatus === "git-missing";
-  const kept = (sessionId: string): boolean => t.rows.has(sessionId) && !t.hosts.has(sessionId);
 
   // buckets (§6.4 parallelism)
   const perBucket = new Map<number, number>();
@@ -95,7 +93,6 @@ export function computeGlobals(t: SessionTable, stats: readonly SessionStats[], 
   const switchTool = (tool: ToolId): boolean => SWITCH_TOOLS.has(tool) && !excluded.has(tool);
   for (const tool of SWITCH_TOOLS) if (switchTool(tool)) for (const src of t.activity.byTool[tool]?.lifetimeSources ?? []) switchSpan.addSource(src);
   // markers only from lifetime-window sources: a detail-window emitter is never summed against lifetime weeks
-  const detailSources = new Set(raw.coverage.filter((c) => c.window === "detail").map((c) => c.source));
   const lifetimeSources = new Set(raw.coverage.filter((c) => c.window === "lifetime" && !detailSources.has(c.source)).map((c) => c.source));
   let switches = 0;
   for (const m of raw.store.all("marker")) {
@@ -123,7 +120,6 @@ export function computeGlobals(t: SessionTable, stats: readonly SessionStats[], 
   const gitSpan = activeSpan.range();
 
   // config (kept tools only)
-  const configs = raw.store.all("config").filter((c) => !excluded.has(c.tool));
   const userHook = configs.some((c) => c.kind === "hook" && (c.checks?.length ?? 0) > 0)
     && !configs.some((c) => c.kind === "feature" && c.name === "hooks-disabled");
   const guards: number[] = [];
@@ -141,12 +137,11 @@ export function computeGlobals(t: SessionTable, stats: readonly SessionStats[], 
     repoOff ? fixedMetric("detail", ["git"], 0, null, "repo-signals-off") : fixedMetric("detail", ["git"], n, value, "no-data", span);
 
   // commits: the repos of kept rows, inside the date range
-  const detailRows = [...t.rows.values()].filter((r) => r.window === "detail" && !t.hosts.has(r.id));
   const keptRepos = new Set<string>();
   for (const row of detailRows) if (row.repoKey !== undefined) keptRepos.add(row.repoKey);
-  const detailFrom = stats.length > 0 ? Math.max(from, stats.reduce((m, s) => Math.min(m, s.start), Infinity)) : undefined;
-  const hi = Math.min(o.now, to);
-  const reworkFrom = detailFrom === undefined ? undefined : Math.max(from, detailFrom - REWORK_LEAD_MS);
+  const detailFrom = stats.length > 0 ? Math.max(t.scope.from, stats.reduce((m, s) => Math.min(m, s.start), Infinity)) : undefined;
+  const hi = Math.min(o.now, t.scope.to);
+  const reworkFrom = detailFrom === undefined ? undefined : Math.max(t.scope.from, detailFrom - REWORK_LEAD_MS);
   let reworkDen = 0;
   let reworked = 0;
   let own = 0;
@@ -184,45 +179,11 @@ export function computeGlobals(t: SessionTable, stats: readonly SessionStats[], 
     }
   }
 
-  // used artifacts, provenance-weighted: one count of distinct config entries, each "used at least once" (a lifetime
-  // predicate). Evidence of use: the entry's own `uses` counter, an MCP call naming it, or a custom child of its type.
-  // Dated evidence (the calls, the children) obeys the date range and the exclusions: a call inside the range, of a kept
-  // detail row; a child only when it is in scope (`inScope`, the walk's rule). Undated usage counters are state read at
-  // scan time: a date range cannot limit them, and they are not clipped.
-  const evidence = new Map<string, Set<string>>(); // evidence key → the sources of the events that supplied it
-  const addEvidence = (key: string, source: string): void => {
-    const set = evidence.get(key);
-    if (set) set.add(source);
-    else evidence.set(key, new Set([source]));
-  };
-  for (const e of raw.store.all("tool")) {
-    if (e.mcpServer !== undefined && !excluded.has(e.tool) && inRange(e.ts) && kept(e.sessionId) && t.rows.get(e.sessionId)!.window === "detail") {
-      addEvidence(`mcp-server\u0000${e.mcpServer}`, e.source);
-    }
-  }
-  const markersOf = (id: string) => raw.store.forSession(id, "marker").filter((m) => detailSources.has(m.source) && inRange(m.ts));
-  for (const row of detailRows) {
-    if (row.agentType === undefined || row.parentId === undefined || !inScope(row, t, raw.store, markersOf)) continue;
-    addEvidence(`agent\u0000${row.agentType}`, row.source);
-  }
-  const used = new Map<string, { w: number; sources: Set<string> }>();
-  for (const c of configs) {
-    if (!ARTIFACT_KINDS.has(c.kind) || c.name === undefined) continue;
-    const seen = c.kind === "mcp-server" ? evidence.get(`mcp-server\u0000${c.name}`)
-      : c.kind === "agent" ? new Set([...(evidence.get(`agent\u0000${keyedHash(raw.salt, c.name)}`) ?? []), ...(evidence.get(`agent\u0000${c.name}`) ?? [])])
-      : undefined;
-    const byEvent = seen !== undefined && seen.size > 0;
-    if (!((c.uses ?? 0) > 0) && !byEvent) continue;
-    const key = `${c.kind}\u0000${c.name}`;
-    let u = used.get(key);
-    if (!u) used.set(key, (u = { w: 0, sources: new Set() }));
-    u.w = Math.max(u.w, weight(c.provenance));
-    u.sources.add(c.source);
-    if (byEvent) for (const src of seen!) u.sources.add(src);
-  }
+  // used artifacts, provenance-weighted: the distinct config entries in use (`artifactUse`, which documents the rule)
+  const used = artifactUse(raw, t, scope).filter((a) => a.used);
   const artifactSpan = new Span(); // sources only: a state count has no from/to
   let artifactWeight = 0;
-  for (const u of used.values()) { artifactWeight += u.w; for (const src of u.sources) artifactSpan.addSource(src); }
+  for (const u of used) { artifactWeight += weight(u.provenance); for (const src of u.sources) artifactSpan.addSource(src); }
 
   const memoryFiles = configs.filter((c) => c.kind === "memory-file").length;
   const commitSpan = { from: detailFrom, to: hi };
@@ -234,7 +195,7 @@ export function computeGlobals(t: SessionTable, stats: readonly SessionStats[], 
     guardrails: repoMetric(activeRepos, mean(guards), gitSpan),
     maintainedShare: repoMetric(activeRepos, ratio(maintained, activeRepos), gitSpan),
     // config is read by lifetime-window readers (`uses` are the tools' own lifetime counters): a lifetime metric
-    artifacts: artifactSpan.metric("lifetime", used.size, used.size > 0 ? artifactWeight : null),
+    artifacts: artifactSpan.metric("lifetime", used.length, used.length > 0 ? artifactWeight : null),
     memoryFiles,
     switchesPerWeek: switchSpan.metric("lifetime", switchWeeks, ratio(switches, switchWeeks), switchWeeks === 0 ? "not-captured" : "no-data"),
     reworkShare: repoMetric(reworkDen, ratio(reworked, reworkDen), { from: reworkFrom, to: hi }),
@@ -242,7 +203,7 @@ export function computeGlobals(t: SessionTable, stats: readonly SessionStats[], 
     aiCoauthoredShare: repoMetric(own, ratio(ai, own), commitSpan),
     commitAfterSession: repoMetric(afterDen, ratio(afterNum, afterDen), afterSpan.range()),
     repoSignals: repoStatus,
-    evidence: { repos: repoOff ? 0 : activeRepos, buckets: perBucket.size, artifacts: used.size, lifetimeWeeks: t.activity.lifetimeWeeks.length, ownCommits: own },
+    evidence: { repos: repoOff ? 0 : activeRepos, buckets: perBucket.size, artifacts: used.length, lifetimeWeeks: t.activity.lifetimeWeeks.length, ownCommits: own },
     ...(firstParallel === undefined ? {} : { firstParallelBucket: firstParallel * BUCKET_MS }),
   };
 }
