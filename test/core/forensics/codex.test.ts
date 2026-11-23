@@ -35,14 +35,14 @@ describe("checkRollouts: C6, every rollout has a thread row", () => {
   test("2 rollouts missing their rows fail", () => {
     const [c6] = run([...indexed(5), rollout(9), rollout(10)]);
     expect([c6.status, c6.reason]).toEqual(["fail", "missing-thread-rows"]);
-    expect(c6.values).toEqual({ missing: 2, rollouts: 7 });
+    expect(c6.values).toEqual({ missing: 2, rollouts: 7, beforeIndex: 0 });
     expect(c6.askAbout).toBe("2 Codex session files have no entry in Codex's own thread index. Were session files copied in from somewhere else?");
   });
 
   test("1 rollout missing its row is a note with the same question", () => {
     const [c6] = run([...indexed(5), rollout(9)]);
     expect([c6.status, c6.reason]).toEqual(["note", "missing-thread-rows"]);
-    expect(c6.values).toEqual({ missing: 1, rollouts: 6 });
+    expect(c6.values).toEqual({ missing: 1, rollouts: 6, beforeIndex: 0 });
     expect(c6.askAbout).toBe("1 Codex session file has no entry in Codex's own thread index. Were session files copied in from somewhere else?");
   });
 
@@ -59,6 +59,22 @@ describe("checkRollouts: C6, every rollout has a thread row", () => {
     expect(status(1_000, 10)).toBe("fail");
     expect(status(20, 1)).toBe("note");
     expect(status(20, 2)).toBe("fail");
+  });
+
+  test("rollouts named before the index's earliest row are not checked", () => {
+    const dated = (i: number): ThreadRowEv => ({ ...row(i), createdAt: T0 + 10 * HOUR });
+    const early = Array.from({ length: 5 }, (_, i) => rollout(50 + i, { fileTs: T0 + i * HOUR, uuidTs: T0 + i * HOUR + 400 }));
+    const inside = Array.from({ length: 5 }, (_, i) => [rollout(10 + i), dated(10 + i)]).flat();
+    const [c6] = run([threadsCov(), ...early, ...inside]);
+    expect([c6.status, c6.n]).toEqual(["pass", 5]);
+    expect(c6.values).toEqual({ missing: 0, rollouts: 5, beforeIndex: 5 });
+    const [m] = run([threadsCov(), ...early, ...inside, rollout(20)]);
+    expect([m.status, m.values.missing, m.values.beforeIndex]).toEqual(["note", 1, 5]);
+  });
+
+  test("without any createdAt every rollout is checked", () => {
+    const [c6] = run([threadsCov(), rollout(0), rollout(1), row(2)]);
+    expect([c6.status, c6.values.beforeIndex]).toEqual(["fail", 0]);
   });
 
   test("a rollout named 2 min before now is ignored", () => {
@@ -109,10 +125,12 @@ describe("checkRollouts: C7, the id's time is not after the file name's", () => 
     expect(c7.askAbout).toBeString();
   });
 
-  test("quarter hours within 2 s and up to 14 h are zone changes; other offsets are not", () => {
+  test("quarter hours within 2 s and up to 26 h are zone changes; other offsets are not", () => {
     expect(run([rollout(0, { uuidTs: T0 + 5.75 * HOUR + 1_500, fileTs: T0 })])[1].status).toBe("note");
     expect(run([rollout(0, { uuidTs: T0 + 14 * HOUR, fileTs: T0 })])[1].status).toBe("note");
-    expect(run([rollout(0, { uuidTs: T0 + 14.25 * HOUR, fileTs: T0 })])[1].status).toBe("fail");
+    expect(run([rollout(0, { uuidTs: T0 + 16 * HOUR, fileTs: T0 })])[1].status).toBe("note");
+    expect(run([rollout(0, { uuidTs: T0 + 26 * HOUR, fileTs: T0 })])[1].status).toBe("note");
+    expect(run([rollout(0, { uuidTs: T0 + 26.25 * HOUR, fileTs: T0 })])[1].status).toBe("fail");
     expect(run([rollout(0, { uuidTs: T0 + 3 * HOUR + 5 * SEC, fileTs: T0 })])[1].status).toBe("fail");
     expect(run([rollout(0, { uuidTs: T0 + 10 * MIN, fileTs: T0 })])[1].status).toBe("fail");
   });
@@ -175,22 +193,29 @@ describe("checkRollouts: C8, the rate-limit ledger only rises within a window", 
     expect(c8.status).toBe("pass");
   });
 
-  test("a drop of more than 2 points is a contradiction; 2 of them stay under the fail threshold", () => {
-    const evs = ledger().map((e, i) => (i === 3 || i === 11 ? { ...e, usedPercent: e.usedPercent - 8 } : e));
-    const [, , c8] = run(evs);
-    expect(c8.values.contradictions).toBe(2);
+  /** `ledger()` with the readings at the given indexes 8 points lower: each a drop of more than 2 points. */
+  const dropped = (evs: RateLimitEv[], at: number[]) => evs.map((e, i) => (at.includes(i) ? { ...e, usedPercent: e.usedPercent - 8 } : e));
+
+  test("one drop in each of four windows passes: a single drop in a window looks like a service-side reset", () => {
+    const [, , c8] = run(dropped(ledger(), [3, 11, 19, 27]));
+    expect(c8.values.contradictions).toBe(0);
     expect(c8.status).toBe("pass");
-    const three = ledger().map((e, i) => (i === 3 || i === 11 || i === 19 ? { ...e, usedPercent: e.usedPercent - 8 } : e));
-    expect(run(three)[2].status).toBe("fail");
   });
 
-  test("3 contradictions among 1,050 pairs are within 0.5% and pass", () => {
+  test("drops count in windows holding two or more of them; 4 such among 42 pairs fail", () => {
+    const [, , c8] = run(dropped(ledger(), [3, 5, 11, 13]));
+    expect(c8.values.contradictions).toBe(4);
+    expect(c8.status).toBe("fail");
+    const two = run(dropped(ledger(), [3, 5]))[2];
+    expect([two.values.contradictions, two.status]).toEqual([2, "pass"]);
+  });
+
+  test("4 contradictions among 1,050 pairs are within 0.5% and pass", () => {
     const evs: RateLimitEv[] = [];
     for (let k = 0; k < 25; k++) evs.push(...ledger(T0 + k * 30 * HOUR));
-    const marked = evs.map((e, i) => (i === 3 || i === 11 || i === 19 ? { ...e, usedPercent: e.usedPercent - 8 } : e));
-    const [, , c8] = run(marked);
+    const [, , c8] = run(dropped(evs, [3, 5, 11, 13]));
     expect(c8.values.pairs).toBe(1_050);
-    expect(c8.values.contradictions).toBe(3);
+    expect(c8.values.contradictions).toBe(4);
     expect(c8.status).toBe("pass");
   });
 
@@ -202,16 +227,12 @@ describe("checkRollouts: C8, the rate-limit ledger only rises within a window", 
     expect(c8.values.pairs).toBe(126);
   });
 
-  test("without resetsAt, snapshots of the same windowMinutes less than a window apart pair", () => {
+  test("snapshots without resetsAt form no pairs: a genuine ledger across resets is not failed", () => {
     const evs = ledger().map((e) => ({ ...e, resetsAt: undefined }));
     for (const e of evs) delete e.resetsAt;
     const [, , c8] = run(evs);
-    // consecutive snapshots are 30 min apart, and 90 min apart at a window's turn: all 47 consecutive pairs pair
-    expect(c8.values.pairs).toBe(47);
-    // each window's first snapshot is lower than the last of the window before: 5 contradictions
-    expect(c8.values.contradictions).toBe(5);
-    const noMinutes = evs.map((e) => ({ ...e, windowMinutes: undefined }));
-    expect(run(noMinutes)[2].values.pairs ?? 0).toBe(0);
+    expect(c8.values).toEqual({ pairs: 0, contradictions: 0 });
+    expect([c8.status, c8.reason]).toEqual(["n/a", "too-few"]);
   });
 
   test("10 pairs are n/a", () => {

@@ -150,6 +150,38 @@ describe("runForensics: the band", () => {
     expect(f.band).toBe("consistent-with-notes");
   });
 
+  test("unverifiable ids with every other anchorable check n/a are unverifiable, whatever C5 and C9 say", () => {
+    const f = run([...scrambled(anchors("cc-msg", 1), 5), ...files(20)]);
+    expect(byId(f, "C1").reason).toBe("scheme-changed");
+    expect(byId(f, "C5").status).toBe("pass");
+    expect(f.band).toBe("unverifiable");
+  });
+
+  test("unverifiable ids with C4 passing are consistent with notes", () => {
+    const f = run([...scrambled(anchors("cc-msg", 1), 5), sess("a"), identity("session", "a"), identity("config", "a")]);
+    expect(byId(f, "C4").status).toBe("pass");
+    expect(f.band).toBe("consistent-with-notes");
+  });
+
+  test("Cursor-only data is unverifiable, with a C9 pass and a C5 pass, or with a C5 note", () => {
+    const releases: ReleaseTable = { version: 1, models: [{ match: "^model-x$", released: "2020-01-01", source: "https://example.com/x" }], tools: {} };
+    const cursorFile = (f: FileFactEv): FileFactEv => ({ ...f, tool: "cursor", source: "cursor.x" });
+    const base: Ev[] = [sess("c", "cursor", T0, { models: ["model-x"] }), prompt("c", T0 + MIN, "cursor")];
+    const passing = run([...base, ...files(20).map(cursorFile)], [], releases);
+    expect([byId(passing, "C9").status, byId(passing, "C5").status]).toEqual(["pass", "pass"]);
+    expect(passing.band).toBe("unverifiable");
+    const restored = files(20, (i) => file(i * 1.5, { birth: T0 + 50 * DAY + i * 10 * SEC, ctime: T0 + 50 * DAY + i * 10 * SEC })).map(cursorFile);
+    const noted = run([...base, ...restored], [], releases);
+    expect(byId(noted, "C5").status).toBe("note");
+    expect(noted.band).toBe("unverifiable");
+  });
+
+  test("a C3 warn with every other check n/a is consistent with notes", () => {
+    const f = run(claudeDays(6));
+    expect(f.checks.filter((c) => c.id !== "C3" && /^C\d$/.test(c.id)).every((c) => c.status === "n/a")).toBe(true);
+    expect(f.band).toBe("consistent-with-notes");
+  });
+
   test("too few ids stay neutral: with C3 passing the band is consistent", () => {
     const f = run([...anchors().slice(0, 30), ...claudeDays(10)]);
     expect(byId(f, "C1").reason).toBe("too-few");
@@ -157,8 +189,9 @@ describe("runForensics: the band", () => {
   });
 
   test("a raised soft flag alone makes notes", () => {
-    const cfg: ConfigEv = { k: "config", tool: "claude-code", source: "claude-code.config", kind: "skill", name: "a", provenance: "authored", uses: 2, firstSeen: NOW - DAY };
-    const f = run([...anchors("cc-msg", 1), cfg]);
+    const cfg = (name: string): ConfigEv =>
+      ({ k: "config", tool: "claude-code", source: "claude-code.config", kind: "skill", name, provenance: "authored", uses: 2, firstSeen: NOW - DAY });
+    const f = run([...anchors("cc-msg", 1), cfg("a"), cfg("b"), cfg("c")]);
     expect(byId(f, "soft:new-config").status).toBe("note");
     expect(f.band).toBe("consistent-with-notes");
   });
@@ -253,7 +286,7 @@ describe("wording: every reason and question the forensic checks produce", () =>
         { textHash: i < 5 ? "x" : `u${i}`, features: { ...features, chars: 300 } })),
       ...[80, 1, 2, 3].map((d) => history(NOW - d * DAY, `l${d}`)),
       ...Array.from({ length: 10 }, (_, i): ToolEv => ({ k: "tool", tool: "claude-code", source: CC, ts: NOW - DAY + i, sessionId: "s", name: "Read", category: "read" })),
-      { k: "config", tool: "claude-code", source: "claude-code.config", kind: "skill", name: "a", provenance: "authored", uses: 1, firstSeen: NOW - DAY },
+      ...["a", "b", "c"].map((name): ConfigEv => ({ k: "config", tool: "claude-code", source: "claude-code.config", kind: "skill", name, provenance: "authored", uses: 1, firstSeen: NOW - DAY })),
     ],
   ];
   const releases: ReleaseTable = { version: 1, models: [{ match: "^model-x$", released: "2027-01-01", source: "https://example.com/x" }], tools: {} };

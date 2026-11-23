@@ -1,5 +1,6 @@
 import type { SessionTable } from "../analysis/types";
 import type { ToolId } from "../model/ids";
+import type { ScanResult } from "../scan";
 import shipped from "./releases.json" with { type: "json" };
 import type { CheckResult } from "./types";
 
@@ -21,31 +22,48 @@ const TOL_MS = 2 * DAY_MS;
 
 const dayMs = (day: string): number => Date.parse(`${day}T00:00:00Z`);
 
+/** The earliest time each model is carried by an event of the session (its turns' and usage records' `model`). */
+function firstUses(raw: ScanResult, sessionId: string): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const e of [...raw.store.forSession(sessionId, "turn"), ...raw.store.forSession(sessionId, "usage")]) {
+    if (e.model === undefined) continue;
+    const was = out.get(e.model);
+    if (was === undefined || e.ts < was) out.set(e.model, e.ts);
+  }
+  return out;
+}
+
 /**
  * C9 over the session rows. Each model of a row is checked against the first table entry whose pattern matches it, and
- * the row's version against its tool's entry of that exact version. A check is violated when the row starts more than
- * 2 days before the entry's release day. Any violation → fail; n/a when nothing matched. `values`: `checked` (the checks
- * made), `violations`, `sessions` (the rows with one). The result names no model or version: counts only.
+ * the row's version against its tool's entry of that exact version. A check compares the release day with the model's
+ * first use in the session (the earliest of its events that carries the model), so a thread resumed after a release with
+ * the new model is not taken for an early one; where no event carries it (a version, a model only the session row
+ * names), with the row's end. It is violated when that time is more than 2 days before the release day. Any violation
+ * → fail; n/a when nothing matched. `values`: `checked` (the checks made), `violations`, `sessions` (the rows with one).
+ * The result names no model or version: counts only.
  */
-export function checkReleases(t: SessionTable, table: ReleaseTable): CheckResult {
+export function checkReleases(t: SessionTable, table: ReleaseTable, raw: ScanResult): CheckResult {
   const models = table.models.map((m) => ({ re: new RegExp(m.match), at: dayMs(m.released) }));
   let checked = 0, violations = 0;
   const violating = new Set<string>();
   const tools = new Set<ToolId>();
   for (const row of t.rows.values()) {
-    const dates: number[] = [];
+    const checks: { at: number; used: number }[] = [];
+    let uses: Map<string, number> | undefined;
     for (const model of row.models) {
       const hit = models.find((m) => m.re.test(model));
-      if (hit) dates.push(hit.at);
+      if (!hit) continue;
+      uses ??= firstUses(raw, row.id);
+      checks.push({ at: hit.at, used: uses.get(model) ?? row.end });
     }
     if (row.version !== undefined) {
       const hit = table.tools[row.tool]?.find((v) => v.version === row.version);
-      if (hit) dates.push(dayMs(hit.released));
+      if (hit) checks.push({ at: dayMs(hit.released), used: row.end });
     }
-    if (dates.length > 0) tools.add(row.tool);
-    for (const at of dates) {
+    if (checks.length > 0) tools.add(row.tool);
+    for (const c of checks) {
       checked++;
-      if (row.start < at - TOL_MS) {
+      if (c.used < c.at - TOL_MS) {
         violations++;
         violating.add(row.id);
       }

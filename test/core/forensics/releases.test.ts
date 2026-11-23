@@ -1,10 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { buildSessionTable } from "../../../core/analysis/sessions";
 import { checkReleases, RELEASES, type ReleaseTable } from "../../../core/forensics/releases";
-import type { Ev, SessionEv } from "../../../core/model/events";
+import type { Ev, SessionEv, TurnEv, UsageEv } from "../../../core/model/events";
 import type { ToolId } from "../../../core/model/ids";
 import { scanResultOf } from "../../kit/scanresult";
 
+const HOUR = 3_600_000;
 const DAY = 86_400_000;
 const RELEASED = Date.UTC(2026, 5, 10);
 const TABLE: ReleaseTable = {
@@ -19,9 +20,13 @@ const sess = (id: string, start: number, over: Partial<SessionEv> = {}): Session
   k: "session", tool: "claude-code", source: "claude-code.transcripts", id, window: "detail", origin: "human", start, end: start + 3_600_000,
   models: [], ...over,
 });
+const turn = (sessionId: string, ts: number, model: string): TurnEv =>
+  ({ k: "turn", tool: "claude-code", source: "claude-code.transcripts", ts, sessionId, window: "detail", model });
+const usage = (sessionId: string, ts: number, model: string): UsageEv =>
+  ({ k: "usage", tool: "claude-code", source: "claude-code.transcripts", ts, sessionId, model, inTok: 1, outTok: 1, cacheR: 0, cacheW: 0 });
 const check = (events: Ev[], table: ReleaseTable = TABLE) => {
   const raw = scanResultOf(events);
-  return checkReleases(buildSessionTable(raw, { now: raw.finishedAt, timeZone: "UTC" }), table);
+  return checkReleases(buildSessionTable(raw, { now: raw.finishedAt, timeZone: "UTC" }), table, raw);
 };
 
 describe("checkReleases (C9)", () => {
@@ -39,6 +44,27 @@ describe("checkReleases (C9)", () => {
     const c = check([sess("a", RELEASED - DAY, { models: ["model-x"] })]);
     expect([c.status, c.reason]).toEqual(["pass", "ok"]);
     expect(c.askAbout).toBeUndefined();
+  });
+
+  test("a resumed session: started 10 days before the release, the new model first used after it, passes", () => {
+    const start = RELEASED - 10 * DAY;
+    const c = check([sess("r", start, { end: RELEASED + 5 * DAY, models: ["old-m", "model-x"] }),
+      turn("r", start + HOUR, "old-m"), usage("r", RELEASED + 4 * DAY, "model-x"), turn("r", RELEASED + 5 * DAY, "model-x")]);
+    expect([c.status, c.reason]).toEqual(["pass", "ok"]);
+    expect(c.values.checked).toBe(1);   // "old-m" is not in the table
+  });
+
+  test("a model first used 5 days before its release still fails, though the session ends after it", () => {
+    const start = RELEASED - 10 * DAY;
+    const c = check([sess("r", start, { end: RELEASED + 5 * DAY, models: ["model-x"] }),
+      turn("r", RELEASED - 5 * DAY, "model-x"), turn("r", RELEASED + 4 * DAY, "model-x")]);
+    expect(c.status).toBe("fail");
+  });
+
+  test("a model no event carries is compared with the row's end", () => {
+    const start = RELEASED - 10 * DAY;
+    expect(check([sess("r", start, { end: RELEASED - DAY, models: ["model-x"] })]).status).toBe("pass");
+    expect(check([sess("r", start, { end: RELEASED - 3 * DAY, models: ["model-x"] })]).status).toBe("fail");
   });
 
   test("a model takes the first entry that matches", () => {

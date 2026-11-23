@@ -26,7 +26,8 @@ export interface Forensics { band: "consistent" | "consistent-with-notes" | "inc
 /** Tools whose traces carry server-minted ids the checks verify: Claude Code (C1, C2) and Codex (C8). */
 const ANCHORABLE: ReadonlySet<ToolId> = new Set<ToolId>(["claude-code", "codex"]);
 const BACKING: readonly [ToolId, readonly CheckResult["id"][]][] = [["claude-code", ["C1", "C2"]], ["codex", ["C8"]]];
-const PRIMARY = new Set<CheckResult["id"]>(["C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9"]);
+/** The checks tied to an anchorable tool's own records. */
+const ANCHOR_CHECKS = new Set<CheckResult["id"]>(["C1", "C2", "C3", "C4", "C6", "C7", "C8"]);
 
 /**
  * Ids that exist but cannot be verified: a C1 or C2 result that is n/a for a reason other than `too-few`, or that names
@@ -38,15 +39,17 @@ const unverified = (c: CheckResult): boolean => (c.id === "C1" || c.id === "C2")
 /**
  * The band over every result (never `worst()`, where n/a ranks below pass):
  * 1. any fail → `inconsistent`;
- * 2. else any warn or note (a raised soft flag is a note) → `consistent-with-notes`;
- * 3. else, when any of C1–C9 passed → `consistent`, or `consistent-with-notes` when ids exist but cannot be verified;
- * 4. else → `unverifiable` (unverifiable ids with nothing passing stay unverifiable).
+ * 2. else, when every check tied to an anchorable tool (C1–C4, C6–C8) is n/a → `unverifiable`, whatever C5, C9 or the
+ *    soft flags say: nothing in the data can be held against what a server minted or a tool's own records;
+ * 3. else any warn or note (a raised soft flag is a note), or ids that exist but cannot be verified →
+ *    `consistent-with-notes`;
+ * 4. else → `consistent`.
  */
 function bandOf(checks: readonly CheckResult[]): Forensics["band"] {
   if (checks.some((c) => c.status === "fail")) return "inconsistent";
-  if (checks.some((c) => c.status === "warn" || c.status === "note")) return "consistent-with-notes";
-  if (checks.some((c) => PRIMARY.has(c.id) && c.status === "pass")) return checks.some(unverified) ? "consistent-with-notes" : "consistent";
-  return "unverifiable";
+  if (checks.every((c) => !ANCHOR_CHECKS.has(c.id) || c.status === "n/a")) return "unverifiable";
+  if (checks.some((c) => c.status === "warn" || c.status === "note" || unverified(c))) return "consistent-with-notes";
+  return "consistent";
 }
 
 /**
@@ -59,7 +62,7 @@ export function runForensics(raw: ScanResult, t: SessionTable, stats: readonly S
   const [c6, c7, c8] = checkRollouts(raw, { now: o.now });
   const checks: CheckResult[] = [
     c1, c2, checkClaudeHistory(raw, t), checkAccount(raw), checkFileTimes(raw, { timeZone: o.timeZone }), c6, c7, c8,
-    checkReleases(t, o.releases ?? RELEASES), provenance(raw, t), ...softFlags(raw, t, o),
+    checkReleases(t, o.releases ?? RELEASES, raw), provenance(raw, t), ...softFlags(raw, t, o),
   ];
 
   const present = new Set<ToolId>();

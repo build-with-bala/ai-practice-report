@@ -200,11 +200,29 @@ describe("softFlags", () => {
   });
 
   describe("new-config", () => {
-    test("a used artifact first seen within 7 days is raised, with the count", () => {
-      const f = flag([config({ firstSeen: NOW - 2 * DAY }), config({ name: "b", firstSeen: NOW - 30 * DAY })], "soft:new-config");
+    /** `fresh` used artifacts first seen 2 days before now, and `old` first seen 30 days before. */
+    const artifacts = (fresh: number, old: number): ConfigEv[] => [
+      ...Array.from({ length: fresh }, (_, i) => config({ name: `n${i}`, firstSeen: NOW - 2 * DAY })),
+      ...Array.from({ length: old }, (_, i) => config({ name: `o${i}`, firstSeen: NOW - 30 * DAY })),
+    ];
+
+    test("3 new of 6 are raised, with the counts", () => {
+      const f = flag(artifacts(3, 3), "soft:new-config");
       expect([f.status, f.reason]).toEqual(["note", "new-config"]);
-      expect(f.values.recent).toBe(1);
-      expect(f.askAbout).toBe("1 of the tools and skills in use were first seen in the 7 days before this scan. Was this machine set up or migrated in that week?");
+      expect(f.values).toEqual({ recent: 3, artifacts: 6 });
+      expect(f.askAbout).toBe("3 of the 6 tools and skills in use were first seen in the 7 days before this scan. Was this machine set up or migrated, or were its tools updated, in that week?");
+    });
+
+    test("1 new of 10, or 2 new of 2, is not raised", () => {
+      expect(flag(artifacts(1, 9), "soft:new-config").status).toBe("pass");
+      expect(flag(artifacts(2, 0), "soft:new-config").status).toBe("pass");
+      expect(flag(artifacts(3, 4), "soft:new-config").status).toBe("pass");
+    });
+
+    test("reports of one artifact count once, at its earliest first-seen time", () => {
+      const f = flag([...artifacts(3, 0), config({ name: "n0", firstSeen: NOW - 30 * DAY }), config({ name: "n1", source: "claude-code.other", firstSeen: NOW - DAY })], "soft:new-config");
+      expect(f.values).toEqual({ recent: 2, artifacts: 3 });
+      expect(f.status).toBe("pass");
     });
 
     test("older artifacts pass; unused ones and features are not counted", () => {
@@ -220,7 +238,7 @@ describe("softFlags", () => {
       ...Array.from({ length: 61 }, (_, i) => prompt(T0 + i * MIN, { textHash: i < 5 ? "x" : `u${i}` }, 300)),
       ...[80, 1, 2, 3, 4, 5].map((d) => lifetime(NOW - d * DAY)),
       ...Array.from({ length: 10 }, (_, i) => toolEv(i, { ok: undefined })),
-      config({ firstSeen: NOW - DAY }),
+      ...["a", "b", "c"].map((name) => config({ name, firstSeen: NOW - DAY })),
     ];
     const fs = flags(evs);
     expect(fs.map((f) => f.status)).toEqual(["note", "note", "note", "note", "note"]);
