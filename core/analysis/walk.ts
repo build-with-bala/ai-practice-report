@@ -25,16 +25,21 @@ export type Hist = Record<number, number>;
  * - Steering (rules 10–12): `followUps` = typed turns that start no episode; `briefs`, `correctedBriefs`,
  *   `briefScoreSum`; `interrupts` (the person's, not proxy-timed) and `healthyInterrupts`; `workEpisodes` (episodes with
  *   an action) and `turnsPerWorkSum`; `queued` = `queue` markers.
- * - Children (rule 13), over every descendant: `children`, `finishedChildren`, `bgKnown` (background known),
- *   `bgChildren` (background), `childTypes`, `workflowRuns` (distinct workflow ids), `maxDepth` (0 without children).
+ * - Children (rule 13): fan-out — `children` and `finishedChildren` — counts the row's direct children only; deeper
+ *   descendants feed `maxDepth` (0 without children) and A_t, never fan-out. `bgKnown` (background known), `bgChildren`
+ *   (background), `childTypes` and `workflowRuns` (distinct workflow ids) take every descendant.
  * - Hygiene (rule 14): `compactAuto`, `compactManual`, `freshEpisodes`.
  * - `tierPairs` (rule 15): flat [10·tier + effort rank, log2(1 + episode actions), …], one pair per episode with both.
  * - Cost (rule 16): `tokens` (Σ in + out + cache writes, row and descendants; `tokensKnown`: any usage), `usd` (the
- *   row's totals; `usdKnown`: one names a cost).
+ *   row's totals; `usdKnown`: one names a cost, and the row lies wholly inside the date range — totals carry no time).
  * - Delivery (rules 17–18): `editEpisodes`; `editEpisodesInRepo` (the row's repo has an identity); `landedEpisodes`
  *   (of those in a repo: a commit of the repo — any, clones' included — or a commit or PR marker of the row within
- *   [episode start, episode end + DELIVERY_WINDOW_MS]); `prKeys` and `commitShaKeys` (marker details, sorted);
- *   `landed` units (rule 18, from owner commits only).
+ *   [episode start, episode end + DELIVERY_WINDOW_MS]; the row's markers include its descendants'); `prKeys` and
+ *   `commitShaKeys` (marker details of the row and its descendants, sorted; a key two rows name belongs to the
+ *   earliest-starting one only); `landed` units (rule 18, from owner commits only). A git commit becomes a landed unit
+ *   only in a repo with an identity (`RepoFacts.identity`); marker keys count without one.
+ * - Date range (`SessionTable.scope`): events, markers and commits outside [from, to] are ignored, even in a kept row
+ *   that overlaps the range; `start` and `end` are the row's, clipped to the range.
  * - `buckets` (rule 19): the distinct ⌊ts / BUCKET_MS⌋ with an action of the row or its descendants, ascending.
  */
 export interface SessionStats {
@@ -134,17 +139,31 @@ export function buildSessionStats(t: SessionTable, store: EventStore, repos: Rep
   const detailSources = new Set<string>();
   for (const c of store.all("coverage")) if (c.window === "detail") detailSources.add(c.source);
   const gated = new Set<ToolId>(t.capabilities.outcomes);
-  const markersOf = (id: string): MarkerEv[] => store.forSession(id, "marker").filter((m) => detailSources.has(m.source));
+  const { from, to } = t.scope;
+  const inRange = (ts: number): boolean => ts >= from && ts <= to;
+  const markersOf = (id: string): MarkerEv[] => store.forSession(id, "marker").filter((m) => detailSources.has(m.source) && inRange(m.ts));
 
   const repoIndex = new Map<string, RepoIndex>();
   for (const r of repos.repos) {
     if (repoIndex.has(r.repoKey)) continue;
-    repoIndex.set(r.repoKey, { identity: r.identity, commitTs: r.commits.map((c) => c.ts).sort((a, b) => a - b) });
+    repoIndex.set(r.repoKey, { identity: r.identity, commitTs: r.commits.map((c) => c.ts).filter(inRange).sort((a, b) => a - b) });
   }
 
-  const out = t.detailTop.map((row) => walkRow(row, t, store, { timeZone: o.timeZone, gated, markersOf, repoIndex }));
-  assignCommits(repos, out);
+  const out = t.detailTop.map((row) => walkRow(row, t, store, { timeZone: o.timeZone, gated, markersOf, repoIndex, inRange }));
+  ownKeysOnce(out);
+  assignCommits(repos, out, inRange);
   return out;
+}
+
+/** A PR or commit key that several rows' markers name belongs to the earliest-starting row (then the smallest id) only. */
+function ownKeysOnce(out: readonly SessionStats[]): void {
+  const prs = new Set<string>();
+  const shas = new Set<string>();
+  const firstSeen = (keys: readonly string[], seen: Set<string>): string[] => keys.filter((k) => !seen.has(k) && (seen.add(k), true));
+  for (const s of [...out].sort((a, b) => a.start - b.start || cmp(a.id, b.id))) {
+    s.prKeys = firstSeen(s.prKeys, prs);
+    s.commitShaKeys = firstSeen(s.commitShaKeys, shas);
+  }
 }
 
 /**
@@ -153,7 +172,7 @@ export function buildSessionStats(t: SessionTable, store: EventStore, repos: Rep
  * |its commit marker keys ∪ the commits assigned to it| + its distinct PRs. A commit a commit marker of any row already
  * names is not assigned again: the marker's row counts it (one commit, counted once).
  */
-function assignCommits(repos: RepoSignals, out: SessionStats[]): void {
+function assignCommits(repos: RepoSignals, out: SessionStats[], inRange: (ts: number) => boolean): void {
   const marked = new Set<string>();
   for (const s of out) for (const k of s.commitShaKeys) marked.add(k);
   const rowsByRepo = new Map<string, SessionStats[]>();
@@ -169,7 +188,7 @@ function assignCommits(repos: RepoSignals, out: SessionStats[]): void {
     if (!r.identity || !rows) continue;
     rows.sort((a, b) => a.start - b.start || cmp(a.id, b.id));
     for (const c of r.commits) {
-      if (!c.owner || marked.has(c.shaKey)) continue;
+      if (!c.owner || marked.has(c.shaKey) || !inRange(c.ts)) continue;
       for (let i = lastAtMost(rows, c.ts, (s) => s.start); i >= 0; i--) {
         const s = rows[i]!;
         if (c.ts > s.end + DELIVERY_WINDOW_MS) continue;
@@ -188,11 +207,15 @@ function assignCommits(repos: RepoSignals, out: SessionStats[]): void {
 
 interface WalkCtx {
   timeZone: string; gated: ReadonlySet<ToolId>; markersOf: (id: string) => MarkerEv[]; repoIndex: ReadonlyMap<string, RepoIndex>;
+  inRange: (ts: number) => boolean;
 }
 
 function walkRow(row: SessionRow, t: SessionTable, store: EventStore, cx: WalkCtx): SessionStats {
   const scripted = row.origin === "scripted" || row.origin === "scheduled";
   const markers = cx.markersOf(row.id);
+  const inRange = cx.inRange;
+  const start = Math.max(row.start, t.scope.from);
+  const end = Math.min(row.end, t.scope.to);
   // rule 1: the row's events in order — ts, then kind (prompt < tool < marker < turn < usage), then emission (a stable
   // sort of the kinds concatenated in that order)
   const seq: RowEv[] = [
@@ -201,18 +224,19 @@ function walkRow(row: SessionRow, t: SessionTable, store: EventStore, cx: WalkCt
     ...markers,
     ...store.forSession(row.id, "turn").filter((e) => e.window === "detail"),
     ...store.forSession(row.id, "usage"),
-  ].sort(byTs);
-  const clears = store.forSession(row.id, "marker").filter((m) => m.kind === "clear" && m.proxyTs === undefined).map((m) => m.ts).sort((a, b) => a - b);
+  ].filter((e) => inRange(e.ts)).sort(byTs);
+  const clears = store.forSession(row.id, "marker").filter((m) => m.kind === "clear" && m.proxyTs === undefined && inRange(m.ts))
+    .map((m) => m.ts).sort((a, b) => a - b);
   const n = seq.length;
   const actPrefix = new Int32Array(n + 1);
   for (let i = 0; i < n; i++) {
     const e = seq[i]!;
     actPrefix[i + 1] = actPrefix[i]! + (e.k === "tool" && isAction(e) ? 1 : 0);
   }
-  const rowEnd = Math.max(row.end, n > 0 ? seq[n - 1]!.ts : row.end);
+  const rowEnd = Math.max(end, n > 0 ? seq[n - 1]!.ts : end);
 
   const s: SessionStats = {
-    id: row.id, tool: row.tool, source: row.source, origin: row.origin, start: row.start, end: row.end, scripted,
+    id: row.id, tool: row.tool, source: row.source, origin: row.origin, start, end, scripted,
     days: [], turns: 0, stickySum: 0, actions: actPrefix[n]!, successRuns: {},
     gatedVae: cx.gated.has(row.tool), editTurns: 0, editWeight: 0, verifiedWeight: 0,
     failingChecks: 0, closedChecks: 0, fixCycles: {},
@@ -230,20 +254,23 @@ function walkRow(row: SessionRow, t: SessionTable, store: EventStore, cx: WalkCt
   const shaKeys = new Set<string>();
   const persons: MarkerEv[] = [];
   const deliveryTs: number[] = [];
+  /** Rule 17: a commit or PR marker of the row or a descendant. */
+  const delivery = (m: MarkerEv): void => {
+    if (m.kind !== "pr-link" && m.kind !== "commit") return;
+    if (m.detail !== undefined) (m.kind === "pr-link" ? prKeys : shaKeys).add(m.detail);
+    if (m.proxyTs === undefined) deliveryTs.push(m.ts);
+  };
   for (const m of markers) {
     if (m.kind === "compact-auto") s.compactAuto++;
     else if (m.kind === "compact-manual") s.compactManual++;
     else if (m.kind === "queue") s.queued++;
-    else if (m.kind === "pr-link" || m.kind === "commit") {
-      if (m.detail !== undefined) (m.kind === "pr-link" ? prKeys : shaKeys).add(m.detail);
-      if (m.proxyTs === undefined) deliveryTs.push(m.ts);
-    } else if (personInterrupt(m)) persons.push(m);
+    else if (m.kind === "pr-link" || m.kind === "commit") delivery(m);
+    else if (personInterrupt(m)) persons.push(m);
   }
   persons.sort(byTs);
-  deliveryTs.sort((a, b) => a - b);
-  s.prKeys = [...prKeys].sort(cmp);
-  s.commitShaKeys = [...shaKeys].sort(cmp);
-  for (const tot of store.forSession(row.id, "totals")) {
+  // totals carry no time: a row the date range cuts gives no cost, rather than the cost of its excluded part too
+  const whole = row.start >= t.scope.from && row.end <= t.scope.to;
+  for (const tot of whole ? store.forSession(row.id, "totals") : []) {
     if (tot.usd !== undefined && !s.usdKnown) { s.usd = tot.usd; s.usdKnown = true; }
   }
   const buckets = new Set<number>();
@@ -260,10 +287,10 @@ function walkRow(row: SessionRow, t: SessionTable, store: EventStore, cx: WalkCt
     const { id, top } = stack.pop()!;
     const c = t.rows.get(id);
     if (!c || t.hosts.has(id)) continue;
-    const own = store.forSession(id, "tool");
-    const child = top ?? { id, start: c.start, tools: [], actions: 0, lastTs: c.start };
+    const own = store.forSession(id, "tool").filter((e) => inRange(e.ts));
+    const cStart = Math.max(c.start, t.scope.from);
+    const child = top ?? { id, start: cStart, tools: [], actions: 0, lastTs: cStart };
     if (!top) direct.push(child);
-    s.children++;
     s.maxDepth = Math.max(s.maxDepth, c.depth - row.depth);
     if (c.background !== undefined) { s.bgKnown++; if (c.background) s.bgChildren++; }
     bump(s.childTypes, childType(c.agentType));
@@ -276,11 +303,17 @@ function walkRow(row: SessionRow, t: SessionTable, store: EventStore, cx: WalkCt
       s.actions++;
       buckets.add(Math.floor(e.ts / BUCKET_MS));
     }
-    const acts = own.filter(isAction).sort(byTs);
-    const failedLastTwo = acts.length >= 2 && acts[acts.length - 1]!.ok === false && acts[acts.length - 2]!.ok === false;
-    const stopped = cx.markersOf(id).some((m) => m.kind === "interrupt" && m.detail === "stopped-by-user");
-    if (!stopped && !failedLastTwo) s.finishedChildren++;
+    const childMarkers = cx.markersOf(id);
+    for (const m of childMarkers) delivery(m);
+    if (!top) { // fan-out: direct children only
+      s.children++;
+      const acts = own.filter(isAction).sort(byTs);
+      const failedLastTwo = acts.length >= 2 && acts[acts.length - 1]!.ok === false && acts[acts.length - 2]!.ok === false;
+      const stopped = childMarkers.some((m) => m.kind === "interrupt" && m.detail === "stopped-by-user");
+      if (!stopped && !failedLastTwo) s.finishedChildren++;
+    }
     for (const u of store.forSession(id, "usage")) {
+      if (!inRange(u.ts)) continue;
       s.tokens += u.inTok + u.outTok + u.cacheW;
       s.tokensKnown = true;
       child.lastTs = Math.max(child.lastTs, u.ts);
@@ -288,6 +321,9 @@ function walkRow(row: SessionRow, t: SessionTable, store: EventStore, cx: WalkCt
     for (const g of c.children) stack.push({ id: g, top: child });
   }
   for (const c of direct) c.tools.sort(byTs);
+  deliveryTs.sort((a, b) => a - b);
+  s.prKeys = [...prKeys].sort(cmp);
+  s.commitShaKeys = [...shaKeys].sort(cmp);
   s.workflowRuns = workflows.size;
   s.buckets = [...buckets].sort((a, b) => a - b);
   if (scripted) return s; // rule 20: no turns (nor a person's interrupts), but buckets, tokens and children
@@ -361,7 +397,11 @@ function walkRow(row: SessionRow, t: SessionTable, store: EventStore, cx: WalkCt
     const tu = turns[i]!;
     let ok = !interrupted.has(i);
     const next = turns[i + 1];
-    if (ok && next && next.p.intent === "correction" && next.p.ts - lastRealTs(tu.pos, tu.end, tu.p.ts) <= CORRECTION_WINDOW_MS) ok = false;
+    if (ok && next && next.p.intent === "correction") {
+      // the window runs from the span's last real event, or its attributed children's last event when later
+      const last = Math.max(lastRealTs(tu.pos, tu.end, tu.p.ts), ...tu.children.map((c) => c.lastTs));
+      if (next.p.ts - last <= CORRECTION_WINDOW_MS) ok = false;
+    }
     if (ok) {
       let seen = 0;
       for (let k = tu.end - 1; k > tu.pos && seen < 2; k--) {

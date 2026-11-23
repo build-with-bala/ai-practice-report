@@ -3,8 +3,12 @@ import type { Origin, ToolId, Window } from "../model/ids";
 
 /** What every metric says about its evidence: one window, the sources it read, the span covered and the sample size. */
 export interface MetricMeta { window: Window; sources: string[]; from?: number; to?: number; n: number }
-/** A measured value; `null` = not measurable (never a default 0). */
-export interface Metric extends MetricMeta { value: number | null }
+/**
+ * A measured value; `null` = not measurable (never a default 0), and `reason` says why: `no-data` (the data could hold it,
+ * but n = 0), `not-captured` (no tool in the data records the fields it needs), `repo-signals-off` (it needs repo
+ * signals, and they are off or git is missing).
+ */
+export interface Metric extends MetricMeta { value: number | null; reason?: "no-data" | "not-captured" | "repo-signals-off" }
 
 /** What the person left out of the report: whole tools, projects (projectKeys), and a date range (epoch ms, inclusive). */
 export interface Exclusions { tools?: ToolId[]; projects?: string[]; from?: number; to?: number }
@@ -42,6 +46,11 @@ export interface Activity { detailDays: string[]; lifetimeDays: string[]; detail
  */
 export interface SessionTable {
   rows: Map<string, SessionRow>; detailTop: SessionRow[]; hosts: Set<string>; repoOf: Map<string, string>;
+  /**
+   * What the exclusions left in scope: the date range (epoch ms, inclusive; ±Infinity when open) and the tools left out.
+   * Every later stage clips to the range: events, commits and markers outside it never count, even in a kept row.
+   */
+  scope: { from: number; to: number; tools: ReadonlySet<ToolId> };
   /** Origin human, or a scripted prompt the dedupe relabelled (its host copy was typed by the person). */
   isHuman(p: PromptEv): boolean;
   activity: Activity; capabilities: Capabilities;

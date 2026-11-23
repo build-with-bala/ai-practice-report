@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { buildSessionTable } from "../../../core/analysis/sessions";
+import type { Exclusions } from "../../../core/analysis/types";
 import { childType, effortRank, modelTier } from "../../../core/analysis/tiers";
 import { briefScore, buildSessionStats, isAction, type SessionStats } from "../../../core/analysis/walk";
 import type { CommitFact, RepoFacts, RepoSignals } from "../../../core/git/types";
@@ -56,13 +57,13 @@ const usage = (sessionId: string, ts: number, inTok: number, outTok: number, cac
 /** A passing check the row's tool reports, so its tool has `outcomes` (VAE is gated on it). */
 const outcomesFor = (sessionId: string, ts: number, t: ToolId = "claude-code"): ToolEv => check(sessionId, ts, true, { tool: t });
 
-function walk(evs: Ev[], o: { repos?: RepoSignals; timeZone?: string } = {}): Map<string, SessionStats> {
+function walk(evs: Ev[], o: { repos?: RepoSignals; timeZone?: string; exclude?: Exclusions } = {}): Map<string, SessionStats> {
   const raw = scanResultOf([...COVERAGE, ...evs], o.repos ? { repos: o.repos } : {});
-  const t = buildSessionTable(raw, { now: raw.finishedAt, timeZone: o.timeZone ?? "UTC" });
+  const t = buildSessionTable(raw, { now: raw.finishedAt, timeZone: o.timeZone ?? "UTC", ...(o.exclude ? { exclude: o.exclude } : {}) });
   const out = buildSessionStats(t, raw.store, raw.repos, { timeZone: o.timeZone ?? "UTC" });
   return new Map(out.map((s) => [s.id, s]));
 }
-const one = (evs: Ev[], id = "s", o: { repos?: RepoSignals; timeZone?: string } = {}): SessionStats => walk(evs, o).get(id)!;
+const one = (evs: Ev[], id = "s", o: { repos?: RepoSignals; timeZone?: string; exclude?: Exclusions } = {}): SessionStats => walk(evs, o).get(id)!;
 const reads = (sessionId: string, from: number, n: number, step = SEC): ToolEv[] => Array.from({ length: n }, (_, i) => tool(sessionId, from + i * step));
 
 describe("tiers", () => {
@@ -138,7 +139,7 @@ describe("walk: attribution (rules 1–5)", () => {
       ...reads("c1", T0 + 6 * MIN, 2), ...reads("g1", T0 + 7 * MIN, 3), ...reads("c2", T0 - HOUR, 4),
     ]);
     expect(s.successRuns).toEqual({ 4: 1, 5: 1 });
-    expect(s.children).toBe(3);
+    expect(s.children).toBe(2); // fan-out: the direct children c1 and c2
     expect(s.maxDepth).toBe(2);
   });
 
@@ -374,7 +375,7 @@ describe("walk: interrupts and briefs (rules 10–11)", () => {
 });
 
 describe("walk: children (rule 13)", () => {
-  test("finished, background, types, workflow runs and depth", () => {
+  test("fan-out counts direct children only; background, types, workflow runs and depth take every descendant", () => {
     const sub = (id: string, over: Partial<SessionEv> = {}) => sess(id, { parentId: "s", origin: "subagent", start: T0 + MIN, ...over });
     const s = one([
       sess("s"), prompt("s", T0),
@@ -383,7 +384,7 @@ describe("walk: children (rule 13)", () => {
       sub("failed", { agentType: "0123456789abcdef", workflowId: "w2" }), check("failed", T0 + MIN, false), check("failed", T0 + MIN + SEC, false),
       sess("deep", { parentId: "ok", origin: "subagent", start: T0 + 2 * MIN }),
     ]);
-    expect([s.children, s.finishedChildren, s.bgKnown, s.bgChildren, s.workflowRuns, s.maxDepth]).toEqual([4, 2, 2, 1, 2, 2]);
+    expect([s.children, s.finishedChildren, s.bgKnown, s.bgChildren, s.workflowRuns, s.maxDepth]).toEqual([3, 1, 2, 1, 2, 2]);
     expect(s.childTypes).toEqual({ explore: 1, implement: 1, custom: 1, other: 1 });
   });
 });
@@ -421,14 +422,15 @@ describe("walk: tiers and tokens (rules 15–16)", () => {
   });
 });
 
+const commit = (ts: number, shaKey: string, owner = true): CommitFact => ({ ts, shaKey, files: [], owner });
+const repo = (repoKey: string, projectKeys: string[], commits: CommitFact[], identity = true): RepoFacts => ({
+  repoKey, projectKeys, identity, commits, commitsTruncated: false, fileLists: true,
+  instructions: { files: [], namesChecks: [], touched: 0 }, hooks: { entries: 0, checks: [], disabled: false },
+  ci: { present: false, checks: [] }, precommit: { present: false, checks: [] },
+});
+const signals = (repos: RepoFacts[]): RepoSignals => ({ status: "ok", repos, roots: new Map(), skipped: {}, ms: 0 });
+
 describe("walk: delivery (rules 17–18)", () => {
-  const commit = (ts: number, shaKey: string, owner = true): CommitFact => ({ ts, shaKey, files: [], owner });
-  const repo = (repoKey: string, projectKeys: string[], commits: CommitFact[], identity = true): RepoFacts => ({
-    repoKey, projectKeys, identity, commits, commitsTruncated: false, fileLists: true,
-    instructions: { files: [], namesChecks: [], touched: 0 }, hooks: { entries: 0, checks: [], disabled: false },
-    ci: { present: false, checks: [] }, precommit: { present: false, checks: [] },
-  });
-  const signals = (repos: RepoFacts[]): RepoSignals => ({ status: "ok", repos, roots: new Map(), skipped: {}, ms: 0 });
 
   test("landed edit episodes and landed units against repo signals", () => {
     const repos = signals([
@@ -497,6 +499,76 @@ describe("walk: scripted rows (rule 20) and buckets (rule 19)", () => {
   test("buckets count actions only, of the row and its descendants, once each", () => {
     const s = one([sess("s"), prompt("s", T0), tool("s", T0 + SEC), tool("s", T0 + 2 * SEC), tool("s", T0 + 15 * MIN, { category: "meta" })]);
     expect(s.buckets).toEqual([Math.floor((T0 + SEC) / (10 * MIN))]);
+  });
+});
+
+describe("walk: date range, cross-row keys, fan-out, children's ends and markers (Task 5 review rulings)", () => {
+  test("a session straddling the range's start counts only its in-range turns, actions, markers, days and commits", () => {
+    const from = T0;
+    const repos = signals([repo("R", ["PK"], [commit(T0 - 9 * HOUR, "early"), commit(T0 + 5 * MIN, "late")])]);
+    const s = one([
+      sess("s", { projectKey: "PK", start: T0 - 11 * HOUR, end: T0 + HOUR }),
+      prompt("s", T0 - 10 * HOUR), edit("s", T0 - 10 * HOUR + SEC, "ts", 4), ...reads("s", T0 - 10 * HOUR + 2 * SEC, 3),
+      marker("s", T0 - 10 * HOUR + 5 * SEC, "compact-manual"), marker("s", T0 - 10 * HOUR + 6 * SEC, "pr-link", { detail: "old-pr" }),
+      sess("c", { parentId: "s", origin: "subagent", start: T0 - 10 * HOUR, end: T0 + MIN }),
+      ...reads("c", T0 - 10 * HOUR + 10 * SEC, 4), tool("c", T0 + 30 * SEC),
+      usage("s", T0 - 10 * HOUR + SEC, 100, 100), usage("s", T0 + SEC, 5, 5),
+      prompt("s", T0), tool("s", T0 + SEC), edit("s", T0 + 2 * SEC, "ts", 2),
+    ], "s", { repos, exclude: { from } });
+    expect([s.turns, s.episodes, s.actions, s.compactManual, s.tokens]).toEqual([1, 1, 3, 0, 10]);
+    expect(s.days).toEqual(["2026-11-02"]);
+    expect(s.prKeys).toEqual([]);
+    expect(s.buckets).toEqual([Math.floor((T0 + SEC) / (10 * MIN))]);
+    expect([s.start, s.end]).toEqual([T0, T0 + HOUR]);
+    expect([s.editEpisodesInRepo, s.landedEpisodes, s.landed]).toEqual([1, 1, 1]); // "late" only: "early" lies before the range
+  });
+
+  test("a PR (and a commit) two rows link belongs to the earlier row only", () => {
+    const all = walk([
+      sess("a", { start: T0, end: T0 + HOUR }), prompt("a", T0),
+      marker("a", T0 + MIN, "pr-link", { detail: "pr1" }), marker("a", T0 + MIN, "commit", { detail: "k1" }),
+      sess("b", { start: T0 + 2 * HOUR, end: T0 + 3 * HOUR }), prompt("b", T0 + 2 * HOUR),
+      marker("b", T0 + 2 * HOUR + MIN, "pr-link", { detail: "pr1" }), marker("b", T0 + 2 * HOUR + MIN, "commit", { detail: "k1" }),
+      marker("b", T0 + 2 * HOUR + MIN, "pr-link", { detail: "pr2" }),
+    ]);
+    const a = all.get("a")!;
+    const b = all.get("b")!;
+    expect([a.prKeys, a.commitShaKeys, a.landed]).toEqual([["pr1"], ["k1"], 2]);
+    expect([b.prKeys, b.commitShaKeys, b.landed]).toEqual([["pr2"], [], 1]);
+  });
+
+  test("nested delegation: fan-out counts the direct children, depth and A_t take the grandchild", () => {
+    const s = one([
+      sess("s"), prompt("s", T0),
+      tool("s", T0 + SEC, { name: "Agent", category: "delegate", delegateTo: "c1" }),
+      sess("c1", { parentId: "s", origin: "subagent", start: T0 + 2 * SEC }), tool("c1", T0 + 3 * SEC, { name: "Agent", category: "delegate", delegateTo: "g" }),
+      sess("g", { parentId: "c1", origin: "subagent", start: T0 + 4 * SEC }), ...reads("g", T0 + 5 * SEC, 3),
+      sess("c2", { parentId: "s", origin: "subagent", start: T0 + 2 * SEC }), ...reads("c2", T0 + 6 * SEC, 1),
+    ]);
+    expect([s.children, s.finishedChildren, s.maxDepth, s.actions]).toEqual([2, 2, 2, 6]);
+    expect(s.successRuns).toEqual({ 6: 1 });
+  });
+
+  test("rule 6: the correction window runs from the later of the span's last event and its children's last event", () => {
+    const evs = (childEnd: number): Ev[] => [
+      sess("s"), prompt("s", T0), tool("s", T0 + 10 * SEC),
+      tool("s", T0 + 20 * SEC, { name: "Agent", category: "delegate", delegateTo: "c" }),
+      sess("c", { parentId: "s", origin: "subagent", start: T0 + 30 * SEC, background: true }), tool("c", T0 + MIN), tool("c", childEnd),
+      prompt("s", T0 + 25 * MIN, { intent: "correction" }),
+    ];
+    expect(one(evs(T0 + 20 * MIN)).successRuns).toEqual({ 0: 1 }); // the correction comes 5 min after the background child's end
+    expect(one(evs(T0 + 2 * MIN)).successRuns).toEqual({ 4: 1, 0: 1 }); // 23 min after both
+  });
+
+  test("delivery reads the commit and PR markers of the children attributed to the row", () => {
+    const repos = signals([repo("R", ["PK"], [])]);
+    const s = one([
+      sess("s", { projectKey: "PK" }), prompt("s", T0), edit("s", T0 + SEC, "ts", 2),
+      sess("c", { parentId: "s", origin: "subagent", start: T0 + 2 * SEC }), tool("c", T0 + 3 * SEC),
+      marker("c", T0 + 5 * MIN, "commit", { detail: "kc" }), marker("c", T0 + 6 * MIN, "pr-link", { detail: "prc" }),
+    ], "s", { repos });
+    expect([s.commitShaKeys, s.prKeys]).toEqual([["kc"], ["prc"]]);
+    expect([s.editEpisodesInRepo, s.landedEpisodes, s.landed]).toEqual([1, 1, 2]);
   });
 });
 
