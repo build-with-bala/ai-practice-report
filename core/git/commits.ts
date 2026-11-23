@@ -122,29 +122,117 @@ export const LOG_ARGS: readonly string[] = ["-z", "--format=%x00%x1e%H%x1f%ct%x1
 /** One commit record of `git log` output of LOG_ARGS (in memory only). */
 export interface LogRecord { sha: string; ct: number; email: string; message: string; files: string[] }
 
+const NUL = 0;
+
 /**
- * The records of `git log` output of LOG_ARGS (all authors'). A header (an empty token, then one starting `\x1e`) must
- * hold at least four fields with a hex sha and a numeric time; one that does not is left out with the paths after it.
- * `cut`: the output was cut short, so its last record (possibly incomplete) is left out.
+ * `git log` output of LOG_ARGS parsed as it streams, record by record: `push` each chunk as it arrives (the chunk is
+ * not kept: only the bytes of the token it leaves unfinished are copied), `end` once the output is over. Each record is
+ * handed to `onRecord` once it is complete — at the next header, or at the end — so what is held is one record plus the
+ * unfinished token, never the output.
+ *
+ * Tokens are NUL-ended. A header (an empty token, then one starting `\x1e`) must hold at least four fields with a hex sha
+ * and a numeric time; one that does not is left out with the paths after it. `maxFiles`: paths kept per record (the
+ * rest are dropped as they stream; default all). The tokens and records are those of splitting the whole output at
+ * NUL, so `logRecords` (the whole-output form) and the stream agree byte for byte.
  */
-export function logRecords(stdout: string, o: { cut?: boolean } = {}): LogRecord[] {
-  const out: LogRecord[] = [];
-  let cur: LogRecord | undefined;
-  const tokens = stdout.split("\0");
-  for (let i = 0; i < tokens.length; i++) {
-    const token = tokens[i]!;
-    if (token === "") continue;
-    if (i > 0 && tokens[i - 1] === "" && token.startsWith(HEAD)) {
+export class LogStream {
+  private readonly decoder = new TextDecoder();
+  private pending: Uint8Array[] = [];
+  private pendingBytes = 0;
+  private tokens = 0;
+  private prevEmpty = false;
+  private cur: LogRecord | undefined;
+  private emitted = 0;
+  private done = false;
+  constructor(private readonly onRecord: (r: LogRecord) => void, private readonly o: { maxFiles?: number } = {}) {}
+
+  /** The bytes of the unfinished token held between chunks. */
+  get buffered(): number {
+    return this.pendingBytes;
+  }
+
+  /** Records handed out so far. */
+  get records(): number {
+    return this.emitted;
+  }
+
+  push(chunk: Uint8Array): void {
+    if (this.done) return;
+    let pos = 0;
+    while (pos < chunk.length) {
+      const nul = chunk.indexOf(NUL, pos);
+      if (nul === -1) {
+        const rest = chunk.slice(pos); // a copy: the chunk's buffer is never kept
+        this.pending.push(rest);
+        this.pendingBytes += rest.length;
+        return;
+      }
+      this.token(this.take(chunk.subarray(pos, nul)));
+      pos = nul + 1;
+    }
+  }
+
+  /** The output is over: its last token, then its last record. Returns the records handed out. */
+  end(): number {
+    if (this.done) return this.emitted;
+    this.done = true;
+    this.token(this.take(new Uint8Array(0)));
+    this.flush();
+    return this.emitted;
+  }
+
+  /** The unfinished token's bytes followed by `tail`, decoded; the held bytes are released. */
+  private take(tail: Uint8Array): string {
+    if (this.pending.length === 0) return this.decoder.decode(tail);
+    const bytes = new Uint8Array(this.pendingBytes + tail.length);
+    let at = 0;
+    for (const p of this.pending) {
+      bytes.set(p, at);
+      at += p.length;
+    }
+    bytes.set(tail, at);
+    this.pending = [];
+    this.pendingBytes = 0;
+    return this.decoder.decode(bytes);
+  }
+
+  private flush(): void {
+    if (this.cur === undefined) return;
+    const r = this.cur;
+    this.cur = undefined;
+    this.emitted++;
+    this.onRecord(r);
+  }
+
+  private token(token: string): void {
+    const first = this.tokens++ === 0;
+    if (token === "") {
+      this.prevEmpty = true;
+      return;
+    }
+    if (!first && this.prevEmpty && token.startsWith(HEAD)) {
+      this.flush();
       const fields = token.slice(1).split(FIELD);
       const sha = fields[0] ?? "";
       const ct = Number(fields[1]);
       const valid = fields.length >= 4 && /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i.test(sha) && fields[1] !== "" && Number.isFinite(ct);
-      cur = valid ? { sha, ct, email: fields[2]!, message: fields.slice(3).join(FIELD), files: [] } : undefined;
-      if (cur) out.push(cur);
-    } else if (cur) {
-      cur.files.push(token.replace(/^\n/, ""));
+      this.cur = valid ? { sha, ct, email: fields[2]!, message: fields.slice(3).join(FIELD), files: [] } : undefined;
+    } else if (this.cur && (this.o.maxFiles === undefined || this.cur.files.length < this.o.maxFiles)) {
+      this.cur.files.push(token.replace(/^\n/, ""));
     }
+    this.prevEmpty = false;
   }
+}
+
+/**
+ * The records of `git log` output of LOG_ARGS (all authors'), as LogStream reads them. `cut`: the output was cut short,
+ * so its last record (possibly incomplete) is left out.
+ */
+export function logRecords(stdout: string, o: { cut?: boolean } = {}): LogRecord[] {
+  const out: LogRecord[] = [];
+  const stream = new LogStream((r) => out.push(r));
+  stream.push(new TextEncoder().encode(stdout));
+  stream.end();
   if (o.cut) out.pop();
   return out;
 }
@@ -152,20 +240,50 @@ export function logRecords(stdout: string, o: { cut?: boolean } = {}): LogRecord
 /** A commit of the person's as keyed facts, with its full sha (memory only, for the pass: never stored). */
 export interface ParsedCommit { fact: CommitFact; sha: string }
 
+export interface CommitOptions { salt: Uint8Array; email: string; maxFiles: number }
+
 /**
- * The person's commits in `git log` output of LOG_ARGS: only those whose author email equals `o.email`
- * (case-insensitively); each as keyed facts — `ts` = commit time in ms, `shaKey`, the trailers `classifyCommit` reads,
- * up to `o.maxFiles` changed paths as keyed hashes, and `owner` true (a later pass decides between repos). `cut` as for
- * `logRecords`.
+ * The person's commits of a streamed `git log` output of LOG_ARGS: `push` its chunks, then `end(cut)`. Each record is
+ * reduced to keyed facts as soon as it is complete (its message and paths are dropped then): only those whose author
+ * email equals `o.email` (case-insensitively), each with `ts` = commit time in ms, `shaKey`, the trailers
+ * `classifyCommit` reads, up to `o.maxFiles` changed paths as keyed hashes, and `owner` true (a later pass decides
+ * between repos). The last record is held back as facts until the next one or the end, so a `cut` output (its last
+ * record possibly incomplete) leaves it out, as `logRecords` does. `records`: every author's records, the left-out one
+ * not counted.
  */
-export function parseCommits(stdout: string, o: { salt: Uint8Array; email: string; maxFiles: number; cut?: boolean }): ParsedCommit[] {
+export function commitStream(o: CommitOptions): { push(chunk: Uint8Array): void; end(cut: boolean): { commits: ParsedCommit[]; records: number } } {
   const email = o.email.trim().toLowerCase();
-  return logRecords(stdout, { cut: o.cut })
-    .filter((r) => r.email.trim().toLowerCase() === email)
-    .map((r) => ({ sha: r.sha.toLowerCase(), fact: { ts: r.ct * 1000, shaKey: shaKey(o.salt, r.sha), ...classifyCommit(r.message),
-      files: r.files.slice(0, o.maxFiles).map((f) => keyedHash(o.salt, f)), owner: true } }));
+  const commits: ParsedCommit[] = [];
+  let last: ParsedCommit | null | undefined; // the last record's facts (null: another author's), not yet kept
+  let records = 0;
+  const keep = () => {
+    if (last === undefined) return;
+    if (last !== null) commits.push(last);
+    records++;
+  };
+  const stream = new LogStream((r) => {
+    keep();
+    last = r.email.trim().toLowerCase() !== email ? null : { sha: r.sha.toLowerCase(), fact: { ts: r.ct * 1000, shaKey: shaKey(o.salt, r.sha),
+      ...classifyCommit(r.message), files: r.files.slice(0, o.maxFiles).map((f) => keyedHash(o.salt, f)), owner: true } };
+  }, { maxFiles: o.maxFiles });
+  return {
+    push: (chunk) => stream.push(chunk),
+    end: (cut) => {
+      stream.end();
+      if (!cut) keep();
+      last = undefined;
+      return { commits, records };
+    },
+  };
+}
+
+/** The person's commits in a whole `git log` output of LOG_ARGS (`commitStream` over it). `cut` as for `logRecords`. */
+export function parseCommits(stdout: string, o: CommitOptions & { cut?: boolean }): ParsedCommit[] {
+  const s = commitStream(o);
+  s.push(new TextEncoder().encode(stdout));
+  return s.end(o.cut ?? false).commits;
 }
 
 /** `parseCommits` without the shas: the facts only. */
-export const parseLog = (stdout: string, o: { salt: Uint8Array; email: string; maxFiles: number; cut?: boolean }): CommitFact[] =>
+export const parseLog = (stdout: string, o: CommitOptions & { cut?: boolean }): CommitFact[] =>
   parseCommits(stdout, o).map((c) => c.fact);

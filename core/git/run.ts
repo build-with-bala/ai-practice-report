@@ -5,10 +5,17 @@
  */
 import { accessSync, statSync } from "node:fs";
 import path from "node:path";
+import { STREAM_GC } from "../io/jsonl";
 
 export interface GitResult { code: number | null; stdout: string; timedOut: boolean; truncated: boolean }
-/** `git`: the absolute path of the git to run (`resolveGit`); found on PATH when left out. */
-export type GitRunner = (args: readonly string[], o: { cwd: string; timeoutMs: number; maxBytes: number; signal: AbortSignal; git?: string }) => Promise<GitResult>;
+/**
+ * `git`: the absolute path of the git to run (`resolveGit`); found on PATH when left out. `onChunk`: stdout is handed
+ * over chunk by chunk as it arrives (up to `maxBytes` in all) and not kept, so `stdout` is empty; the chunk is valid only
+ * during the call, and whatever the callee keeps it copies. A runner that does not stream may ignore it and return
+ * `stdout`.
+ */
+export type GitRunner = (args: readonly string[], o: { cwd: string; timeoutMs: number; maxBytes: number; signal: AbortSignal; git?: string;
+  onChunk?: (chunk: Uint8Array) => void }) => Promise<GitResult>;
 
 /**
  * Put before every subcommand: no pager; and repo config that would run a program, take a lock or change the output is
@@ -80,7 +87,13 @@ const REAP_MS = 1_000;
 /**
  * Runs `git <GIT_SAFE_ARGS> <args>` in `o.cwd`: stdin and stderr ignored, stdout streamed. The child is killed on
  * timeout (`timedOut`), on abort, and once stdout passes `maxBytes` (cut there: `truncated`). `code` is the exit code,
- * null when the child was killed. Rejects only when git cannot be started (ENOENT: no git, or no such folder).
+ * null when the child was killed. Rejects only when git cannot be started (ENOENT: no git, or no such folder), or when
+ * `onChunk` throws (the child is killed first).
+ *
+ * Memory: each read of the child's stdout comes in a freshly allocated backing buffer much larger than the chunk (a
+ * small chunk can pin a buffer many times its size), so no chunk is ever kept — with `onChunk` each goes to the callee,
+ * without it its bytes are copied — and each read is reported to the streaming pacer (STREAM_GC) by the size of its
+ * backing buffer, what it really allocated, so collections keep pace with git output as they do with file streams.
  */
 export const runGit: GitRunner = (args, o) => run(args, o, gitEnv(process.env));
 
@@ -112,22 +125,39 @@ async function run(args: readonly string[], o: Parameters<GitRunner>[1], env: Re
 
   const chunks: Uint8Array[] = [];
   let size = 0;
+  let failed: { error: unknown } | undefined; // what `onChunk` threw
+  /** One chunk's bytes: to the callee, or copied (never the view itself, which pins its backing buffer). */
+  const accept = (bytes: Uint8Array): boolean => {
+    if (!o.onChunk) {
+      chunks.push(bytes.slice());
+      return true;
+    }
+    try {
+      o.onChunk(bytes);
+      return true;
+    } catch (error) {
+      failed = { error };
+      stop();
+      return false;
+    }
+  };
   const reader = child.stdout.getReader();
   const reading = (async () => {
     try {
       for (;;) {
         const { done, value } = await reader.read();
         if (done || stopped) break;
+        STREAM_GC.add(Math.max(value.byteLength, value.buffer.byteLength));
         const room = o.maxBytes - size;
         if (value.byteLength > room) {
-          if (room > 0) chunks.push(value.subarray(0, room));
+          if (room > 0) accept(value.subarray(0, room));
           size = o.maxBytes;
           truncated = true;
           stop();
           break;
         }
-        chunks.push(value);
         size += value.byteLength;
+        if (!accept(value)) break;
       }
     } catch { /* the stream ends with the child */ }
   })();
@@ -141,7 +171,8 @@ async function run(args: readonly string[], o: Parameters<GitRunner>[1], env: Re
     await Promise.race([child.exited, new Promise((resolve) => { reap = setTimeout(resolve, REAP_MS); })]);
     clearTimeout(reap);
   }
-  const bytes = new Uint8Array(size);
+  if (failed) throw failed.error;
+  const bytes = new Uint8Array(o.onChunk ? 0 : size);
   let at = 0;
   for (const c of chunks) { bytes.set(c, at); at += c.byteLength; }
   return { code: stopped ? null : child.exitCode, stdout: new TextDecoder().decode(bytes), timedOut, truncated };

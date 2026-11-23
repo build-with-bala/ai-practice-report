@@ -1,4 +1,4 @@
-import { LOG_ARGS, logRecords, parseCommits, type ParsedCommit } from "./commits";
+import { commitStream, LOG_ARGS, type ParsedCommit } from "./commits";
 import { candidates, groupRepos, type Found, type Repo } from "./discover";
 import { INSTRUCTION_FILES, MAX_FOLDER_FILES, MAX_REPO_FILE_BYTES, readRepoFiles, REPO_FILES, REPO_FOLDERS, SESSION_FOLDER_FILES } from "./files";
 import { resolveGit, runGit, type GitResult, type GitRunner } from "./run";
@@ -18,7 +18,7 @@ export interface RepoSignalOptions {
   maxCommits?: number;
   /** Changed paths kept per commit (default 200). */
   maxFiles?: number;
-  /** Repos read at once (default 4). */
+  /** Repos read at once (default 2). */
   concurrency?: number;
   /** The git runner (default `runGit`); tests pass their own. */
   runner?: GitRunner;
@@ -41,6 +41,11 @@ export interface RepoSignalInput {
 }
 
 const DAY_MS = 86_400_000;
+/**
+ * Repos read at once by default. Each repo's `git log` streams through one record at a time, so the width bounds how many
+ * records, chunks and git children are alive together; two keeps the pass's memory flat while git still overlaps.
+ */
+const DEFAULT_CONCURRENCY = 2;
 const REV_PARSE_TIMEOUT_MS = 5_000;
 /** Output cap of a small command (version, toplevel, one config value). */
 const SMALL_BYTES = 64 * 1024;
@@ -127,7 +132,7 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
   const timeoutMs = o.timeoutMs ?? 10_000;
   const maxCommits = o.maxCommits ?? 5_000;
   const maxFiles = o.maxFiles ?? 200;
-  const width = Math.max(1, Math.floor(o.concurrency ?? 4));
+  const width = Math.max(1, Math.floor(o.concurrency ?? DEFAULT_CONCURRENCY));
   const skipped: Record<string, number> = {};
   const skip = (reason: string, n = 1) => { if (n > 0) skipped[reason] = (skipped[reason] ?? 0) + n; };
   const roots = new Map<string, string>();
@@ -143,10 +148,14 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
     if (signal.aborted) resolve(STOPPED);
     else signal.addEventListener("abort", () => resolve(STOPPED), { once: true });
   });
-  /** One git command; STOPPED when the budget or an abort came first (the runner kills its child on the same signal). */
-  const git = async (args: readonly string[], cwd: string, ms = timeoutMs, maxBytes = SMALL_BYTES): Promise<GitResult | typeof STOPPED> => {
+  /**
+   * One git command; STOPPED when the budget or an abort came first (the runner kills its child on the same signal).
+   * `onChunk`: the output streams to it instead of coming back whole (`GitRunner`).
+   */
+  const git = async (args: readonly string[], cwd: string, ms = timeoutMs, maxBytes = SMALL_BYTES,
+    onChunk?: (chunk: Uint8Array) => void): Promise<GitResult | typeof STOPPED> => {
     if (signal.aborted) return STOPPED;
-    return Promise.race([runner(args, { cwd, timeoutMs: ms, maxBytes, signal, git: exe }), stopped]);
+    return Promise.race([runner(args, { cwd, timeoutMs: ms, maxBytes, signal, git: exe, ...(onChunk ? { onChunk } : {}) }), stopped]);
   };
   // every return goes through here: a shared commit is owned once whatever path the pass ends by (done, stopped, thrown)
   const result = (status: RepoSignals["status"]): RepoSignals => {
@@ -278,25 +287,38 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
       ...(since === undefined ? [] : [`--since=${new Date(since).toISOString()}`]),
       `--max-count=${maxCommits}`, ...(withNames ? ["--name-only"] : []), ...LOG_ARGS,
     ];
-    let log = await git(logArgs(names), repo.root, timeoutMs, LOG_BYTES);
+    /**
+     * One `git log`, parsed as it streams (`commitStream`): the output is never held whole. A runner that returns
+     * `stdout` instead of streaming (tests) is parsed the same way.
+     */
+    const readLog = async (withNames: boolean) => {
+      const parse = commitStream({ salt: input.salt, email, maxFiles });
+      let streamed = false;
+      const r = await git(logArgs(withNames), repo.root, timeoutMs, LOG_BYTES, (chunk) => { streamed = true; parse.push(chunk); });
+      if (r === STOPPED) return STOPPED;
+      if (!streamed && r.stdout !== "") parse.push(new TextEncoder().encode(r.stdout));
+      return { r, parse };
+    };
+    let log = await readLog(names);
     if (log === STOPPED) return STOPPED;
     // with lazy fetch off, a partial clone that lacks trees cannot list paths (git fails): read it again without them
-    if (names && log.code !== 0 && !log.timedOut && !log.truncated) {
+    if (names && log.r.code !== 0 && !log.r.timedOut && !log.r.truncated) {
       names = false;
-      log = await git(logArgs(false), repo.root, timeoutMs, LOG_BYTES);
+      log = await readLog(false);
       if (log === STOPPED) return STOPPED;
     }
     facts.fileLists = names;
-    if (log.timedOut) {
+    const { r, parse } = log;
+    if (r.timedOut) {
       skip("timeout");
       facts.commitsTruncated = true;
     }
-    if (!log.truncated && !log.timedOut && log.code !== 0) return { commits: [], names }; // an empty repo, or a history git cannot read
     // a cut output's last record may be incomplete: it is left out
-    const cut = log.truncated || log.timedOut;
-    const commits = parseCommits(log.stdout, { salt: input.salt, email, maxFiles, cut });
+    const cut = r.truncated || r.timedOut;
+    const { commits, records } = parse.end(cut);
+    if (!r.truncated && !r.timedOut && r.code !== 0) return { commits: [], names }; // an empty repo, or a history git cannot read
     facts.commits = commits.map((c) => c.fact);
-    facts.commitsTruncated ||= log.truncated || logRecords(log.stdout, { cut }).length >= maxCommits;
+    facts.commitsTruncated ||= r.truncated || records >= maxCommits;
     return { commits, names };
   }
 }
