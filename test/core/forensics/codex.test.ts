@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { checkRollouts } from "../../../core/forensics/codex";
 import type { CoverageEv, Ev, RateLimitEv, RolloutFactEv, ThreadRowEv } from "../../../core/model/events";
 import { scanResultOf } from "../../kit/scanresult";
+import { asks, tableOf } from "./table";
 
 const T0 = Date.UTC(2026, 9, 1, 9, 0);
 const SEC = 1_000;
@@ -21,7 +22,10 @@ const rollout = (i: number, over: Partial<RolloutFactEv> = {}): RolloutFactEv =>
 const row = (i: number): ThreadRowEv => ({ k: "codex-thread-row", tool: "codex", source: "codex.threads", threadId: `codex:t${i}` });
 /** `n` rollouts, each with its thread row. */
 const indexed = (n: number): Ev[] => [threadsCov(), ...Array.from({ length: n }, (_, i) => [rollout(i), row(i)]).flat()];
-const run = (events: Ev[]) => checkRollouts(scanResultOf(events, { finishedAt: NOW }), { now: NOW });
+const run = (events: Ev[]) => {
+  const raw = scanResultOf(events, { finishedAt: NOW });
+  return asks(checkRollouts(raw, tableOf(raw), { now: NOW }));
+};
 
 describe("checkRollouts: C6, every rollout has a thread row", () => {
   test("every rollout with a row passes", () => {
@@ -97,6 +101,13 @@ describe("checkRollouts: C6, every rollout has a thread row", () => {
   test("without any createdAt every rollout is checked", () => {
     const [c6] = run([threadsCov(), rollout(0), rollout(1), row(2)]);
     expect([c6.status, c6.values.beforeIndex]).toEqual(["fail", 0]);
+  });
+
+  test("the 10-min rule reads a rollout's start on its id's clock where it has one", () => {
+    // named an hour off (another zone), begun 2 min before now: not checked yet
+    expect(run([...indexed(5), rollout(98, { fileTs: NOW - HOUR, uuidTs: NOW - 2 * MIN })])[0].values).toEqual({ missing: 0, rollouts: 5, beforeIndex: 0 });
+    // named 2 min before now on a clock an hour ahead, begun an hour ago: checked
+    expect(run([...indexed(5), rollout(97, { fileTs: NOW - 2 * MIN, uuidTs: NOW - HOUR })])[0].values).toEqual({ missing: 1, rollouts: 6, beforeIndex: 0 });
   });
 
   test("a rollout named 2 min before now is ignored", () => {

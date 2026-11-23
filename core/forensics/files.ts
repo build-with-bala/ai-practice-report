@@ -1,7 +1,10 @@
 import { dayKey } from "../analysis/activity";
+import type { SessionTable } from "../analysis/types";
 import type { FileFactEv } from "../model/events";
 import type { ScanResult } from "../scan";
-import { toolsOf, type CheckResult } from "./types";
+import { forensicScope, type ForensicScope } from "./scope";
+import { asked } from "./questions";
+import { toolsOf, type CheckResult, type CheckValues } from "./types";
 
 /*
  * C5: the trace files' own times agree with the events inside them. A file the tool wrote was last modified at or after
@@ -79,14 +82,15 @@ function bulkWindows(gapped: readonly FileFactEv[], total: number): { start: num
 }
 
 /**
- * C5 over every trace file's facts. A file violates when its mtime is more than 2 s before its last event, or its
+ * C5 over the trace files' facts in scope (`ForensicScope.files`: kept tools, and files whose events overlap the date
+ * range or that have no event times). A file violates when its mtime is more than 2 s before its last event, or its
  * ctime more than 24 h after its mtime — unless it is in the restore cluster or in a bulk-change window. Fewer than 5
  * files → n/a; at least max(2, 1% of the files) violating → fail; else a restore cluster → note with its local day
  * (`date`) in `timeZone`; else a bulk-change window → note with the largest window's local day (`date`) and its file
  * count (`bulkFiles`).
  */
-export function checkFileTimes(raw: ScanResult, o: { timeZone: string }): CheckResult {
-  const files = raw.store.all("file");
+export function checkFileTimes(raw: ScanResult, t: SessionTable, o: { timeZone: string }, s: ForensicScope = forensicScope(raw, t)): CheckResult {
+  const files = s.files();
   const tools = toolsOf(files);
   if (files.length < MIN_FILES) return { id: "C5", status: "n/a", n: files.length, reason: "too-few", values: {}, tools };
   const cluster = restoreCluster(files);
@@ -95,27 +99,20 @@ export function checkFileTimes(raw: ScanResult, o: { timeZone: string }): CheckR
   const inBulk = new Set(bulk.flatMap((w) => w.files));
   const ctimeViolators = new Set(gapped.filter((f) => !inBulk.has(f)));
   const violations = files.filter((f) => (f.lastTs !== undefined && f.mtime < f.lastTs - MTIME_TOL_MS) || ctimeViolators.has(f)).length;
-  const values: Record<string, number | string> = { violations };
+  const values: CheckValues = { violations };
   const base = { id: "C5" as const, n: files.length, tools };
   if (cluster) {
     values.date = dayKey(cluster.start, o.timeZone);
-    values.days = Math.round(cluster.spanMs / DAY_MS);
+    values.days = Math.ceil(cluster.spanMs / DAY_MS); // a cluster spans more than 7 days: up
     values.clusterFiles = cluster.files.size;
   } else if (bulk.length > 0) {
     values.date = dayKey(bulk[0]!.start, o.timeZone);
     values.bulkFiles = bulk[0]!.files.length;
   }
   if (violations >= Math.max(FAIL_MIN, FAIL_SHARE * files.length)) {
-    return { ...base, status: "fail", reason: "file-times", values,
-      askAbout: `${violations} trace files have file times that do not fit the events inside them: last modified before their last event, or changed more than a day after their last write. Were trace files edited, or their times reset?` };
+    return asked({ ...base, status: "fail", reason: "file-times", values });
   }
-  if (cluster) {
-    return { ...base, status: "note", reason: "restore-cluster", values,
-      askAbout: `Most trace files were created on ${values.date} although their activity spans ${values.days} days. Was this history copied or restored from a backup then?` };
-  }
-  if (bulk.length > 0) {
-    return { ...base, status: "note", reason: "bulk-change", values,
-      askAbout: `${values.bulkFiles} trace files were last changed on ${values.date} although their content is older. Was this history copied, restored or migrated then?` };
-  }
+  if (cluster) return asked({ ...base, status: "note", reason: "restore-cluster", values });
+  if (bulk.length > 0) return asked({ ...base, status: "note", reason: "bulk-change", values });
   return { ...base, status: "pass", reason: "ok", values };
 }

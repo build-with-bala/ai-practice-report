@@ -1,7 +1,10 @@
+import type { SessionTable } from "../analysis/types";
 import type { RateLimitEv } from "../model/events";
 import type { ScanResult } from "../scan";
 import { THREADS_SOURCE } from "../sources/codex/indexdb";
-import { toolsOf, type CheckResult } from "./types";
+import { forensicScope, type ForensicScope } from "./scope";
+import { asked } from "./questions";
+import { toolsOf, type CheckResult, type CheckValues } from "./types";
 
 /*
  * C6–C8: Codex's own records agree with each other. The CLI enters every thread it starts in its thread index, names
@@ -24,21 +27,25 @@ const FAIL_MIN = 3;
 const FAIL_SHARE = 0.005;
 
 /**
- * C6, every rollout has a thread-index row (by `threadId`). Rollouts named at or after 10 min before `now` are left out:
- * the CLI may not have written their row yet. n/a without a read thread index (coverage of `codex.threads` `ok` or
- * `drift` with records), or without rollouts. Rollouts missing their row: at least max(2, 1% of the rollouts checked) →
- * fail; fewer, but at least 1 → note with the same question (a genuine machine can hold a stray one). The index cannot
- * vouch for sessions older than itself: when a row carries `createdAt`, rollouts that began before the earliest one are
- * not checked (`beforeIndex`; without any `createdAt` every rollout is). `createdAt` is an absolute time and a file name
- * a local one, so a rollout's start is read on the same clock: its id's time (`uuidTs`) where it has one, else its file
- * name's (`fileTs`). When every rollout began before the index: n/a, reason `before-index`. `n`: the rollouts checked;
- * `values`: `missing`, `rollouts` (checked), `beforeIndex`.
+ * C6, every rollout in scope has a thread-index row in scope (by `threadId`). Rollouts that began at or after 10 min
+ * before `now` are left out: the CLI may not have written their row yet. n/a without a read thread index (coverage of a
+ * kept tool's `codex.threads`, `ok` or `drift` with records), or without rollouts. Rollouts missing their row: at least
+ * max(2, 1% of the rollouts checked) → fail; fewer, but at least 1 → note with the same question (a genuine machine can
+ * hold a stray one). The index cannot vouch for sessions older than itself: when a row carries `createdAt`, rollouts
+ * that began before the earliest one are not checked (`beforeIndex`; without any `createdAt` every rollout is).
+ * `createdAt` is an absolute time and a file name a local one, so a rollout's start — for the 10-min rule too — is read
+ * on one clock: its id's time (`uuidTs`) where it has one, else its file name's (`fileTs`). When every rollout began
+ * before the index: n/a, reason `before-index`. `n`: the rollouts checked; `values`: `missing`, `rollouts` (checked),
+ * `beforeIndex`.
  */
-function checkThreadRows(raw: ScanResult, now: number): CheckResult {
-  const rollouts = raw.store.all("codex-rollout").filter((r) => r.fileTs === undefined || r.fileTs < now - RECENT_MS);
-  const rows = raw.store.all("codex-thread-row");
+function checkThreadRows(s: ForensicScope, now: number): CheckResult {
+  const rollouts = s.rollouts().filter((r) => {
+    const began = r.uuidTs ?? r.fileTs;
+    return began === undefined || began < now - RECENT_MS;
+  });
+  const rows = s.threadRows();
   const tools = toolsOf([...rollouts, ...rows]);
-  const indexed = raw.coverage.some((c) => c.source === THREADS_SOURCE && (c.status === "ok" || c.status === "drift") && c.records > 0);
+  const indexed = s.coverage().some((c) => c.source === THREADS_SOURCE && (c.status === "ok" || c.status === "drift") && c.records > 0);
   if (!indexed) return { id: "C6", status: "n/a", n: rollouts.length, reason: "no-thread-index", values: {}, tools };
   if (rollouts.length === 0) return { id: "C6", status: "n/a", n: 0, reason: "no-rollouts", values: {}, tools };
   let since = Infinity;
@@ -52,11 +59,10 @@ function checkThreadRows(raw: ScanResult, now: number): CheckResult {
   if (checked.length === 0) return { id: "C6", status: "n/a", n: 0, reason: "before-index", values: { beforeIndex }, tools };
   const have = new Set(rows.map((r) => r.threadId));
   const missing = checked.filter((r) => !have.has(r.threadId)).length;
-  const base = { id: "C6" as const, n: checked.length, values: { missing, rollouts: checked.length, beforeIndex }, tools };
+  const base = { id: "C6" as const, n: checked.length, values: { missing, rollouts: checked.length, beforeIndex } satisfies CheckValues, tools };
   if (missing === 0) return { ...base, status: "pass", reason: "ok" };
   const fail = missing >= Math.max(MISSING_MIN, MISSING_SHARE * checked.length);
-  return { ...base, status: fail ? "fail" : "note", reason: "missing-thread-rows",
-    askAbout: `${missing} Codex session ${missing === 1 ? "file has" : "files have"} no entry in Codex's own thread index. Were session files copied in from somewhere else?` };
+  return { ...base, status: fail ? "fail" : "note", reason: "missing-thread-rows" };
 }
 
 /** A positive offset that is a whole number of quarter hours (1 to 104, up to 26 h, within 2 s): the zone changed since the file was named. */
@@ -71,8 +77,8 @@ function isZoneShift(d: number): boolean {
  * name was written in another zone than the one it is read in now), which is a note. Any violation → fail. n/a without
  * a rollout that has both times.
  */
-function checkIdTimes(raw: ScanResult): CheckResult {
-  const rollouts = raw.store.all("codex-rollout").filter((r) => r.uuidTs !== undefined && r.fileTs !== undefined);
+function checkIdTimes(s: ForensicScope): CheckResult {
+  const rollouts = s.rollouts().filter((r) => r.uuidTs !== undefined && r.fileTs !== undefined);
   const tools = toolsOf(rollouts);
   if (rollouts.length === 0) return { id: "C7", status: "n/a", n: 0, reason: "no-data", values: {}, tools };
   let violations = 0, zoneShifted = 0;
@@ -82,15 +88,11 @@ function checkIdTimes(raw: ScanResult): CheckResult {
     if (isZoneShift(d)) zoneShifted++;
     else violations++;
   }
-  const base = { id: "C7" as const, n: rollouts.length, values: { violations, zoneShifted }, tools };
+  const base = { id: "C7" as const, n: rollouts.length, values: { violations, zoneShifted } satisfies CheckValues, tools };
   if (violations > 0) {
-    return { ...base, status: "fail", reason: "uuid-after-name",
-      askAbout: `${violations} Codex session ${violations === 1 ? "id carries a time later than its file name" : "ids carry a time later than their file names"}, by more than a second. Were session files renamed, or their ids edited?` };
+    return { ...base, status: "fail", reason: "uuid-after-name" };
   }
-  if (zoneShifted > 0) {
-    return { ...base, status: "note", reason: "time-zone-change",
-      askAbout: `${zoneShifted} Codex session ${zoneShifted === 1 ? "file is" : "files are"} named in a different time zone from this machine's current one. Did the time zone change, or were the files made on another machine?` };
-  }
+  if (zoneShifted > 0) return { ...base, status: "note", reason: "time-zone-change" };
   return { ...base, status: "pass", reason: "ok" };
 }
 
@@ -137,8 +139,8 @@ function ledgerPairs(snaps: RateLimitEv[]): { pairs: number; contradictions: num
  * C8, the usage-limit ledger only rises within one reset window, per (bucket, window) ledger (`ledgerPairs`). `values`:
  * `pairs`, `contradictions`. n/a under 20 pairs; at least 3 contradictions and more than 0.5% of the pairs → fail. `n`: the pairs.
  */
-function checkLedger(raw: ScanResult): CheckResult {
-  const all = raw.store.all("ratelimit");
+function checkLedger(s: ForensicScope): CheckResult {
+  const all = s.rateLimits();
   const tools = toolsOf(all);
   const ledgers = new Map<string, RateLimitEv[]>();
   for (const e of all) {
@@ -153,16 +155,18 @@ function checkLedger(raw: ScanResult): CheckResult {
     pairs += r.pairs;
     contradictions += r.contradictions;
   }
-  const base = { id: "C8" as const, n: pairs, values: { pairs, contradictions }, tools };
+  const base = { id: "C8" as const, n: pairs, values: { pairs, contradictions } satisfies CheckValues, tools };
   if (pairs < MIN_PAIRS) return { ...base, status: "n/a", reason: "too-few" };
   if (contradictions >= FAIL_MIN && contradictions > FAIL_SHARE * pairs) {
-    return { ...base, status: "fail", reason: "ledger-contradictions",
-      askAbout: `The usage-limit readings fell ${contradictions} times within one limit window, where they only rise. Were traces from more than one account combined here?` };
+    return { ...base, status: "fail", reason: "ledger-contradictions" };
   }
   return { ...base, status: "pass", reason: "ok" };
 }
 
-/** C6 (thread rows), C7 (id times) and C8 (the usage-limit ledger) over Codex's records. */
-export function checkRollouts(raw: ScanResult, o: { now: number }): [CheckResult, CheckResult, CheckResult] {
-  return [checkThreadRows(raw, o.now), checkIdTimes(raw), checkLedger(raw)];
+/**
+ * C6 (thread rows), C7 (id times) and C8 (the usage-limit ledger) over Codex's records in scope: rollouts by their
+ * start and their session, thread rows by `createdAt`, usage-limit readings by `ts` (`ForensicScope`).
+ */
+export function checkRollouts(raw: ScanResult, t: SessionTable, o: { now: number }, s: ForensicScope = forensicScope(raw, t)): [CheckResult, CheckResult, CheckResult] {
+  return [asked(checkThreadRows(s, o.now)), asked(checkIdTimes(s)), asked(checkLedger(s))];
 }

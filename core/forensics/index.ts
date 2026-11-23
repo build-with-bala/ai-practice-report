@@ -8,16 +8,19 @@ import { checkRollouts } from "./codex";
 import { checkFileTimes } from "./files";
 import { provenance } from "./provenance";
 import { checkReleases, RELEASES, type ReleaseTable } from "./releases";
+import { forensicScope } from "./scope";
 import { softFlags } from "./soft";
 import { round, type CheckResult } from "./types";
 
 export type { ReleaseTable } from "./releases";
-export type { CheckId, CheckResult, CheckStatus } from "./types";
+export { questionFor } from "./questions";
+export { DATE_KEY, REASONS, VALUE_KEYS } from "./types";
+export type { CheckId, CheckResult, CheckStatus, CheckValues, ProvenanceKey, Reason, ValueKey } from "./types";
 
 /**
  * The integrity summary (spec §6.6). `band`: the verdict over every check; `serverBacked`: the share of typed turns
  * from tools whose server-minted data checked out (display only: it never changes a score, an evidence minimum or a
- * confidence), null without typed turns; `anchorable` / `notAnchorable`: the tools in the data that do or do not
+ * confidence), null without typed turns; `anchorable` / `notAnchorable`: the tools in scope that do or do not
  * record server-minted ids (neutral, never a penalty); `checks`: C1–C10, then the soft flags, always in that order.
  */
 export interface Forensics { band: "consistent" | "consistent-with-notes" | "inconsistent" | "unverifiable"; serverBacked: number | null;
@@ -54,21 +57,20 @@ function bandOf(checks: readonly CheckResult[]): Forensics["band"] {
 
 /**
  * Every forensic check over a scan result, pure and synchronous: `now` and `timeZone` are the caller's; `releases`
- * defaults to the shipped table. The tools in the data are the session rows' and the in-scope prompts'.
+ * defaults to the shipped table. Every check and soft flag reads in-scope data only, through one view of the scan
+ * (`forensicScope`): the exclusions in `t` (tools, projects, the date range) and its host copies leave out what they
+ * hit, so an exclusion never leaks what it excludes. The tools in scope are the kept rows' and the in-scope prompts'.
  */
 export function runForensics(raw: ScanResult, t: SessionTable, stats: readonly SessionStats[],
   o: { now: number; timeZone: string; releases?: ReleaseTable }): Forensics {
-  const [c1, c2] = checkAnchors(raw);
-  const [c6, c7, c8] = checkRollouts(raw, { now: o.now });
+  const s = forensicScope(raw, t);
+  const [c1, c2] = checkAnchors(raw, t, s);
+  const [c6, c7, c8] = checkRollouts(raw, t, { now: o.now }, s);
   const checks: CheckResult[] = [
-    c1, c2, checkClaudeHistory(raw, t), checkAccount(raw), checkFileTimes(raw, { timeZone: o.timeZone }), c6, c7, c8,
-    checkReleases(t, o.releases ?? RELEASES, raw), provenance(raw, t), ...softFlags(raw, t, o),
+    c1, c2, checkClaudeHistory(raw, t, s), checkAccount(raw, t, s), checkFileTimes(raw, t, { timeZone: o.timeZone }, s), c6, c7, c8,
+    checkReleases(t, o.releases ?? RELEASES, raw, s), provenance(raw, t, s), ...softFlags(raw, t, o, s),
   ];
-
-  const present = new Set<ToolId>();
-  for (const row of t.rows.values()) present.add(row.tool);
-  for (const p of raw.store.all("prompt")) if (!t.scope.tools.has(p.tool) && p.ts >= t.scope.from && p.ts <= t.scope.to) present.add(p.tool);
-  const tools = [...present].sort();
+  const tools = s.tools();
 
   const status = new Map(checks.map((c) => [c.id, c.status]));
   const backed = new Set(BACKING.filter(([, ids]) => ids.every((id) => status.get(id) === "pass" || status.get(id) === "note")).map(([tool]) => tool));
