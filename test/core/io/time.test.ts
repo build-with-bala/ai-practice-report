@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { localDay, toEpochMs } from "../../../core/io/time";
+import { withTz } from "../../kit/tz";
 
 describe("toEpochMs", () => {
   test("seconds, ms, numeric strings, ISO", () => {
@@ -27,22 +28,6 @@ describe("toEpochMs", () => {
 
 /** The process zone when this file started, before any test changed process.env.TZ. */
 const startZone = new Intl.DateTimeFormat().resolvedOptions().timeZone;
-
-/**
- * Runs `f` with `process.env.TZ = tz`, then restores the zone by assignment: TZ's previous value, or — when it was unset —
- * the zone that was in effect (`bun test` runs in UTC with TZ unset; assigning "" would switch to the system zone instead).
- * Never `delete process.env.TZ`: in Bun 1.3 that removes the variable's setter, so the zone stays at its last value and
- * later assignments are ignored for the rest of the process, every later test file included.
- */
-function withTz(tz: string, f: () => void): void {
-  const saved = process.env.TZ ?? new Intl.DateTimeFormat().resolvedOptions().timeZone;
-  try {
-    process.env.TZ = tz;
-    f();
-  } finally {
-    process.env.TZ = saved;
-  }
-}
 
 describe("localDay", () => {
   const ms = Date.UTC(2026, 10, 16, 12, 30);

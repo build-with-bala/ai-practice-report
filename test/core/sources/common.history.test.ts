@@ -5,6 +5,7 @@ import { PromptLog } from "../../../core/sources/common/history";
 import type { PluginCoverage, ScanCtx } from "../../../core/sources/types";
 import { shingleSimilarity } from "../../../core/text/similarity";
 import { fakeHome, type FakeHome } from "../../kit/home";
+import { withTz } from "../../kit/tz";
 
 let h: FakeHome;
 beforeEach(() => { h = fakeHome(); });
@@ -29,20 +30,6 @@ function logOf() {
     prompts: () => events.filter((e): e is PromptEv => e.k === "prompt"),
     daily: () => events.filter((e): e is DailyEv => e.k === "daily"),
   };
-}
-
-/**
- * Runs `f` with `process.env.TZ = tz`, then restores the zone by assignment (never `delete process.env.TZ`: in Bun 1.3
- * that removes the variable's setter for the rest of the process).
- */
-function withTz(tz: string, f: () => void): void {
-  const saved = process.env.TZ ?? new Intl.DateTimeFormat().resolvedOptions().timeZone;
-  try {
-    process.env.TZ = tz;
-    f();
-  } finally {
-    process.env.TZ = saved;
-  }
 }
 
 describe("PromptLog", () => {

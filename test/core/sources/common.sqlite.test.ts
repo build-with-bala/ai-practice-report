@@ -20,10 +20,11 @@ const busy = (ms: number): void => {
 };
 
 /**
- * A store that answers rowid pages: the n-th query (1-based) returns `sizes[n - 1]` rows (none past the list), each one
- * holding the thread for `ms` first; `fail` replaces the n-th query with that error. Every query's parameters are kept.
+ * A store that answers rowid pages: the n-th query (1-based) returns `sizes[n - 1]` rows (none past the list), or
+ * `sizes(n)` rows, each one holding the thread for `ms` first; `fail` replaces the n-th query with that error. Every
+ * query's parameters are kept.
  */
-function stubDb(sizes: number[], o: { ms?: number; fail?: Map<number, Error> } = {}): RoDb & { params: unknown[][] } {
+function stubDb(sizes: number[] | ((n: number) => number), o: { ms?: number; fail?: Map<number, Error> } = {}): RoDb & { params: unknown[][] } {
   let rid = 0;
   const params: unknown[][] = [];
   return {
@@ -35,7 +36,8 @@ function stubDb(sizes: number[], o: { ms?: number; fail?: Map<number, Error> } =
       if (o.ms !== undefined) busy(o.ms);
       const err = o.fail?.get(params.length);
       if (err) throw err;
-      return Array.from({ length: sizes[params.length - 1] ?? 0 }, () => ({ rid: ++rid })) as T[];
+      const n = typeof sizes === "function" ? sizes(params.length) : sizes[params.length - 1] ?? 0;
+      return Array.from({ length: n }, () => ({ rid: ++rid })) as T[];
     },
     get: () => undefined,
     tables: () => [],
@@ -57,22 +59,32 @@ const tallyOf = () => new Tally("codex", "test.pass", "lifetime");
 
 describe("Pass", () => {
   test("each page waits for a turn of the event loop once the slice is used up: a timer armed before a long pass fires during it", async () => {
-    const db = stubDb([PAGE, PAGE, PAGE, 7], { ms: 30 });
-    const tally = tallyOf();
+    // Ordering only, never wall-clock: the store hands out full pages until the timer has fired, then a short last page.
+    // A pass that never gave the event loop a turn would read all MAX_PAGES full pages with the timer still pending.
+    const MAX_PAGES = 100;
     let fired = false;
+    let firedBefore: number | undefined; // the query that first saw the timer fired
+    const db = stubDb((n) => {
+      if (fired && firedBefore === undefined) firedBefore = n;
+      return fired || n > MAX_PAGES ? 7 : PAGE;
+    }, { ms: 30 });
+    const tally = tallyOf();
     setTimeout(() => { fired = true; }, 1);
     const pages: number[] = [];
     let firedFirst: boolean | undefined;
     const done = await new Pass(db, "t", tally, ctxFor(), "t.db-query").byRowid(SQL, (rows) => pages.push(rows.length)).then((v) => {
-      firedFirst = fired; // read as the pass resolves, before any other timer could run
+      firedFirst = fired; // read as the pass resolves
       return v;
     });
     expect(firedFirst).toBe(true);
+    expect(firedBefore).toBeDefined(); // the timer ran while the pass still had pages to read
+    const full = firedBefore! - 1;
+    expect(full).toBeGreaterThanOrEqual(1);
     expect(done).toBe(true);
-    expect(pages).toEqual([PAGE, PAGE, PAGE, 7]);
-    expect(tally.records).toBe(3 * PAGE + 7);
+    expect(pages).toEqual([...Array.from({ length: full }, () => PAGE), 7]);
+    expect(tally.records).toBe(full * PAGE + 7);
     // each page resumes after the last rowid read, PAGE rows at a time
-    expect(db.params).toEqual([[Number.MIN_SAFE_INTEGER, PAGE], [PAGE, PAGE], [2 * PAGE, PAGE], [3 * PAGE, PAGE]]);
+    expect(db.params).toEqual(Array.from({ length: full + 1 }, (_, i) => [i === 0 ? Number.MIN_SAFE_INTEGER : i * PAGE, PAGE]));
   });
 
   test("an abort inside a page's mapping ends the pass before the next full page: false", async () => {
