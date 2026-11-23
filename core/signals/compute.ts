@@ -158,8 +158,9 @@ export function computeSignals(sample: readonly SessionStats[], g: Globals): Sig
     if (compactions > 0 || r.episodes > 0) hygieneSpan.add(r);
     if (r.tierPairs.length > 0) { for (const v of r.tierPairs) pairs.push(v); rhoSpan.add(r); }
     landed += r.landed;
-    if (r.tokensKnown) { tokenRows++; tokens += r.tokens; tokenLanded += r.landed; if (r.landed > 0) tokenSpan.add(r); }
-    if (r.usdKnown) { usdRows++; usd += r.usd; usdLanded += r.landed; if (r.landed > 0) usdSpan.add(r); }
+    // every known row that adds to either sum is in the span
+    if (r.tokensKnown) { tokenRows++; tokens += r.tokens; tokenLanded += r.landed; if (r.tokens > 0 || r.landed > 0) tokenSpan.add(r); }
+    if (r.usdKnown) { usdRows++; usd += r.usd; usdLanded += r.landed; if (r.usd > 0 || r.landed > 0) usdSpan.add(r); }
     if (r.editEpisodesInRepo > 0) { editInRepo += r.editEpisodesInRepo; landedEpisodes += r.landedEpisodes; landedSpan.add(r); }
   }
 

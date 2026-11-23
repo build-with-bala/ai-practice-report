@@ -10,6 +10,28 @@ export function dayKey(ms: number, timeZone: string): string {
   return localDay(ms, timeZone);
 }
 
+/**
+ * The first epoch ms of a local day ("YYYY-MM-DD") in an explicit IANA zone: a binary search over the 30 hours around
+ * the day's UTC midnight (every zone's offset is within ±14 h), so DST days resolve too.
+ */
+export function dayStart(day: string, timeZone: string): number {
+  const [y, m, d] = day.split("-").map(Number) as [number, number, number];
+  let lo = Date.UTC(y, m - 1, d) - 15 * 3_600_000;
+  let hi = Date.UTC(y, m - 1, d) + 15 * 3_600_000;
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (dayKey(mid, timeZone) < day) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+/** The last epoch ms of a local day ("YYYY-MM-DD") in an explicit IANA zone: one before the next day's start. */
+export function dayEnd(day: string, timeZone: string): number {
+  const [y, m, d] = day.split("-").map(Number) as [number, number, number];
+  return dayStart(new Date(Date.UTC(y, m - 1, d + 1)).toISOString().slice(0, 10), timeZone) - 1;
+}
+
 /** The ISO-8601 week ("YYYY-Www") of a day ("YYYY-MM-DD"): weeks start on Monday, and week 1 holds the year's first Thursday. */
 export function isoWeek(day: string): string {
   const [y, m, d] = day.split("-").map(Number) as [number, number, number];

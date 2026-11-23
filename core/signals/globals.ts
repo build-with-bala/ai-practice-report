@@ -1,4 +1,4 @@
-import { isoWeek } from "../analysis/activity";
+import { dayEnd, dayStart, isoWeek } from "../analysis/activity";
 import { PR_LINK_TOOLS, SWITCH_TOOLS, type Metric, type SessionTable } from "../analysis/types";
 import type { SessionStats } from "../analysis/walk";
 import type { CommitFact, RepoFacts } from "../git/types";
@@ -17,11 +17,19 @@ const weight = (p: ConfigEv["provenance"]): number => (p === "authored" ? 1 : 0.
 const ratio = (num: number, den: number): number | null => (den > 0 ? num / den : null);
 const mean = (v: readonly number[]): number | null => (v.length > 0 ? v.reduce((a, b) => a + b, 0) / v.length : null);
 
-/** The distinct ISO weeks of the given tools' active days in one window, from `Activity.byTool`. */
-function toolWeeks(t: SessionTable, tools: ReadonlySet<ToolId>, window: "detailDays" | "lifetimeDays"): number {
+/** The distinct ISO weeks of the given tools' active days in one window, from `Activity.byTool`, and their first and last day. */
+function toolDays(t: SessionTable, tools: ReadonlySet<ToolId>, window: "detailDays" | "lifetimeDays"): { weeks: number; first?: string; last?: string } {
   const weeks = new Set<string>();
-  for (const tool of tools) for (const day of t.activity.byTool[tool]?.[window] ?? []) weeks.add(isoWeek(day));
-  return weeks.size;
+  let first: string | undefined;
+  let last: string | undefined;
+  for (const tool of tools) {
+    for (const day of t.activity.byTool[tool]?.[window] ?? []) {
+      weeks.add(isoWeek(day));
+      if (first === undefined || day < first) first = day;
+      if (last === undefined || day > last) last = day;
+    }
+  }
+  return { weeks: weeks.size, ...(first === undefined ? {} : { first, last: last! }) };
 }
 
 /**
@@ -32,7 +40,8 @@ function toolWeeks(t: SessionTable, tools: ReadonlySet<ToolId>, window: "detailD
  * - **Buckets.** An active bucket holds an action of at least one `detailTop` row (scripted rows too); a parallel one,
  *   of at least 2 rows. `firstParallelBucket` is the start of the earliest parallel bucket (pre-flight P14).
  * - **Repos.** An active repo is the `repoKey` of at least one `detailTop` row; repo-wide totals (rework, co-authored
- *   share) read the repos of any kept row (no host copy), so a repo only an excluded project or tool used never counts.
+ *   share) read the repos of kept detail-window rows (no host copy), so a repo only an excluded project or tool, or
+ *   only lifetime-window sessions, used never counts; the artifacts' child types and MCP calls read the same rows.
  *   Whole-report totals count owner commits only; per-repo matching (a commit after a session, a later fix) takes any.
  * - **Per-week rates** divide by the active weeks of the tools that emit their markers (pre-flight P10): null when none
  *   of them has a week, never 0.
@@ -69,7 +78,7 @@ export function computeGlobals(t: SessionTable, stats: readonly SessionStats[], 
   const scripted = stats.filter((s) => s.scripted).length;
 
   // PRs per week of the tools that link PRs (pre-flight P10)
-  const prWeeks = toolWeeks(t, PR_LINK_TOOLS, "detailDays");
+  const prWeeks = toolDays(t, PR_LINK_TOOLS, "detailDays").weeks;
   const prSpan = new Span();
   const prs = new Set<string>();
   for (const s of stats) {
@@ -77,13 +86,22 @@ export function computeGlobals(t: SessionTable, stats: readonly SessionStats[], 
     for (const k of s.prKeys) prs.add(k);
   }
 
-  // switches per lifetime week of the tools that record them (pre-flight P10)
-  const switchWeeks = toolWeeks(t, SWITCH_TOOLS, "lifetimeDays");
+  // switches per lifetime week of the tools that record them (pre-flight P10); the metric's span and sources are the
+  // denominator's (those tools' lifetime days, and the stores they come from) as well as the markers'
+  const sw = toolDays(t, SWITCH_TOOLS, "lifetimeDays");
+  const switchWeeks = sw.weeks;
   const switchSpan = new Span();
+  if (sw.first !== undefined) { switchSpan.addTs(dayStart(sw.first, t.timeZone)); switchSpan.addTs(dayEnd(sw.last!, t.timeZone)); }
+  const switchTool = (tool: ToolId): boolean => SWITCH_TOOLS.has(tool) && !excluded.has(tool);
+  for (const p of raw.store.all("prompt")) if (p.window === "lifetime" && switchTool(p.tool) && inRange(p.ts)) switchSpan.addSource(p.source);
+  for (const e of raw.store.all("daily")) if (e.unit === "prompts" && e.zone === "local" && e.count >= 1 && switchTool(e.tool)) switchSpan.addSource(e.source);
+  // markers only from lifetime-window sources: a detail-window emitter is never summed against lifetime weeks
+  const detailSources = new Set(raw.coverage.filter((c) => c.window === "detail").map((c) => c.source));
+  const lifetimeSources = new Set(raw.coverage.filter((c) => c.window === "lifetime" && !detailSources.has(c.source)).map((c) => c.source));
   let switches = 0;
   for (const m of raw.store.all("marker")) {
     if ((m.kind !== "model-switch" && m.kind !== "effort-switch") || m.detail === undefined) continue;
-    if (!SWITCH_TOOLS.has(m.tool) || excluded.has(m.tool) || !inRange(m.ts)) continue;
+    if (!switchTool(m.tool) || !lifetimeSources.has(m.source) || !inRange(m.ts)) continue;
     // a marker of a session that is in the store but left out (excluded, or a host copy) does not count
     if (m.sessionId !== undefined && raw.store.session(m.sessionId) !== undefined && !kept(m.sessionId)) continue;
     switches++;
@@ -124,8 +142,9 @@ export function computeGlobals(t: SessionTable, stats: readonly SessionStats[], 
     repoOff ? fixedMetric("detail", ["git"], 0, null, "repo-signals-off") : fixedMetric("detail", ["git"], n, value, "no-data", span);
 
   // commits: the repos of kept rows, inside the date range
+  const detailRows = [...t.rows.values()].filter((r) => r.window === "detail" && !t.hosts.has(r.id));
   const keptRepos = new Set<string>();
-  for (const row of t.rows.values()) if (row.repoKey !== undefined && !t.hosts.has(row.id)) keptRepos.add(row.repoKey);
+  for (const row of detailRows) if (row.repoKey !== undefined) keptRepos.add(row.repoKey);
   const detailFrom = stats.length > 0 ? Math.max(from, stats.reduce((m, s) => Math.min(m, s.start), Infinity)) : undefined;
   const hi = Math.min(o.now, to);
   const reworkFrom = detailFrom === undefined ? undefined : Math.max(from, detailFrom - REWORK_LEAD_MS);
@@ -172,7 +191,7 @@ export function computeGlobals(t: SessionTable, stats: readonly SessionStats[], 
     if (e.mcpServer !== undefined && !excluded.has(e.tool) && inRange(e.ts) && kept(e.sessionId) && t.rows.get(e.sessionId)!.window === "detail") mcpNamed.add(e.mcpServer);
   }
   const childTypes = new Set<string>();
-  for (const row of t.rows.values()) if (row.agentType !== undefined && row.parentId !== undefined && !t.hosts.has(row.id)) childTypes.add(row.agentType);
+  for (const row of detailRows) if (row.agentType !== undefined && row.parentId !== undefined) childTypes.add(row.agentType);
   const used = new Map<string, { w: number; source: string }>();
   for (const c of configs) {
     if (!ARTIFACT_KINDS.has(c.kind) || c.name === undefined) continue;
@@ -197,7 +216,8 @@ export function computeGlobals(t: SessionTable, stats: readonly SessionStats[], 
     headlessPerWeek: allSpan.metric("detail", detailWeeks, ratio(scripted, detailWeeks)),
     guardrails: repoMetric(activeRepos, mean(guards), gitSpan),
     maintainedShare: repoMetric(activeRepos, ratio(maintained, activeRepos), gitSpan),
-    artifacts: artifactSpan.metric("detail", used.size, used.size > 0 ? artifactWeight : null),
+    // config is read by lifetime-window readers (`uses` are the tools' own lifetime counters): a lifetime metric
+    artifacts: artifactSpan.metric("lifetime", used.size, used.size > 0 ? artifactWeight : null),
     memoryFiles,
     switchesPerWeek: switchSpan.metric("lifetime", switchWeeks, ratio(switches, switchWeeks), switchWeeks === 0 ? "not-captured" : "no-data"),
     reworkShare: repoMetric(reworkDen, ratio(reworked, reworkDen), { from: reworkFrom, to: hi }),

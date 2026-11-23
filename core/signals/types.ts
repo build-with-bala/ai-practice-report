@@ -65,18 +65,21 @@ export class Span {
   range(): { from?: number; to?: number } {
     return Number.isFinite(this.from) ? { from: this.from, to: this.to } : {};
   }
-  /** A metric over this span: null with `reason` when n = 0 or the value is not finite. */
+  /** A metric over this span: null with `reason` when n = 0, or `degenerate` when n > 0 and the value is not finite. */
   metric(window: Window, n: number, value: number | null, reason: Reason = "no-data"): Metric {
     return fixedMetric(window, [...this.sources].sort(), n, value, reason, this.range());
   }
 }
 
-/** A fixed-source metric (repo metrics read git: `sources ["git"]`) over an explicit span. */
+/**
+ * A fixed-source metric (repo metrics read git: `sources ["git"]`) over an explicit span. A null value takes `reason`
+ * when n = 0; with n > 0 a `no-data` reason becomes `degenerate` (`no-data` always means n = 0).
+ */
 export function fixedMetric(window: Window, sources: string[], n: number, value: number | null, reason: Reason, span?: { from?: number; to?: number }): Metric {
   const m: Metric = { window, sources, n, value: null };
   if (span?.from !== undefined && Number.isFinite(span.from)) m.from = span.from;
   if (span?.to !== undefined && Number.isFinite(span.to)) m.to = span.to;
   if (n > 0 && value !== null && Number.isFinite(value)) m.value = value;
-  else m.reason = reason;
+  else m.reason = n > 0 && reason === "no-data" ? "degenerate" : reason;
   return m;
 }

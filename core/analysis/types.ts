@@ -6,9 +6,10 @@ export interface MetricMeta { window: Window; sources: string[]; from?: number; 
 /**
  * A measured value; `null` = not measurable (never a default 0), and `reason` says why: `no-data` (the data could hold it,
  * but n = 0), `not-captured` (no tool in the data records the fields it needs), `repo-signals-off` (it needs repo
- * signals, and they are off or git is missing).
+ * signals, and they are off or git is missing), `degenerate` (n > 0, but the value is undefined on that evidence: a
+ * correlation with a constant side or under 3 pairs).
  */
-export interface Metric extends MetricMeta { value: number | null; reason?: "no-data" | "not-captured" | "repo-signals-off" }
+export interface Metric extends MetricMeta { value: number | null; reason?: "no-data" | "not-captured" | "repo-signals-off" | "degenerate" }
 
 /** What the person left out of the report: whole tools, projects (projectKeys), and a date range (epoch ms, inclusive). */
 export interface Exclusions { tools?: ToolId[]; projects?: string[]; from?: number; to?: number }
@@ -51,6 +52,8 @@ export interface SessionTable {
    * Every later stage clips to the range: events, commits and markers outside it never count, even in a kept row.
    */
   scope: { from: number; to: number; tools: ReadonlySet<ToolId> };
+  /** The IANA zone the activity days are keyed in. */
+  timeZone: string;
   /** Origin human, or a scripted prompt the dedupe relabelled (its host copy was typed by the person). */
   isHuman(p: PromptEv): boolean;
   activity: Activity; capabilities: Capabilities;

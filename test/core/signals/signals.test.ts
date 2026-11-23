@@ -88,6 +88,8 @@ describe("computeSignals: the sample formulas", () => {
     expect(s.rho.value).toBeCloseTo(1, 12);
     expect(s.rho.n).toBe(3);
     expect([s.tokensPerLanded.value, s.tokensPerLanded.n]).toEqual([750, 2]);
+    // every known row in either sum is in the span: b adds tokens, though it landed nothing
+    expect([s.tokensPerLanded.sources, s.tokensPerLanded.from, s.tokensPerLanded.to]).toEqual([[CC, CX], T0, T0 + DAY + HOUR]);
     expect([s.usdPerLanded.value, s.usdPerLanded.n, s.usdPerLanded.sources]).toEqual([1, 2, [CC]]);
   });
 
@@ -110,6 +112,9 @@ describe("computeSignals: the sample formulas", () => {
     expect(pairs([21, 1, 21, 2, 33, 3]).value).toBeCloseTo(Math.sqrt(3) / 2, 12);
     expect(pairs([21, 1, 33, 2]).value).toBeNull();
     expect(pairs([21, 1, 21, 2, 21, 3]).value).toBeNull();
+    expect([pairs([21, 1, 21, 2, 21, 3]).n, pairs([21, 1, 21, 2, 21, 3]).reason]).toEqual([3, "degenerate"]); // n > 0, value null
+    expect(pairs([21, 1, 33, 2]).reason).toBe("degenerate");
+    expect(computeSignals([stat("x", { episodes: 1, tierPairs: [] })], globals()).rho.reason).toBe("not-captured");
     expect(pairs([21, 1, 22, 1, 33, 1]).value).toBeNull();
   });
 
@@ -336,6 +341,7 @@ describe("computeGlobals", () => {
     // s1 1.0, c1 0.3, m1 0.3 (named by a tool call), my-agent 1.0 (a custom child's type), p1 0.3; codex's p2 is excluded
     expect(g.artifacts.value).toBeCloseTo(2.9, 12);
     expect([g.artifacts.n, g.evidence.artifacts]).toEqual([5, 5]);
+    expect(g.artifacts.window).toBe("lifetime"); // ConfigEv uses are lifetime counters of lifetime config readers
     expect(g.memoryFiles).toBe(2);
   });
 
@@ -354,6 +360,40 @@ describe("computeGlobals", () => {
     // only c1 is left: c2 (a fix, 5 h) and c4 lie after the range's end
     expect([g.reworkShare.value, g.reworkShare.n, g.aiCoauthoredShare.n]).toEqual([0, 1, 1]);
     expect(g.switchesPerWeek.value).toBe(1); // one switch with a detail in range, over Claude Code's one lifetime week in range
+  });
+
+  test("switches: a measured 0 carries the denominator's sources and days (M1)", () => {
+    const { g } = globalsOf([
+      sess("a"), prompt("a", T0),
+      prompt(undefined, T0, { source: HIST, window: "lifetime" }), prompt(undefined, T0 + 7 * DAY, { source: HIST, window: "lifetime" }),
+      marker("a", T0 + MIN, "model-switch", { source: HIST }), // a picker opened: no detail, no switch
+    ]);
+    expect(g.switchesPerWeek).toEqual({ window: "lifetime", sources: [HIST], from: T0 - 9 * HOUR, to: T0 + 8 * DAY - 9 * HOUR - 1, n: 2, value: 0 });
+  });
+
+  test("switches: one marker still spans the denominator's weeks, not one instant (M1)", () => {
+    const { g } = globalsOf([
+      sess("a"), prompt("a", T0),
+      prompt(undefined, T0, { source: HIST, window: "lifetime" }), prompt(undefined, T0 + 7 * DAY, { source: HIST, window: "lifetime" }),
+      marker("a", T0 + MIN, "model-switch", { source: HIST, detail: "opus" }),
+    ]);
+    const m = g.switchesPerWeek;
+    expect([m.value, m.n, m.from, m.to]).toEqual([0.5, 2, Date.UTC(2026, 10, 2), Date.UTC(2026, 10, 10) - 1]);
+  });
+
+  test("switch markers count only from lifetime-window sources (M4)", () => {
+    const { g } = globalsOf([
+      sess("a"), prompt("a", T0), prompt(undefined, T0, { source: HIST, window: "lifetime" }),
+      marker("a", T0 + MIN, "model-switch", { source: CC, detail: "opus" }), // a detail-window emitter: not summed against lifetime weeks
+      marker("a", T0 + 2 * MIN, "effort-switch", { source: HIST, detail: "high" }),
+    ]);
+    expect([g.switchesPerWeek.value, g.switchesPerWeek.n]).toEqual([1, 1]);
+  });
+
+  test("repo-wide totals read the repos of detail rows only (M5)", () => {
+    const repos = signals([...REPOS().repos, repo("L", ["PL"], { commits: [commit(T0 + HOUR, "l1", ["fl"], { ai: "codex" })] })]);
+    const { g } = globalsOf([...WORLD, sess("life", { projectKey: "PL", window: "lifetime", start: T0, end: T0 + 2 * HOUR })], { repos, now: T0 + 15 * DAY });
+    expect([g.aiCoauthoredShare.value, g.aiCoauthoredShare.n]).toEqual([1 / 3, 3]); // L's commit, of a lifetime-only session, stays out
   });
 
   test("an empty scan gives null metrics and finite values", () => {
