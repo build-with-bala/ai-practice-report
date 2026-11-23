@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "models": [
+    { "match": "^claude-opus-4-5(-\\d{8})?$", "released": "2025-11-24", "source": "https://www.anthropic.com/news/claude-opus-4-5" },
+    { "match": "^claude-haiku-4-5(-\\d{8})?$", "released": "2025-10-15", "source": "https://www.anthropic.com/news/claude-haiku-4-5" },
+    { "match": "^claude-sonnet-4-5(-\\d{8})?$", "released": "2025-09-29", "source": "https://www.anthropic.com/news/claude-sonnet-4-5" },
+    { "match": "^claude-opus-4-1(-\\d{8})?$", "released": "2025-08-05", "source": "https://www.anthropic.com/news/claude-opus-4-1" },
+    { "match": "^claude-(opus|sonnet)-4(-\\d{8})?$", "released": "2025-05-22", "source": "https://www.anthropic.com/news/claude-4" },
+    { "match": "^gpt-5-codex$", "released": "2025-09-15", "source": "https://openai.com/index/introducing-upgrades-to-codex/" },
+    { "match": "^gpt-5(-\\d{4}-\\d{2}-\\d{2})?$", "released": "2025-08-07", "source": "https://openai.com/index/introducing-gpt-5/" }
+  ],
+  "tools": {}
+}
