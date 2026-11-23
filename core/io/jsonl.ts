@@ -38,10 +38,12 @@ export interface GcPacerOptions {
  * The fallback. A collection "did not fall" when its RSS fell by less than half of the growth it answered
  * (`rss before − baseline`; any collection with no growth to answer). A partial fall below that half counts as not
  * falling. From the first collection that did not fall, the pacer also collects every `fallbackEvery` bytes streamed
- * since its last collection, above `minRss`, and keeps doing so until a look finds RSS at or below `minRss` (memory
- * really handed back: a new phase). A later collection that does fall does not turn it off, since a fall can be garbage
- * that filled kept pages unseen, freed again, while RSS still says nothing of live memory. While RSS falls as it
- * should, the pacer is the adaptive rule alone, and a small process pays nothing.
+ * since its last collection, above `minRss`, and keeps doing so until a new phase begins: a look that finds RSS at or
+ * below `minRss` (memory really handed back), or `newPhase()`, which a scan calls when it starts (`holdStreamGc`). A
+ * later collection that does fall does not turn it off within the phase, since a fall can be garbage that filled kept
+ * pages unseen, freed again, while RSS still says nothing of live memory. So every scan starts on the adaptive rule and
+ * enters the fallback only after a collection of its own did not fall: a scan that stays under `minRss` pays nothing,
+ * and one whose RSS falls as it should pays only the adaptive rule's collections, whatever scans ran before it.
  */
 export class GcPacer {
   /** False: `add` does nothing (no look at the RSS, no collection). */
@@ -63,6 +65,11 @@ export class GcPacer {
   /** The collections run so far. */
   get collections(): number {
     return this.count;
+  }
+
+  /** A new phase (a scan starts): the fallback ends, until a collection of this phase does not fall. */
+  newPhase(): void {
+    this.fallback = false;
   }
 
   /**
@@ -128,7 +135,10 @@ let enabledBefore = true;
  * hold; a value set by hand on `STREAM_GC.enabled` while a hold is held is overwritten at the next take or release.
  */
 export function holdStreamGc(mode: "auto" | "off"): () => void {
-  if (holds === 0) enabledBefore = STREAM_GC.enabled;
+  if (holds === 0) {
+    enabledBefore = STREAM_GC.enabled;
+    STREAM_GC.newPhase();
+  }
   holds++;
   if (mode === "auto") autoHolds++;
   STREAM_GC.enabled = autoHolds > 0;

@@ -87,8 +87,8 @@ describe("GcPacer", () => {
     let collections = 0;
     const pacer = new GcPacer(OPTS, () => { collections++; rss = 900 * MiB; }, () => rss);
     pacer.add(OPTS.checkEvery); // baseline 600
-    rss = 1_200 * MiB;
-    pacer.add(OPTS.checkEvery); // 600 over: collects, leaving a 900 MiB baseline (a fall of half: no fallback)
+    rss = 1_000 * MiB;
+    pacer.add(OPTS.checkEvery); // 400 over: collects, leaving a 900 MiB baseline
     expect(collections).toBe(1);
     rss = 350 * MiB; // the first scan's store is released and its pages returned
     pacer.add(OPTS.checkEvery); // the baseline drops to 350
@@ -420,6 +420,48 @@ describe("scan gc option", () => {
     } finally {
       Object.assign(pacer, { rss: saved.rss, collect: saved.collect, bytes: saved.bytes, baseline: saved.baseline });
       STREAM_GC.enabled = saved.enabled;
+    }
+  });
+
+  test("two scans in a row: the second starts on the adaptive rule, not the first scan's fallback", async () => {
+    const pacer = STREAM_GC as unknown as { rss: () => number; collect: () => void; bytes: number; baseline: number | undefined; sinceCollect: number };
+    const saved = { rss: pacer.rss, collect: pacer.collect, bytes: pacer.bytes, baseline: pacer.baseline, sinceCollect: pacer.sinceCollect, enabled: STREAM_GC.enabled };
+    let rss = 400 * MiB;
+    pacer.rss = () => rss;
+    pacer.collect = () => {}; // RSS never falls
+    pacer.bytes = 0;
+    pacer.baseline = undefined;
+    const reading = (id: string, body: () => void): SourcePlugin => ({
+      tool: "codex", id, tier: "P0", beta: false, describe: { reads: [], neverReads: [] },
+      locate: () => [{ root: env.home, home: env.home, wsl: false }],
+      scan: async (_c, ctx) => {
+        body();
+        ctx.emit({ k: "coverage", tool: "codex", source: id, window: "detail", status: "empty", files: 0, bytes: 0, records: 0,
+          skipped: {}, unknownTypes: {}, versions: [] });
+      },
+    });
+    const gcOf = async (p: SourcePlugin): Promise<number | undefined> => {
+      let n: number | undefined;
+      await run(p, { onLog: (_l, code, v) => { if (code === "scan.gc") n = v; } });
+      return n;
+    };
+    try {
+      const first = await gcOf(reading("first", () => {
+        STREAM_GC.add(OPTS.checkEvery); // the baseline, 400 MiB
+        rss = 600 * MiB;
+        STREAM_GC.add(OPTS.checkEvery); // 200 over: collects; RSS stays: the fallback starts
+        for (let i = 0; i < 8; i++) STREAM_GC.add(OPTS.checkEvery); // 64 MiB: a fallback collection every 16 MiB
+      }));
+      expect(first).toBe(1 + 4 + 1); // the slack collection, 4 fallback ones, the settling one
+      // RSS is still 600 MiB (never under the floor): only the new scan's start ends the fallback
+      const second = await gcOf(reading("second", () => {
+        for (let i = 0; i < 8; i++) STREAM_GC.add(OPTS.checkEvery); // flat RSS: the adaptive rule collects nothing
+      }));
+      expect(second).toBe(1); // the settling collection only
+    } finally {
+      Object.assign(pacer, { rss: saved.rss, collect: saved.collect, bytes: saved.bytes, baseline: saved.baseline, sinceCollect: saved.sinceCollect });
+      STREAM_GC.enabled = saved.enabled;
+      STREAM_GC.newPhase();
     }
   });
 
