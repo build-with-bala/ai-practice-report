@@ -9,6 +9,7 @@ import type { CheckResult } from "../../../core/forensics/types";
 import type { AnchorEv, ConfigEv, CoverageEv, DailyEv, Ev, FileFactEv, IdentityEv, PromptEv, SessionEv, ToolEv } from "../../../core/model/events";
 import type { ToolId, Window } from "../../../core/model/ids";
 import { scanResultOf } from "../../kit/scanresult";
+import { asks } from "./table";
 
 const SEC = 1_000;
 const MIN = 60 * SEC;
@@ -97,7 +98,9 @@ function claudeDays(inHistory: number, statsDays: (day: string, i: number) => bo
 const run = (events: Ev[], stats: readonly SessionStats[] = [], releases: ReleaseTable = TABLE): Forensics => {
   const raw = scanResultOf(events, { finishedAt: NOW });
   const t = buildSessionTable(raw, { now: NOW, timeZone: "UTC" });
-  return runForensics(raw, t, stats, { now: NOW, timeZone: "UTC", releases });
+  const f = runForensics(raw, t, stats, { now: NOW, timeZone: "UTC", releases });
+  asks(f.checks);
+  return f;
 };
 const byId = (f: Forensics, id: CheckResult["id"]): CheckResult => f.checks.find((c) => c.id === id)!;
 const ORDER: CheckResult["id"][] = ["C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10",

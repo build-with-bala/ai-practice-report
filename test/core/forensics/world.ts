@@ -23,7 +23,8 @@ export const NOW = T0 + 31 * DAY;
 export const TABLE: ReleaseTable = { version: 1, models: [{ match: "^model-w$", released: "2026-01-01", source: "https://example.com/w" }], tools: {} };
 
 export type Project = "A" | "B";
-export interface Tagged { ev: Ev; tool: ToolId; project?: Project; period?: 0 | 1 }
+/** `case`: the host-copy pair (`host`) or the orphans (`orphan`: events naming a session the store does not hold). */
+export interface Tagged { ev: Ev; tool: ToolId; project?: Project; period?: 0 | 1; case?: "host" | "orphan" }
 
 /** A seeded generator (mulberry32): the world is the same on every run. */
 function rng(seed: number): () => number {
@@ -56,11 +57,12 @@ const config = (tool: ToolId, over: Partial<ConfigEv>): ConfigEv =>
 export function world(): Tagged[] {
   const r = rng(7);
   const out: Tagged[] = [];
-  const add = (ev: Ev, tool: ToolId, period?: 0 | 1, project?: Project): void => {
+  const add = (ev: Ev, tool: ToolId, period?: 0 | 1, project?: Project): Tagged => {
     const x: Tagged = { ev, tool };
     if (period !== undefined) x.period = period;
     if (project !== undefined) x.project = project;
     out.push(x);
+    return x;
   };
 
   // undated, sessionless: coverage, config entries, the config account
@@ -142,7 +144,7 @@ export function world(): Tagged[] {
           textHash: `cx-${project}${period}-${i}`, features }, "codex", period, project);
       }
       add({ k: "codex-rollout", tool: "codex", source: CX, threadId: cid, fileTs: cstart, uuidTs: cstart + 400 }, "codex", period, project);
-      add({ k: "codex-thread-row", tool: "codex", source: "codex.threads", threadId: cid, createdAt: cstart + 300 }, "codex", period);
+      add({ k: "codex-thread-row", tool: "codex", source: "codex.threads", threadId: cid, createdAt: cstart + 300 }, "codex", period, project);
     }
     // a session of project B whose rollout has no thread row
     if (period === 1) {
@@ -152,6 +154,49 @@ export function world(): Tagged[] {
       add({ k: "codex-rollout", tool: "codex", source: CX, threadId: xid, fileTs: xstart, uuidTs: xstart + 400 }, "codex", period, "B");
     }
   }
+
+  // Cursor: project B's many detail prompts decide Cursor's window, which then reads its detail prompts; without B, its
+  // sessionless lifetime prompts (one long prompt among them sent 6 times) win
+  for (const project of ["A", "B"] as const) {
+    const id = `cursor:${project}1`, start = LATE + (project === "A" ? 5 : 6) * DAY;
+    add({ k: "session", tool: "cursor", source: "cursor.chats", id, window: "detail", origin: "human", start, end: start + DAY, models: [],
+      projectKey: `k${project}` }, "cursor", 1, project);
+    for (let i = 0; i < (project === "A" ? 3 : 30); i++) {
+      add({ k: "prompt", tool: "cursor", source: "cursor.chats", ts: start + i * 20 * MIN, sessionId: id, window: "detail", origin: "human",
+        intent: "spec", textHash: `cu-${project}-${i}`, features: { ...features, chars: 50 } }, "cursor", 1, project);
+    }
+  }
+  for (let i = 0; i < 10; i++) {
+    add({ k: "prompt", tool: "cursor", source: "cursor.history", ts: LATE + 7 * DAY + i * HOUR, window: "lifetime", origin: "human", intent: "spec",
+      textHash: i < 6 ? "cu-long" : `cu-h${i}`, features: { ...features, chars: i < 6 ? 300 : 50 } }, "cursor", 1);
+  }
+
+  // a host copy: a Copilot session from VS Code relaying a short Claude Code session of project A, prompt for prompt
+  const hostStart = T0 + 8 * DAY;
+  add({ k: "session", tool: "claude-code", source: CC, id: "claude-code:relayed", window: "detail", origin: "human", start: hostStart,
+    end: hostStart + HOUR, models: [], projectKey: "kA" }, "claude-code", 0, "A").case = "host";
+  add({ k: "session", tool: "copilot", source: "copilot.vscode", id: "copilot:host", window: "detail", origin: "human", start: hostStart,
+    end: hostStart + HOUR, models: [], projectKey: "kA", surface: "vscode" }, "copilot", 0, "A").case = "host";
+  for (let i = 0; i < 4; i++) {
+    const ts = hostStart + i * 5 * MIN;
+    const base = { k: "prompt", ts, window: "detail", origin: "human", intent: "spec", textHash: `relayed-${i}`, features } as const;
+    add({ ...base, tool: "claude-code", source: CC, sessionId: "claude-code:relayed" }, "claude-code", 0, "A").case = "host";
+    add({ ...base, tool: "copilot", source: "copilot.vscode", ts: ts + 2 * SEC, sessionId: "copilot:host" }, "copilot", 0, "A").case = "host";
+  }
+
+  // orphans: events naming sessions the store does not hold
+  const orphanAt = LATE + 8 * DAY;
+  const orphans: Ev[] = [
+    { k: "tool", tool: "claude-code", source: CC, ts: orphanAt, sessionId: "claude-code:gone", name: "Read", category: "read" },
+    { k: "prompt", tool: "claude-code", source: CC, ts: orphanAt, sessionId: "claude-code:gone", window: "detail", origin: "human", intent: "spec",
+      textHash: "orphan-detail", features },
+    { k: "prompt", tool: "claude-code", source: "claude-code.history", ts: orphanAt, sessionId: "claude-code:gone", window: "lifetime",
+      origin: "human", intent: "spec", textHash: "orphan-lifetime", features },
+    { k: "identity", tool: "claude-code", source: CC, scope: "session", hash: "acct-gone", sessionId: "claude-code:gone" },
+    { k: "codex-rollout", tool: "codex", source: CX, threadId: "codex:gone", fileTs: orphanAt, uuidTs: orphanAt + 400 },
+    { k: "codex-thread-row", tool: "codex", source: "codex.threads", threadId: "codex:gone", createdAt: orphanAt + 300 },
+  ];
+  for (const ev of orphans) add(ev, ev.tool, 1).case = "orphan";
   return out;
 }
 

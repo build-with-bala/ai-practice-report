@@ -2,9 +2,11 @@ import { describe, expect, test } from "bun:test";
 import type { Exclusions } from "../../../core/analysis/types";
 import { runForensics, type Forensics } from "../../../core/forensics";
 import type { CheckId, CheckResult } from "../../../core/forensics/types";
+import type { Ev } from "../../../core/model/events";
 import type { ScanResult } from "../../../core/scan";
-import { tableOf } from "./table";
-import { MID, NOW, scanOf, TABLE, world, type Tagged } from "./world";
+import { scanResultOf } from "../../kit/scanresult";
+import { asks, tableOf } from "./table";
+import { DAY, HOUR, MID, NOW, scanOf, T0, TABLE, world, type Tagged } from "./world";
 
 /*
  * Every check and soft flag reads in-scope data only. Excluding a slice of the world must give, check by check, what
@@ -13,7 +15,11 @@ import { MID, NOW, scanOf, TABLE, world, type Tagged } from "./world";
  * exclusion leaves them in.
  */
 
-const run = (raw: ScanResult, exclude?: Exclusions): Forensics => runForensics(raw, tableOf(raw, exclude), [], { now: NOW, timeZone: "UTC", releases: TABLE });
+const run = (raw: ScanResult, exclude?: Exclusions): Forensics => {
+  const f = runForensics(raw, tableOf(raw, exclude), [], { now: NOW, timeZone: "UTC", releases: TABLE });
+  asks(f.checks);
+  return f;
+};
 const byId = (f: Forensics, id: CheckId): CheckResult => f.checks.find((c) => c.id === id)!;
 const ALL: CheckId[] = ["C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10",
   "soft:rhythm", "soft:repeated-long", "soft:recent-burst", "soft:unclosed-tools", "soft:new-config"];
@@ -63,6 +69,48 @@ describe("forensics over in-scope data only", () => {
 
   test("an exclusion that matches nothing changes nothing", () => {
     const raw = scanOf(all);
-    expect(run(raw, { tools: ["cursor"] })).toEqual(run(raw));
+    expect(run(raw, { tools: ["aider"] })).toEqual(run(raw));
+  });
+
+  test("an excluded project's prompts do not decide a tool's window", () => {
+    // Cursor's window is detail only through project B's prompts: without B its lifetime prompts, one long one sent 6
+    // times, are read; Claude Code's two kept sessions each hold one repeated long prompt
+    expect(byId(full, "soft:repeated-long").values.repeated).toBe(4);
+    expect(byId(run(scanOf(all), { projects: ["kB"] }), "soft:repeated-long").values.repeated).toBe(3);
+  });
+
+  test("a tool whose only session is a host copy is in no check and in neither list", () => {
+    expect([full.anchorable, full.notAnchorable]).toEqual([["claude-code", "codex"], ["cursor"]]);
+    for (const c of full.checks) expect([c.id, c.tools.includes("copilot")]).toEqual([c.id, false]);
+    expect(Object.keys(byId(full, "C10").values).some((k) => k.startsWith("copilot/"))).toBe(false);
+  });
+
+  test("orphans: tool calls, detail prompts and session accounts are out; lifetime prompts, rollouts and thread rows stay", () => {
+    const bare = run(scanOf(all.filter((x) => x.case !== "orphan")));
+    for (const id of ["C4", "soft:unclosed-tools"] as const) expect([id, byId(full, id)]).toEqual([id, byId(bare, id)]);
+    expect(byId(full, "C10").n - byId(bare, "C10").n).toBe(1);
+    expect(byId(full, "C10").values["claude-code/human/lifetime"]! - byId(bare, "C10").values["claude-code/human/lifetime"]!).toBe(1);
+    expect([byId(full, "C6").values.rollouts! - byId(bare, "C6").values.rollouts!, byId(full, "C6").values.missing]).toEqual([1, byId(bare, "C6").values.missing]);
+    expect(byId(full, "C7").n - byId(bare, "C7").n).toBe(1);
+  });
+});
+
+describe("C6 under a project exclusion", () => {
+  test("an excluded project's thread rows do not set the index start", () => {
+    const cov: Ev = { k: "coverage", tool: "codex", source: "codex.threads", window: "lifetime", status: "ok", beta: false, files: 1, bytes: 1,
+      records: 2, skipped: {}, unknownTypes: {}, versions: [] };
+    const session = (id: string, start: number, projectKey: string): Ev =>
+      ({ k: "session", tool: "codex", source: "codex.rollouts", id, window: "detail", origin: "human", start, end: start + HOUR, models: [], projectKey });
+    const evs: Ev[] = [cov,
+      session("codex:b", T0, "kB"), { k: "codex-thread-row", tool: "codex", source: "codex.threads", threadId: "codex:b", createdAt: T0 },
+      session("codex:a-old", T0 + DAY, "kA"), { k: "codex-rollout", tool: "codex", source: "codex.rollouts", threadId: "codex:a-old", fileTs: T0 + DAY, uuidTs: T0 + DAY },
+      session("codex:a", T0 + 2 * DAY, "kA"), { k: "codex-rollout", tool: "codex", source: "codex.rollouts", threadId: "codex:a", fileTs: T0 + 2 * DAY, uuidTs: T0 + 2 * DAY },
+      { k: "codex-thread-row", tool: "codex", source: "codex.threads", threadId: "codex:a", createdAt: T0 + 2 * DAY },
+    ];
+    const withB = scanResultOf(evs, { finishedAt: NOW });
+    const withoutB = scanResultOf(evs.filter((e) => !("threadId" in e && e.threadId === "codex:b") && !(e.k === "session" && e.id === "codex:b")), { finishedAt: NOW });
+    const excluded = byId(run(withB, { projects: ["kB"] }), "C6");
+    expect(excluded).toEqual(byId(run(withoutB), "C6"));
+    expect([excluded.status, excluded.n, excluded.values.beforeIndex]).toEqual(["pass", 1, 1]);
   });
 });

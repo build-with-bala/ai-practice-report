@@ -4,6 +4,7 @@ import { promptWindowByTool } from "../analysis/promptwindow";
 import type { SessionTable } from "../analysis/types";
 import type { PromptEv } from "../model/events";
 import type { ScanResult } from "../scan";
+import { asked } from "./questions";
 import { forensicScope, type ForensicScope } from "./scope";
 import { round, toolsOf, type CheckId, type CheckResult } from "./types";
 
@@ -28,7 +29,6 @@ const NEW_CONFIG_MIN = 3;
 const NEW_CONFIG_SHARE = 0.5;
 
 const na = (id: CheckId, tools: CheckResult["tools"], n = 0): CheckResult => ({ id, status: "n/a", n, reason: "no-data", values: {}, tools });
-const pct = (x: number): number => Math.round(x * 100);
 
 /**
  * The human prompts in scope (`ForensicScope.human`: no session left out, no host copy — a host copy's prompts are the
@@ -73,8 +73,7 @@ function rhythm(prompts: readonly PromptEv[]): CheckResult {
   const median = cvs.length % 2 === 1 ? cvs[m]! : (cvs[m - 1]! + cvs[m]!) / 2;
   const base = { id: "soft:rhythm" as const, n: cvs.length, values: { sessions: cvs.length, medianCv: round(median, 2) }, tools };
   if (median >= RHYTHM_MAX_CV) return { ...base, status: "pass", reason: "ok" };
-  return { ...base, status: "note", reason: "regular-rhythm",
-    askAbout: `Across ${cvs.length} ${cvs.length === 1 ? "session" : "sessions"}, typed prompts arrive at unusually regular intervals. Were these prompts sent by a script rather than typed?` };
+  return { ...base, status: "note", reason: "regular-rhythm" };
 }
 
 /**
@@ -90,13 +89,13 @@ function repeatedLong(prompts: readonly PromptEv[]): CheckResult {
   const repeated = [...counts.values()].filter((c) => c >= LONG_REPEATS).length;
   const base = { id: "soft:repeated-long" as const, n: known.length, values: { repeated }, tools };
   if (repeated === 0) return { ...base, status: "pass", reason: "ok" };
-  return { ...base, status: "note", reason: "repeated-long",
-    askAbout: `${repeated} long ${repeated === 1 ? "prompt" : "prompts"} of 200 characters or more ${repeated === 1 ? "was" : "were each"} sent 5 times or more. Were these prompts pasted from a template or sent by a script?` };
+  return { ...base, status: "note", reason: "repeated-long" };
 }
 
 /**
  * recent-burst: of the lifetime active days, the share in the 14 days up to `now`'s day; raised when it is at least 50%
- * and the days span more than 60 days (first to last). n/a without lifetime active days.
+ * and the days span more than 60 days (first to last); a raised flag also gives the first active day (`date`). n/a
+ * without lifetime active days.
  */
 function recentBurst(t: SessionTable, now: number, timeZone: string): CheckResult {
   const days = t.activity.lifetimeDays;
@@ -107,10 +106,10 @@ function recentBurst(t: SessionTable, now: number, timeZone: string): CheckResul
   const before = dayKey(now - BURST_DAYS * DAY_MS, timeZone), today = dayKey(now, timeZone);
   const recentDays = days.filter((d) => d > before && d <= today).length;
   const share = recentDays / days.length;
-  const base = { id: "soft:recent-burst" as const, n: days.length, values: { days: days.length, recentDays, spanDays, share: round(share) }, tools };
-  if (share < BURST_SHARE || spanDays <= BURST_SPAN_DAYS) return { ...base, status: "pass", reason: "ok" };
-  return { ...base, status: "note", reason: "recent-burst",
-    askAbout: `${pct(share)}% of the active days since ${first} fall in the 14 days before this scan. Was most of this history made just before the scan?` };
+  const values = { days: days.length, recentDays, spanDays, share: round(share) };
+  const base = { id: "soft:recent-burst" as const, n: days.length, tools };
+  if (share < BURST_SHARE || spanDays <= BURST_SPAN_DAYS) return { ...base, values, status: "pass", reason: "ok" };
+  return { ...base, values: { ...values, date: first }, status: "note", reason: "recent-burst" };
 }
 
 /**
@@ -127,8 +126,7 @@ function unclosedTools(s: ForensicScope): CheckResult {
   const share = open / calls.length;
   const base = { id: "soft:unclosed-tools" as const, n: calls.length, values: { open, share: round(share) }, tools };
   if (share <= UNCLOSED_SHARE) return { ...base, status: "pass", reason: "ok" };
-  return { ...base, status: "note", reason: "unclosed-tools",
-    askAbout: `${pct(share)}% of the tool calls in the Claude Code transcripts have no recorded result. Were transcripts cut short or edited?` };
+  return { ...base, status: "note", reason: "unclosed-tools" };
 }
 
 /**
@@ -151,9 +149,7 @@ function newConfig(raw: ScanResult, t: SessionTable, now: number, s: ForensicSco
   const recent = dated.filter((a) => a.firstSeen! >= now - NEW_CONFIG_MS).length;
   const base = { id: "soft:new-config" as const, n: m, values: { recent, artifacts: m }, tools };
   if (recent < NEW_CONFIG_MIN || recent < NEW_CONFIG_SHARE * m) return { ...base, status: "pass", reason: "ok" };
-  // raised means recent ≥ 3, so both counts are plural
-  return { ...base, status: "note", reason: "new-config",
-    askAbout: `${recent} of the ${m} tools and skills in use were first seen in the 7 days before this scan. Was this machine set up or migrated, or were its tools updated, in that week?` };
+  return { ...base, status: "note", reason: "new-config" };
 }
 
 /**
@@ -162,5 +158,5 @@ function newConfig(raw: ScanResult, t: SessionTable, now: number, s: ForensicSco
  */
 export function softFlags(raw: ScanResult, t: SessionTable, o: { now: number; timeZone: string }, s: ForensicScope = forensicScope(raw, t)): CheckResult[] {
   const prompts = humanPrompts(raw, t, s);
-  return [rhythm(prompts), repeatedLong(prompts), recentBurst(t, o.now, o.timeZone), unclosedTools(s), newConfig(raw, t, o.now, s)];
+  return [rhythm(prompts), repeatedLong(prompts), recentBurst(t, o.now, o.timeZone), unclosedTools(s), newConfig(raw, t, o.now, s)].map(asked);
 }

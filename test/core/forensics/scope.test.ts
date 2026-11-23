@@ -1,15 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import { analyze } from "../../../core/analyze";
 import type { CheckId, CheckResult, Forensics } from "../../../core/forensics";
+import type { ProvenanceKey } from "../../../core/forensics/types";
 import type { Ev, IdentityEv, PromptEv, SessionEv } from "../../../core/model/events";
 import { scanResultOf } from "../../kit/scanresult";
 import { personaScan } from "../../fixtures/personas";
-import { tableOf } from "./table";
+import { asks, tableOf } from "./table";
 
 /* Forensics through `analyze`: the exclusions the person chose reach every check. */
 
 const UTC = { timeZone: "UTC", bootstrap: 10 };
-const byId = (f: Forensics, id: CheckId): CheckResult => f.checks.find((c) => c.id === id)!;
+const byId = (f: Forensics, id: CheckId): CheckResult => asks(f.checks.find((c) => c.id === id)!);
 
 describe("analyze: forensics under exclusions", () => {
   test("excluding the only tool leaves nothing to verify", () => {
@@ -59,7 +60,7 @@ describe("analyze: forensics under exclusions", () => {
     const before = analyze(raw, UTC).forensics, after = analyze(raw, { ...UTC, exclude: { projects: [busiest] } }).forensics;
     const c10a = byId(before, "C10"), c10b = byId(after, "C10");
     expect(c10a.n - c10b.n).toBe(droppedPrompts);
-    for (const key of Object.keys(c10a.values)) expect([key, (c10a.values[key] as number) - ((c10b.values[key] as number | undefined) ?? 0)]).toEqual([key, expected.get(key) ?? 0]);
+    for (const key of Object.keys(c10a.values) as ProvenanceKey[]) expect([key, c10a.values[key]! - (c10b.values[key] ?? 0)]).toEqual([key, expected.get(key) ?? 0]);
     expect(byId(before, "soft:unclosed-tools").n - byId(after, "soft:unclosed-tools").n).toBe(droppedCalls);
   });
 

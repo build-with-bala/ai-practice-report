@@ -7,6 +7,7 @@ import { computeGlobals } from "../../../core/signals/globals";
 import type { ConfigEv, CoverageEv, Ev, PromptEv, SessionEv, ToolEv } from "../../../core/model/events";
 import type { Window } from "../../../core/model/ids";
 import { scanResultOf } from "../../kit/scanresult";
+import { asks } from "./table";
 
 const SEC = 1_000;
 const MIN = 60 * SEC;
@@ -52,7 +53,7 @@ function rng(seed: number): () => number {
 
 const flags = (events: Ev[]): CheckResult[] => {
   const raw = scanResultOf([cov(CC, "detail"), cov("claude-code.history", "lifetime"), sess("s"), ...events], { finishedAt: NOW });
-  return softFlags(raw, buildSessionTable(raw, { now: NOW, timeZone: "UTC" }), { now: NOW, timeZone: "UTC" });
+  return asks(softFlags(raw, buildSessionTable(raw, { now: NOW, timeZone: "UTC" }), { now: NOW, timeZone: "UTC" }));
 };
 const flag = (events: Ev[], id: CheckResult["id"]): CheckResult => flags(events).find((f) => f.id === id)!;
 
@@ -109,7 +110,8 @@ describe("softFlags", () => {
     });
 
     test("one scripted session among five human-like ones is not raised", () => {
-      const evs = [session("bot", () => MIN), ...[1, 2, 3, 4, 5].map((k) => session(`h${k}`, humanLike(10 + k)))].flat();
+      const evs: Ev[] = [session("bot", () => MIN), ...[1, 2, 3, 4, 5].map((k) => session(`h${k}`, humanLike(10 + k)))].flat();
+      evs.push(...["bot", "h1", "h2", "h3", "h4", "h5"].map((id) => sess(id)));
       const f = flag(evs, "soft:rhythm");
       expect(f.status).toBe("pass");
       expect(f.values.sessions).toBe(6);
@@ -266,7 +268,7 @@ describe("softFlags", () => {
       const raw = scanResultOf([cov(CC, "detail"), cov("claude-code.history", "lifetime"), sess("s"), ...evs], { finishedAt: NOW });
       const t = buildSessionTable(raw, { now: NOW, timeZone: "UTC" });
       const g = computeGlobals(t, buildSessionStats(t, raw.store, raw.repos, { timeZone: "UTC" }), raw, { now: NOW });
-      const f = softFlags(raw, t, { now: NOW, timeZone: "UTC" }).find((x) => x.id === "soft:new-config")!;
+      const f = asks(softFlags(raw, t, { now: NOW, timeZone: "UTC" })).find((x) => x.id === "soft:new-config")!;
       expect(g.evidence.artifacts).toBe(3); // used-skill, docs, reviewer
       expect(f.values).toEqual({ recent: g.evidence.artifacts, artifacts: g.evidence.artifacts });
       expect(f.status).toBe("note");

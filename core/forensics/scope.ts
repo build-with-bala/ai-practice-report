@@ -11,20 +11,22 @@ import type { ScanResult } from "../scan";
  *
  * - Tools: an excluded tool's events reach no check.
  * - Date range: a dated event outside the range reaches no check.
- * - Sessions: an event that names a session the store holds counts only when that session is a kept row of the session
- *   table (`t.rows`, no host copy). That is how a project exclusion applies (its sessions have no row), and how host
- *   copies are left out. An event that names no session, or a session the store does not hold, cannot be tied to a
- *   project: it is kept by tool and date alone.
- * - Prompts follow the same rule. It is the scope helper's rule for prompts in scope (`AnalysisScope.human`: a lifetime
- *   prompt needs no session left out and no host copy, a detail one a kept row) but for one case: a detail prompt whose
- *   session the store does not hold (an orphan) is kept by tool and date, like every other event that cannot be tied
- *   to a project, where the activity rule drops it (an orphan never makes a day active).
+ * - Sessions: an event that names a session counts only when that session is a kept row of the session table (`t.rows`,
+ *   no host copy). That is how a project exclusion applies (its sessions have no row), and how host copies are left
+ *   out. An event that names no session cannot be tied to a project: it is kept by tool and date alone. Where the
+ *   named session is one the store does not hold (an orphan), each kind decides:
+ *   - tool calls and session account hashes: out of scope (as in `core/analysis/scope.ts` and `Analysis.identity`);
+ *   - prompts: the scope helper's rule (`AnalysisScope.human`): an orphan detail prompt is out, an orphan lifetime
+ *     prompt stays (history outlives its sessions);
+ *   - rollouts and thread-index rows (their `threadId` is the session id): an orphan stays — a rollout nobody can
+ *     account for is exactly what C6 exists to catch.
  */
 
 /**
  * The in-scope view of a scan. Each list is computed on first use and kept.
- * - `keptTool` / `inRange` / `session`: the three rules above, one at a time (`session(undefined)` is true).
- * - `prompt`: a prompt in scope, whoever sent it; `human`: a prompt in scope that is human (`t.isHuman`).
+ * - `keptTool` / `inRange` / `session`: the three rules above, one at a time (`session(undefined)` is true; an orphan
+ *   is false).
+ * - `prompt`: a prompt in scope, whoever sent it; `human`: a human prompt in scope (the scope helper's own rule).
  * - `rows`: the kept session rows that are no host copy; `tools`: the tools in scope — those of `rows` and of the
  *   prompts in scope (sorted).
  * - `anchors`: by `ts`. `identities`: config-scope ones by tool; session-scope ones by their session.
@@ -32,9 +34,9 @@ import type { ScanResult } from "../scan";
  *   when the other is missing) overlap the range, or when it has no event times; its file-system times never decide.
  * - `rollouts`: by their start — the id's time (`uuidTs`) where it has one, else the file name's (`fileTs`); kept when
  *   it has neither — and by their session (`threadId` is the rollout's session id).
- * - `threadRows`: by tool and `createdAt` alone (kept when it has none): an index row is no session's event. Its
- *   `createdAt` and its rollout's start mark the same moment, the thread's creation, so a rollout and its own row fall
- *   on the same side of a range's end.
+ * - `threadRows`: by `createdAt` (kept when it has none) and by their session, as rollouts are. Its `createdAt` and its
+ *   rollout's start mark the same moment, the thread's creation, so a rollout and its own row fall on the same side of
+ *   a range's end.
  * - `rateLimits`: by `ts`. `toolCalls`: by `ts` and their session. `prompts`: `prompt` over the store.
  * - `daily`: a tool's day totals, kept when the day lies within the range's first and last day in the analysis zone
  *   (the session table's rule for days).
@@ -70,16 +72,19 @@ export function forensicScope(raw: ScanResult, t: SessionTable): ForensicScope {
   const { from, to } = t.scope;
   const keptTool = (tool: ToolId): boolean => !a.excluded.has(tool);
   const inRange = a.inRange;
-  const session = (id: string | undefined): boolean => id === undefined || raw.store.session(id) === undefined || a.kept(id);
+  const session = (id: string | undefined): boolean => id === undefined || a.kept(id);
+  // a Codex thread's session rule: an orphan thread stays
+  const thread = (id: string): boolean => raw.store.session(id) === undefined || a.kept(id);
+  // the scope helper's prompt rule with its human test left out: a prompt in scope, whoever sent it
+  const prompt = analysisScope(raw, { ...t, isHuman: () => true }).human;
   const fromDay = Number.isFinite(from) ? dayKey(from, t.timeZone) : undefined;
   const toDay = Number.isFinite(to) ? dayKey(to, t.timeZone) : undefined;
   const dated = (ts: number | undefined): boolean => ts === undefined || inRange(ts);
 
-  const prompt = (p: PromptEv): boolean => keptTool(p.tool) && inRange(p.ts) && session(p.sessionId);
   const rows = memo(() => [...t.rows.values()].filter((r) => !t.hosts.has(r.id)));
   const prompts = memo(() => raw.store.all("prompt").filter(prompt));
   return {
-    analysis: a, keptTool, inRange, session, prompt, human: (p) => prompt(p) && t.isHuman(p), rows, prompts,
+    analysis: a, keptTool, inRange, session, prompt, human: a.human, rows, prompts,
     tools: memo(() => {
       const s = new Set<ToolId>();
       for (const r of rows()) s.add(r.tool);
@@ -93,10 +98,12 @@ export function forensicScope(raw: ScanResult, t: SessionTable): ForensicScope {
       const first = f.firstTs ?? f.lastTs, last = f.lastTs ?? f.firstTs;
       return first === undefined || last === undefined || (last >= from && first <= to);
     })),
-    rollouts: memo(() => raw.store.all("codex-rollout").filter((r) => keptTool(r.tool) && dated(r.uuidTs ?? r.fileTs) && session(r.threadId))),
-    threadRows: memo(() => raw.store.all("codex-thread-row").filter((r) => keptTool(r.tool) && dated(r.createdAt))),
+    rollouts: memo(() => raw.store.all("codex-rollout").filter((r) => keptTool(r.tool) && dated(r.uuidTs ?? r.fileTs) && thread(r.threadId))),
+    threadRows: memo(() => raw.store.all("codex-thread-row").filter((r) => keptTool(r.tool) && dated(r.createdAt) && thread(r.threadId))),
     rateLimits: memo(() => raw.store.all("ratelimit").filter((e) => keptTool(e.tool) && inRange(e.ts))),
     toolCalls: memo(() => raw.store.all("tool").filter((e) => keptTool(e.tool) && inRange(e.ts) && session(e.sessionId))),
+    // the range's days are read in the analysis zone (the session table's rule), while the stats cache keys its days in
+    // UTC: at the range's first and last day the two can differ by the zone's offset
     daily: memo(() => raw.store.all("daily").filter((d) => keptTool(d.tool) && (fromDay === undefined || d.day >= fromDay) && (toDay === undefined || d.day <= toDay))),
     configs: () => a.configs,
     coverage: memo(() => raw.coverage.filter((c) => keptTool(c.tool))),

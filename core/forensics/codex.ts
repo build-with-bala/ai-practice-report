@@ -3,6 +3,7 @@ import type { RateLimitEv } from "../model/events";
 import type { ScanResult } from "../scan";
 import { THREADS_SOURCE } from "../sources/codex/indexdb";
 import { forensicScope, type ForensicScope } from "./scope";
+import { asked } from "./questions";
 import { toolsOf, type CheckResult } from "./types";
 
 /*
@@ -61,8 +62,7 @@ function checkThreadRows(s: ForensicScope, now: number): CheckResult {
   const base = { id: "C6" as const, n: checked.length, values: { missing, rollouts: checked.length, beforeIndex }, tools };
   if (missing === 0) return { ...base, status: "pass", reason: "ok" };
   const fail = missing >= Math.max(MISSING_MIN, MISSING_SHARE * checked.length);
-  return { ...base, status: fail ? "fail" : "note", reason: "missing-thread-rows",
-    askAbout: `${missing} Codex session ${missing === 1 ? "file has" : "files have"} no entry in Codex's own thread index. Were session files copied in from somewhere else?` };
+  return { ...base, status: fail ? "fail" : "note", reason: "missing-thread-rows" };
 }
 
 /** A positive offset that is a whole number of quarter hours (1 to 104, up to 26 h, within 2 s): the zone changed since the file was named. */
@@ -90,13 +90,9 @@ function checkIdTimes(s: ForensicScope): CheckResult {
   }
   const base = { id: "C7" as const, n: rollouts.length, values: { violations, zoneShifted }, tools };
   if (violations > 0) {
-    return { ...base, status: "fail", reason: "uuid-after-name",
-      askAbout: `${violations} Codex session ${violations === 1 ? "id carries a time later than its file name" : "ids carry a time later than their file names"}, by more than a second. Were session files renamed, or their ids edited?` };
+    return { ...base, status: "fail", reason: "uuid-after-name" };
   }
-  if (zoneShifted > 0) {
-    return { ...base, status: "note", reason: "time-zone-change",
-      askAbout: `${zoneShifted} Codex session ${zoneShifted === 1 ? "file is" : "files are"} named in a different time zone from this machine's current one. Did the time zone change, or were the files made on another machine?` };
-  }
+  if (zoneShifted > 0) return { ...base, status: "note", reason: "time-zone-change" };
   return { ...base, status: "pass", reason: "ok" };
 }
 
@@ -162,8 +158,7 @@ function checkLedger(s: ForensicScope): CheckResult {
   const base = { id: "C8" as const, n: pairs, values: { pairs, contradictions }, tools };
   if (pairs < MIN_PAIRS) return { ...base, status: "n/a", reason: "too-few" };
   if (contradictions >= FAIL_MIN && contradictions > FAIL_SHARE * pairs) {
-    return { ...base, status: "fail", reason: "ledger-contradictions",
-      askAbout: `The usage-limit readings fell ${contradictions} times within one limit window, where they only rise. Were traces from more than one account combined here?` };
+    return { ...base, status: "fail", reason: "ledger-contradictions" };
   }
   return { ...base, status: "pass", reason: "ok" };
 }
@@ -173,5 +168,5 @@ function checkLedger(s: ForensicScope): CheckResult {
  * start and their session, thread rows by `createdAt`, usage-limit readings by `ts` (`ForensicScope`).
  */
 export function checkRollouts(raw: ScanResult, t: SessionTable, o: { now: number }, s: ForensicScope = forensicScope(raw, t)): [CheckResult, CheckResult, CheckResult] {
-  return [checkThreadRows(s, o.now), checkIdTimes(s), checkLedger(s)];
+  return [asked(checkThreadRows(s, o.now)), asked(checkIdTimes(s)), asked(checkLedger(s))];
 }

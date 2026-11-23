@@ -2,7 +2,8 @@ import type { SessionTable } from "../analysis/types";
 import type { AnchorEv } from "../model/events";
 import type { ScanResult } from "../scan";
 import { forensicScope, type ForensicScope } from "./scope";
-import { round, toolsOf, type CheckResult } from "./types";
+import { asked } from "./questions";
+import { round, toolsOf, type CheckResult, type CheckValues, type Reason } from "./types";
 
 /*
  * C1 and C2: Claude Code's server-issued message and request ids (`msg_…`, `req_…`; `AnchorEv.idTail` is what follows
@@ -157,17 +158,11 @@ function recognize(anchors: readonly AnchorEv[]): Recognized {
   return { points: ok.map((a, i) => ({ v: Number(raw[i]! - min), ts: a.ts })), ...out };
 }
 
-const C1_ASK = (pct: number): string =>
-  `About ${pct}% of the server-issued ids do not match their recorded times, by more than 10 minutes. Were any trace times edited, or sessions added from somewhere else?`;
-const C1_MALFORMED_ASK = (n: number): string =>
-  `${n} server-issued ids do not have the form the service issues. Were some sessions run through another provider or gateway?`;
-const C2_ASK = (rho: number): string =>
-  `The order of the server-issued ids does not follow the order of their recorded times (rank correlation ${rho}). Were trace files merged or their times edited?`;
 const MAX_P99_S = 31_536_000;
 const MALFORMED_SHARE = 0.01;
 const MALFORMED_MIN = 2;
 
-function naPair(n: number, reason: string, values: Record<string, number>, tools: CheckResult["tools"]): [CheckResult, CheckResult] {
+function naPair(n: number, reason: Reason, values: CheckValues, tools: CheckResult["tools"]): [CheckResult, CheckResult] {
   return [{ id: "C1", status: "n/a", n, reason, values: { ...values }, tools }, { id: "C2", status: "n/a", n, reason, values: { ...values }, tools }];
 }
 
@@ -181,7 +176,7 @@ function checkKind(anchors: readonly AnchorEv[]): [CheckResult, CheckResult] {
   if (ps.length < MIN_ANCHORS) {
     const [c1, c2] = naPair(ps.length, "too-few", left, tools);
     if (!malformed) return [c1, c2];
-    return [{ id: "C1", status: "note", n: anchors.length, reason: "malformed-ids", values: { ...left }, askAbout: C1_MALFORMED_ASK(rec.malformed), tools }, c2];
+    return [{ id: "C1", status: "note", n: anchors.length, reason: "malformed-ids", values: { ...left }, tools }, c2];
   }
   const sample = stride(ps, FIT_SAMPLE);
   const start = inlierLine(sample);
@@ -197,8 +192,6 @@ function checkKind(anchors: readonly AnchorEv[]): [CheckResult, CheckResult] {
     id: "C1", status: c1Fail ? "fail" : malformed ? "note" : "pass", n: ps.length, reason: c1Fail ? "off-time" : malformed ? "malformed-ids" : "ok",
     values: { offShare: round(off), p99Seconds: Math.min(MAX_P99_S, Math.round(quantile(res, 0.99) / 1_000)), ...left }, tools,
   };
-  if (c1Fail) c1.askAbout = C1_ASK(Math.max(1, Math.round(off * 100)));
-  else if (malformed) c1.askAbout = C1_MALFORMED_ASK(rec.malformed);
 
   const rankSample = stride(ps, RANK_SAMPLE);
   const rho = spearman(rankSample);
@@ -206,7 +199,6 @@ function checkKind(anchors: readonly AnchorEv[]): [CheckResult, CheckResult] {
   const c2Fail = rho < MIN_RHO;
   const c2: CheckResult = { id: "C2", status: c2Fail ? "fail" : "pass", n: rankSample.length, reason: c2Fail ? "out-of-order" : "ok",
     values: { rho: round(rho), ...left }, tools };
-  if (c2Fail) c2.askAbout = C2_ASK(Math.floor(rho * 1_000) / 1_000);
   return [c1, c2];
 }
 
@@ -227,5 +219,5 @@ function combine(rs: readonly CheckResult[]): CheckResult {
 export function checkAnchors(raw: ScanResult, t: SessionTable, s: ForensicScope = forensicScope(raw, t)): [CheckResult, CheckResult] {
   const all = s.anchors();
   const perKind = KINDS.map((k) => checkKind(all.filter((a) => a.kind === k)));
-  return [combine(perKind.map((p) => p[0])), combine(perKind.map((p) => p[1]))];
+  return [asked(combine(perKind.map((p) => p[0]))), asked(combine(perKind.map((p) => p[1])))];
 }

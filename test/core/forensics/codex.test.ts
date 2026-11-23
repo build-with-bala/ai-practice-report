@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { checkRollouts } from "../../../core/forensics/codex";
 import type { CoverageEv, Ev, RateLimitEv, RolloutFactEv, ThreadRowEv } from "../../../core/model/events";
 import { scanResultOf } from "../../kit/scanresult";
-import { tableOf } from "./table";
+import { asks, tableOf } from "./table";
 
 const T0 = Date.UTC(2026, 9, 1, 9, 0);
 const SEC = 1_000;
@@ -24,7 +24,7 @@ const row = (i: number): ThreadRowEv => ({ k: "codex-thread-row", tool: "codex",
 const indexed = (n: number): Ev[] => [threadsCov(), ...Array.from({ length: n }, (_, i) => [rollout(i), row(i)]).flat()];
 const run = (events: Ev[]) => {
   const raw = scanResultOf(events, { finishedAt: NOW });
-  return checkRollouts(raw, tableOf(raw), { now: NOW });
+  return asks(checkRollouts(raw, tableOf(raw), { now: NOW }));
 };
 
 describe("checkRollouts: C6, every rollout has a thread row", () => {

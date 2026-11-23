@@ -13,7 +13,9 @@ import { softFlags } from "./soft";
 import { round, type CheckResult } from "./types";
 
 export type { ReleaseTable } from "./releases";
-export type { CheckId, CheckResult, CheckStatus } from "./types";
+export { questionFor } from "./questions";
+export { DATE_KEY, REASONS, VALUE_KEYS } from "./types";
+export type { CheckId, CheckResult, CheckStatus, CheckValues, ProvenanceKey, Reason, ValueKey } from "./types";
 
 /**
  * The integrity summary (spec §6.6). `band`: the verdict over every check; `serverBacked`: the share of typed turns

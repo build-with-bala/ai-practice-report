@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { promptWindowByTool } from "../../../core/analysis/promptwindow";
 import { buildSessionTable } from "../../../core/analysis/sessions";
 import type { Exclusions } from "../../../core/analysis/types";
-import type { Ev, PromptEv } from "../../../core/model/events";
+import type { Ev, PromptEv, SessionEv } from "../../../core/model/events";
 import type { Origin, ToolId, Window } from "../../../core/model/ids";
 import { scanResultOf } from "../../kit/scanresult";
 
@@ -54,5 +54,36 @@ describe("promptWindowByTool", () => {
       { tools: ["cursor"], from: T0 });
     expect(m.get("codex")).toBe("detail");
     expect(m.has("cursor")).toBe(false);
+  });
+
+  const session = (id: string, projectKey: string, start = T0): SessionEv => ({
+    k: "session", tool: "codex", source: "codex.detail", id, window: "detail", origin: "human", start, end: start + 300 * MIN, models: [], projectKey,
+  });
+  const inSession = (id: string, ts?: number): PromptEv => ({ ...prompt("codex", "detail", "human", ts), sessionId: id });
+
+  test("an excluded project's prompts do not sway the choice", () => {
+    const evs: Ev[] = [session("codex:a", "kA"), session("codex:b", "kB"), ...many(2, () => inSession("codex:a")),
+      ...many(9, () => inSession("codex:b")), ...many(5, () => prompt("codex", "lifetime"))];
+    expect(windows(evs).get("codex")).toBe("detail");
+    expect(windows(evs, { projects: ["kB"] }).get("codex")).toBe("lifetime");
+  });
+
+  test("an excluded tool's prompts do not count, and a tool left with none has no window", () => {
+    const evs: Ev[] = [...many(3, () => prompt("codex", "detail")), ...many(1, () => prompt("codex", "lifetime")), ...many(3, () => prompt("cursor", "detail"))];
+    const m = windows(evs, { tools: ["codex"] });
+    expect([m.has("codex"), m.get("cursor")]).toEqual([false, "detail"]);
+  });
+
+  test("a date range decides with the prompts inside it, and sessions it drops do not count", () => {
+    const late = T0 + 1_000 * MIN;
+    const evs: Ev[] = [session("codex:old", "kA", T0 - 2_000 * MIN), ...many(9, () => inSession("codex:old", T0 + 5 * MIN)),
+      ...many(4, () => prompt("codex", "detail", "human", late)), ...many(6, () => prompt("codex", "lifetime", "human", late))];
+    expect(windows(evs).get("codex")).toBe("detail");
+    expect(windows(evs, { from: late }).get("codex")).toBe("lifetime");
+  });
+
+  test("with no exclusion every prompt counts: orphans and sessionless prompts too", () => {
+    const evs: Ev[] = [...many(5, () => ({ ...prompt("codex", "detail"), sessionId: "codex:gone" })), ...many(4, () => prompt("codex", "lifetime"))];
+    expect(windows(evs).get("codex")).toBe("detail");
   });
 });

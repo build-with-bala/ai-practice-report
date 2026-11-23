@@ -3,6 +3,7 @@ import type { ToolId } from "../model/ids";
 import type { ScanResult } from "../scan";
 import shipped from "./releases.json" with { type: "json" };
 import { forensicScope, type ForensicScope } from "./scope";
+import { asked } from "./questions";
 import type { CheckResult } from "./types";
 
 /*
@@ -78,7 +79,5 @@ export function checkReleases(t: SessionTable, table: ReleaseTable, raw: ScanRes
   if (checked === 0) return { ...base, status: "n/a", reason: "no-match", values: {} };
   const values = { checked, violations, sessions: violating.size };
   if (violations === 0) return { ...base, status: "pass", reason: "ok", values };
-  const k = violating.size;
-  return { ...base, status: "fail", reason: "before-release", values,
-    askAbout: `${k} ${k === 1 ? "session" : "sessions"} used a model or tool version more than 2 days before its public release. Were session times edited?` };
+  return asked({ ...base, status: "fail", reason: "before-release", values });
 }

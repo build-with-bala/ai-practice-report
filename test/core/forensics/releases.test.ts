@@ -4,6 +4,7 @@ import { checkReleases, RELEASES, type ReleaseTable } from "../../../core/forens
 import type { Ev, SessionEv, TurnEv, UsageEv } from "../../../core/model/events";
 import type { ToolId } from "../../../core/model/ids";
 import { scanResultOf } from "../../kit/scanresult";
+import { asks } from "./table";
 
 const HOUR = 3_600_000;
 const DAY = 86_400_000;
@@ -26,7 +27,7 @@ const usage = (sessionId: string, ts: number, model: string): UsageEv =>
   ({ k: "usage", tool: "claude-code", source: "claude-code.transcripts", ts, sessionId, model, inTok: 1, outTok: 1, cacheR: 0, cacheW: 0 });
 const check = (events: Ev[], table: ReleaseTable = TABLE) => {
   const raw = scanResultOf(events);
-  return checkReleases(buildSessionTable(raw, { now: raw.finishedAt, timeZone: "UTC" }), table, raw);
+  return asks(checkReleases(buildSessionTable(raw, { now: raw.finishedAt, timeZone: "UTC" }), table, raw));
 };
 
 describe("checkReleases (C9)", () => {

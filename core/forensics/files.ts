@@ -3,7 +3,8 @@ import type { SessionTable } from "../analysis/types";
 import type { FileFactEv } from "../model/events";
 import type { ScanResult } from "../scan";
 import { forensicScope, type ForensicScope } from "./scope";
-import { toolsOf, type CheckResult } from "./types";
+import { asked } from "./questions";
+import { toolsOf, type CheckResult, type CheckValues } from "./types";
 
 /*
  * C5: the trace files' own times agree with the events inside them. A file the tool wrote was last modified at or after
@@ -98,7 +99,7 @@ export function checkFileTimes(raw: ScanResult, t: SessionTable, o: { timeZone: 
   const inBulk = new Set(bulk.flatMap((w) => w.files));
   const ctimeViolators = new Set(gapped.filter((f) => !inBulk.has(f)));
   const violations = files.filter((f) => (f.lastTs !== undefined && f.mtime < f.lastTs - MTIME_TOL_MS) || ctimeViolators.has(f)).length;
-  const values: Record<string, number | string> = { violations };
+  const values: CheckValues = { violations };
   const base = { id: "C5" as const, n: files.length, tools };
   if (cluster) {
     values.date = dayKey(cluster.start, o.timeZone);
@@ -109,16 +110,9 @@ export function checkFileTimes(raw: ScanResult, t: SessionTable, o: { timeZone: 
     values.bulkFiles = bulk[0]!.files.length;
   }
   if (violations >= Math.max(FAIL_MIN, FAIL_SHARE * files.length)) {
-    return { ...base, status: "fail", reason: "file-times", values,
-      askAbout: `${violations} trace files have file times that do not fit the events inside them: last modified before their last event, or changed more than a day after their last write. Were trace files edited, or their times reset?` };
+    return asked({ ...base, status: "fail", reason: "file-times", values });
   }
-  if (cluster) {
-    return { ...base, status: "note", reason: "restore-cluster", values,
-      askAbout: `Most trace files were created on ${values.date} although their activity spans ${values.days} days. Was this history copied or restored from a backup then?` };
-  }
-  if (bulk.length > 0) {
-    return { ...base, status: "note", reason: "bulk-change", values,
-      askAbout: `${values.bulkFiles} trace files were last changed on ${values.date} although their content is older. Was this history copied, restored or migrated then?` };
-  }
+  if (cluster) return asked({ ...base, status: "note", reason: "restore-cluster", values });
+  if (bulk.length > 0) return asked({ ...base, status: "note", reason: "bulk-change", values });
   return { ...base, status: "pass", reason: "ok", values };
 }

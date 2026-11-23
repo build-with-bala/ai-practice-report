@@ -3,9 +3,9 @@ import { checkAnchors } from "../../../core/forensics/anchors";
 import type { AnchorEv } from "../../../core/model/events";
 import type { ScanResult } from "../../../core/scan";
 import { scanResultOf } from "../../kit/scanresult";
-import { tableOf } from "./table";
+import { asks, tableOf } from "./table";
 
-const anchorsOf = (raw: ScanResult) => checkAnchors(raw, tableOf(raw));
+const anchorsOf = (raw: ScanResult) => asks(checkAnchors(raw, tableOf(raw)));
 
 const B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 const T0 = Date.UTC(2026, 9, 1, 8, 0);

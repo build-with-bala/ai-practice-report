@@ -1,7 +1,7 @@
 import type { SessionTable } from "../analysis/types";
 import type { ScanResult } from "../scan";
 import { forensicScope, type ForensicScope } from "./scope";
-import { toolsOf, type CheckResult } from "./types";
+import { toolsOf, type CheckResult, type CheckValues, type ProvenanceKey } from "./types";
 
 /*
  * C10: provenance, classified only (spec §6.6). Who sent each prompt — the person, a script, a subagent, a schedule —
@@ -18,12 +18,12 @@ export function provenance(raw: ScanResult, t: SessionTable, s: ForensicScope = 
   const prompts = s.prompts();
   const tools = toolsOf(prompts);
   if (prompts.length === 0) return { id: "C10", status: "n/a", n: 0, reason: "no-data", values: {}, tools };
-  const counts = new Map<string, number>();
+  const counts = new Map<ProvenanceKey, number>();
   for (const p of prompts) {
-    const key = `${p.tool}/${t.isHuman(p) ? "human" : p.origin}/${p.window}`;
+    const key: ProvenanceKey = `${p.tool}/${t.isHuman(p) ? "human" : p.origin}/${p.window}`;
     counts.set(key, (counts.get(key) ?? 0) + 1);
   }
-  const values: Record<string, number> = {};
+  const values: CheckValues = {};
   for (const key of [...counts.keys()].sort()) values[key] = counts.get(key)!;
   return { id: "C10", status: "info", n: prompts.length, reason: "classify-only", values, tools };
 }

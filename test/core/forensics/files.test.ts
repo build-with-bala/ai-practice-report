@@ -3,9 +3,9 @@ import { checkFileTimes } from "../../../core/forensics/files";
 import type { FileFactEv } from "../../../core/model/events";
 import type { ScanResult } from "../../../core/scan";
 import { scanResultOf } from "../../kit/scanresult";
-import { tableOf } from "./table";
+import { asks, tableOf } from "./table";
 
-const fileTimesOf = (raw: ScanResult, o: { timeZone: string }) => checkFileTimes(raw, tableOf(raw), o);
+const fileTimesOf = (raw: ScanResult, o: { timeZone: string }) => asks(checkFileTimes(raw, tableOf(raw), o));
 
 const T0 = Date.UTC(2026, 9, 1, 9, 0);
 const MIN = 60_000;
