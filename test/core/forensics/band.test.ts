@@ -304,7 +304,7 @@ describe("wording: every reason and question the forensic checks produce", () =>
     const asked = new Set(results.filter((c) => c.askAbout !== undefined).map((c) => `${c.id}:${c.reason}`));
     expect([...asked].sort()).toEqual([
       "C1:malformed-ids", "C1:off-time", "C2:out-of-order", "C3:history-mismatch", "C3:missing-stats-days", "C4:no-match",
-      "C4:several-accounts", "C5:bulk-change", "C5:file-times", "C5:restore-cluster", "C6:missing-thread-rows", "C7:time-zone-change",
+      "C4:several-accounts", "C5:changed-after-write", "C5:file-times", "C5:restore-cluster", "C6:missing-thread-rows", "C7:time-zone-change",
       "C7:uuid-after-name", "C8:ledger-contradictions", "C9:before-release", "soft:new-config:new-config",
       "soft:recent-burst:recent-burst", "soft:repeated-long:repeated-long", "soft:rhythm:regular-rhythm", "soft:unclosed-tools:unclosed-tools",
     ].sort());

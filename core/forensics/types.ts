@@ -26,14 +26,14 @@ export type CheckId = "C1" | "C2" | "C3" | "C4" | "C5" | "C6" | "C7" | "C8" | "C
 /** Every reason code a check or soft flag can give. */
 export type Reason = "ok" | "ok-history-only" | "ok-stats-only" | "no-data" | "too-few" | "unknown-marker" | "scheme-changed"
   | "degenerate" | "off-time" | "malformed-ids" | "out-of-order" | "history-mismatch" | "missing-stats-days" | "no-match"
-  | "several-accounts" | "file-times" | "restore-cluster" | "bulk-change" | "no-thread-index" | "no-rollouts" | "before-index"
+  | "several-accounts" | "file-times" | "restore-cluster" | "changed-after-write" | "no-thread-index" | "no-rollouts" | "before-index"
   | "missing-thread-rows" | "uuid-after-name" | "time-zone-change" | "ledger-contradictions" | "before-release"
   | "classify-only" | "regular-rhythm" | "repeated-long" | "recent-burst" | "unclosed-tools" | "new-config";
 export const REASONS: Readonly<Record<Reason, true>> = {
   ok: true, "ok-history-only": true, "ok-stats-only": true, "no-data": true, "too-few": true, "unknown-marker": true,
   "scheme-changed": true, degenerate: true, "off-time": true, "malformed-ids": true, "out-of-order": true, "history-mismatch": true,
   "missing-stats-days": true, "no-match": true, "several-accounts": true, "file-times": true, "restore-cluster": true,
-  "bulk-change": true, "no-thread-index": true, "no-rollouts": true, "before-index": true, "missing-thread-rows": true,
+  "changed-after-write": true, "no-thread-index": true, "no-rollouts": true, "before-index": true, "missing-thread-rows": true,
   "uuid-after-name": true, "time-zone-change": true, "ledger-contradictions": true, "before-release": true,
   "classify-only": true, "regular-rhythm": true, "repeated-long": true, "recent-burst": true, "unclosed-tools": true,
   "new-config": true,
@@ -43,7 +43,7 @@ export const REASONS: Readonly<Record<Reason, true>> = {
 export const DATE_KEY = "date";
 /** The fixed `values` keys (every check but C10). */
 type FixedKey = typeof DATE_KEY | "unrecognized" | "malformed" | "offShare" | "p99Seconds" | "rho" | "unverifiedKinds"
-  | "matchShare" | "prompts" | "missingDays" | "days" | "accounts" | "violations" | "clusterFiles" | "bulkFiles" | "missing"
+  | "matchShare" | "prompts" | "missingDays" | "days" | "accounts" | "violations" | "clusterFiles" | "bulkFiles" | "changedFiles" | "missing"
   | "rollouts" | "beforeIndex" | "zoneShifted" | "pairs" | "contradictions" | "checked" | "sessions" | "medianCv" | "repeated"
   | "recentDays" | "spanDays" | "share" | "open" | "recent" | "artifacts";
 /** C10's keys: `<tool>/<origin>/<window>`, where a relabelled scripted prompt counts as `human`. */
@@ -56,7 +56,7 @@ export type CheckValues = { [K in ValueKey]?: K extends typeof DATE_KEY ? string
 const FIXED_KEYS: Readonly<Record<FixedKey, true>> = {
   date: true, unrecognized: true, malformed: true, offShare: true, p99Seconds: true, rho: true, unverifiedKinds: true,
   matchShare: true, prompts: true, missingDays: true, days: true, accounts: true, violations: true, clusterFiles: true,
-  bulkFiles: true, missing: true, rollouts: true, beforeIndex: true, zoneShifted: true, pairs: true, contradictions: true,
+  bulkFiles: true, changedFiles: true, missing: true, rollouts: true, beforeIndex: true, zoneShifted: true, pairs: true, contradictions: true,
   checked: true, sessions: true, medianCv: true, repeated: true, recentDays: true, spanDays: true, share: true, open: true,
   recent: true, artifacts: true,
 };
@@ -84,7 +84,7 @@ export type ValueKind = "count" | "share" | "corr" | "ratio" | "date";
 const FIXED_KINDS: Readonly<Record<FixedKey, ValueKind>> = {
   date: "date", unrecognized: "count", malformed: "count", offShare: "share", p99Seconds: "count", rho: "corr", unverifiedKinds: "count",
   matchShare: "share", prompts: "count", missingDays: "count", days: "count", accounts: "count", violations: "count", clusterFiles: "count",
-  bulkFiles: "count", missing: "count", rollouts: "count", beforeIndex: "count", zoneShifted: "count", pairs: "count", contradictions: "count",
+  bulkFiles: "count", changedFiles: "count", missing: "count", rollouts: "count", beforeIndex: "count", zoneShifted: "count", pairs: "count", contradictions: "count",
   checked: "count", sessions: "count", medianCv: "ratio", repeated: "count", recentDays: "count", spanDays: "count", share: "share", open: "count",
   recent: "count", artifacts: "count",
 };

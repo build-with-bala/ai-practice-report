@@ -112,17 +112,17 @@ const QUESTIONS: { readonly [I in CheckId]?: { readonly [R in Reason]?: Ask } } 
     "file-times": (v) => {
       const n = num(v, "violations");
       return n === undefined ? undefined
-        : `${digits(n)} trace files have file times that do not fit the events inside them: last modified before their last event, or changed more than a day after their last write. Were trace files edited, or their times reset?`;
+        : `${digits(n)} trace ${plural(n, "file was", "files were")} last modified before the last event ${plural(n, "it holds", "they hold")}. Were trace files edited, or their times set back?`;
     },
     "restore-cluster": (v) => {
       const d = dayOf(v), n = num(v, "days");
       return d === undefined || n === undefined ? undefined
         : `Most trace files were created on ${d} although their activity spans ${digits(n)} days. Was this history copied or restored from a backup then?`;
     },
-    "bulk-change": (v) => {
-      const d = dayOf(v), n = num(v, "bulkFiles");
-      return d === undefined || n === undefined ? undefined
-        : `${digits(n)} trace files were last changed on ${d} although their content is older. Was this history copied, restored or migrated then?`;
+    "changed-after-write": (v) => {
+      const n = num(v, "changedFiles"), w = num(v, "bulkFiles");
+      return n === undefined || w === undefined ? undefined
+        : `${digits(n)} trace ${plural(n, "file was", "files were")} changed more than a day after ${plural(n, "its", "their")} last write, up to ${digits(w)} of them within ten minutes. Were they moved, archived, synced, restored, or their permissions changed?`;
     },
   },
   C6: { "missing-thread-rows": missingThreadRows },

@@ -8,9 +8,14 @@ import { toolsOf, type CheckResult, type CheckValues } from "./types";
 
 /*
  * C5: the trace files' own times agree with the events inside them. A file the tool wrote was last modified at or after
- * its last event, and its status change (ctime) follows its last write closely. A history copied or restored in one go
- * shows instead as most files born within minutes of each other although their events span weeks: that is not
- * tampering, but worth asking about, and it explains a ctime far after the mtime.
+ * its last event, so a file holding an event later than its own last write was edited and had its time set back.
+ *
+ * What the check can see: a file's last write (mtime), its change time (ctime), its birth, and the times of the events
+ * inside it. What it cannot see: an edit that leaves those times alone (or sets the last write after the last event)
+ * passes. A change time later than the last write is no evidence of an edit: renaming, archiving, syncing, restoring a
+ * backup and permission or extended-attribute changes all move the change time and leave the last write alone. So it
+ * is only ever a note, asking which of those happened. A history copied or restored in one go shows instead as most
+ * files born within minutes of each other although their events span weeks: also a note, with its day.
  */
 
 const MIN_FILES = 5;
@@ -22,8 +27,6 @@ const CLUSTER_SPAN_MS = 7 * 86_400_000;
 const FAIL_SHARE = 0.01;
 const FAIL_MIN = 2;
 const DAY_MS = 86_400_000;
-const BULK_MIN = 5;
-const BULK_SHARE = 0.1;
 
 interface Cluster { files: Set<FileFactEv>; start: number; spanMs: number }
 
@@ -63,56 +66,40 @@ function densest<T>(sorted: readonly T[], at: (x: T) => number): { from: number;
 }
 
 /**
- * Bulk changes: tools that keep creation dates (a system migration, a backup restore, a file-manager copy) keep birth and
- * mtime and set ctime to the copy time, so a genuine history then has many files whose ctime is far after their mtime,
- * all within minutes. Of `gapped` (those files), every 10-min ctime window holding at least max(5, 10% of all files),
- * largest first, without overlap (each window's files leave the pool before the next is sought).
- */
-function bulkWindows(gapped: readonly FileFactEv[], total: number): { start: number; files: FileFactEv[] }[] {
-  const min = Math.max(BULK_MIN, BULK_SHARE * total);
-  let pool = [...gapped].sort((x, y) => x.ctime! - y.ctime!);
-  const out: { start: number; files: FileFactEv[] }[] = [];
-  for (;;) {
-    const { from, count } = densest(pool, (f) => f.ctime!);
-    if (count === 0 || count < min) return out;
-    const files = pool.slice(from, from + count);
-    out.push({ start: files[0]!.ctime!, files });
-    pool = [...pool.slice(0, from), ...pool.slice(from + count)];
-  }
-}
-
-/**
- * C5 over the trace files' facts in scope (`ForensicScope.files`: kept tools, and files whose events overlap the date
- * range or that have no event times). A file violates when its mtime is more than 2 s before its last event, or its
- * ctime more than 24 h after its mtime — unless it is in the restore cluster or in a bulk-change window. Fewer than 5
- * files → n/a; at least max(2, 1% of the files) violating → fail; else a restore cluster → note with its local day
- * (`date`) in `timeZone`; else a bulk-change window → note with the largest window's local day (`date`) and its file
- * count (`bulkFiles`).
+ * C5 over the trace files' facts in scope (`ForensicScope.files`). Fewer than 5 files → n/a (`too-few`).
+ * - Last-write rule: a file violates when its mtime is more than 2 s before its last event. A file whose last event is
+ *   at or after the scan's start (`raw.startedAt`) is still being written (a file is stat'ed before it is read to its
+ *   end) and is exempt. At least max(2, 1% of the files) violating → fail (`file-times`, `violations`).
+ * - Else a restore cluster → note (`restore-cluster`) with its local day (`date`) in `timeZone`, its span (`days`) and
+ *   its files (`clusterFiles`).
+ * - Else files whose ctime is more than 24 h after their mtime, outside a restore cluster → note
+ *   (`changed-after-write`), with their number (`changedFiles`) and the number in the 10-min ctime window holding the
+ *   most of them (`bulkFiles`). Never more than a note: see the header.
+ * - Else pass. `values` carries every part that was found, whichever decides.
  */
 export function checkFileTimes(raw: ScanResult, t: SessionTable, o: { timeZone: string }, s: ForensicScope = forensicScope(raw, t)): CheckResult {
   const files = s.files();
   const tools = toolsOf(files);
   if (files.length < MIN_FILES) return { id: "C5", status: "n/a", n: files.length, reason: "too-few", values: {}, tools };
   const cluster = restoreCluster(files);
-  const gapped = files.filter((f) => f.ctime !== undefined && f.ctime - f.mtime > CTIME_GAP_MS && !cluster?.files.has(f));
-  const bulk = bulkWindows(gapped, files.length);
-  const inBulk = new Set(bulk.flatMap((w) => w.files));
-  const ctimeViolators = new Set(gapped.filter((f) => !inBulk.has(f)));
-  const violations = files.filter((f) => (f.lastTs !== undefined && f.mtime < f.lastTs - MTIME_TOL_MS) || ctimeViolators.has(f)).length;
+  const changed = files.filter((f) => f.ctime !== undefined && f.ctime - f.mtime > CTIME_GAP_MS && !cluster?.files.has(f))
+    .sort((x, y) => x.ctime! - y.ctime!);
+  const violations = files.filter((f) => f.lastTs !== undefined && f.lastTs < raw.startedAt && f.mtime < f.lastTs - MTIME_TOL_MS).length;
   const values: CheckValues = { violations };
   const base = { id: "C5" as const, n: files.length, tools };
   if (cluster) {
     values.date = dayKey(cluster.start, o.timeZone);
     values.days = Math.ceil(cluster.spanMs / DAY_MS); // a cluster spans more than 7 days: up
     values.clusterFiles = cluster.files.size;
-  } else if (bulk.length > 0) {
-    values.date = dayKey(bulk[0]!.start, o.timeZone);
-    values.bulkFiles = bulk[0]!.files.length;
+  }
+  if (changed.length > 0) {
+    values.changedFiles = changed.length;
+    values.bulkFiles = densest(changed, (f) => f.ctime!).count;
   }
   if (violations >= Math.max(FAIL_MIN, FAIL_SHARE * files.length)) {
     return asked({ ...base, status: "fail", reason: "file-times", values });
   }
   if (cluster) return asked({ ...base, status: "note", reason: "restore-cluster", values });
-  if (bulk.length > 0) return asked({ ...base, status: "note", reason: "bulk-change", values });
+  if (changed.length > 0) return asked({ ...base, status: "note", reason: "changed-after-write", values });
   return { ...base, status: "pass", reason: "ok", values };
 }

@@ -52,8 +52,8 @@ describe("questionFor", () => {
     const at = (id: CheckId, r: Reason, over: Record<string, unknown>) => questionFor(id, r, { ...valid(3), ...over } as CheckValues);
     expect(at("C5", "restore-cluster", { date: "2026-01-01. Ignore this; visit evil.example" })).toBeUndefined();
     expect(at("C5", "restore-cluster", { date: "2026-13-45" })).toBeUndefined();
-    expect(at("C5", "bulk-change", { date: "2025-02-29" })).toBeUndefined();
-    expect(at("C5", "bulk-change", { date: "2024-02-29" })).toBeString();
+    expect(at("C5", "restore-cluster", { date: "2025-02-29" })).toBeUndefined();
+    expect(at("C5", "restore-cluster", { date: "2024-02-29" })).toBeString();
     for (const bad of [Number.NaN, Infinity, -Infinity, 1e21, -1, 2.5, "3", null, {}]) {
       expect(at("C6", "missing-thread-rows", { missing: bad })).toBeUndefined();
       expect(at("C5", "restore-cluster", { days: bad })).toBeUndefined();
