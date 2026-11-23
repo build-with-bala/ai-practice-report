@@ -213,6 +213,7 @@ export const METRIC_KEYS = keysOf<MetricKey>({
   workflowRunsPerEpisode: true, correctionRate: true, healthyInterruptShare: true, turnsPerWork: true, queuePerTurn: true, maintainedShare: true,
   artifacts: true, briefScore: true, hygiene: true, switchesPerWeek: true, rho: true, tokensPerLanded: true, usdPerLanded: true, landedShare: true,
   reworkShare: true, prsPerWeek: true, aiCoauthoredShare: true, commitAfterSession: true, guardrails: true, headlessPerWeek: true,
+  uncheckedCommandShare: true,
 });
 export const FEATURES = keysOf<Feature>({
   subagents: true, workflows: true, "background-agents": true, "plan-mode": true, skills: true, mcp: true, headless: true, "parallel-sessions": true,

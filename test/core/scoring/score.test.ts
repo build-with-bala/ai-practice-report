@@ -45,7 +45,7 @@ function signalsAt(at: "p50" | "p90", over: Partial<Signals> = {}): Signals {
     maintainedShare: empty(), artifacts: empty(), memoryFiles: 0, briefScore: empty(), hygiene: empty(),
     switchesPerWeek: empty(), rho: empty(), tokensPerLanded: empty(), usdPerLanded: empty(),
     landedShare: empty(), reworkShare: empty(), prsPerWeek: empty(), aiCoauthoredShare: empty(), commitAfterSession: empty(),
-    guardrails: empty(), headlessPerWeek: empty(), evidence: evidence(10, 6), repoSignals: "ok",
+    guardrails: empty(), headlessPerWeek: empty(), uncheckedCommandShare: empty(), evidence: evidence(10, 6), repoSignals: "ok",
   };
   COMPONENTS.forEach((c, i) => {
     const e = ref.components[c.id]!;

@@ -30,6 +30,11 @@ export interface Signals {
   switchesPerWeek: Metric; rho: Metric; tokensPerLanded: Metric; usdPerLanded: Metric;
   landedShare: Metric; reworkShare: Metric; prsPerWeek: Metric; aiCoauthoredShare: Metric; commitAfterSession: Metric;
   guardrails: Metric; headlessPerWeek: Metric;
+  /**
+   * Among the code-edit turns that count as not checked, the share in which a shell command ran after the last edit
+   * that the command classifier did not recognise as a check; unscored.
+   */
+  uncheckedCommandShare: Metric;
   evidence: Evidence; repoSignals: RepoSignals["status"];
 }
 
