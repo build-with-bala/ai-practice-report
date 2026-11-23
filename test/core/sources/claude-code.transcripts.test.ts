@@ -461,7 +461,7 @@ describe("claude-code transcripts: record mapping", () => {
       .user({ sessionId: "OLD", message: { role: "user", content: "copied from another session" }, promptSource: "typed" });
     t.write(h, topFile("P13"));
     const logs: [string, string, number | undefined][] = [];
-    const r = await scan({ env: h.env, plugins: [ccTranscripts], onLog: (level, code, n) => logs.push([level, code, n]) });
+    const r = await scan({ env: h.env, plugins: [ccTranscripts], onLog: (level, code, n) => { if (code !== "scan.gc") logs.push([level, code, n]); } });
     expect(logs).toEqual([["debug", "cc.heavy-parsed", 1], ["debug", "cc.foreign-session-files", 1]]);
     expect(r.coverage[0]).toMatchObject({ status: "ok", unknownTypes: {} });
     expect(r.coverage[0]!.skipped).toEqual({ copied: 1 });

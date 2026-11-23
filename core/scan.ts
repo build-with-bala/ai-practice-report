@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { detectEnv, type Env } from "./env/env";
 import { homesToScan } from "./env/paths";
 import { collectRepoSignals, type RepoSignalOptions, type RepoSignals } from "./git/index";
+import { holdStreamGc, STREAM_GC } from "./io/jsonl";
 import { enterScanTrap } from "./io/signals";
 import { ScanTemp } from "./io/temp";
 import { maybeYield } from "./io/yield";
@@ -44,6 +45,15 @@ export interface ScanOptions { env?: Env; plugins?: SourcePlugin[]; tools?: Tool
    * git runs; options tune them. Progress is reported as plugin `repo-signals`.
    */
   repoSignals?: boolean | RepoSignalOptions;
+  /**
+   * The streaming reader's garbage-collection pacer, default `auto`: on for the scan. `off` turns it off for the scan
+   * (an application that manages memory itself). The pacer is shared by every scan in the process: while scans overlap
+   * it is on if any of them asked for `auto`, and off only while all of them asked for `off`; when the last ends it is
+   * restored as it was before (`holdStreamGc`). Every scan logs `scan.gc` (debug) once, with the number of collections
+   * the pacer ran during the scan's lifetime. The pacer is process-wide, so that count includes collections caused by
+   * an overlapping scan's reading.
+   */
+  gc?: "auto" | "off";
   /** @internal test hook: builds the temp registry inside the scan's temp folder, when a private copy first needs one. */
   tempFactory?: (base: string) => TempDirs }
 export interface Warning { code: "drift" | "error" | "too-large" | "temp-leftover" | "beta"; tool: ToolId | "scan"; source: string; detail: string }
@@ -108,6 +118,8 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
   const trap = opts.handleSignals === false ? undefined : enterScanTrap({ abort: () => stop.abort(), closeSync: () => { temp.close(); } });
   let tempClean = false;
   let repos = repoSignalsOff(opts.repoSignals === false ? "off" : "partial");
+  const releaseGc = holdStreamGc(opts.gc === "off" ? "off" : "auto");
+  const collectionsBefore = STREAM_GC.collections;
 
   try {
     const aborted = new Set<SourcePlugin>();
@@ -205,6 +217,8 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
       repos = await repoPass(store, cwds, { salt, now, signal, options, onProgress: opts.onProgress });
     }
   } finally {
+    releaseGc();
+    try { opts.onLog?.("debug", "scan.gc", STREAM_GC.collections - collectionsBefore); } catch { /* never fails a scan */ }
     tempClean = temp.close();
     // cleaned up: a trapped SIGINT/SIGTERM, one caught at the tail included, now ends the process by that signal once
     // every scan inside the trap has cleaned up, so nothing after scan() runs

@@ -301,7 +301,7 @@ describe("claude-code history: mapping", () => {
     chmodSync(file, 0o000);
     try {
       const logs: string[] = [];
-      const r = await scan({ env: h.env, plugins: [ccHistory], onLog: (_l, code) => logs.push(code) });
+      const r = await scan({ env: h.env, plugins: [ccHistory], onLog: (_l, code) => { if (code !== "scan.gc") logs.push(code); } });
       expect(r.coverage[0]).toMatchObject({ status: "empty", files: 0, skipped: { "io-error": 1 } });
       expect(logs).toEqual(["cc.io-error"]);
     } finally {
