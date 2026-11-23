@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { cssString, kitCss } from "../../../core/viz/css";
+import { cssString, KIT_CLASSES, kitCss } from "../../../core/viz/css";
 import { THEMES } from "../../../core/viz/tokens";
 
 const css = kitCss({ footerLeft: "Your practice · No. 0000-0000" });
@@ -63,8 +63,7 @@ describe("kitCss", () => {
 
   test("a hostile footer cannot close the style element or break out of its string", () => {
     const hostile = kitCss({ footerLeft: 'x"}</style><script>alert(1)</script>\n' });
-    expect(hostile).not.toContain("</style");
-    expect(hostile).not.toContain("<script");
+    expect(hostile).not.toContain("<");
     expect(hostile).toContain(`@bottom-left{content:${cssString('x"}</style><script>alert(1)</script>\n')}`);
   });
 });
@@ -116,5 +115,28 @@ describe("cssString", () => {
   test("other control characters are dropped; ordinary text is kept", () => {
     expect(cssString("a\u0000b\tc\rd\u001Fe\u007Ff\u0085g")).toBe('"abcdefg"');
     expect(cssString("Jordan Example · No. 7F3A-91C2")).toBe('"Jordan Example · No. 7F3A-91C2"');
+  });
+
+  test("lone surrogates are dropped; a surrogate pair is kept", () => {
+    expect(cssString("a\uD800b\uDFFFc\uDC00\uD83D")).toBe('"abc"');
+    expect(cssString("x\uD83D\uDE00y")).toBe('"x\uD83D\uDE00y"');
+  });
+});
+
+describe("KIT_CLASSES", () => {
+  /** Every class name that some selector of the stylesheet names. */
+  const styled = new Set([...css.matchAll(/\.(-?[A-Za-z_][\w-]*)/g)].map((m) => m[1]!));
+
+  test("every listed class has a rule in the kit stylesheet", () => {
+    expect(KIT_CLASSES.filter((c) => !styled.has(c))).toEqual([]);
+  });
+
+  test("it lists every type role and mark class, with no duplicates", () => {
+    for (const c of [...TYPE_CLASSES, ...MARK_CLASSES]) expect([c, KIT_CLASSES.includes(c)]).toEqual([c, true]);
+    expect(new Set(KIT_CLASSES).size).toBe(KIT_CLASSES.length);
+  });
+
+  test("every class the stylesheet styles is listed", () => {
+    expect([...styled].filter((c) => !KIT_CLASSES.includes(c)).sort()).toEqual([]);
   });
 });

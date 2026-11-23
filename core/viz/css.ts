@@ -23,6 +23,30 @@ import { PRINT_SCALE_PT, SPACE, THEMES, TYPE_SCALE, type ColorToken, type ThemeN
  *   `seal-disc`, `seal-text`, `seal-outline`, `seal-ringtext`, `seal__meta`), `tree`, `dots`, `tag`.
  */
 
+/**
+ * The kit's class vocabulary: every class the stylesheet styles, and the only classes renderers and pages may use. A
+ * test checks the list against `kitCss` both ways, so renderers and the stylesheet fail together.
+ */
+export const KIT_CLASSES: readonly string[] = [
+  // type roles
+  "t-disp-44", "t-disp-28", "t-disp-20", "t-serif-20", "t-serif-16", "t-mono-64", "t-mono-44", "t-mono-20", "t-mono-16", "t-mono-14", "t-mono-12",
+  // text colour utilities
+  "c-ink", "c-muted", "c-faint", "c-vermilion", "c-verdigris",
+  // marks
+  "m-solid", "m-hollow", "m-hatch", "m-ref", "m-axis", "m-flag", "m-pass", "m-heat-0", "m-heat-1", "m-heat-2", "m-heat-3", "m-heat-4",
+  "m-prompt", "m-wait", "m-track", "m-stroke",
+  // layout
+  "page", "layout", "rail", "chapter-bar", "masthead", "kit-controls", "chapter", "skip-link", "scroll-x", "mw-960", "mw-888",
+  "kit-defs", "kit-hatch-line", "print-footer", "no-margin-boxes", "icon",
+  // components
+  "num", "tag", "dots", "cite",
+  "exhibit", "exhibit__head", "exhibit__letter", "exhibit__tag", "exhibit__note", "exhibit__placeholder", "exhibit--thin", "exhibit--empty", "is-cited",
+  "ledger", "ledger-group", "ledger-row", "ledger-row__label", "ledger-row__rule", "ledger-row__value", "ledger-row__dots", "ledger-row__window",
+  "ledger-components",
+  "seal", "seal--struck", "seal--provisional", "seal--flagged", "seal-ring", "seal-disc", "seal-text", "seal-outline", "seal-ringtext", "seal__meta",
+  "tree",
+];
+
 const kebab = (token: ColorToken): string => token.replace(/[A-Z]/g, (c) => "-" + c.toLowerCase()).replace(/(\d)$/, "-$1");
 const v = (token: ColorToken): string => `var(--${kebab(token)})`;
 const rule = (selector: string, decls: readonly string[]): string => `${selector}{${decls.join(";")}}`;
@@ -32,7 +56,7 @@ const themeVars = (theme: ThemeName): string[] =>
   (Object.entries(THEMES[theme]) as [ColorToken, string][]).map(([token, hex]) => `--${kebab(token)}:${hex}`);
 const scheme = (theme: ThemeName): string => `color-scheme:${theme === "ink" ? "dark" : "light"}`;
 
-/** A CSS string literal of `s`: `\` and `"` escaped, a newline as `\A `, `<` and `>` as hex escapes (so no raw `</style>`), other control characters dropped (pre-flight F6). */
+/** A CSS string literal of `s`: `\` and `"` escaped, a newline as `\A `, `<` and `>` as hex escapes (so no raw `</style>`), other control characters and lone surrogates dropped (pre-flight F6). */
 export function cssString(s: string): string {
   let out = "";
   for (const ch of s) {
@@ -42,7 +66,7 @@ export function cssString(s: string): string {
     else if (ch === "\n") out += "\\A ";
     else if (ch === "<") out += "\\3C ";
     else if (ch === ">") out += "\\3E ";
-    else if (cp < 0x20 || (cp >= 0x7f && cp <= 0x9f)) continue;
+    else if (cp < 0x20 || (cp >= 0x7f && cp <= 0x9f) || (cp >= 0xd800 && cp <= 0xdfff)) continue;
     else out += ch;
   }
   return `"${out}"`;
@@ -186,6 +210,8 @@ function components(): string[] {
       `color:${v("muted")}`, "margin-top:var(--s5)"]),
     rule(".exhibit__note", [`border:1.5px solid ${v("gold")}`, `padding:var(--s3) var(--s4)`, `color:${v("muted")}`]),
     rule(".exhibit__placeholder", ["display:block", "width:100%", "height:48px"]),
+    rule(".exhibit--thin .exhibit__note", ["margin-bottom:var(--s5)"]),
+    rule(".exhibit--empty .exhibit__note", ["margin-top:var(--s4)"]),
     // assay ledger
     rule(".ledger", ["display:grid", "gap:var(--s3)"]),
     rule(".ledger-group>h3,.ledger-group>.tag", ["margin:var(--s5) 0 var(--s2)"]),
@@ -209,6 +235,7 @@ function components(): string[] {
     rule(".seal--struck .seal-disc", ["fill:currentColor"]),
     rule(".seal--struck .seal-text", [`fill:${v("onAccent")}`]),
     rule(".seal--struck>svg", ["animation:kit-strike 420ms cubic-bezier(.2,.8,.2,1)"]),
+    rule(".seal--provisional .seal-disc", ["fill:none"]),
     rule(".seal--flagged", [`color:${v("vermilion")}`]),
     rule(".seal__meta", ["display:grid", "justify-items:center", "gap:var(--s1)", `color:${v("muted")}`]),
     // delegation outline: branches are borders
