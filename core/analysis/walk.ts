@@ -39,8 +39,9 @@ export type Hist = Record<number, number>;
  *   earliest-starting one only); `landed` units (rule 18, from owner commits only). A git commit becomes a landed unit
  *   only in a repo with an identity (`RepoFacts.identity`); marker keys count without one.
  * - Date range (`SessionTable.scope`): events, markers and commits outside [from, to] are ignored, even in a kept row
- *   that overlaps the range; `start` and `end` are the row's, clipped to the range. A descendant the range cuts with no
- *   event inside it counts nowhere (not in fan-out, background, types, workflows or depth).
+ *   that overlaps the range; `start` and `end` are the row's, clipped to the range. A descendant out of scope
+ *   (`inScope`) counts nowhere (not in background, types, workflows or depth); a direct child counts in fan-out when any
+ *   node of its subtree is in scope, and its descendants always group under it.
  * - `buckets` (rule 19): the distinct ⌊ts / BUCKET_MS⌋ with an action of the row or its descendants, ascending.
  */
 export interface SessionStats {
@@ -87,6 +88,20 @@ export function isAction(e: ToolEv): boolean {
 export function briefScore(f: PromptFeatures): number {
   const marks = [f.hasContext, f.fileRefs >= 1, f.listLines >= 2, f.constraintTerms >= 1, f.lenBucket >= 2];
   return marks.filter(Boolean).length / marks.length;
+}
+
+/**
+ * Whether a session row is in scope of the date range: it lies wholly inside the range, or it has an event inside it
+ * (a tool call, usage, a marker of `markersOf`, a prompt or a turn). A row the range cuts with no event inside it is
+ * part of the excluded period and counts nowhere — in the walk's children, nor as artifact evidence.
+ */
+export function inScope(r: SessionRow, t: SessionTable, store: EventStore, markersOf: (id: string) => readonly MarkerEv[]): boolean {
+  const { from, to } = t.scope;
+  if (r.start >= from && r.end <= to) return true;
+  const inRange = (ts: number): boolean => ts >= from && ts <= to;
+  return store.forSession(r.id, "tool").some((e) => inRange(e.ts)) || store.forSession(r.id, "usage").some((e) => inRange(e.ts))
+    || markersOf(r.id).length > 0 || store.forSession(r.id, "prompt").some((e) => inRange(e.ts))
+    || store.forSession(r.id, "turn").some((e) => inRange(e.ts));
 }
 
 /** A check action that ran to its end: it lists checks and says whether it passed. */
@@ -280,54 +295,59 @@ function walkRow(row: SessionRow, t: SessionTable, store: EventStore, cx: WalkCt
     else if (e.k === "usage") { s.tokens += e.inTok + e.outTok + e.cacheW; s.tokensKnown = true; }
   }
 
-  // children (rules 4, 13): every descendant that is no host copy, grouped under the row's direct child it descends from
+  // children (rules 4, 13): every descendant that is no host copy, grouped under the row's direct child it descends from.
+  // A direct child counts (fan-out, its group for A_t) when any node of its subtree is in scope (`inScope`); each node's
+  // own attributes (background, type, workflow, depth) count only when that node is.
   const direct: Child[] = [];
   const workflows = new Set<string>();
-  const stack: { id: string; top: Child | undefined }[] = row.children.map((id) => ({ id, top: undefined }));
-  while (stack.length > 0) {
-    const { id, top } = stack.pop()!;
-    const c = t.rows.get(id);
-    if (!c || t.hosts.has(id)) continue;
-    const own = store.forSession(id, "tool").filter((e) => inRange(e.ts));
-    const usage = store.forSession(id, "usage").filter((u) => inRange(u.ts));
-    const childMarkers = cx.markersOf(id);
-    // a descendant the date range cuts, with no event inside it, is part of the excluded period: it counts nowhere
-    // (its own descendants are still looked at, under the same top)
-    const cut = c.start < t.scope.from || c.end > t.scope.to;
-    if (cut && own.length === 0 && usage.length === 0 && childMarkers.length === 0
-      && !store.forSession(id, "prompt").some((p) => inRange(p.ts)) && !store.forSession(id, "turn").some((e) => inRange(e.ts))) {
-      for (const g of c.children) stack.push({ id: g, top });
-      continue;
+  for (const did of row.children) {
+    const d = t.rows.get(did);
+    if (!d || t.hosts.has(did)) continue;
+    const nodes: { c: SessionRow; own: ToolEv[]; usage: UsageEv[]; marks: MarkerEv[]; active: boolean }[] = [];
+    const stack = [did];
+    while (stack.length > 0) {
+      const id = stack.pop()!;
+      const c = t.rows.get(id);
+      if (!c || t.hosts.has(id)) continue;
+      const own = store.forSession(id, "tool").filter((e) => inRange(e.ts));
+      const usage = store.forSession(id, "usage").filter((u) => inRange(u.ts));
+      const marks = cx.markersOf(id);
+      const active = own.length > 0 || usage.length > 0 || marks.length > 0 || inScope(c, t, store, cx.markersOf);
+      nodes.push({ c, own, usage, marks, active });
+      for (const g of c.children) stack.push(g);
     }
-    const cStart = Math.max(c.start, t.scope.from);
-    const child = top ?? { id, start: cStart, tools: [], actions: 0, lastTs: cStart };
-    if (!top) direct.push(child);
-    s.maxDepth = Math.max(s.maxDepth, c.depth - row.depth);
-    if (c.background !== undefined) { s.bgKnown++; if (c.background) s.bgChildren++; }
-    bump(s.childTypes, childType(c.agentType));
-    if (c.workflowId !== undefined) workflows.add(c.workflowId);
-    for (const e of own) {
-      child.tools.push(e);
-      child.lastTs = Math.max(child.lastTs, e.ts);
-      if (!isAction(e)) continue;
-      child.actions++;
-      s.actions++;
-      buckets.add(Math.floor(e.ts / BUCKET_MS));
+    if (!nodes.some((x) => x.active)) continue; // the whole subtree lies in the excluded period: it counts nowhere
+    const cStart = Math.max(d.start, t.scope.from);
+    const child: Child = { id: did, start: cStart, tools: [], actions: 0, lastTs: cStart };
+    direct.push(child);
+    s.children++;
+    for (const { c, own, usage, marks, active } of nodes) {
+      if (active) {
+        s.maxDepth = Math.max(s.maxDepth, c.depth - row.depth);
+        if (c.background !== undefined) { s.bgKnown++; if (c.background) s.bgChildren++; }
+        bump(s.childTypes, childType(c.agentType));
+        if (c.workflowId !== undefined) workflows.add(c.workflowId);
+      }
+      for (const e of own) {
+        child.tools.push(e);
+        child.lastTs = Math.max(child.lastTs, e.ts);
+        if (!isAction(e)) continue;
+        child.actions++;
+        s.actions++;
+        buckets.add(Math.floor(e.ts / BUCKET_MS));
+      }
+      for (const m of marks) delivery(m);
+      for (const u of usage) {
+        s.tokens += u.inTok + u.outTok + u.cacheW;
+        s.tokensKnown = true;
+        child.lastTs = Math.max(child.lastTs, u.ts);
+      }
     }
-    for (const m of childMarkers) delivery(m);
-    if (!top) { // fan-out: direct children only
-      s.children++;
-      const acts = own.filter(isAction).sort(byTs);
-      const failedLastTwo = acts.length >= 2 && acts[acts.length - 1]!.ok === false && acts[acts.length - 2]!.ok === false;
-      const stopped = childMarkers.some((m) => m.kind === "interrupt" && m.detail === "stopped-by-user");
-      if (!stopped && !failedLastTwo) s.finishedChildren++;
-    }
-    for (const u of usage) {
-      s.tokens += u.inTok + u.outTok + u.cacheW;
-      s.tokensKnown = true;
-      child.lastTs = Math.max(child.lastTs, u.ts);
-    }
-    for (const g of c.children) stack.push({ id: g, top: child });
+    // finished: judged on the subtree's in-range actions, and the direct child's own stop
+    const acts = child.tools.filter(isAction).sort(byTs);
+    const failedLastTwo = acts.length >= 2 && acts[acts.length - 1]!.ok === false && acts[acts.length - 2]!.ok === false;
+    const stopped = nodes[0]!.marks.some((m) => m.kind === "interrupt" && m.detail === "stopped-by-user");
+    if (!stopped && !failedLastTwo) s.finishedChildren++;
   }
   for (const c of direct) c.tools.sort(byTs);
   deliveryTs.sort((a, b) => a - b);

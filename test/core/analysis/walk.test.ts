@@ -539,6 +539,22 @@ describe("walk: date range, cross-row keys, fan-out, children's ends and markers
     expect([inside.children, inside.finishedChildren, inside.bgKnown, inside.workflowRuns, inside.maxDepth, inside.actions]).toEqual([1, 1, 1, 1, 2, 6]);
   });
 
+  test("a cut direct child with no event in range still groups an in-range grandchild: fan-out 1, its own attributes not counted", () => {
+    const s = one([
+      sess("s", { start: T0 - 11 * HOUR, end: T0 + HOUR }), prompt("s", T0), tool("s", T0 + SEC),
+      tool("s", T0 + 2 * SEC, { name: "Agent", category: "delegate", delegateTo: "c" }),
+      prompt("s", T0 + 5 * MIN),
+      sess("c", { parentId: "s", origin: "subagent", start: T0 - 10 * HOUR, end: T0 + 30 * MIN, background: true, agentType: "Explore", workflowId: "w" }),
+      ...reads("c", T0 - 10 * HOUR + SEC, 2), // the child's own work lies before the range
+      sess("g", { parentId: "c", origin: "subagent", start: T0 + 6 * MIN, end: T0 + 7 * MIN, agentType: "Plan" }),
+      ...reads("g", T0 + 6 * MIN, 3), // the grandchild works inside the range, in the second turn's time
+    ], "s", { exclude: { from: T0 } });
+    expect([s.children, s.finishedChildren, s.maxDepth, s.bgKnown, s.workflowRuns, s.actions]).toEqual([1, 1, 2, 0, 0, 5]);
+    expect(s.childTypes).toEqual({ plan: 1 }); // the direct child's own type and background are not counted
+    // the grandchild's 3 actions go with its direct ancestor, which the first turn delegated: A_t 2 + 3, then 0
+    expect(s.successRuns).toEqual({ 5: 1, 0: 1 });
+  });
+
   test("a PR (and a commit) two rows link belongs to the earlier row only", () => {
     const all = walk([
       sess("a", { start: T0, end: T0 + HOUR }), prompt("a", T0),
