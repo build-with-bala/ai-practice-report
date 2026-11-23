@@ -13,6 +13,7 @@ const spec: FieldSpec = {
     counts: { t: "record", key: /^[a-z]{1,4}$/, of: { t: "integer", s: "aggregate" }, maxKeys: 2 },
     tagged: { t: "record", key: /^[a-z]{1,4}$/, of: { t: "number", s: "aggregate" }, maxKeys: 9, fields: { date: { t: "string", pattern: /^\d{4}-\d{2}-\d{2}$/, s: "aggregate" } } },
     inner: { t: "object", fields: { a: { t: "integer", s: "aggregate" } } },
+    pair: { t: "nullable", of: { t: "tuple", of: [{ t: "integer", s: "aggregate" }, { t: "integer", s: "aggregate" }] } },
   },
 };
 
@@ -44,6 +45,12 @@ describe("sanitize: deny by default", () => {
     expect(sanitize({ list: "1,2" }, spec)).toEqual({});
   });
 
+  test("a tuple is all or nothing: one bad element, or a wrong length, fails it whole (I4)", () => {
+    expect(sanitize({ pair: [62, 78] }, spec)).toEqual({ pair: [62, 78] });
+    expect(sanitize({ pair: null }, spec)).toEqual({ pair: null });
+    for (const bad of [[NaN, 78], [62.5, 78], [62, "78"], [62], [62, 78, 90], []]) expect(sanitize({ pair: bad }, spec)).toEqual({});
+  });
+
   test("a record keeps keys matching its pattern, at most maxKeys (in key order); declared keys take their own spec", () => {
     expect(sanitize({ counts: { c: 3, a: 1, "B!": 9, b: 2 } }, spec)).toEqual({ counts: { a: 1, b: 2 } });
     expect(sanitize({ tagged: { date: "2026-01-02", n: 1, other: "2026-01-02" } }, spec)).toEqual({ tagged: { date: "2026-01-02", n: 1 } });
@@ -70,6 +77,7 @@ describe("AIPROF2", () => {
   function leaves(s: FieldSpec, at = "$", out: Array<[string, FieldSpec]> = []): Array<[string, FieldSpec]> {
     switch (s.t) {
       case "nullable": case "array": return leaves(s.of, at + "[]", out);
+      case "tuple": s.of.forEach((f, i) => leaves(f, `${at}[${i}]`, out)); return out;
       case "object": for (const [k, f] of Object.entries(s.fields)) leaves(f, `${at}.${k}`, out); return out;
       case "record":
         leaves(s.of, `${at}{}`, out);
@@ -82,6 +90,7 @@ describe("AIPROF2", () => {
   function nodes(s: FieldSpec, out: FieldSpec[] = []): FieldSpec[] {
     out.push(s);
     if (s.t === "nullable" || s.t === "array") nodes(s.of, out);
+    else if (s.t === "tuple") for (const f of s.of) nodes(f, out);
     else if (s.t === "object") for (const f of Object.values(s.fields)) nodes(f, out);
     else if (s.t === "record") { nodes(s.of, out); for (const f of Object.values(s.fields ?? {})) nodes(f, out); }
     return out;
@@ -93,16 +102,63 @@ describe("AIPROF2", () => {
     }
   });
 
-  test("every pattern is anchored at both ends and stateless; every array and record is bounded", () => {
-    for (const s of nodes(AIPROF2)) {
-      const res = s.t === "string" ? [s.pattern] : s.t === "record" ? [s.key] : [];
-      for (const re of res) {
-        expect(`${re.source} ${re.source.startsWith("^") && re.source.endsWith("$")}`).toBe(`${re.source} true`);
-        expect(re.global || re.sticky).toBe(false);
+  /**
+   * Valid samples of every pattern in the schema: each pattern must match at least one. A sample with a prefix, a
+   * suffix or an embedded newline must then fail it, which an unanchored (or multi-line) pattern would let through.
+   */
+  const SAMPLES = [
+    "1.0.0-dev", "2.13.0", "2026-11", "2026-W47", "2026-11-02", "7/7", "P-3F2A", "my-lib", "0123456789abcdef", "github", "custom #1",
+    "claude-opus-4-1-20250805", "gpt-other", "fine-tuned", "other", "restore-cluster", "Was this history restored from a backup then?",
+    "matchShare", "claude-code/human/detail", "py", "data", "skill", "default", "never", "read-only", "subagents",
+  ];
+  const patterns = (): Array<[string, RegExp]> => {
+    const out: Array<[string, RegExp]> = [];
+    const walk = (s: FieldSpec, at: string): void => {
+      if (s.t === "string") out.push([at, s.pattern]);
+      else if (s.t === "nullable" || s.t === "array") walk(s.of, `${at}[]`);
+      else if (s.t === "tuple") s.of.forEach((f, i) => walk(f, `${at}[${i}]`));
+      else if (s.t === "object") for (const [k, f] of Object.entries(s.fields)) walk(f, `${at}.${k}`);
+      else if (s.t === "record") {
+        out.push([`${at}{key}`, s.key]);
+        walk(s.of, `${at}{}`);
+        for (const [k, f] of Object.entries(s.fields ?? {})) walk(f, `${at}.${k}`);
       }
+    };
+    walk(AIPROF2, "$");
+    return out;
+  };
+
+  test("every string and key pattern is anchored: a valid sample with a prefix, a suffix or an embedded newline fails", () => {
+    const list = patterns();
+    expect(list.length).toBeGreaterThan(30);
+    for (const [at, re] of list) {
+      expect(`${at} m:${re.multiline} g:${re.global} y:${re.sticky}`).toBe(`${at} m:false g:false y:false`);
+      const valid = SAMPLES.filter((x) => re.test(x));
+      expect(`${at} samples:${valid.length > 0}`).toBe(`${at} samples:true`);
+      for (const x of valid) {
+        const mid = Math.max(1, x.length >> 1);
+        for (const bad of [`\u0000${x}`, `${x}\u0000`, `\n${x}`, `${x}\n`, `${x.slice(0, mid)}\n${x.slice(mid)}`]) {
+          expect(`${at} ${JSON.stringify(bad)} ${re.test(bad)}`).toBe(`${at} ${JSON.stringify(bad)} false`);
+        }
+      }
+    }
+  });
+
+  test("every array and record is bounded, and every interval is a nullable pair", () => {
+    for (const s of nodes(AIPROF2)) {
       if (s.t === "array") expect(s.max).toBeGreaterThan(0);
       if (s.t === "record") expect(s.maxKeys).toBeGreaterThan(0);
+      if (s.t === "object" && "interval" in s.fields) {
+        const iv = s.fields.interval!;
+        expect(iv.t === "nullable" && iv.of.t === "tuple" && iv.of.of.length === 2).toBe(true);
+      }
     }
+  });
+
+  test("the core version takes semantic versions only", () => {
+    const core = (AIPROF2 as Extract<FieldSpec, { t: "object" }>).fields.core as Extract<FieldSpec, { t: "string" }>;
+    for (const ok of ["1.0.0", "1.0.0-dev", "10.2.33-rc.1", "1.0.0+build.5"]) expect(`${ok} ${core.pattern.test(ok)}`).toBe(`${ok} true`);
+    for (const bad of ["1.0", "01.0.0", "1.0.0-", "1.0.0-dev..x", "v1.0.0", "1.0.0 ", "1.0.0-a b"]) expect(`${bad} ${core.pattern.test(bad)}`).toBe(`${bad} false`);
   });
 
   test("only `projects[].name` is revealed, and nothing else holds a free-form name", () => {

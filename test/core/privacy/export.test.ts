@@ -2,8 +2,9 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import path from "node:path";
 import { analyze, type Analysis } from "../../../core/analyze";
 import { canonicalJson, exportPayload, scan } from "../../../core/index";
-import type { ConfigEv, Ev, SessionEv } from "../../../core/model/events";
-import { MCP_PUBLIC, mcpExportName, mcpLabels, modelExportId } from "../../../core/privacy/allowlists";
+import { ExportError, RevealError } from "../../../core/privacy/export";
+import type { ConfigEv, Ev, FileFactEv, SessionEv } from "../../../core/model/events";
+import { MCP_PUBLIC, mcpExportName, mcpLabels, MODEL_WORDS, modelExportId } from "../../../core/privacy/allowlists";
 import type { ScanResult } from "../../../core/scan";
 import { CcTranscript, ccSid, fixtureStart, slug } from "../../fixtures/claude-code";
 import { personaScan } from "../../fixtures/personas";
@@ -83,14 +84,19 @@ describe("exportPayload end to end", () => {
 });
 
 describe("exportPayload: raw channels", () => {
-  test("a fine-tuned model id exports as fine-tuned; known families keep their id; the rest is other", () => {
+  test("model ids: an allowlist of family, versions, dates and public words; else <family>-other or other (I3)", () => {
     expect(modelExportId("ft:gpt-4o:acme:x:y")).toBe("fine-tuned");
-    expect(modelExportId("claude-opus-4")).toBe("claude-opus-4");
-    expect(modelExportId("o3-mini")).toBe("o3-mini");
-    expect(modelExportId("gpt-5.1-codex")).toBe("gpt-5.1-codex");
-    expect(modelExportId(`${CANARY.slug}-opus`)).toBe("other");
-    expect(modelExportId("acme/claude-opus")).toBe("other");
-    expect(modelExportId(`claude-${"x".repeat(41)}`)).toBe("other");
+    for (const kept of ["claude-opus-4-1-20250805", "gpt-4o-mini", "gemini-2.5-pro", "o3-mini", "claude-opus-4", "gpt-5.1-codex", "gpt-4o-2024-08-06",
+      "claude-3-5-sonnet-20241022", "deepseek", "qwen-2.5-coder"]) expect(`${kept} → ${modelExportId(kept)}`).toBe(`${kept} → ${kept}`);
+    expect(modelExportId("gpt-4o-contoso-prod-deployment")).toBe("gpt-other");
+    expect(modelExportId("llama-3-acme-hr-finetune")).toBe("llama-other");
+    expect(modelExportId(`deepseek${"0123456789abcdef0123456789abcdef01234567"}`)).toBe("deepseek-other");
+    expect(modelExportId(`deepseek-${"0123456789abcdef0123456789abcdef01234567"}`)).toBe("deepseek-other");
+    expect(modelExportId("gpt--4")).toBe("gpt-other");
+    for (const other of ["Claude-Opus-4", "acme/claude-opus", "claude-opus\n4", "claude opus", `claude-${"4-".repeat(40)}4`, `${CANARY.slug}-opus`, "gemma-2", ""]) {
+      expect(`${JSON.stringify(other)} → ${modelExportId(other)}`).toBe(`${JSON.stringify(other)} → other`);
+    }
+    expect(MODEL_WORDS.has("opus") && MODEL_WORDS.has("mini") && !MODEL_WORDS.has("acme")).toBe(true);
     const s: SessionEv = { k: "session", tool: "claude-code", source: "claude-code.transcripts", id: "claude-code:ft-session-0001", window: "detail",
       origin: "human", start: Date.UTC(2026, 10, 10, 12), end: Date.UTC(2026, 10, 10, 13), models: ["ft:gpt-4o:acme:x:y"] };
     const a = analyze(withEvents(personaScan("expert"), [s]), UTC);
@@ -98,6 +104,24 @@ describe("exportPayload: raw channels", () => {
     const out = parsed(a);
     expect((out.exposure as Json).models).toMatchObject({ "fine-tuned": 1 });
     expect(JSON.stringify(out)).not.toContain("acme");
+  });
+
+  test("150 model ids give 64 keys: the 63 most used and other with the summed rest", () => {
+    const a = analyze(personaScan("expert"), UTC);
+    const raw: Record<string, number> = { "acme-model": 5 };
+    for (let i = 0; i < 150; i++) raw[`gpt-${1 + Math.floor(i / 10)}.${i % 10}`] = i < 3 ? 10 : 1;
+    a.private.models = raw;
+    const models = (parsed(a).exposure as Json).models as Record<string, number>;
+    expect(Object.keys(models).length).toBe(64);
+    expect(models["gpt-1.0"]).toBe(10);
+    expect(Object.values(models).reduce((x, y) => x + y, 0)).toBe(5 + 3 * 10 + 147);
+    expect(models.other).toBe(5 + (150 - 63)); // acme-model, and the 87 least used (ties by id)
+  });
+
+  test("ids that map to one export id have their counts summed", () => {
+    const a = analyze(personaScan("expert"), UTC);
+    a.private.models = { "gpt-4o-contoso-a": 2, "gpt-4o-contoso-b": 3, "gpt-4o": 1, "x-model": 4 };
+    expect((parsed(a).exposure as Json).models).toEqual({ "gpt-4o": 1, "gpt-other": 5, other: 4 });
   });
 
   test("model counts sum under their export id", () => {
@@ -153,10 +177,22 @@ describe("exportPayload: projects and reveal", () => {
     expect(projects.filter((p) => "name" in p)).toEqual([expect.objectContaining({ label: target, name: "my-lib" })]);
   });
 
-  test("without reveal no project has a name; a name failing its pattern is dropped", () => {
+  test("without reveal no project has a name; a name failing its pattern fails the export, its text never in the message", () => {
     expect((parsed(a).projects as Json[]).some((p) => "name" in p)).toBe(false);
-    const bad = parsed(a, { ...OPTS, reveal: [{ label: a.projects[0]!.label, name: "x\n<script>" }] });
-    expect((bad.projects as Json[]).some((p) => "name" in p)).toBe(false);
+    const fail = () => exportPayload(a, { ...OPTS, reveal: [{ label: a.projects[0]!.label, name: "x\n<script>" }] });
+    expect(fail).toThrow(ExportError);
+    try { fail(); } catch (e) {
+      expect((e as ExportError).paths).toEqual(["$.projects[0].name"]);
+      expect((e as Error).message).not.toContain("script");
+    }
+  });
+
+  test("a reveal label that names no exported project throws; the last entry for a label wins", () => {
+    expect(() => exportPayload(a, { ...OPTS, reveal: [{ label: "P-0000", name: "my-lib" }] })).toThrow(RevealError);
+    expect(() => exportPayload(a, { ...OPTS, reveal: [{ label: "not a label", name: "secret-name" }] })).toThrow(/^exportPayload: the reveal label names/);
+    const label = a.projects[0]!.label;
+    const out = parsed(a, { ...OPTS, reveal: [{ label, name: "first" }, { label: label.toLowerCase(), name: "second" }] });
+    expect((out.projects as Json[])[0]!.name).toBe("second");
   });
 
   test("at most 100 projects, ranked by sessions; the rest are counted", () => {
@@ -185,30 +221,37 @@ describe("exportPayload: no fine timestamps", () => {
     }
   });
 
-  test("C5's restore date is exported; a date anywhere else in check values is not", () => {
+  test("C5's restore date is exported; a date anywhere else in check values fails the export", () => {
     const a = analyze(personaScan("expert"), UTC);
     const c5 = a.forensics.checks.find((c) => c.id === "C5")!;
     c5.status = "note";
     c5.reason = "restore-cluster";
     c5.values = { violations: 0, date: "2026-11-02", days: 40, clusterFiles: 9 };
     c5.askAbout = "Most trace files were created on 2026-11-02 although their activity spans 40 days. Was this history copied or restored from a backup then?";
-    const c1 = a.forensics.checks.find((c) => c.id === "C1")!;
-    c1.values = { ...c1.values, when: "2026-11-03", p99Seconds: 4 };
     const checks = (parsed(a).forensics as Json).checks as Json[];
-    expect(checks.find((c) => c.id === "C5")).toEqual({ id: "C5", status: "note", reason: "restore-cluster", values: c5.values, askAbout: c5.askAbout });
-    expect((checks.find((c) => c.id === "C1")!.values as Json).when).toBeUndefined();
-    expect((checks.find((c) => c.id === "C1")!.values as Json).p99Seconds).toBe(4);
+    expect(checks.find((c) => c.id === "C5")).toEqual({ id: "C5", status: "note", n: c5.n, reason: "restore-cluster", values: c5.values, askAbout: c5.askAbout, tools: c5.tools });
+    const c1 = a.forensics.checks.findIndex((c) => c.id === "C1");
+    a.forensics.checks[c1]!.values = { ...a.forensics.checks[c1]!.values, when: "2026-11-03" };
+    expect(() => exportPayload(a, OPTS)).toThrow(`$.forensics.checks[${c1}].values.when`);
+    expect(() => exportPayload(a, OPTS)).not.toThrow("2026-11-03");
   });
 
-  test("an askAbout or reason outside its character set or form is dropped", () => {
+  test("every check exports its n and its tools", () => {
+    const a = analyze(personaScan("expert"), UTC);
+    const checks = (parsed(a).forensics as Json).checks as Json[];
+    expect(checks.map((c) => [c.id, c.n, c.tools])).toEqual(a.forensics.checks.map((c) => [c.id, c.n, c.tools]));
+  });
+
+  test("an askAbout or reason outside its character set or form fails the export, naming paths only", () => {
     const a = analyze(personaScan("expert"), UTC);
     a.forensics.checks[0]!.askAbout = `Ask about ${String.fromCodePoint(0x1f600)}?`;
     a.forensics.checks[1]!.reason = "Free Text!";
     a.forensics.checks[2]!.askAbout = "x".repeat(1_000);
-    const checks = (parsed(a).forensics as Json).checks as Json[];
-    expect(checks[0]!.askAbout).toBeUndefined();
-    expect(checks[1]!.reason).toBeUndefined();
-    expect(checks[2]!.askAbout).toBeUndefined();
+    let err: unknown;
+    try { exportPayload(a, OPTS); } catch (e) { err = e; }
+    expect(err).toBeInstanceOf(ExportError);
+    expect((err as ExportError).paths).toEqual(["$.forensics.checks[0].askAbout", "$.forensics.checks[1].reason", "$.forensics.checks[2].askAbout"]);
+    expect((err as Error).message).not.toMatch(/Ask about|Free Text|xxxx/);
   });
 });
 
@@ -233,11 +276,13 @@ describe("exportPayload: the preview contract and deny by default", () => {
 
   test("an unexpected key added at every depth of a real analysis never survives", () => {
     const a = analyze(personaScan("expert", { canaries: true }), UTC);
+    const checkValues = new Set<unknown>(a.forensics.checks.map((c) => c.values)); // open records: planted text there fails the export (next test)
     let planted = 0;
     const plant = (v: unknown): void => {
       if (Array.isArray(v)) { for (const x of v) plant(x); return; }
       if (v === null || typeof v !== "object") return;
       for (const x of Object.values(v)) plant(x);
+      if (checkValues.has(v)) return;
       (v as Json).zzUnexpected = "LEAKVALUE";
       (v as Json).LEAK_KEY = { nested: "LEAKVALUE" };
       planted++;
@@ -248,6 +293,52 @@ describe("exportPayload: the preview contract and deny by default", () => {
     expect(json).not.toContain("LEAK");
     expect(json).not.toContain("zzUnexpected");
     expect(json).not.toContain("nested");
+  });
+
+  test("text planted in a check's values fails the export: the path names the key, never the value", () => {
+    const a = analyze(personaScan("expert"), UTC);
+    (a.forensics.checks[3]!.values as Json).zzUnexpected = "LEAKVALUE";
+    let err: unknown;
+    try { exportPayload(a, OPTS); } catch (e) { err = e; }
+    expect((err as ExportError).paths).toEqual(["$.forensics.checks[3].values.zzUnexpected"]);
+    expect((err as Error).message).not.toContain("LEAK");
+  });
+
+  test("fail closed: a draft the schema would change throws ExportError with the paths only (I4)", () => {
+    const base = analyze(personaScan("expert"), UTC);
+    const cases: Array<[(a: Analysis) => void, string[]]> = [
+      [(a) => { (a.overall as unknown as Json).status = "SCORED"; }, ["$.overall.status"]],
+      [(a) => { a.overall.interval = [NaN, 78]; }, ["$.overall.interval"]],
+      [(a) => { a.dimensions[0]!.interval = [62.5, 78]; }, ["$.dimensions[0].interval"]],
+      [(a) => { a.dimensions[1]!.score = 71.5; }, ["$.dimensions[1].score"]],
+      [(a) => { (a.dimensions[2]!.components[0] as unknown as Json).x = Infinity; }, ["$.dimensions[2].components[0].x"]],
+      [(a) => { (a.coverage.rows[0]!.sources[0] as Json).status = "SECRET-STATUS"; }, ["$.coverage[0].statuses[0]", "$.coverage[0].statuses"]],
+    ];
+    for (const [mutate, paths] of cases) {
+      const a = structuredClone(base);
+      mutate(a);
+      let err: unknown;
+      try { exportPayload(a, OPTS); } catch (e) { err = e; }
+      expect(err).toBeInstanceOf(ExportError);
+      expect(paths).toContain((err as ExportError).paths[0]!);
+      expect((err as Error).message).not.toMatch(/SCORED|NaN|62\.5|71\.5|Infinity|SECRET/);
+    }
+  });
+
+  test("the three personas and an empty scan export without throwing", () => {
+    for (const kind of ["novice", "intermediate", "expert"] as const) {
+      for (const canaries of [false, true]) expect(() => exportPayload(analyze(personaScan(kind, { canaries }), UTC), OPTS)).not.toThrow();
+    }
+  });
+
+  test("a coverage row exports one status per source, sorted, and no source names", () => {
+    const a = analyze(personaScan("expert"), UTC);
+    a.coverage.rows[0]!.sources = [{ source: "claude-code.x", status: "ok", beta: false }, { source: "claude-code.y", status: "error", beta: false },
+      { source: "claude-code.z", status: "ok", beta: true }];
+    const row = (parsed(a).coverage as Json[])[0]!;
+    expect(row.statuses).toEqual(["error", "ok", "ok"]);
+    expect(row.beta).toBe(true);
+    expect(JSON.stringify(row)).not.toContain("claude-code.");
   });
 
   test("the top level holds exactly the declared parts", () => {
@@ -291,6 +382,25 @@ describe("exportPayload: golden bytes", () => {
       }
     }
     expect(checked).toBeGreaterThan(10);
+  });
+
+  test("a richer scan (public and custom MCP labels, a restore date in C5, a revealed name) exports these exact bytes", () => {
+    const raw = personaScan("expert");
+    const born = Date.UTC(2026, 10, 2, 9, 30);
+    const files: FileFactEv[] = Array.from({ length: 8 }, (_, i) => ({
+      k: "file", tool: "claude-code", source: "claude-code.transcripts", pathHash: `f${String(i).padStart(15, "0")}`, bytes: 1_000 + i,
+      mtime: born + 60_000, birth: born + i * 1_000, ctime: born + 60_000, firstTs: Date.UTC(2026, 8, 1) + i * DAY, lastTs: Date.UTC(2026, 9, 20) + i * DAY,
+    }));
+    const a = analyze(withEvents(raw, [...files, mcpConfig("github"), mcpConfig("@modelcontextprotocol/server-playwright"), mcpConfig(CANARY.mcp),
+      mcpConfig("internal-tools")]), { timeZone: "UTC", seed: 0x5eed });
+    const result = withTz("UTC", () => exportPayload(a, { ...OPTS, reveal: [{ label: a.projects[0]!.label, name: "bibliothèque ü-lib" }] }));
+    const out = JSON.parse(result.json) as Json;
+    expect((out.config as Json).mcpServers).toEqual(["github", "playwright", "custom #1", "custom #2"]);
+    const c5 = ((out.forensics as Json).checks as Json[]).find((c) => c.id === "C5")!;
+    expect([c5.status, c5.reason, (c5.values as Json).date]).toEqual(["note", "restore-cluster", "2026-11-02"]);
+    expect((out.projects as Json[])[0]!.name).toBe("bibliothèque ü-lib");
+    expectNoCanaries(result.json);
+    expect(result.json).toMatchSnapshot();
   });
 
   test("persona canaries: the expert with canaries exports none (P3 pre-flight F25)", () => {

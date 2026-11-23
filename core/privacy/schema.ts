@@ -9,7 +9,7 @@ import { PRACTICE_ROLES, STACK_ROLES } from "../scoring/roles";
 import type { Metric } from "../analysis/types";
 import type { Evidence } from "../signals/types";
 import type { EditLang } from "../text/langs";
-import { MCP_PUBLIC, MODEL_ID, RISK_TOKENS } from "./allowlists";
+import { MCP_PUBLIC, MODEL_FAMILY_PATTERN, RISK_TOKENS } from "./allowlists";
 
 /**
  * The sensitivity class of an exported value (spec §6.7): `public` (fixed vocabulary), `aggregate` (counts, rates,
@@ -19,20 +19,22 @@ export type Sensitivity = "public" | "aggregate" | "pseudonymous" | "revealed";
 
 /**
  * One declared field of the export. Leaves carry their sensitivity class; `nullable`, `array` (at most `max` elements),
- * `object` (exactly the declared `fields`) and `record` (keys matching `key`, at most `maxKeys`, each value by `of`, or
- * by its own spec in `fields` for a declared key) compose them. Every pattern is anchored at both ends.
+ * `tuple` (exactly one element per spec in `of`, all or nothing), `object` (exactly the declared `fields`) and `record`
+ * (keys matching `key`, at most `maxKeys`, each value by `of`, or by its own spec in `fields` for a declared key) compose
+ * them. Every pattern is anchored at both ends.
  */
 export type FieldSpec =
   | { t: "number" | "integer" | "boolean"; s: Sensitivity } | { t: "enum"; values: readonly string[]; s: Sensitivity }
   | { t: "string"; pattern: RegExp; s: Sensitivity } | { t: "nullable"; of: FieldSpec }
-  | { t: "array"; of: FieldSpec; max: number } | { t: "object"; fields: Readonly<Record<string, FieldSpec>> }
+  | { t: "array"; of: FieldSpec; max: number } | { t: "tuple"; of: readonly FieldSpec[] } | { t: "object"; fields: Readonly<Record<string, FieldSpec>> }
   | { t: "record"; key: RegExp; of: FieldSpec; maxKeys: number; fields?: Readonly<Record<string, FieldSpec>> };
 
 /**
  * A value as the schema allows it (deny by default), or `undefined` when it is not allowed at all:
  * - an object keeps only its declared, own fields whose values are allowed; a record only own keys matching its key
  *   pattern (in key order, at most `maxKeys`) whose values are allowed; anything that is not a plain object is dropped;
- * - an array keeps its allowed elements, at most `max` of them;
+ * - an array keeps its allowed elements, at most `max` of them; a tuple is kept whole or not at all: it must have
+ *   exactly its length, and every element must be allowed;
  * - a number must be finite (an integer a safe integer), -0 becomes 0; a string must match its pattern, an enum be one
  *   of its values; a boolean be a boolean.
  * The result is fresh plain data: nothing of the input is shared with it. Pure and synchronous.
@@ -52,6 +54,16 @@ export function sanitize(value: unknown, spec: FieldSpec): unknown {
         if (out.length >= spec.max) break;
         const y = sanitize(x, spec.of);
         if (y !== undefined) out.push(y);
+      }
+      return out;
+    }
+    case "tuple": {
+      if (!Array.isArray(value) || value.length !== spec.of.length) return undefined;
+      const out: unknown[] = [];
+      for (let i = 0; i < spec.of.length; i++) {
+        const y = sanitize(value[i], spec.of[i]!);
+        if (y === undefined) return undefined;
+        out.push(y);
       }
       return out;
     }
@@ -119,18 +131,18 @@ export const METRIC_KEYS = keysOf<MetricKey>({
   artifacts: true, briefScore: true, hygiene: true, switchesPerWeek: true, rho: true, tokensPerLanded: true, usdPerLanded: true, landedShare: true,
   reworkShare: true, prsPerWeek: true, aiCoauthoredShare: true, commitAfterSession: true, guardrails: true, headlessPerWeek: true,
 });
-const FEATURES = keysOf<Feature>({
+export const FEATURES = keysOf<Feature>({
   subagents: true, workflows: true, "background-agents": true, "plan-mode": true, skills: true, mcp: true, headless: true, "parallel-sessions": true,
   "model-switching": true, "manual-compaction": true,
 });
-const PROMPT_ARCS = keysOf<PromptArc>({ "1": true, "2-3": true, "4-10": true, "11-30": true, "31+": true });
-const DURATION_ARCS = keysOf<DurationArc>({ "<10m": true, "10-60m": true, "1-4h": true, ">4h": true });
-const TOOLCHAINS = keysOf<Toolchain>({ js: true, py: true, go: true, rust: true, jvm: true, dotnet: true, ruby: true, php: true, swift: true, dart: true,
+export const PROMPT_ARCS = keysOf<PromptArc>({ "1": true, "2-3": true, "4-10": true, "11-30": true, "31+": true });
+export const DURATION_ARCS = keysOf<DurationArc>({ "<10m": true, "10-60m": true, "1-4h": true, ">4h": true });
+export const TOOLCHAINS = keysOf<Toolchain>({ js: true, py: true, go: true, rust: true, jvm: true, dotnet: true, ruby: true, php: true, swift: true, dart: true,
   native: true, shell: true, any: true });
-const EDIT_LANGS = keysOf<EditLang>({ ...Object.fromEntries(TOOLCHAINS.map((t) => [t, true])) as Record<Toolchain, true>, doc: true });
-const TECH_CATEGORIES = keysOf<TechCategory>({ data: true, infra: true, security: true, testing: true, ai: true, architecture: true, frontend: true,
+export const EDIT_LANGS = keysOf<EditLang>({ ...Object.fromEntries(TOOLCHAINS.map((t) => [t, true])) as Record<Toolchain, true>, doc: true });
+export const TECH_CATEGORIES = keysOf<TechCategory>({ data: true, infra: true, security: true, testing: true, ai: true, architecture: true, frontend: true,
   mobile: true, systems: true });
-const CONFIG_KINDS = keysOf<ConfigEv["kind"]>({ skill: true, command: true, agent: true, plugin: true, hook: true, "mcp-server": true, "memory-file": true,
+export const CONFIG_KINDS = keysOf<ConfigEv["kind"]>({ skill: true, command: true, agent: true, plugin: true, hook: true, "mcp-server": true, "memory-file": true,
   "instruction-file": true, profile: true, feature: true });
 const BANDS = keysOf<Band>({ exceptional: true, strong: true, developing: true, limited: true, insufficient: true });
 const FORENSIC_BANDS = keysOf<Forensics["band"]>({ consistent: true, "consistent-with-notes": true, inconsistent: true, unverifiable: true });
@@ -164,7 +176,8 @@ const DATE = str(/^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])$/, "aggregate
 const KEYED_HASH = str(/^[0-9a-f]{8,64}$/, "pseudonymous");
 const TOOL = en(TOOL_IDS);
 const WINDOW = en(WINDOWS);
-const INTERVAL = nullable(arr(int(), 2));
+/** A bootstrap interval: both ends or none (a one-point interval would claim more than the data holds). */
+const INTERVAL = nullable({ t: "tuple", of: [int(), int()] });
 
 /** A metric: its value (null with a reason when not measurable), sample size, window and span by month. */
 const METRIC = obj({ value: nullable(num()), n: int(), window: WINDOW, from: MONTH, to: MONTH, reason: en(METRIC_REASONS) });
@@ -176,8 +189,8 @@ const ASK_ABOUT = str(/^[ -ÿ -⁯−]{1,400}$/, "aggregate");
 
 /** An MCP server's export label: a public name, or "custom #n". */
 const MCP_LABEL = str(new RegExp(`^(?:${[...MCP_PUBLIC].map(esc).join("|")}|custom #[1-9]\\d{0,3})$`), "pseudonymous");
-/** A model's export id: a known family's id, "fine-tuned" or "other". */
-const MODEL_KEY = new RegExp(`^(?:fine-tuned|other|${MODEL_ID.source.slice(1, -1)})$`);
+/** A model's export id: a known family's allowlisted id or `<family>-other`, "fine-tuned" or "other" (at most 64 characters). */
+const MODEL_KEY = new RegExp(`^(?=.{1,64}$)(?:fine-tuned|other|(?:${MODEL_FAMILY_PATTERN})(?:-[a-z0-9.]+)*)$`);
 /** A project name the person chose to reveal: letters, digits, spaces and ". _ -", 1 to 64 of them, no edge space. */
 const REVEALED_NAME = str(/^[\p{L}\p{N}](?:[\p{L}\p{N} ._-]{0,62}[\p{L}\p{N}])?$/u, "revealed");
 
@@ -187,10 +200,10 @@ const REVEALED_NAME = str(/^[\p{L}\p{N}](?:[\p{L}\p{N} ._-]{0,62}[\p{L}\p{N}])?$
  */
 export const AIPROF2: FieldSpec = obj({
   schema: en(["aiprof/2"]),
-  core: str(/^\d{1,4}\.\d{1,4}\.\d{1,4}(?:-[0-9A-Za-z.]{1,24})?$/, "public"),
+  core: str(/^(?=.{1,64}$)(?:0|[1-9]\d{0,3})\.(?:0|[1-9]\d{0,3})\.(?:0|[1-9]\d{0,3})(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/, "public"),
   reference: en(["v0"]),
   coverage: arr(obj({
-    tool: TOOL, window: WINDOW, status: en(COVERAGE_STATUS), beta: bool("public"), from: MONTH, to: MONTH,
+    tool: TOOL, window: WINDOW, statuses: arr(en(COVERAGE_STATUS), 64), beta: bool("public"), from: MONTH, to: MONTH,
     sessions: int(), prompts: int(), formatChanged: bool(),
   }), 64),
   overall: obj({
@@ -237,9 +250,9 @@ export const AIPROF2: FieldSpec = obj({
   forensics: obj({
     band: en(FORENSIC_BANDS), serverBacked: nullable(num()), anchorable: arr(TOOL, TOOL_IDS.length), notAnchorable: arr(TOOL, TOOL_IDS.length),
     checks: arr(obj({
-      id: en(CHECK_IDS), status: en(CHECK_STATUS), reason: str(/^[a-z0-9-]{1,40}$/, "public"),
-      values: { t: "record", key: CHECK_VALUE_KEY, of: num(), maxKeys: 64, fields: { date: DATE } },
-      askAbout: ASK_ABOUT,
+      id: en(CHECK_IDS), status: en(CHECK_STATUS), n: int(), reason: str(/^[a-z0-9-]{1,40}$/, "public"),
+      values: { t: "record", key: CHECK_VALUE_KEY, of: num(), maxKeys: TOOL_IDS.length * ORIGINS.length * WINDOWS.length + 64, fields: { date: DATE } },
+      askAbout: ASK_ABOUT, tools: arr(TOOL, TOOL_IDS.length),
     }), 32),
   }),
   identity: obj({ accounts: int(), bindings: arr(KEYED_HASH, 64) }),

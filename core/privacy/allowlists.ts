@@ -46,13 +46,42 @@ export function mcpLabels(config: Analysis["private"]["config"]): Map<string, st
   return out;
 }
 
-/** A model id from a known vendor family: exported as is. */
-export const MODEL_ID = /^(claude|gpt|o\d|gemini|codex|grok|llama|mistral|qwen|deepseek)[a-z0-9.\-]{0,40}$/;
+/** The model families whose ids may be exported (an alternation, unanchored): every other model is "other". */
+export const MODEL_FAMILY_PATTERN = "claude|gpt|o\\d|gemini|codex|grok|llama|mistral|qwen|deepseek";
+const FAMILY = new RegExp(`^(?:${MODEL_FAMILY_PATTERN})`);
+/** The characters and length a model id may have at all; anything else (upper case, "/", whitespace, longer) is "other". */
+const MODEL_CHARS = /^[a-z0-9.-]{1,64}$/;
 
-/** A model id as exported: a known family's id as is; a fine-tuned model ("ft:…") as "fine-tuned"; anything else "other". */
+/** The public tier and variant words a model id may hold after its family (I3: an allowlist, not a prefix). */
+export const MODEL_WORDS: ReadonlySet<string> = new Set([
+  "opus", "sonnet", "haiku", "mini", "nano", "pro", "flash", "ultra", "max", "turbo", "preview", "latest", "codex", "instant", "large", "medium",
+  "small", "lite", "plus", "thinking", "high", "low", "coder", "chat", "vision", "exp",
+]);
+/** A short version number: "4", "4o", "3.5", "4.1", "2.5". */
+const VERSION = /^\d{1,2}(?:\.\d{1,2})?[a-z]?$/;
+/** A date or a part of one: "20250805", or the "YYYY", "MM", "DD" of "YYYY-MM-DD". */
+const DATE_PART = /^(?:\d{8}|\d{4}|\d{2})$/;
+const modelToken = (t: string): boolean => VERSION.test(t) || DATE_PART.test(t) || MODEL_WORDS.has(t);
+
+/**
+ * A model id as exported:
+ * - "ft:…" (a fine-tuned model) → "fine-tuned";
+ * - an id of a known family (`MODEL_FAMILY_PATTERN`) whose every "-"-separated token after the family is a short version
+ *   number, a date part or a word of `MODEL_WORDS` → the id as is ("claude-opus-4-1-20250805", "gpt-4o-mini");
+ * - another id of a known family → "<family>-other" ("gpt-4o-contoso-prod" → "gpt-other");
+ * - anything else, or an id with characters other than a–z, 0–9, "." and "-", or longer than 64 → "other".
+ * Ids that map to one export id have their counts summed by the caller.
+ */
 export function modelExportId(raw: string): string {
   if (raw.startsWith("ft:")) return "fine-tuned";
-  return MODEL_ID.test(raw) ? raw : "other";
+  if (!MODEL_CHARS.test(raw)) return "other";
+  const m = FAMILY.exec(raw);
+  if (!m) return "other";
+  const family = m[0];
+  const rest = raw.slice(family.length);
+  if (rest === "") return family;
+  if (rest.startsWith("-") && rest.slice(1).split("-").every(modelToken)) return raw;
+  return `${family}-other`;
 }
 
 /**
