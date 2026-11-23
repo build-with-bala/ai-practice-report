@@ -22,8 +22,8 @@ export const GIT_SAFE_ARGS: readonly string[] = ["--no-pager", "-c", "core.fsmon
  * Set on every git child: no optional locks, no prompt, no lazy fetch of a partial clone, no transport at all (so even a
  * git too old to know GIT_NO_LAZY_FETCH cannot fetch through a remote — whose URL repo config may make an `ext::`
  * command or an ssh call; GIT_ALLOW_PROTOCOL outranks repo-level `protocol.*.allow`), no system config, no pager, C locale;
- * and on Windows no program found in the working folder by a bare name (`NoDefaultCurrentDirectoryInExePath`: what a
- * `git.cmd` runs under cmd.exe, and git itself, never come from the repo).
+ * and on Windows no program found in the working folder by a bare name (`NoDefaultCurrentDirectoryInExePath`: what git
+ * itself starts never comes from the repo).
  */
 const SAFE_ENV: Readonly<Record<string, string>> = {
   GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0", GIT_NO_LAZY_FETCH: "1", GIT_ALLOW_PROTOCOL: "none", GIT_CONFIG_NOSYSTEM: "1", GIT_PAGER: "cat", LC_ALL: "C",
@@ -43,16 +43,16 @@ function runnable(p: string, win: boolean): boolean {
 
 /**
  * The absolute path of `git` on `env`'s PATH: the first absolute PATH entry holding it (relative entries, `.` among them,
- * are skipped, and the working folder is never looked in). On Windows `git.exe` is looked for on all of PATH first,
- * then `git.cmd` (each only when PATHEXT lists it), whatever PATHEXT's order: a `.cmd` runs under cmd.exe. Undefined
- * when there is none.
+ * are skipped, and the working folder is never looked in). On Windows only `git.exe` is run (when PATHEXT lists `.exe`),
+ * never a `git.cmd`, which would run under cmd.exe: an install with only a `git.cmd` is git-missing. Undefined when
+ * there is none.
  */
 export function resolveGit(env: Record<string, string | undefined>, platform: string = process.platform): string | undefined {
   const win = platform === "win32";
   const p = win ? path.win32 : path.posix;
   const get = (name: string) => (win ? Object.entries(env).find(([k]) => k.toUpperCase() === name)?.[1] : env[name]);
   const listed = new Set((get("PATHEXT") ?? ".COM;.EXE;.BAT;.CMD").split(";").map((e) => e.trim().toLowerCase()));
-  const exts = win ? [".exe", ".cmd"].filter((e) => listed.has(e)) : [""];
+  const exts = win ? [".exe"].filter((e) => listed.has(e)) : [""];
   const dirs = (get("PATH") ?? "").split(win ? ";" : ":").map((raw) => raw.trim().replace(/^"(.*)"$/, "$1"))
     .filter((dir) => dir !== "" && p.isAbsolute(dir) && (!win || /^(?:[A-Za-z]:[\\/]|[\\/]{2})/.test(dir)));
   for (const ext of exts) {

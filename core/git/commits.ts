@@ -28,10 +28,23 @@ const CO_AUTHOR = /^\s*co-authored-by:(.*)$/gim;
 const GENERATED: readonly [AiTool, RegExp][] = TOOLS.map(([tool, p]) => [tool, new RegExp(`generated (?:with|by) \\[?(?:${p})\\b`, "i")]);
 const WORDS: readonly [AiTool, string][] = TOOLS.flatMap(([tool, p]) => p.split("|").map((w): [AiTool, string] => [tool, w]));
 
-/** A co-author trailer's parts: its display name, and its address's local part and domain (lower-cased). */
+/** An address's domain, with its `@`: what is never matched against tool words. */
+const AT_DOMAIN = /@[^\s<>,;()]*/g;
+
+/**
+ * A co-author trailer's parts: its display name, and its address's local part and domain (lower-cased). The address is
+ * the first `<local@domain>` wherever it stands (whatever follows it — a comma, a `(reviewer)` — is dropped), else the
+ * first bare `local@domain`; the name is what stands before a bracketed address, or the trailer without its bare one.
+ * Any other `@domain` left in the name is dropped too: a malformed trailer never falls back to matching its whole text.
+ */
 function trailerParts(trailer: string): { name: string; local: string; domain: string } {
-  const m = /^(.*?)<([^<>@\s]*)@([^<>\s]*)>\s*$/.exec(trailer.trim());
-  return m ? { name: m[1]!, local: m[2]!.toLowerCase(), domain: m[3]!.toLowerCase() } : { name: trailer, local: "", domain: "" };
+  const t = trailer.trim();
+  const bracketed = /<([^<>@\s]*)@([^<>\s]*)>/.exec(t);
+  const bare = bracketed ? undefined : /([^\s<>,;()]*)@([^\s<>,;()]*)/.exec(t);
+  const m = bracketed ?? bare;
+  if (!m) return { name: t.replace(AT_DOMAIN, ""), local: "", domain: "" };
+  const name = bracketed ? t.slice(0, m.index) : t.slice(0, m.index) + t.slice(m.index + m[0].length);
+  return { name: name.replace(AT_DOMAIN, ""), local: m[1]!.toLowerCase(), domain: m[2]!.toLowerCase() };
 }
 
 /**

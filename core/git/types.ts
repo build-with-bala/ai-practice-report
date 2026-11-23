@@ -18,6 +18,7 @@ export type InstructionKind = "claude" | "agents" | "gemini" | "cursorrules" | "
  */
 export interface CommitFact { ts: number; shaKey: string; ai?: AiTool; generated?: AiTool; rework?: "revert" | "fixup" | "fix"; files: string[]; owner: boolean }
 export interface InstructionFacts { files: InstructionKind[]; namesChecks: CheckKind[]; touched: number; lastTouched?: number }
+/** `.claude/settings.json` hooks: the entries there, the checks their commands run, and `disableAllHooks` (then none runs, and `checks` is empty). */
 export interface HookFacts { entries: number; checks: CheckKind[]; disabled: boolean }
 export interface CheckFacts { present: boolean; checks: CheckKind[] }
 
@@ -26,8 +27,8 @@ export interface CheckFacts { present: boolean; checks: CheckKind[] }
  * session projects inside it; `identity`: the repo has a `user.email`, so the person's commits can be told apart (none
  * are read without it); `commitsTruncated`: the history held more commits than were read (`maxCommits`, or the output
  * cap); `fileLists`: changed paths were read (false for a partial clone read without them, where rework is not
- * measurable). `instructions`, `hooks`, `ci` and `precommit` come from the repo's allowlisted files (filled by a later
- * pass; empty until then).
+ * measurable). `instructions`, `hooks`, `ci` and `precommit` come from the repo's allowlisted files, read from the
+ * worktree the most detail-window sessions ran in (`readRepoFiles`).
  */
 export interface RepoFacts { repoKey: string; projectKeys: string[]; identity: boolean; commits: CommitFact[]; commitsTruncated: boolean; fileLists: boolean;
   instructions: InstructionFacts; hooks: HookFacts; ci: CheckFacts; precommit: CheckFacts }
@@ -37,7 +38,8 @@ export interface RepoFacts { repoKey: string; projectKeys: string[]; identity: b
  * not read, or not to their end); `off` (switched off); `git-missing` (no git to run). `roots`: repoKey → the raw root
  * path, held in memory only (for the repo-file pass and display on this machine) and never part of an analysis or an
  * export. `skipped`: session folders or repos left out, by reason (`missing`, `not-a-repo`, `too-many-repos`, `budget`,
- * `timeout`, `error`). `since`: the earliest commit time asked for (epoch ms). `ms`: time taken.
+ * `timeout`, `error`), and repo files left unread (`file-not-file`, `file-too-large`, `file-refused`, `file-io-error`,
+ * `file-parse`, `files-capped`: `readRepoFiles`). `since`: the earliest commit time asked for (epoch ms). `ms`: time taken.
  */
 export interface RepoSignals { status: "ok" | "partial" | "off" | "git-missing"; repos: RepoFacts[]; roots: Map<string, string>;
   skipped: Record<string, number>; since?: number; ms: number }

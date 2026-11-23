@@ -4,17 +4,15 @@ import type { Env } from "../../env/env";
 import { bornAt, isFile, readJsonSmallResult, safeStat } from "../../io/fs";
 import { toEpochMs } from "../../io/time";
 import type { ConfigEv, IdentityEv, MarkerEv } from "../../model/events";
-import { classifyCommand } from "../../text/commands";
 import { listDir, readSidecar, Tally } from "../common/coverage";
 import { isObj, num, type Obj } from "../common/guards";
+import { parseHooks } from "../common/hooks";
 import type { Candidate, ScanCtx } from "../types";
 
 export const CONFIG_SOURCE = "claude-code.config";
 const TOOL = "claude-code";
 /** Older CLIs keep per-project data in the global config, so it may be large. */
 const GLOBAL_CONFIG_MAX = 64 * 1024 * 1024;
-/** Hook event names as the CLI spells them (`PreToolUse`, `Stop`, …); any other key is reported as `other`. */
-const HOOK_EVENT = /^[A-Z][A-Za-z]{2,40}$/;
 
 type Out = (ev: ConfigEv | MarkerEv | IdentityEv) => void;
 interface Usage { uses: number; lastUsed?: number }
@@ -23,7 +21,6 @@ interface GlobalUsage { skills: Map<string, Usage>; plugins: Map<string, number>
 
 const isNum = (x: unknown): x is number => typeof x === "number" && Number.isFinite(x);
 const isStr = (x: unknown): x is string => typeof x === "string";
-const isBool = (x: unknown): x is boolean => typeof x === "boolean";
 /** One path segment: a plugin id's parts name folders of the plugin cache only when they cannot step out of it. */
 const SEGMENT = /^(?!\.{1,2}$)[^\\/]+$/;
 const realpathOf = (p: string): string | undefined => {
@@ -125,41 +122,23 @@ function readGlobalConfig(file: string, ctx: ScanCtx, tally: Tally, out: Out): G
 }
 
 /**
- * settings.json hooks: one event per hook entry; a command hook's command is classified in memory and never kept. With
- * `disableAllHooks: true` the CLI runs none of them: no hook event, one `hooks-disabled` feature, and each entry left
- * out skipped `hooks-disabled`.
+ * settings.json hooks (`parseHooks`): one event per hook entry; a command hook's command is classified in memory and
+ * never kept. With `disableAllHooks: true` the CLI runs none of them: no hook event, one `hooks-disabled` feature, and
+ * each entry left out skipped `hooks-disabled`.
  */
 function hooks(settings: Obj | undefined, tally: Tally, out: Out): void {
-  const disabled = settings !== undefined && field(settings, "disableAllHooks", isBool, tally) === true;
-  if (disabled) out(cfg("feature", "authored", "hooks-disabled"));
-  const table = settings ? field(settings, "hooks", isObj, tally) : undefined;
-  for (const [event, groups] of Object.entries(table ?? {})) {
-    const name = HOOK_EVENT.test(event) ? event : "other";
-    if (!Array.isArray(groups)) {
-      tally.unknownKey("hooks:shape");
-      continue;
-    }
-    for (const group of groups) {
-      const list = isObj(group) && Array.isArray(group.hooks) ? group.hooks : undefined;
-      if (!list) {
-        tally.unknownKey("hooks:shape");
-        continue;
-      }
-      for (const hook of list) {
-        if (!isObj(hook)) {
-          tally.unknownKey("hooks:shape");
-          continue;
-        }
-        if (disabled) {
-          tally.skip("hooks-disabled");
-          continue;
-        }
-        const ev = cfg("hook", "authored", name);
-        if (typeof hook.command === "string") ev.checks = classifyCommand(hook.command).checks;
-        out(ev);
-      }
-    }
+  const parsed = parseHooks(settings, (key) => tally.unknownKey(key));
+  if (parsed.disabled) {
+    out(cfg("feature", "authored", "hooks-disabled"));
+    for (let i = 0; i < parsed.entries; i++) tally.skip("hooks-disabled");
+    return;
   }
+  parsed.events.forEach((name, i) => {
+    const ev = cfg("hook", "authored", name);
+    const checks = parsed.entryChecks[i];
+    if (checks !== undefined) ev.checks = checks;
+    out(ev);
+  });
 }
 
 /** Skill names in `~/.agents/.skill-lock.json` (only the keys of `skills`): empty without a lock, undefined when it cannot be read. */

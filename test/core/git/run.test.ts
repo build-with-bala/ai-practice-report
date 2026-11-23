@@ -119,18 +119,17 @@ describe("runGit", () => {
     expect(resolveGit(env(rel.replace(h.root, ".")))).toBeUndefined();
   });
 
-  test("on Windows, PATHEXT's .exe and .cmd names are tried in its order", () => {
+  test("on Windows, a git.cmd alone is never run: only git.exe is (a cmd-only install is git-missing)", () => {
     const dir = path.join(h.root, "win");
     mkdirSync(dir, { recursive: true });
     writeFileSync(path.join(dir, "git.cmd"), "@echo off\r\n");
-    const p = resolveGit({ PATH: "C:\\nowhere;" + dir.replace(/\//g, "\\"), PATHEXT: ".BAT;.CMD;.EXE" }, "win32");
-    // a POSIX temp path is not a Windows absolute path, so only a Windows host can find it
-    if (process.platform === "win32") expect(p?.toLowerCase()).toBe(path.join(dir, "git.cmd").toLowerCase());
-    else expect(p).toBeUndefined();
+    const winDir = dir.replace(/\//g, "\\");
+    expect(resolveGit({ PATH: "C:\\nowhere;" + winDir, PATHEXT: ".BAT;.CMD;.EXE" }, "win32")).toBeUndefined();
+    expect(resolveGit({ PATH: winDir, PATHEXT: ".CMD" }, "win32")).toBeUndefined();
   });
 
   // Windows paths: only a Windows host can stat them
-  test.skipIf(process.platform !== "win32")("on Windows, git.exe anywhere on PATH wins over git.cmd, whatever PATHEXT's order", () => {
+  test.skipIf(process.platform !== "win32")("on Windows, git.exe anywhere on PATH is found, a git.cmd before it never, whatever PATHEXT's order", () => {
     const first = path.join(h.root, "first");
     const later = path.join(h.root, "later");
     mkdirSync(first, { recursive: true });

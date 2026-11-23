@@ -1,5 +1,6 @@
 import { LOG_ARGS, logRecords, parseCommits, type ParsedCommit } from "./commits";
 import { candidates, groupRepos, type Found, type Repo } from "./discover";
+import { INSTRUCTION_FILES, MAX_FOLDER_FILES, MAX_REPO_FILE_BYTES, readRepoFiles, REPO_FILES, REPO_FOLDERS, SESSION_FOLDER_FILES } from "./files";
 import { resolveGit, runGit, type GitResult, type GitRunner } from "./run";
 import type { RepoFacts, RepoSignals } from "./types";
 
@@ -56,6 +57,14 @@ export const REPO_SIGNALS_DESCRIBE: { reads: string[]; runs: string[] } = {
     "git metadata of the repos that hold recent session folders (found by checking each folder's ancestors for .git, never by crawling): " +
       "commit times; whether the author is the repo's user.email (compared in memory, never kept); AI co-author and generated-with trailers; " +
       "revert and fix-up subjects; changed-file paths as keyed hashes. Commit messages, emails, paths and source files are never kept.",
+    `allowlisted repo files, from the worktree the most detail sessions ran in, read in memory (at most ${MAX_REPO_FILE_BYTES / 1024} KiB each; ` +
+      "larger ones count as present, unread) and reduced to kinds, check kinds, booleans and counts — their text is never kept: " +
+      `${[...Object.values(INSTRUCTION_FILES).filter((p) => !p.endsWith("/")), ...REPO_FILES].join(", ")}; ` +
+      `${SESSION_FOLDER_FILES.join(" and ")} also at each session folder inside the repo; and one level deep, at most ${MAX_FOLDER_FILES} files each, ` +
+      `${REPO_FOLDERS.map((f) => `${f.dir} (${f.what})`).join(", ")}. .claude/settings.local.json, source files and any other file are never opened; ` +
+      "a credential, token or key file name (or a link to one) is refused unopened.",
+    "git config: the system-level git config is ignored (GIT_CONFIG_NOSYSTEM); only user.email and, for a git older than 2.44, " +
+      "the partial-clone keys are asked for.",
   ],
   runs: [
     "git --version",
@@ -63,6 +72,7 @@ export const REPO_SIGNALS_DESCRIBE: { reads: string[]; runs: string[] } = {
     "git config --get user.email",
     "git config --get extensions.partialClone, git config --get remote.origin.promisor (git older than 2.44 only)",
     "git log --all --no-merges --no-renames --date-order --since=<date> --max-count=<n> --name-only -z (commit metadata only)",
+    "git log -n50 --since=<180 days ago> --format=%ct -- <instruction file paths> (commit times only; not for a partial clone read without paths)",
     "every git command: started by its absolute path on PATH (never from the repo folder), with no stdin, no pager and no prompt; " +
       "no transport at all (-c protocol.allow=never, GIT_ALLOW_PROTOCOL=none) and GIT_NO_LAZY_FETCH=1, so nothing is " +
       "fetched whatever the repo config says; fsmonitor and signature checks off; no system config; inherited GIT_* variables removed",
@@ -135,8 +145,10 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
     if (signal.aborted) return STOPPED;
     return Promise.race([runner(args, { cwd, timeoutMs: ms, maxBytes, signal, git: exe }), stopped]);
   };
+  // every return goes through here: a shared commit is owned once whatever path the pass ends by (done, stopped, thrown)
   const result = (status: RepoSignals["status"]): RepoSignals => {
     clearTimeout(timer);
+    assignOwners(read);
     const out: RepoSignals = { status, repos, roots, skipped, ms: Date.now() - started };
     if (since !== undefined) out.since = since;
     return out;
@@ -205,24 +217,36 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
       done++;
       try { input.onProgress?.(done, chosen.length); } catch { /* a caller's callback never fails repo signals */ }
     });
-    assignOwners(read);
     return result(partial());
   } catch {
     return result(partial());
   }
 
-  /** One repo's facts: identity, then its commits. */
+  /** One repo's facts: its commits (with an identity), then its allowlisted files. */
   async function readRepo(repo: Repo): Promise<{ facts: RepoFacts; commits: ParsedCommit[] } | typeof STOPPED> {
     const facts: RepoFacts = { repoKey: repo.repoKey, projectKeys: repo.projectKeys, identity: false, commits: [], commitsTruncated: false,
       fileLists: true, ...EMPTY_FACTS() };
-    let commits: ParsedCommit[] = [];
-    const out = () => ({ facts, commits });
-    const id = await git(["config", "--get", "user.email"], repo.root);
-    if (id === STOPPED) return STOPPED;
-    const email = id.code === 0 ? id.stdout.trim() : "";
-    if (email === "") return out();
-    facts.identity = true;
+    const got = await readCommits(repo, facts);
+    if (got === STOPPED) return STOPPED;
+    // the files of the worktree the most detail sessions ran in, never the common dir's parent: a `.git` may be a link to
+    // a store elsewhere, and each linked worktree holds its own files
+    const tree = repo.trees[0];
+    if (tree !== undefined) {
+      const cwds = tree.projectKeys.map((k) => input.cwds.get(k)).filter((c): c is string => c !== undefined);
+      const filesRunner: GitRunner = async (args, ro) => {
+        const r = await git(args, ro.cwd, ro.timeoutMs, ro.maxBytes);
+        return r === STOPPED ? { code: null, stdout: "", timedOut: false, truncated: false } : r;
+      };
+      Object.assign(facts, await readRepoFiles(tree.root, cwds, { signal, runner: filesRunner, now: input.now, timeoutMs, skip, history: got.names }));
+    }
+    return { facts, commits: got.commits };
+  }
 
+  /**
+   * One repo's identity, then its commits, into `facts`. `names`: whether git may read the history by path (false for a
+   * partial clone that cannot list paths without fetching).
+   */
+  async function readCommits(repo: Repo, facts: RepoFacts): Promise<{ commits: ParsedCommit[]; names: boolean } | typeof STOPPED> {
     // an older git would fetch a partial clone's missing trees to list paths (it has no GIT_NO_LAZY_FETCH): read it
     // without them. A partial clone says so by `extensions.partialClone` (older layouts) or its remote's `promisor`.
     let names = true;
@@ -234,6 +258,12 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
         if (!names) break;
       }
     }
+    const id = await git(["config", "--get", "user.email"], repo.root);
+    if (id === STOPPED) return STOPPED;
+    const email = id.code === 0 ? id.stdout.trim() : "";
+    if (email === "") return { commits: [], names };
+    facts.identity = true;
+
     const logArgs = (withNames: boolean): string[] => [
       "log", "--all", "--no-merges", "--no-renames", "--date-order",
       ...(since === undefined ? [] : [`--since=${new Date(since).toISOString()}`]),
@@ -252,12 +282,12 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
       skip("timeout");
       facts.commitsTruncated = true;
     }
-    if (!log.truncated && !log.timedOut && log.code !== 0) return out(); // an empty repo, or a history git cannot read
+    if (!log.truncated && !log.timedOut && log.code !== 0) return { commits: [], names }; // an empty repo, or a history git cannot read
     // a cut output's last record may be incomplete: it is left out
     const cut = log.truncated || log.timedOut;
-    commits = parseCommits(log.stdout, { salt: input.salt, email, maxFiles, cut });
+    const commits = parseCommits(log.stdout, { salt: input.salt, email, maxFiles, cut });
     facts.commits = commits.map((c) => c.fact);
     facts.commitsTruncated ||= log.truncated || logRecords(log.stdout, { cut }).length >= maxCommits;
-    return out();
+    return { commits, names };
   }
 }

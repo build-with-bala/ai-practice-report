@@ -9,11 +9,13 @@ import { __observeQueries, openRo } from "../../core/io/sqlite";
 import { TempRegistry } from "../../core/io/temp";
 import { scan, type ScanOptions, type ScanResult } from "../../core/scan";
 import { registry } from "../../core/sources/registry";
+import type { Candidate, SourcePlugin } from "../../core/sources/types";
 import { buildAntigravity } from "../fixtures/antigravity";
 import { buildCcLifetime, buildCcTranscripts } from "../fixtures/claude-code";
 import { buildCodexIndex, buildCodexRollouts } from "../fixtures/codex";
 import { buildCopilot, jetbrainsRel } from "../fixtures/copilot";
 import { buildAgentCli, buildCursor } from "../fixtures/cursor";
+import { makeRepo } from "../fixtures/repos";
 import { CANARY } from "../kit/canary";
 import { fakeHome, type FakeHome } from "../kit/home";
 
@@ -187,6 +189,37 @@ describe("never-opened files", () => {
       want.push(`stream ${linked}: never opened`);
     }
     expect(violations(opens, h.root)).toEqual(want);
+  });
+});
+
+describe("repo files: only the allowlisted ones are opened", () => {
+  /** A plugin that reports one recent detail-window session in `dir`. */
+  const sessionIn = (dir: string): SourcePlugin => ({
+    tool: "codex", id: "fake-sessions", tier: "P0", beta: false, describe: { reads: [], neverReads: [] },
+    locate: (): Candidate[] => [{ root: h.root, home: h.root, wsl: false }],
+    scan: async (_c, ctx) => {
+      ctx.emit({ k: "session", tool: "codex", source: "fake-sessions", id: "codex:s0", window: "detail", origin: "human",
+        start: ctx.now - 2 * 86_400_000, end: ctx.now - 86_400_000, models: [], projectKey: ctx.registerCwd(dir) });
+    },
+  });
+
+  test("a scan opens a repo's instruction files, hooks, CI and pre-commit config — never source files, .env, secrets or settings.local.json", async () => {
+    const allowed = ["CLAUDE.md", "AGENTS.md", "GEMINI.md", ".cursorrules", ".cursor/rules/a.mdc", ".claude/settings.json", ".github/workflows/ci.yml",
+      ".pre-commit-config.yaml", "lefthook.yml", ".husky/pre-commit", "pkg/CLAUDE.md"];
+    const planted = ["src/index.ts", ".env", "secrets.json", "package.json", ".claude/settings.local.json", "pkg/index.ts", "README.md", ".cursor/mcp.json",
+      ".github/dependabot.yml", ".husky/_/husky.sh"];
+    const files: Record<string, string> = {};
+    for (const rel of allowed) files[rel] = rel.endsWith(".json") ? "{}" : "x\n";
+    for (const rel of planted) files[rel] = rel.endsWith(".json") ? JSON.stringify({ token: CANARY.secret }) : `${CANARY.secret}\n`;
+    const repo = makeRepo(path.join(h.env.home, "code", "repo"), [{ files, message: "init", at: Date.now() - 3 * 86_400_000 }]);
+
+    const { r, opens } = await recordScan({ env: h.env, plugins: [sessionIn(path.join(repo, "pkg"))], handleSignals: false });
+
+    expect(r.repos.status).toBe("ok");
+    expect(violations(opens, h.root)).toEqual([]);
+    const inRepo = opens.map((o) => path.relative(real(repo), real(o.path)).split(path.sep).join("/")).filter((rel) => !rel.startsWith(".."));
+    expect(inRepo.sort()).toEqual([...allowed].sort());
+    expect(opens.every((o) => o.how === "read")).toBe(true);
   });
 });
 

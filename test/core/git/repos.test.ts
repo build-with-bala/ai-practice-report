@@ -167,12 +167,13 @@ describe("repo signals: discovery from session folders and commits as keyed fact
     process.env.XDG_CONFIG_HOME = path.join(h.root, "xdg");
     let r: Awaited<ReturnType<typeof run>>;
     try {
-      r = await run([r4], { repoSignals: { runner: (a, o) => { seen.push(a[0]!); return runGit(a, o); } } });
+      r = await run([r4], { repoSignals: { runner: (a, o) => { seen.push(a.join(" ")); return runGit(a, o); } } });
     } finally {
       for (const [k, v] of Object.entries(saved)) if (v === undefined) Reflect.deleteProperty(process.env, k); else process.env[k] = v;
     }
     expect(r.repos.repos[0]).toMatchObject({ identity: false, commits: [] });
-    expect(seen).not.toContain("log");
+    // no commit log: only the instruction-file history (commit times by any author, Task 3) runs `log`
+    expect(seen.filter((c) => c.startsWith("log ")).map((c) => c.split(" ").slice(0, 2).join(" "))).toEqual(["log -n50"]);
   });
 });
 
@@ -210,6 +211,12 @@ describe("repo signals: one repo, one count; hostile repos", () => {
     const largeIsB = path.basename(largeDir) === "b";
     const r = await run(largeIsB ? [a, b, path.join(b, "sub")] : [a, path.join(a, "sub"), b], { salt });
     expect(owners(r)).toEqual([[small, 3, 0], [large, 3, 3]]);
+
+    // a pass that ends partial (aborted once both were read) still owns each shared commit once
+    const ac = new AbortController();
+    const p = await run([a, b], { salt, signal: ac.signal, onProgress: (x) => { if (x.plugin === "repo-signals" && x.done === x.total) ac.abort(); } });
+    expect(p.repos.status).toBe("partial");
+    expect(owners(p)).toEqual([[small, 3, 3], [large, 3, 0]]);
   });
 
   test.skipIf(!POSIX)("a changed file named like a log record is a path, never a record (POSIX)", async () => {

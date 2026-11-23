@@ -51,8 +51,15 @@ export function candidates(cwds: ReadonlyMap<string, string>, recent: ReadonlySe
   return [...byDir].map(([dir, projectKeys]) => ({ dir, projectKeys }));
 }
 
-/** A repo: its key, its raw root (memory only), its session projects, and its detail-window session count. */
-export interface Repo { repoKey: string; root: string; projectKeys: string[]; sessions: number }
+/** A worktree of a repo that sessions ran in: its root as git spells it (memory only), its session projects, and their detail-window sessions. */
+export interface Worktree { root: string; projectKeys: string[]; sessions: number }
+
+/**
+ * A repo: its key, its raw root (memory only), its session projects, and its detail-window session count. `trees`: the
+ * worktrees sessions ran in, the one with the most detail-window sessions first (then the smallest root) — where the
+ * repo's files are read, since linked worktrees hold different files, and the common dir's parent may be no worktree.
+ */
+export interface Repo { repoKey: string; root: string; projectKeys: string[]; sessions: number; trees: Worktree[] }
 
 /** What `git rev-parse --show-toplevel --git-common-dir` said for a candidate: its worktree root and the repo's common dir. */
 export interface Found { cand: Candidate; root: string; commonDir: string }
@@ -86,15 +93,21 @@ function identity(p: string): string {
  */
 export function groupRepos(found: readonly Found[], salt: Uint8Array, detailSessions: ReadonlyMap<string, number>,
   max: number, skip: (reason: string) => void): Repo[] {
-  const byCommon = new Map<string, { common: string; roots: string[]; projectKeys: Set<string> }>();
+  const byCommon = new Map<string, { common: string; roots: string[]; projectKeys: Set<string>; trees: Map<string, Set<string>> }>();
   for (const { cand, root, commonDir } of found) {
     const common = real(path.resolve(cand.dir, commonDir));
     const id = identity(common);
-    const g = byCommon.get(id) ?? { common, roots: [], projectKeys: new Set<string>() };
+    const g = byCommon.get(id) ?? { common, roots: [], projectKeys: new Set<string>(), trees: new Map<string, Set<string>>() };
     g.roots.push(root);
-    for (const k of cand.projectKeys) g.projectKeys.add(k);
+    const tree = g.trees.get(root) ?? new Set<string>();
+    for (const k of cand.projectKeys) {
+      g.projectKeys.add(k);
+      tree.add(k);
+    }
+    g.trees.set(root, tree);
     byCommon.set(id, g);
   }
+  const sessionsOf = (keys: Iterable<string>): number => { let n = 0; for (const k of keys) n += detailSessions.get(k) ?? 0; return n; };
   const byKey = new Map<string, Repo>();
   for (const g of byCommon.values()) {
     // the main worktree, as git spells it when a session sat in it; else the common dir's parent; else (a bare or
@@ -106,12 +119,20 @@ export function groupRepos(found: readonly Found[], salt: Uint8Array, detailSess
       root = roots.find((r) => identity(r) === main) ?? path.dirname(g.common);
     }
     const repoKey = keyedHash(salt, normalizePath(root));
-    const repo = byKey.get(repoKey) ?? { repoKey, root, projectKeys: [], sessions: 0 };
+    const repo = byKey.get(repoKey) ?? { repoKey, root, projectKeys: [], sessions: 0, trees: [] };
     for (const k of g.projectKeys) {
       if (repo.projectKeys.includes(k)) continue;
       repo.projectKeys.push(k);
       repo.sessions += detailSessions.get(k) ?? 0;
     }
+    for (const [treeRoot, keys] of g.trees) {
+      const tree = repo.trees.find((t) => t.root === treeRoot);
+      const merged = new Set([...(tree?.projectKeys ?? []), ...keys]);
+      const next = { root: treeRoot, projectKeys: [...merged].sort(), sessions: sessionsOf(merged) };
+      if (tree) Object.assign(tree, next);
+      else repo.trees.push(next);
+    }
+    repo.trees.sort((a, b) => b.sessions - a.sessions || (a.root < b.root ? -1 : a.root > b.root ? 1 : 0));
     byKey.set(repoKey, repo);
   }
   const repos = [...byKey.values()].sort((a, b) => b.sessions - a.sessions || (a.repoKey < b.repoKey ? -1 : a.repoKey > b.repoKey ? 1 : 0));

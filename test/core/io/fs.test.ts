@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { bornAt, fileState, isDir, isFile, readJsonSmall, readJsonSmallResult, readTextLines, safeList, safeStat, walk } from "../../../core/io/fs";
+import { bornAt, fileState, isDir, isFile, readJsonSmall, readJsonSmallResult, readTextLines, readTextSmall, safeList, safeStat, walk } from "../../../core/io/fs";
 
 let root: string;
 beforeAll(() => {
@@ -217,5 +217,55 @@ describe("readTextLines", () => {
     ac.abort();
     expect(await lines(p, 10, ac.signal)).toEqual([]);
     await expect(lines(path.join(root, "t-missing.txt"), 10)).rejects.toThrow();
+  });
+});
+
+/** A named pipe at `p` (POSIX): nothing writes to it, so a reader that opened it would wait forever. */
+function fifo(p: string): string {
+  const r = Bun.spawnSync(["mkfifo", p], { stdout: "ignore", stderr: "ignore" });
+  if (r.exitCode !== 0) throw new Error("mkfifo failed");
+  return p;
+}
+
+describe("readTextSmall", () => {
+  test("a small file whole, a leading BOM dropped; a missing path, a folder, a file over the cap", () => {
+    const p = path.join(root, "s-small.md");
+    writeFileSync(p, "\uFEFFhello\nworld\n");
+    expect(readTextSmall(p, 1024)).toEqual({ ok: true, text: "hello\nworld\n" });
+    expect(readTextSmall(p, 15)).toEqual({ ok: true, text: "hello\nworld\n" }); // 15 bytes: at the cap
+    expect(readTextSmall(p, 14)).toEqual({ ok: false, reason: "too-large" });
+    expect(readTextSmall(path.join(root, "s-missing.md"), 1024)).toEqual({ ok: false, reason: "missing" });
+    const d = path.join(root, "s-dir");
+    mkdirSync(d);
+    expect(readTextSmall(d, 1024)).toEqual({ ok: false, reason: "not-file" });
+  });
+
+  test("a link is read as the file it points to", () => {
+    const target = path.join(root, "s-target.md");
+    writeFileSync(target, "linked");
+    const at = path.join(root, "s-link.md");
+    try {
+      symlinkSync(target, at);
+    } catch (e) {
+      if (process.platform !== "win32") throw e;
+      return;
+    }
+    expect(readTextSmall(at, 1024)).toEqual({ ok: true, text: "linked" });
+  });
+
+  test.skipIf(process.platform === "win32")("a FIFO is no regular file: refused at once, never opened, so it cannot hang a read (POSIX)", () => {
+    const p = fifo(path.join(root, "s-fifo"));
+    expect(readTextSmall(p, 1024)).toEqual({ ok: false, reason: "not-file" });
+  });
+});
+
+describe("readTextLines: only a regular file", () => {
+  test.skipIf(process.platform === "win32")("a FIFO, a device and a folder throw at once, never opened (POSIX)", async () => {
+    const p = fifo(path.join(root, "l-fifo"));
+    const d = path.join(root, "l-dir");
+    mkdirSync(d);
+    for (const at of [p, "/dev/zero", d]) {
+      await expect((async () => { for await (const _ of readTextLines(at, { maxBytes: 1024 })) { /* drain */ } })()).rejects.toThrow(/not a regular file/);
+    }
   });
 });

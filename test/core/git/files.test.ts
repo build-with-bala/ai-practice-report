@@ -1,0 +1,298 @@
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import path from "node:path";
+import { ciChecks, INSTRUCTION_FILES, mentionedChecks, precommitChecks, readRepoFiles, REPO_FILES, REPO_FOLDERS } from "../../../core/git/files";
+import { REPO_SIGNALS_DESCRIBE } from "../../../core/git/index";
+import { runGit } from "../../../core/git/run";
+import { __observeOpens } from "../../../core/io/observe";
+import type { Ev } from "../../../core/model/events";
+import { scan, type ScanOptions } from "../../../core/scan";
+import { parseHooks } from "../../../core/sources/common/hooks";
+import type { Candidate, SourcePlugin } from "../../../core/sources/types";
+import { CANARY, expectNoCanaries } from "../../kit/canary";
+import { fakeHome, type FakeHome } from "../../kit/home";
+import { git, makeRepo } from "../../fixtures/repos";
+
+const POSIX = process.platform !== "win32";
+const DAY = 86_400_000;
+const ago = (days: number) => Date.now() - days * DAY;
+
+let h: FakeHome;
+beforeEach(() => { h = fakeHome(); });
+afterEach(() => {
+  __observeOpens(undefined);
+  h.cleanup();
+});
+
+/** A plugin that reports one detail-window session per folder (count: how many sessions in it), each folder its own project. */
+function sessions(folders: (string | [string, number])[]): SourcePlugin {
+  return {
+    tool: "codex", id: "fake-sessions", tier: "P0", beta: false, describe: { reads: [], neverReads: [] },
+    locate: (): Candidate[] => [{ root: h.root, home: h.root, wsl: false }],
+    scan: async (_c, ctx) => {
+      let n = 0;
+      for (const f of folders) {
+        const [dir, count] = typeof f === "string" ? [f, 1] : f;
+        const projectKey = ctx.registerCwd(dir);
+        for (let i = 0; i < count; i++) {
+          const ev: Ev = { k: "session", tool: "codex", source: "fake-sessions", id: `codex:s${n++}`, window: "detail", origin: "human",
+            start: ctx.now - 10 * DAY, end: ctx.now - 9 * DAY, models: [], projectKey };
+          ctx.emit(ev);
+        }
+      }
+      ctx.emit({ k: "coverage", tool: "codex", source: "fake-sessions", window: "detail", status: "ok", files: 1, bytes: 1, records: n,
+        skipped: {}, unknownTypes: {}, versions: [] });
+    },
+  };
+}
+const run = (folders: (string | [string, number])[], o: Partial<ScanOptions> = {}) =>
+  scan({ env: h.env, plugins: [sessions(folders)], handleSignals: false, ...o });
+
+/** Writes files under `dir` (relative path → content). */
+function plant(dir: string, files: Record<string, string>): void {
+  for (const [rel, content] of Object.entries(files)) {
+    const p = path.join(dir, rel);
+    mkdirSync(path.dirname(p), { recursive: true });
+    writeFileSync(p, content);
+  }
+}
+
+/** A repo at `<root>/<name>` with one commit of `files`, made a few days ago. */
+const repoWith = (name: string, files: Record<string, string>) =>
+  makeRepo(path.join(h.root, name), [{ files: { "README.txt": "r", ...files }, message: "init", at: ago(3) }]);
+
+/** readRepoFiles of one folder, with real git; `skipped` collects the skip reasons. */
+async function read(root: string, cwds: string[] = [], now = Date.now()) {
+  const skipped: Record<string, number> = {};
+  const facts = await readRepoFiles(root, cwds, { signal: new AbortController().signal, runner: runGit, now, timeoutMs: 10_000,
+    skip: (reason) => { skipped[reason] = (skipped[reason] ?? 0) + 1; } });
+  return { ...facts, skipped };
+}
+
+function link(target: string, at: string): boolean {
+  mkdirSync(path.dirname(at), { recursive: true });
+  try {
+    symlinkSync(target, at);
+    return true;
+  } catch (e) {
+    if (POSIX) throw e;
+    return false;
+  }
+}
+
+describe("the text scanners: commands found in text, as check kinds only", () => {
+  test("mentionedChecks: inline code spans, fenced code lines and `$ ` lines; prose never", () => {
+    expect(mentionedChecks("Run `bun test` before a commit.\n\n```sh\nnpm run lint\n```\n")).toEqual(["test", "lint"]);
+    expect(mentionedChecks("~~~\ncargo clippy\n~~~\n$ tsc --noEmit\n  $ make build\n")).toEqual(["build", "lint", "typecheck"]);
+    expect(mentionedChecks("We run pytest and npm test in CI, but say so only in prose.")).toEqual([]);
+    expect(mentionedChecks("an unclosed fence:\n```\npytest -q\n")).toEqual(["test"]);
+  });
+
+  test("ciChecks: `run:` values, plain, quoted and block scalars; other keys never", () => {
+    const yaml = [
+      "jobs:", "  test:", "    steps:", "      - uses: actions/checkout@v4", "      - name: pytest is a name, not a command",
+      "      - run: |", "          pnpm install", "          pnpm test", "      - name: next", "        run: \"npm run lint\" # quoted",
+      "      - run: >-", "          tsc", "          --noEmit", "        env: { CI: 'cargo build' }",
+    ].join("\n");
+    expect(ciChecks(yaml)).toEqual(["test", "lint", "typecheck"]);
+    expect(ciChecks("on: push\njobs:\n  a:\n    steps:\n      - run: echo hi\n")).toEqual([]);
+  });
+
+  test("precommitChecks: pre-commit hook ids and entry lines; lefthook run lines; husky script lines", () => {
+    expect(precommitChecks("pre-commit", "repos:\n  - repo: x\n    hooks:\n      - id: ruff\n      - id: mypy\n")).toEqual(["lint", "typecheck"]);
+    expect(precommitChecks("pre-commit", "repos:\n  - repo: local\n    hooks:\n      - id: unit\n        entry: pytest -q\n      - id: pytest\n")).toEqual(["test"]);
+    expect(precommitChecks("pre-commit", "  - id: trailing-whitespace\n  - id: 'eslint'\n")).toEqual(["lint"]);
+    expect(precommitChecks("lefthook", "pre-commit:\n  commands:\n    lint:\n      run: npx eslint {staged_files}\n")).toEqual(["lint"]);
+    expect(precommitChecks("husky", "#!/usr/bin/env sh\n# pytest in a comment\nnpx vitest run\n")).toEqual(["test"]);
+  });
+
+  test("parseHooks: entries per event, checks of command hooks, disableAllHooks; drift reported by key", () => {
+    const shapes: string[] = [];
+    const p = parseHooks({ hooks: { PostToolUse: [{ hooks: [{ type: "command", command: "bun test" }, { type: "prompt", prompt: "x" }] }, "bad"],
+      "lower-case": [{ hooks: [{ type: "command", command: "tsc --noEmit" }] }] } }, (k) => shapes.push(k));
+    expect(p).toMatchObject({ entries: 3, events: ["PostToolUse", "PostToolUse", "other"], checks: ["test", "typecheck"], disabled: false });
+    expect(shapes).toEqual(["hooks:shape"]);
+    expect(parseHooks({ disableAllHooks: true, hooks: { Stop: [{ hooks: [{ type: "command", command: "make test" }] }] } }))
+      .toMatchObject({ entries: 1, events: [], checks: [], disabled: true });
+    const drift: string[] = [];
+    expect(parseHooks({ disableAllHooks: "yes", hooks: [] }, (k) => drift.push(k))).toMatchObject({ entries: 0, disabled: false });
+    expect(drift).toEqual(["disableAllHooks:type", "hooks:type"]);
+    expect(parseHooks(undefined)).toEqual({ entries: 0, events: [], entryChecks: [], checks: [], disabled: false });
+  });
+});
+
+describe("readRepoFiles: the allowlisted repo files, as booleans and counts", () => {
+  const cases: [string, Record<string, string>, (f: Awaited<ReturnType<typeof read>>) => void][] = [
+    ["CLAUDE.md names `bun test` and has a fenced npm run lint", { "CLAUDE.md": "Run `bun test`.\n\n```sh\nnpm run lint\n```\n" },
+      (f) => expect(f.instructions).toMatchObject({ files: ["claude"], namesChecks: ["test", "lint"] })],
+    [".cursor/rules/a.mdc exists", { ".cursor/rules/a.mdc": "---\n---\nbe nice\n" }, (f) => expect(f.instructions.files).toContain("cursor-rules")],
+    [".github/workflows/ci.yml with a run block holding pnpm test", { ".github/workflows/ci.yml": "jobs:\n  t:\n    steps:\n      - run: |\n          pnpm i\n          pnpm test\n" },
+      (f) => expect(f.ci).toEqual({ present: true, checks: ["test"] })],
+    [".pre-commit-config.yaml with id: ruff", { ".pre-commit-config.yaml": "repos:\n  - repo: r\n    hooks:\n      - id: ruff\n" },
+      (f) => expect(f.precommit).toEqual({ present: true, checks: ["lint"] })],
+    [".husky/pre-commit with npx vitest run", { ".husky/pre-commit": "npx vitest run\n" }, (f) => expect(f.precommit.checks).toContain("test")],
+    [".claude/settings.json PostToolUse hook running bun test", { ".claude/settings.json": JSON.stringify({ hooks: { PostToolUse: [{ hooks: [{ type: "command", command: "bun test" }] }] } }) },
+      (f) => expect(f.hooks).toEqual({ entries: 1, checks: ["test"], disabled: false })],
+    ["the same, plus disableAllHooks: true", { ".claude/settings.json": JSON.stringify({ disableAllHooks: true, hooks: { PostToolUse: [{ hooks: [{ type: "command", command: "bun test" }] }] } }) },
+      (f) => expect(f.hooks).toMatchObject({ disabled: true, checks: [] })],
+    ["a 300 KiB CLAUDE.md", { "CLAUDE.md": `\`bun test\`\n${"x".repeat(300 * 1024)}\n` },
+      (f) => {
+        expect(f.instructions).toMatchObject({ files: ["claude"], namesChecks: [] });
+        expect(f.skipped).toEqual({ "file-too-large": 1 });
+      }],
+    ["every other kind: AGENTS.md, GEMINI.md, .cursorrules, lefthook.yml", { "AGENTS.md": "`go test ./...`", "GEMINI.md": "x", ".cursorrules": "$ make lint", "lefthook.yml": "pre-push:\n  commands:\n    t:\n      run: cargo build\n" },
+      (f) => {
+        expect(f.instructions).toMatchObject({ files: ["agents", "gemini", "cursorrules"], namesChecks: ["test", "lint"] });
+        expect(f.precommit).toEqual({ present: true, checks: ["build"] });
+      }],
+    ["nothing at all", {}, (f) => {
+      expect(f).toEqual({ instructions: { files: [], namesChecks: [], touched: 0 }, hooks: { entries: 0, checks: [], disabled: false },
+        ci: { present: false, checks: [] }, precommit: { present: false, checks: [] }, skipped: {} });
+    }],
+  ];
+  for (const [name, files, check] of cases) {
+    test(name, async () => check(await read(repoWith("r", files))));
+  }
+
+  test("folders: one level only, the allowed endings, at most 64 files each (the rest counted)", async () => {
+    const files: Record<string, string> = {
+      ".cursor/rules/deep/a.md": "x", ".cursor/rules/notes.txt": "x", ".github/workflows/deep/ci.yml": "run: pytest",
+      ".github/workflows/README.md": "run: pytest", ".husky/_/husky.sh": "pytest", ".husky/.gitignore": "pytest",
+    };
+    for (let i = 0; i < 70; i++) files[`.github/workflows/w${String(i).padStart(2, "0")}.yaml`] = "on: push\n";
+    const f = await read(repoWith("r", files));
+    expect(f.instructions.files).toEqual([]);
+    expect(f.ci).toEqual({ present: true, checks: [] });
+    expect(f.precommit).toEqual({ present: false, checks: [] });
+    expect(f.skipped).toEqual({ "files-capped": 6 });
+  });
+
+  test("CLAUDE.md and AGENTS.md at each session folder inside the repo; folders outside it are not read", async () => {
+    const root = repoWith("r", { "pkg/CLAUDE.md": "`pytest`", "app/AGENTS.md": "`npm run build`" });
+    const outside = path.join(h.root, "elsewhere");
+    plant(outside, { "CLAUDE.md": "`cargo clippy`" });
+    const f = await read(root, [path.join(root, "pkg"), path.join(root, "app"), outside, root]);
+    expect(f.instructions).toMatchObject({ files: ["claude", "agents"], namesChecks: ["test", "build"] });
+  });
+
+  test("instruction history: commits by any author touching an instruction path within 180 days", async () => {
+    const root = makeRepo(path.join(h.root, "r"), [
+      { files: { "AGENTS.md": "one" }, message: "old", at: ago(200) },
+      { files: { "src.ts": "x" }, message: "not an instruction file", at: ago(20) },
+      { files: { "AGENTS.md": "two" }, message: "new", at: ago(10), email: "someone@else.test" },
+    ]);
+    const f = await read(root);
+    expect(f.instructions.touched).toBe(1);
+    expect(Math.abs(f.instructions.lastTouched! - ago(10))).toBeLessThan(60_000);
+    // an instruction file at a session folder inside the repo is an instruction path too
+    const sub = makeRepo(path.join(h.root, "s"), [{ files: { "pkg/CLAUDE.md": "x" }, message: "a", at: ago(5) },
+      { files: { ".cursor/rules/a.md": "z" }, message: "b", at: ago(4) }]);
+    expect((await read(sub)).instructions.touched).toBe(1);
+    expect((await read(sub, [path.join(sub, "pkg")])).instructions.touched).toBe(2);
+  });
+
+  test("canaries in every file's name and text never reach the facts", async () => {
+    const c = `${CANARY.prompt} ${CANARY.secret} ${CANARY.path} ${CANARY.email}`;
+    const root = repoWith(CANARY.project, {
+      "CLAUDE.md": `${c}\n\`${CANARY.project} test\`\n`, "AGENTS.md": c, "GEMINI.md": c, ".cursorrules": c, [`.cursor/rules/${CANARY.project}.mdc`]: c,
+      [`.github/workflows/${CANARY.project}.yml`]: `name: ${c}\njobs:\n  x:\n    steps:\n      - run: echo ${CANARY.secret} && npm test\n`,
+      ".pre-commit-config.yaml": `# ${c}\n  - id: ${CANARY.slug}\n    entry: ${CANARY.code}\n`, "lefthook.yml": `x:\n  run: ${c}\n`,
+      [`.husky/${CANARY.project}`]: `${c}\n`,
+      ".claude/settings.json": JSON.stringify({ hooks: { [CANARY.project]: [{ hooks: [{ type: "command", command: `${CANARY.secret} && npm test` }] }] } }),
+    });
+    const f = await read(root, [root]);
+    expect(f.ci.checks).toEqual(["test"]);
+    expect(f.hooks.checks).toEqual(["test"]);
+    expectNoCanaries(f);
+  });
+
+  test("a never-opened name, or a link to one, is present but refused: attempted, never read, counted", async () => {
+    const root = repoWith("r", { ".github/workflows/secrets.yaml": "jobs:\n  a:\n    steps:\n      - run: npm test\n" });
+    const secret = path.join(h.root, "keys", "secrets.json");
+    plant(path.dirname(secret), { "secrets.json": "run: cargo clippy\n" });
+    const linked = link(secret, path.join(root, ".github", "workflows", "ci.yml"));
+    const opened: string[] = [];
+    __observeOpens((p) => opened.push(path.basename(p)));
+    const f = await read(root);
+    __observeOpens(undefined);
+    expect(f.ci).toEqual({ present: true, checks: [] }); // neither was read
+    expect(f.skipped).toEqual({ "file-refused": linked ? 2 : 1 });
+    expect(opened.sort()).toEqual(linked ? ["ci.yml", "secrets.yaml"] : ["secrets.yaml"]);
+  });
+
+  test.skipIf(!POSIX)("a FIFO where a repo file goes is no file: never opened, the read never hangs (POSIX)", async () => {
+    const root = repoWith("r", {});
+    mkdirSync(path.join(root, ".github", "workflows"), { recursive: true });
+    mkdirSync(path.join(root, ".husky"));
+    mkdirSync(path.join(root, ".claude"));
+    for (const rel of ["CLAUDE.md", ".github/workflows/ci.yml", ".husky/pre-commit", ".claude/settings.json"]) {
+      if (Bun.spawnSync(["mkfifo", path.join(root, rel)]).exitCode !== 0) throw new Error("mkfifo failed");
+    }
+    const opened: string[] = [];
+    __observeOpens((p) => opened.push(p));
+    const t = Date.now();
+    const f = await read(root, [root]);
+    __observeOpens(undefined);
+    expect(Date.now() - t).toBeLessThan(5_000);
+    expect(opened).toEqual([]);
+    expect([f.instructions.files, f.ci.present, f.precommit.present]).toEqual([[], false, false]);
+    expect(f.skipped).toEqual({ "file-not-file": 4 });
+  });
+});
+
+describe("repo files in a scan", () => {
+  test("a linked worktree with the only instruction file, where the session ran: read from that worktree", async () => {
+    const main = makeRepo(path.join(h.root, "main"), [{ files: { "a.txt": "a" }, message: "one", at: ago(4) }]);
+    const wt = path.join(h.root, "wt");
+    git(main, ["worktree", "add", "-q", "-b", "side", wt]);
+    plant(wt, { "CLAUDE.md": "`bun test`", ".github/workflows/ci.yml": "jobs:\n  a:\n    steps:\n      - run: make lint\n" });
+    const r = await run([wt]);
+    expect(r.repos.repos).toHaveLength(1);
+    expect(r.repos.repos[0]).toMatchObject({ instructions: { files: ["claude"], namesChecks: ["test"] }, ci: { present: true, checks: ["lint"] } });
+  });
+
+  test("several worktrees with sessions: the one with the most detail sessions is read", async () => {
+    const main = makeRepo(path.join(h.root, "main"), [{ files: { "a.txt": "a" }, message: "one", at: ago(4) }]);
+    const wt = path.join(h.root, "wt");
+    git(main, ["worktree", "add", "-q", "-b", "side", wt]);
+    plant(main, { "AGENTS.md": "x" });
+    plant(wt, { "GEMINI.md": "x" });
+    expect((await run([[main, 1], [wt, 3]])).repos.repos[0]!.instructions.files).toEqual(["gemini"]);
+    expect((await run([[main, 3], [wt, 1]])).repos.repos[0]!.instructions.files).toEqual(["agents"]);
+  });
+
+  test("a repo without user.email still has its files read", async () => {
+    const root = makeRepo(path.join(h.root, "r"), [{ files: { "CLAUDE.md": "`pytest`" }, message: "a", at: ago(3) }], { email: "" });
+    // no global config either: a home of its own
+    const saved = { HOME: process.env.HOME, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME };
+    process.env.HOME = h.root;
+    process.env.XDG_CONFIG_HOME = path.join(h.root, "xdg");
+    let r: Awaited<ReturnType<typeof run>>;
+    try {
+      r = await run([root]);
+    } finally {
+      for (const [k, v] of Object.entries(saved)) if (v === undefined) Reflect.deleteProperty(process.env, k); else process.env[k] = v;
+    }
+    expect(r.repos.repos[0]).toMatchObject({ identity: false, commits: [], instructions: { files: ["claude"], namesChecks: ["test"], touched: 1 } });
+  });
+
+  test("repoSignals: false reads no repo file", async () => {
+    const root = repoWith("r", { "CLAUDE.md": "`pytest`" });
+    const opened: string[] = [];
+    __observeOpens((p) => opened.push(p));
+    await run([root], { repoSignals: false });
+    __observeOpens(undefined);
+    expect(opened.filter((p) => p.startsWith(root))).toEqual([]);
+  });
+});
+
+describe("--explain: what repo signals read", () => {
+  test("REPO_SIGNALS_DESCRIBE.reads names every file and folder readRepoFiles opens or lists, and never settings.local.json", () => {
+    const reads = REPO_SIGNALS_DESCRIBE.reads.join("\n");
+    const named = [...Object.values(INSTRUCTION_FILES), ...REPO_FILES, ...REPO_FOLDERS.map((f) => f.dir)];
+    expect(named.filter((p) => !reads.includes(p))).toEqual([]);
+    // settings.local.json is named only as never opened (pre-flight P21)
+    expect(reads.split(/(?<=\.) /).filter((sentence) => sentence.includes("settings.local.json"))).toEqual([expect.stringMatching(/never opened/)]);
+    expect(reads).toMatch(/system-level git config/i);
+  });
+});

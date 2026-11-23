@@ -1,6 +1,6 @@
-import { lstatSync, readdirSync, readFileSync, statSync, type Stats } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readdirSync, readFileSync, readSync, statSync, type Stats } from "node:fs";
 import path from "node:path";
-import { noteOpen } from "./observe";
+import { NeverOpenedError, noteOpen } from "./observe";
 import { maybeYield } from "./yield";
 
 export function safeList(dir: string): string[] {
@@ -103,15 +103,68 @@ export function readJsonSmall(p: string, maxBytes: number = 8 * 1024 * 1024): un
   return r.ok ? r.value : undefined;
 }
 
+export type TextSmallResult = { ok: true; text: string } | { ok: false; reason: "missing" | "not-file" | "too-large" | "refused" | "io-error" };
+
+/**
+ * A small text file read whole (a repo's allowlisted files), links followed, saying why it could not be read: `missing`
+ * (nothing there, a dangling link), `not-file` (a folder, a pipe, a device: never opened, so a FIFO cannot hang the
+ * read), `too-large` (over `maxBytes`: never opened), `refused` (a never-opened file, by its name or its link's target:
+ * attempted, never opened — `noteOpen`), `io-error`. The file is opened without blocking and checked again by its open
+ * handle, so one swapped for a pipe or grown past the cap between the checks is still refused. A leading UTF-8 BOM is
+ * dropped and invalid UTF-8 replaced.
+ */
+export function readTextSmall(p: string, maxBytes: number): TextSmallResult {
+  const s = statPath(p);
+  if (s.state === "missing") return { ok: false, reason: "missing" };
+  if (s.state === "error") return { ok: false, reason: "io-error" };
+  if (s.state !== "file") return { ok: false, reason: "not-file" };
+  if (s.stat.size > maxBytes) return { ok: false, reason: "too-large" };
+  try {
+    noteOpen(p, "read");
+  } catch (e) {
+    return { ok: false, reason: e instanceof NeverOpenedError ? "refused" : "io-error" };
+  }
+  let fd: number;
+  try {
+    fd = openSync(p, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
+  } catch {
+    return { ok: false, reason: "io-error" };
+  }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) return { ok: false, reason: "not-file" };
+    if (st.size > maxBytes) return { ok: false, reason: "too-large" };
+    const buf = new Uint8Array(maxBytes + 1);
+    let size = 0;
+    for (;;) {
+      const n = readSync(fd, buf, size, buf.length - size, null);
+      if (n === 0) break;
+      size += n;
+      if (size > maxBytes) return { ok: false, reason: "too-large" };
+    }
+    let bytes = buf.subarray(0, size);
+    if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) bytes = bytes.subarray(3);
+    return { ok: true, text: new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes) };
+  } catch {
+    return { ok: false, reason: "io-error" };
+  } finally {
+    closeSync(fd);
+  }
+}
+
 /**
  * The lines of a text file, streamed with bounded memory, links followed: split at `\n` (a `\r` before it is kept), a
  * leading UTF-8 BOM dropped, invalid UTF-8 replaced; a last line without a newline is yielded unless it is empty.
  * `maxBytes` caps each line, never the file: a longer line ends the read with a RangeError. Between chunks the read lets
  * the event loop run (`maybeYield`); once `signal` is aborted it ends early, and the caller must not count the file as
- * fully read. Any I/O failure throws, a missing path included (callers stat the path first), and so does a never-opened
- * file, refused unopened (`noteOpen`: NeverOpenedError).
+ * fully read. Any I/O failure throws, a missing path included (callers stat the path first); so does a path that is not
+ * a regular file (a folder, a pipe, a device: never opened, so a FIFO cannot hang the read), and a never-opened file,
+ * refused unopened (`noteOpen`: NeverOpenedError).
  */
 export async function* readTextLines(p: string, o: { maxBytes: number; signal?: AbortSignal }): AsyncGenerator<string> {
+  const state = fileState(p);
+  if (state === "missing") throw Object.assign(new Error("no such file"), { code: "ENOENT" });
+  if (state !== "file") throw new Error(state === "error" ? "the path cannot be stat'ed" : `not a regular file (${state})`);
   noteOpen(p, "stream");
   const decoder = new TextDecoder("utf-8", { ignoreBOM: true });
   let parts: Uint8Array[] = []; // pieces of the current line, joined once its newline arrives
