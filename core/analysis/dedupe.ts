@@ -3,8 +3,12 @@ import type { SessionRow } from "./types";
 
 /** Two prompts with an equal text hash from different tools, at most this far apart, are one prompt typed once. */
 export const PAIR_WINDOW_MS = 60_000;
-/** A session pair is one session reported twice when at least this share of one side's prompts pair. */
+/** A session pair is one session reported twice only when at least this share of BOTH sides' pairable prompts pair… */
 export const HOST_SHARE = 0.5;
+/** …and at least this many prompts pair. */
+export const HOST_MIN_PAIRS = 3;
+/** Prompts this short ("yes", "continue") are typed everywhere: they never pair. */
+export const MAX_SHORT_WORDS = 2;
 
 export interface DedupeResult {
   /** The host copies: left out of every metric. */
@@ -29,10 +33,15 @@ function hostOf(a: SessionRow, b: SessionRow): SessionRow {
 }
 
 /**
- * The cross-tool dedupe (builder's call 9) over detail-window prompts of kept rows:
- * 1. prompts from different tools with an equal `textHash` within PAIR_WINDOW_MS pair, one to one, earliest first;
- * 2. a session pair where at least HOST_SHARE of one side's human-or-scripted prompts paired has a host copy (`hostOf`);
- * 3. in the other session, the paired prompts whose origin is `scripted` are relabelled human.
+ * The cross-tool dedupe (builder's call 9, as amended) over detail-window prompts of kept rows:
+ * 1. pairable prompts: human or scripted, with more than MAX_SHORT_WORDS words (a short prompt never pairs and is not
+ *    counted in a session's share);
+ * 2. pairable prompts from different tools with an equal `textHash` within PAIR_WINDOW_MS pair, one to one, earliest first;
+ * 3. a session pair is a host copy only when at least HOST_MIN_PAIRS prompts pair AND the paired share is at least
+ *    HOST_SHARE on BOTH sides (an agent host mirrors the whole session; a coincidental prompt does not); `hostOf` picks
+ *    which side is the copy;
+ * 4. in the other session, the paired prompts whose origin is `scripted` are relabelled human.
+ * `pairedPrompts` counts every pair of step 2; `relabelled` only those of step 4.
  */
 export function dedupe(prompts: readonly PromptEv[], rows: ReadonlyMap<string, SessionRow>): DedupeResult {
   const eligible: PromptEv[] = [];
@@ -40,6 +49,7 @@ export function dedupe(prompts: readonly PromptEv[], rows: ReadonlyMap<string, S
   for (const p of prompts) {
     if (p.window !== "detail" || p.sessionId === undefined || !rows.has(p.sessionId)) continue;
     if (p.origin !== "human" && p.origin !== "scripted") continue;
+    if (p.features.words <= MAX_SHORT_WORDS) continue;
     eligible.push(p);
     perSession.set(p.sessionId, (perSession.get(p.sessionId) ?? 0) + 1);
   }
@@ -81,7 +91,8 @@ export function dedupe(prompts: readonly PromptEv[], rows: ReadonlyMap<string, S
   for (const key of [...pairs.keys()].sort()) {
     const list = pairs.get(key)!;
     const [a, b] = key.split("\u0000") as [string, string];
-    const share = Math.max(list.length / perSession.get(a)!, list.length / perSession.get(b)!);
+    if (list.length < HOST_MIN_PAIRS) continue;
+    const share = Math.min(list.length / perSession.get(a)!, list.length / perSession.get(b)!);
     if (share < HOST_SHARE) continue;
     hosts.add(hostOf(rows.get(a)!, rows.get(b)!).id);
     hostPairs.push([key, list]);

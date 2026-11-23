@@ -108,10 +108,12 @@ describe("activity", () => {
     const tool = (id: string, tl: ToolId, over: Partial<SessionEv> = {}) => sess(id, { tool: tl, source: `${tl}.x`, ...over });
     const p = (sid: string, tl: ToolId, ts: number, over: Partial<PromptEv> = {}) => ({ ...prompt(sid, ts, over), tool: tl, source: `${tl}.x` });
     const evs: Ev[] = [
-      tool("H", "copilot", { surface: "vscode" }), p("H", "copilot", T0, { textHash: "x" }),
-      tool("A", "claude-code"), p("A", "claude-code", T0 + 1000, { textHash: "x" }),
-      tool("H2", "copilot", { surface: "vscode" }), p("H2", "copilot", T0 + DAY, { textHash: "y" }), // H2 pairs with B
-      tool("B", "claude-code"), p("B", "claude-code", T0 + DAY + 1000, { textHash: "y" }),
+      tool("H", "copilot", { surface: "vscode" }), tool("A", "claude-code"),
+      tool("H2", "copilot", { surface: "vscode" }), tool("B", "claude-code"), // H2 mirrors B
+      ...[0, 1, 2].flatMap((i) => [
+        p("H", "copilot", T0 + i * 60_000, { textHash: `x${i}` }), p("A", "claude-code", T0 + i * 60_000 + 1000, { textHash: `x${i}` }),
+        p("H2", "copilot", T0 + DAY + i * 60_000, { textHash: `y${i}` }), p("B", "claude-code", T0 + DAY + i * 60_000 + 1000, { textHash: `y${i}` }),
+      ]),
       tool("P", "codex", { projectKey: "secret" }), p("P", "codex", T0 + 2 * DAY),
       p("P", "codex", T0 + 3 * DAY, { window: "lifetime" }), // its row is project-excluded
       p("unknown", "codex", T0 + 4 * DAY, { window: "lifetime" }), // no row: a project exclusion cannot apply
