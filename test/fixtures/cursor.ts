@@ -1,5 +1,5 @@
-// Synthetic Cursor stores. Cursor is not installed on the fixture author's machine: table, key and field names follow the
-// public descriptions FORMAT.md summarises (from docs, unverified locally); every value is invented.
+// Synthetic Cursor stores. Table, key and field names follow the public descriptions FORMAT.md summarises (from
+// documentation, not confirmed with the structure probe); every value is invented.
 import { Database } from "bun:sqlite";
 import path from "node:path";
 import { vscodeUser } from "../../core/env/paths";

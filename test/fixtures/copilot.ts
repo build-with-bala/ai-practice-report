@@ -177,7 +177,7 @@ export function buildCopilot(h: FakeHome): CopilotFixture {
   return { t0, journalFile, legacyFile, copyFile, jetbrainsFile, appsFile, hostsFile };
 }
 
-// ---- Copilot CLI (from the CLI's session event schema and the store schema; not seen on the fixture author's machine) ----
+// ---- Copilot CLI (from the CLI's session event schema and the store schema; not confirmed with the structure probe) ----
 
 /** Builds one CLI `events.jsonl` record by record: `{type, data, id, timestamp, parentId}` with a running clock. */
 export class CliEvents {
