@@ -1,0 +1,107 @@
+import { describe, expect, test } from "bun:test";
+import { buildSessionTable } from "../../../core/analysis/sessions";
+import { checkReleases, RELEASES, type ReleaseTable } from "../../../core/forensics/releases";
+import type { Ev, SessionEv, TurnEv, UsageEv } from "../../../core/model/events";
+import type { ToolId } from "../../../core/model/ids";
+import { scanResultOf } from "../../kit/scanresult";
+
+const HOUR = 3_600_000;
+const DAY = 86_400_000;
+const RELEASED = Date.UTC(2026, 5, 10);
+const TABLE: ReleaseTable = {
+  version: 1,
+  models: [
+    { match: "^model-x(-\\d{8})?$", released: "2026-06-10", source: "https://example.com/x" },
+    { match: "^model-", released: "2020-01-01", source: "https://example.com/any" },
+  ],
+  tools: { codex: [{ version: "9.1.0", released: "2026-06-10", source: "https://example.com/v" }] },
+};
+const sess = (id: string, start: number, over: Partial<SessionEv> = {}): SessionEv => ({
+  k: "session", tool: "claude-code", source: "claude-code.transcripts", id, window: "detail", origin: "human", start, end: start + 3_600_000,
+  models: [], ...over,
+});
+const turn = (sessionId: string, ts: number, model: string): TurnEv =>
+  ({ k: "turn", tool: "claude-code", source: "claude-code.transcripts", ts, sessionId, window: "detail", model });
+const usage = (sessionId: string, ts: number, model: string): UsageEv =>
+  ({ k: "usage", tool: "claude-code", source: "claude-code.transcripts", ts, sessionId, model, inTok: 1, outTok: 1, cacheR: 0, cacheW: 0 });
+const check = (events: Ev[], table: ReleaseTable = TABLE) => {
+  const raw = scanResultOf(events);
+  return checkReleases(buildSessionTable(raw, { now: raw.finishedAt, timeZone: "UTC" }), table, raw);
+};
+
+describe("checkReleases (C9)", () => {
+  test("a model used 5 days before its release fails", () => {
+    const c = check([sess("a", RELEASED - 5 * DAY, { models: ["model-x-20260601"] }), sess("b", RELEASED + DAY, { models: ["model-x"] })]);
+    expect(c.id).toBe("C9");
+    expect([c.status, c.reason]).toEqual(["fail", "before-release"]);
+    expect(c.values).toEqual({ checked: 2, violations: 1, sessions: 1 });
+    expect(c.n).toBe(2);
+    expect(c.tools).toEqual(["claude-code"]);
+    expect(c.askAbout).toBe("1 session used a model or tool version more than 2 days before its public release. Were session times edited?");
+  });
+
+  test("a model used 1 day before its release passes", () => {
+    const c = check([sess("a", RELEASED - DAY, { models: ["model-x"] })]);
+    expect([c.status, c.reason]).toEqual(["pass", "ok"]);
+    expect(c.askAbout).toBeUndefined();
+  });
+
+  test("a resumed session: started 10 days before the release, the new model first used after it, passes", () => {
+    const start = RELEASED - 10 * DAY;
+    const c = check([sess("r", start, { end: RELEASED + 5 * DAY, models: ["old-m", "model-x"] }),
+      turn("r", start + HOUR, "old-m"), usage("r", RELEASED + 4 * DAY, "model-x"), turn("r", RELEASED + 5 * DAY, "model-x")]);
+    expect([c.status, c.reason]).toEqual(["pass", "ok"]);
+    expect(c.values.checked).toBe(1);   // "old-m" is not in the table
+  });
+
+  test("a model first used 5 days before its release still fails, though the session ends after it", () => {
+    const start = RELEASED - 10 * DAY;
+    const c = check([sess("r", start, { end: RELEASED + 5 * DAY, models: ["model-x"] }),
+      turn("r", RELEASED - 5 * DAY, "model-x"), turn("r", RELEASED + 4 * DAY, "model-x")]);
+    expect(c.status).toBe("fail");
+  });
+
+  test("a model no event carries is compared with the row's end", () => {
+    const start = RELEASED - 10 * DAY;
+    expect(check([sess("r", start, { end: RELEASED - DAY, models: ["model-x"] })]).status).toBe("pass");
+    expect(check([sess("r", start, { end: RELEASED - 3 * DAY, models: ["model-x"] })]).status).toBe("fail");
+  });
+
+  test("a model takes the first entry that matches", () => {
+    // "model-x" matches the first entry (2026), so a 2025 session fails although the second entry (2020) would pass it
+    expect(check([sess("a", Date.UTC(2025, 0, 1), { models: ["model-x"] })]).status).toBe("fail");
+    expect(check([sess("a", Date.UTC(2025, 0, 1), { models: ["model-y"] })]).status).toBe("pass");
+  });
+
+  test("a tool version matches its tool's exact entry only", () => {
+    const codex = (version: string, tool: ToolId = "codex") => sess("c", RELEASED - 5 * DAY, { tool, source: `${tool}.x`, version });
+    expect(check([codex("9.1.0")]).status).toBe("fail");
+    expect(check([codex("9.1.0")]).tools).toEqual(["codex"]);
+    expect(check([codex("9.1.1")]).status).toBe("n/a");
+    expect(check([codex("9.1.0", "cursor")]).status).toBe("n/a");
+  });
+
+  test("nothing matching is n/a; an unlisted model is not checked", () => {
+    const c = check([sess("a", RELEASED - 50 * DAY, { models: ["other"] }), sess("b", RELEASED)]);
+    expect([c.status, c.reason, c.n]).toEqual(["n/a", "no-match", 0]);
+  });
+
+  test("the shipped table is well-formed: valid patterns, real dates, public sources", () => {
+    expect(RELEASES.version).toBeGreaterThanOrEqual(1);
+    expect(RELEASES.models.length).toBeGreaterThan(0);
+    const entries = [...RELEASES.models, ...Object.values(RELEASES.tools).flat()];
+    for (const e of entries) {
+      expect(e.released).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      expect(new Date(`${e.released}T00:00:00Z`).toISOString().slice(0, 10)).toBe(e.released);
+      expect(e.source).toMatch(/^https:\/\/[a-z0-9.-]+\.[a-z]{2,}\//);
+    }
+    for (const m of RELEASES.models) expect(() => new RegExp(m.match)).not.toThrow();
+  });
+
+  test("the result names no model: counts only", () => {
+    const c = check([sess("a", RELEASED - 5 * DAY, { models: ["model-x"] })]);
+    expect(JSON.stringify(c)).not.toContain("model-x");
+    for (const v of Object.values(c.values)) expect(typeof v).toBe("number");
+    expect(`${c.reason}${c.askAbout ?? ""}`).toMatch(/^[ -ÿ -⁯−]*$/);
+  });
+});
