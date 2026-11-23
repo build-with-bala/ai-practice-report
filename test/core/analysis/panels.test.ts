@@ -146,6 +146,32 @@ describe("panels: coverage", () => {
   });
 });
 
+describe("panels: coverage spans obey the date range", () => {
+  const coverage: Ev[] = [
+    cov("claude-code", CC, "detail", { from: T0 - 10 * DAY, to: T0 + 10 * DAY }),
+    cov("claude-code", HIST, "lifetime", { from: T0 - 30 * DAY, to: T0 - 20 * DAY }), // wholly before the range
+    cov("codex", CX, "detail", { from: T0 + 2 * DAY }), // open-ended, starts inside the range
+  ];
+  const evs: Ev[] = [sess("a", T0), prompt("a", T0)];
+  const span = (r: { from?: number; to?: number }) => ({ from: r.from, to: r.to });
+
+  test("each span is clipped to the range; a span wholly outside it has none", () => {
+    const { p } = run(evs, { coverage, exclude: { from: T0 - DAY, to: T0 + 5 * DAY } });
+    expect(p.coverage.rows.map(span)).toEqual([
+      { from: T0 - DAY, to: T0 + 5 * DAY }, { from: undefined, to: undefined }, { from: T0 + 2 * DAY, to: undefined }, // an unknown end stays unknown
+    ]);
+  });
+
+  test("an open range clips one end only; no range leaves the spans as reported", () => {
+    expect(run(evs, { coverage, exclude: { from: T0 - DAY } }).p.coverage.rows.map(span)).toEqual([
+      { from: T0 - DAY, to: T0 + 10 * DAY }, { from: undefined, to: undefined }, { from: T0 + 2 * DAY, to: undefined },
+    ]);
+    expect(run(evs, { coverage }).p.coverage.rows.map(span)).toEqual([
+      { from: T0 - 10 * DAY, to: T0 + 10 * DAY }, { from: T0 - 30 * DAY, to: T0 - 20 * DAY }, { from: T0 + 2 * DAY, to: undefined },
+    ]);
+  });
+});
+
 describe("panels: day parts and models", () => {
   test("human prompts by local hour, at the band boundaries", () => {
     const at = (h: number, m = 0, ms = 0) => T0 + h * HOUR + m * MIN + ms;

@@ -10,7 +10,7 @@ export { EventStore } from "./model/store";
 export type * from "./model/events";
 export type * from "./model/ids";
 export { sid } from "./model/ids";
-export { analyze } from "./analyze";
+export { analyze, ExclusionError } from "./analyze";
 export type { Analysis, AnalyzeOptions } from "./analyze";
 export type { Metric, MetricMeta } from "./analysis/types";
 export type { DurationArc, Exposure, Feature, PromptArc } from "./analysis/exposure";

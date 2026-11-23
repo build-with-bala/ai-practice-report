@@ -38,7 +38,7 @@ export interface ConfigPanel { byKind: Partial<Record<ConfigEv["kind"], { author
 /**
  * What was read, per tool and window of kept tools (sorted): each source once (sorted) with its status — the first of
  * error, drift, present-undecodable, ok, empty, absent among its candidates — and beta flag; `from`/`to` span the
- * coverage's; `sessions` = top-level kept rows of that tool and window, `prompts` = its human prompts in scope;
+ * coverage's, each clipped to the date range (a span wholly outside it adds none); `sessions` = top-level kept rows of that tool and window, `prompts` = its human prompts in scope;
  * `formatChanged` when any source drifted.
  */
 export interface CoveragePanel { rows: Array<{ tool: ToolId; window: Window; sources: Array<{ source: string; status: CoverageEv["status"]; beta: boolean }>;
@@ -189,8 +189,12 @@ export function panels(t: SessionTable, raw: ScanResult, o: { timeZone: string }
       const was = bySource.get(c.source);
       if (!was) bySource.set(c.source, { status: c.status, beta: c.beta });
       else { was.beta ||= c.beta; if (STATUS_ORDER.indexOf(c.status) < STATUS_ORDER.indexOf(was.status)) was.status = c.status; }
-      if (c.from !== undefined && Number.isFinite(c.from) && c.from < from) from = c.from;
-      if (c.to !== undefined && Number.isFinite(c.to) && c.to > to) to = c.to;
+      // the span, clipped to the date range: a span wholly outside it adds nothing
+      const cf = c.from !== undefined && Number.isFinite(c.from) ? c.from : undefined;
+      const ct = c.to !== undefined && Number.isFinite(c.to) ? c.to : undefined;
+      if ((cf !== undefined && cf > t.scope.to) || (ct !== undefined && ct < t.scope.from)) continue;
+      if (cf !== undefined && Math.max(cf, t.scope.from) < from) from = Math.max(cf, t.scope.from);
+      if (ct !== undefined && Math.min(ct, t.scope.to) > to) to = Math.min(ct, t.scope.to);
     }
     const [tool, window] = key.split("\u0000") as [ToolId, Window];
     return {

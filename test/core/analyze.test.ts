@@ -1,13 +1,37 @@
 import { describe, expect, test } from "bun:test";
-import { analyze, type Analysis } from "../../core/analyze";
+import { analyze, ExclusionError, type Analysis } from "../../core/analyze";
 import { VERSION } from "../../core/index";
-import type { CoverageEv, Ev, IdentityEv, PromptEv } from "../../core/model/events";
+import type { CoverageEv, Ev, IdentityEv, PromptEv, PromptFeatures, SessionEv, ToolEv } from "../../core/model/events";
+import type { ScanResult, Warning } from "../../core/scan";
 import { personaScan } from "../fixtures/personas";
 import { expectNoCanaries, findCanaries } from "../kit/canary";
 import { scanResultOf } from "../kit/scanresult";
 
 const DAY = 86_400_000;
 const UTC = { timeZone: "UTC" } as const;
+const CC = "claude-code.transcripts";
+const CX = "codex.rollouts";
+const features: PromptFeatures = { words: 8, lenBucket: 1, hasContext: false, fileRefs: 0, listLines: 0, constraintTerms: 0, isTaskStart: true, techCats: {} };
+
+const idEv = (hash: string, o: { sessionId?: string; tool?: "claude-code" | "codex" } = {}): IdentityEv => ({
+  k: "identity", tool: o.tool ?? "claude-code", source: o.tool === "codex" ? CX : CC, scope: o.sessionId ? "session" : "config", hash,
+  ...(o.sessionId ? { sessionId: o.sessionId } : {}),
+});
+const warning = (tool: Warning["tool"]): Warning => ({ code: "error", tool, source: tool === "scan" ? "scan" : `${tool}.x`, detail: "Error" });
+const covEv = (source: string, window: "detail" | "lifetime", over: Partial<CoverageEv> = {}): CoverageEv => ({
+  k: "coverage", tool: "claude-code", source, window, status: "ok", beta: false, files: 1, bytes: 1, records: 1, skipped: {}, unknownTypes: {}, versions: [], ...over,
+});
+const sessEv = (id: string, start: number, over: Partial<SessionEv> = {}): SessionEv =>
+  ({ k: "session", tool: "claude-code", source: CC, id, window: "detail", origin: "human", start, end: start + 3_600_000, models: [], ...over });
+const promptEv = (sessionId: string, ts: number, i: number): PromptEv =>
+  ({ k: "prompt", tool: "claude-code", source: CC, ts, sessionId, window: "detail", origin: "human", intent: "spec", textHash: `p${i}`, features });
+const toolEv = (sessionId: string, ts: number): ToolEv => ({ k: "tool", tool: "claude-code", source: CC, ts, sessionId, name: "Read", category: "read", ok: true });
+/** A persona scan with extra events and warnings added. */
+const withExtras = (raw: ScanResult, evs: Ev[], warnings: Warning[] = []): ScanResult => {
+  for (const e of evs) raw.store.add(e);
+  raw.warnings.push(...warnings);
+  return raw;
+};
 
 /** Every path in `v` whose value is not plain data: a number that is not finite, or an object that is not a plain object or array. */
 function impurities(v: unknown, path = "$", out: string[] = []): string[] {
@@ -121,11 +145,52 @@ describe("analyze()", () => {
     expect(analyze(personaScan("expert"), { ...UTC, exclude: { projects: [busiest.key] } })).toEqual(byLabel);
   });
 
-  test("excluding the only tool leaves nothing to score", () => {
-    const a = analyze(personaScan("expert"), { ...UTC, exclude: { tools: ["claude-code"] } });
+  test("excluding the only tool leaves nothing to score, and nothing of the tool anywhere", () => {
+    const raw = withExtras(personaScan("expert"), [idEv("cc-account")], [warning("claude-code"), warning("scan")]);
+    const a = analyze(raw, { ...UTC, exclude: { tools: ["claude-code"] } });
     expect(a.exclusions.tools).toBe(1);
     expect(a.dimensions.every((d) => d.status !== "scored")).toBe(true);
     expect(a.projects).toEqual([]);
+    expect(a.identity).toEqual({ accounts: 0, hashes: [] });
+    expect(a.coverage.rows).toEqual([]);
+    expect(a.diagnostics.warnings).toEqual([warning("scan")]);
+    const kept = analyze(withExtras(personaScan("expert"), [idEv("cc-account")], [warning("claude-code"), warning("scan")]), UTC);
+    expect(kept.identity.hashes).toEqual(["cc-account"]);
+    expect(kept.diagnostics.warnings).toEqual([warning("claude-code"), warning("scan")]);
+    expect(kept.coverage.rows.length).toBeGreaterThan(0);
+  });
+
+  test("an excluded tool's warnings are dropped; other tools' and the scan's are kept", () => {
+    const raw = scanResultOf([]);
+    raw.warnings.push(warning("codex"), warning("claude-code"), warning("scan"));
+    expect(analyze(raw, { ...UTC, exclude: { tools: ["codex"] } }).diagnostics.warnings).toEqual([warning("claude-code"), warning("scan")]);
+  });
+
+  test("a project exclusion fails closed: an unknown entry throws; labels match in any case; keys match exactly", () => {
+    const busiest = expert.projects[0]!;
+    expect(() => analyze(personaScan("expert"), { ...UTC, exclude: { projects: ["P-0000"] } })).toThrow(ExclusionError);
+    expect(() => analyze(personaScan("expert"), { ...UTC, exclude: { projects: ["P-0000"] } })).toThrow(/"P-0000" matches no project label or key/);
+    expect(() => analyze(personaScan("expert"), { ...UTC, exclude: { projects: ["/home/dev/x"] } })).toThrow(/^analyze: the project exclusion matches no project label or key$/);
+    expect(() => analyze(personaScan("expert"), { ...UTC, exclude: { projects: [busiest.key.toUpperCase()] } })).toThrow(ExclusionError);
+    const lower = analyze(personaScan("expert"), { ...UTC, exclude: { projects: [busiest.label.toLowerCase()] } });
+    expect(lower.exclusions.projects).toBe(1);
+    expect(analyze(personaScan("expert"), { ...UTC, exclude: { projects: [busiest.key] } })).toEqual(lower);
+  });
+
+  test("identity leaves out the sessions of excluded projects and periods", () => {
+    const T = Date.UTC(2026, 10, 2, 9);
+    const evs: Ev[] = [
+      covEv(CC, "detail"),
+      sessEv("in", T, { projectKey: "kA" }), sessEv("other", T, { projectKey: "kB" }), sessEv("early", T - 20 * DAY, { projectKey: "kA" }),
+      sessEv("child", T, { projectKey: "kB", parentId: "other", origin: "subagent" }),
+      idEv("h-in", { sessionId: "in" }), idEv("h-other", { sessionId: "other" }), idEv("h-early", { sessionId: "early" }),
+      idEv("h-child", { sessionId: "child" }), idEv("h-config"), idEv("h-loose", { sessionId: undefined }),
+      { ...idEv("h-unbound"), scope: "session" },
+    ];
+    const all = analyze(scanResultOf(evs), UTC);
+    expect(all.identity).toEqual({ accounts: 7, hashes: ["h-child", "h-config", "h-early", "h-in", "h-loose", "h-other", "h-unbound"] });
+    const a = analyze(scanResultOf(evs), { ...UTC, exclude: { projects: ["kB"], from: T - DAY } });
+    expect(a.identity).toEqual({ accounts: 4, hashes: ["h-config", "h-in", "h-loose", "h-unbound"] });
   });
 
   test("identity: the distinct identity hashes, sorted", () => {
@@ -185,23 +250,84 @@ describe("Review Focus 1: a home with nothing to score", () => {
     expect(a.exposure.activeWeeks.detail.value).toBeNull();
     for (const d of a.dimensions) {
       expect([d.id, unscored.has(d.status)]).toEqual([d.id, true]);
+      expect(Number.isFinite(d.n)).toBe(true);
       expect(d.needs).toBeGreaterThan(0);
     }
+    // the detail layer is empty, so no component has data; Delivery needs repo signals, which are off here
+    expect(a.dimensions.map((d) => [d.id, d.status])).toEqual([
+      ["leverage", "not-measurable"], ["orchestration", "not-measurable"], ["verification", "not-measurable"], ["steering", "not-measurable"],
+      ["context", "not-measurable"], ["judgment", "not-measurable"], ["delivery", "not-measured"],
+    ]);
     expect(a.overall.status).toBe("insufficient");
-    expect(a.forensics.band).toBe("unverifiable");
     expect(impurities(a)).toEqual([]);
   });
 });
 
 describe("Review Focus 3: one persona under two zones", () => {
-  test("every component other than the per-week rates has an equal x under UTC and Pacific/Auckland", () => {
-    const raw = personaScan("intermediate", { hourUtc: 0 });
-    const xs = (a: Analysis) => a.dimensions.flatMap((d) => d.components.map((c) => [c.id, c.x] as const));
-    const utc = xs(analyze(raw, { timeZone: "UTC" }));
-    const akl = xs(analyze(personaScan("intermediate", { hourUtc: 0 }), { timeZone: "Pacific/Auckland" }));
-    const perWeek = new Set(["orc.headless", "jud.switches", "del.prs"]);
-    expect(utc.length).toBe(22);
-    expect(akl.filter(([id]) => !perWeek.has(id))).toEqual(utc.filter(([id]) => !perWeek.has(id)));
-    expect(utc.filter(([, x]) => x !== null).length).toBeGreaterThan(10);
+  const perWeek = new Set(["orc.headless", "jud.switches", "del.prs"]);
+  const xs = (a: Analysis) => a.dimensions.flatMap((d) => d.components.map((c) => [c.id, c.x] as const));
+  const localDay = (ms: number, timeZone: string): string => new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(ms);
+
+  test.each([
+    [0, "the same local date in both zones"],
+    [12, "the next local date in Auckland"],
+  ])("hourUtc %d (%s): the zone arrives, and every component other than the per-week rates has an equal x", (hourUtc) => {
+    const utc = analyze(personaScan("intermediate", { hourUtc }), { timeZone: "UTC" });
+    const akl = analyze(personaScan("intermediate", { hourUtc }), { timeZone: "Pacific/Auckland" });
+    // the zone reaches the analysis: the day parts move, and so does the first active day
+    expect(akl.private.dayParts).not.toEqual(utc.private.dayParts);
+    const first = utc.exposure.tenureWeeks.from!;
+    const firstWork = first + hourUtc * 3_600_000; // the persona's first active day starts at hourUtc
+    expect(localDay(utc.exposure.tenureWeeks.from!, "UTC")).toBe(localDay(firstWork, "UTC"));
+    expect(localDay(akl.exposure.tenureWeeks.from!, "Pacific/Auckland")).toBe(localDay(firstWork, "Pacific/Auckland"));
+    if (hourUtc === 12) expect(localDay(firstWork, "Pacific/Auckland")).not.toBe(localDay(firstWork, "UTC"));
+    else expect(localDay(firstWork, "Pacific/Auckland")).toBe(localDay(firstWork, "UTC"));
+    const u = xs(utc);
+    expect(u.length).toBe(22);
+    expect(xs(akl).filter(([id]) => !perWeek.has(id))).toEqual(u.filter(([id]) => !perWeek.has(id)));
+    expect(u.filter(([, x]) => x !== null).length).toBeGreaterThan(10);
+  });
+});
+
+describe("the date range at analyze level", () => {
+  const T = Date.UTC(2026, 8, 7, 10); // a Monday
+  const FROM = T + 21 * DAY;
+  /** Two sessions a week for 6 weeks, each with prompts, actions and an account hash; coverage spans the whole time. */
+  const events = (): Ev[] => {
+    const out: Ev[] = [covEv(CC, "detail", { from: T, to: T + 42 * DAY })];
+    let i = 0;
+    for (let w = 0; w < 6; w++) {
+      for (const d of [0, 2]) {
+        const start = T + (w * 7 + d) * DAY;
+        const id = `s${w}-${d}`;
+        out.push(sessEv(id, start), idEv(`h-${id}`, { sessionId: id }));
+        for (let k = 0; k < 4; k++) out.push(promptEv(id, start + k * 600_000, i++), toolEv(id, start + k * 600_000 + 30_000));
+      }
+    }
+    return out;
+  };
+  const late = (evs: Ev[]): Ev[] => evs.filter((e) => {
+    const x = e as { ts?: number; start?: number; sessionId?: string };
+    if (x.start !== undefined) return x.start >= FROM;
+    if (x.ts !== undefined) return x.ts >= FROM;
+    if (e.k === "identity") return x.sessionId === undefined || Number(x.sessionId.slice(1).split("-")[0]) >= 3;
+    return true;
+  });
+
+  test("events before `from` contribute nothing to the signals, exposure weeks, coverage spans or identity", () => {
+    const now = T + 42 * DAY;
+    const o = { ...UTC, now, exclude: { from: FROM } };
+    const all = analyze(scanResultOf(events(), { finishedAt: now }), o);
+    const only = analyze(scanResultOf(late(events()), { finishedAt: now }), o);
+    expect(only.signals.evidence.sessions).toBe(6);
+    expect(all.signals).toEqual(only.signals);
+    expect(all.exposure.activeWeeks).toEqual(only.exposure.activeWeeks);
+    expect(all.exposure.tenureWeeks).toEqual(only.exposure.tenureWeeks);
+    expect(all.exposure.weekly).toEqual(only.exposure.weekly);
+    expect(all.coverage.rows).toEqual([{ tool: "claude-code", window: "detail", sources: [{ source: CC, status: "ok", beta: false }],
+      from: FROM, to: T + 42 * DAY, sessions: 6, prompts: 24, formatChanged: false }]);
+    expect(all.identity).toEqual(only.identity);
+    expect(all.identity.accounts).toBe(6);
+    expect(all.exclusions.sessions).toBe(6);
   });
 });
