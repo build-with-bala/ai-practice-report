@@ -4,31 +4,89 @@ import { maybeYield } from "./yield";
 
 export const MAX_LINE_BYTES = 33_554_432;
 
+export interface GcPacerOptions {
+  /** Bytes streamed between two looks at the RSS. */
+  checkEvery: number;
+  /** No collection while the RSS is at or below this: a small scan pays nothing. */
+  minRss: number;
+  /** The RSS growth over the baseline that a collection waits for. */
+  slack: number;
+}
+
 /**
- * Runs `collect` once per `step` bytes reported, while the process RSS is above `minRss` (a small scan pays nothing).
- * Parsed lines leave garbage faster than the engine reclaims it on its own while the event store grows, so without help
- * a long scan's peak RSS climbs with the bytes it streams, whatever the scan concurrency; a full collection every `step`
- * bytes keeps the peak well inside the memory budget, for a few seconds of collection time.
+ * Collects garbage when the process has grown by more than `slack` since it last did. Parsed lines leave garbage faster
+ * than the engine reclaims it on its own while the event store grows, so without help a long scan's peak RSS climbs
+ * with the bytes it streams. Every `checkEvery` bytes reported, the pacer reads the RSS: above `minRss`, and more than
+ * `slack` over the baseline, it runs `collect` and takes the RSS after it as the new baseline (the first look sets the
+ * first baseline). A heap that holds steady is never collected, however much is streamed; one that grows is collected
+ * about once per `slack` of growth, so a large live store costs no more collections than a small one.
  */
 export class GcPacer {
+  /** False: `add` does nothing (no look at the RSS, no collection). */
+  enabled = true;
   private bytes = 0;
+  private baseline: number | undefined;
+  private count = 0;
   constructor(
-    private readonly step: number,
-    private readonly minRss: number,
+    private readonly opts: GcPacerOptions,
     private readonly collect: () => void,
     private readonly rss: () => number = () => process.memoryUsage().rss,
   ) {}
 
+  /** The collections run so far. */
+  get collections(): number {
+    return this.count;
+  }
+
   add(n: number): void {
+    if (!this.enabled) return;
     this.bytes += n;
-    if (this.bytes < this.step) return;
+    if (this.bytes < this.opts.checkEvery) return;
     this.bytes = 0;
-    if (this.rss() > this.minRss) this.collect();
+    const now = this.rss();
+    if (this.baseline === undefined) {
+      this.baseline = now;
+      return;
+    }
+    if (now <= this.opts.minRss || now - this.baseline <= this.opts.slack) return;
+    this.collect();
+    this.count++;
+    this.baseline = this.rss();
   }
 }
 
+const MiB = 1024 * 1024;
 /** The pacer every JSONL stream reports to, process-wide (concurrent readers share one memory budget). */
-export const STREAM_GC = new GcPacer(64 * 1024 * 1024, 384 * 1024 * 1024, () => Bun.gc(true));
+export const STREAM_GC = new GcPacer({ checkEvery: 8 * MiB, minRss: 384 * MiB, slack: 128 * MiB }, () => Bun.gc(true));
+
+/** The holds on STREAM_GC: every one held, and how many of them asked for `off`. */
+let holds = 0;
+let offHolds = 0;
+/** STREAM_GC.enabled as it was when the first of the current holds was taken. */
+let enabledBefore = true;
+
+/**
+ * Sets STREAM_GC for a scan and returns its release (idempotent). STREAM_GC is shared by every scan in the process, and
+ * scans can overlap, so the holds are counted: while any hold is held, the pacer is off if any of them asked for
+ * `off` (an explicit opt-out wins over the default, and one shared pacer cannot be both), else on. A release recomputes
+ * that from the holds still held, so an off scan that ends gives a still-running auto scan its pacer back, and an auto
+ * scan that ends never re-enables it under a still-running off scan. The last release restores the state that was there
+ * before the first hold.
+ */
+export function holdStreamGc(mode: "auto" | "off"): () => void {
+  if (holds === 0) enabledBefore = STREAM_GC.enabled;
+  holds++;
+  if (mode === "off") offHolds++;
+  STREAM_GC.enabled = offHolds === 0;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    holds--;
+    if (mode === "off") offHolds--;
+    STREAM_GC.enabled = holds === 0 ? enabledBefore : offHolds === 0;
+  };
+}
 
 export type JsonlItem =
   | { n: number; value: unknown }

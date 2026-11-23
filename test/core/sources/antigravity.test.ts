@@ -697,7 +697,7 @@ describe("antigravity cli: stores", () => {
     const logs: string[] = [];
     let r: Result;
     try {
-      r = await scan({ env: h.env, plugins: [agCli], onLog: (level, code) => logs.push(`${level} ${code}`) });
+      r = await scan({ env: h.env, plugins: [agCli], onLog: (level, code) => { if (code !== "scan.gc") logs.push(`${level} ${code}`); } });
     } finally {
       release();
     }

@@ -354,7 +354,7 @@ describe("codex threads: thread index and turn history", () => {
     const logs: string[] = [];
     let r: Result;
     try {
-      r = await scan({ env: h.env, plugins: [cxThreads], onLog: (level, code) => logs.push(`${level} ${code}`) });
+      r = await scan({ env: h.env, plugins: [cxThreads], onLog: (level, code) => { if (code !== "scan.gc") logs.push(`${level} ${code}`); } });
     } finally {
       release();
     }

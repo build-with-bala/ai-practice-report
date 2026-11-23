@@ -844,7 +844,7 @@ describe("copilot cli (session events and store, from the CLI's schema)", () => 
     const logs: string[] = [];
     let r: Result;
     try {
-      r = await scan({ env: h.env, plugins: [cpCli], onLog: (level, code) => logs.push(`${level} ${code}`) });
+      r = await scan({ env: h.env, plugins: [cpCli], onLog: (level, code) => { if (code !== "scan.gc") logs.push(`${level} ${code}`); } });
     } finally {
       release();
     }
