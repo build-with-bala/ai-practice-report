@@ -69,6 +69,41 @@ describe("kitCss", () => {
   });
 });
 
+/** Every innermost `selector{declarations}` rule, with at-rule wrappers flattened away. */
+const RULES: { selector: string; decls: string }[] = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((m) => ({ selector: m[1]!.trim(), decls: m[2]! }));
+const usesGold = (decls: string): boolean => /var\(--gold(?:-hi)?\)/.test(decls);
+
+describe("gold is reserved", () => {
+  /** The pinned gold uses: subject measurements, the seal, the `Ex.` letter, the thin-evidence note, the focus ring and the cited exhibit. */
+  const ALLOWED = [".m-solid", ".m-hollow", ".seal", ".exhibit__letter", ".exhibit__note", ":focus-visible", "figure.exhibit.is-cited"];
+
+  test("only the pinned uses take a gold token", () => {
+    const offenders = RULES.filter((r) => usesGold(r.decls) && !ALLOWED.includes(r.selector)).map((r) => r.selector);
+    expect(offenders).toEqual([]);
+    for (const s of ALLOWED) expect([s, RULES.some((r) => r.selector === s && usesGold(r.decls))]).toEqual([s, true]);
+  });
+
+  test("hover, selection, current and pressed states use no gold token", () => {
+    const states = RULES.filter((r) => /:hover|::selection|aria-current|aria-pressed/.test(r.selector));
+    expect(states.length).toBeGreaterThan(0);
+    expect(states.filter((r) => usesGold(r.decls)).map((r) => r.selector)).toEqual([]);
+  });
+
+  test("there is no gold text utility", () => {
+    expect(css).not.toContain(".c-gold");
+  });
+});
+
+describe("print scroll boxes", () => {
+  const printBlock = css.slice(css.indexOf("@media print{"));
+
+  test("text-bearing charts keep their min-width in print; only a marks-only SVG opts in to fit the column", () => {
+    expect(printBlock).not.toMatch(/\.scroll-x>\*\{/);
+    expect(printBlock).not.toContain("min-width:0!important");
+    expect(printBlock).toContain('.scroll-x[data-print="fit"]>svg{min-width:0;width:100%}');
+  });
+});
+
 describe("cssString", () => {
   test("quotes, backslashes and newlines are escaped (pre-flight F6)", () => {
     expect(cssString('a"b\\c\nd')).toBe('"a\\"b\\\\c\\A d"');

@@ -8,12 +8,15 @@ import { PRINT_SCALE_PT, SPACE, THEMES, TYPE_SCALE, type ColorToken, type ThemeN
  * the spacing scale is `--s1`…`--s9`. Themes: `html[data-theme="ink"|"paper"]` picks one; `auto` (or no attribute)
  * follows `prefers-color-scheme`, with ink when there is no preference; print always uses the print tokens.
  *
+ * Gold is kept for the subject's measurements, the seal and the `Ex.` letter; goldHi for the focus ring and the cited
+ * exhibit's outline. Hover, current, pressed and selection states are neutral (ink, with an underline or a border).
+ *
  * Classes the primitives and pages build on:
  * - type roles `t-disp-*`, `t-serif-*`, `t-mono-*` (the only type classes), colour utilities `c-<token>`;
  * - marks `m-*` (SVG fills and strokes; `m-stroke` draws a mark's colour as a stroke instead of a fill, its width set by
  *   the element's `stroke-width`);
  * - layout `layout`, `rail`, `chapter-bar`, `masthead`, `kit-controls`, `chapter`, `skip-link`, `scroll-x` with `mw-960`
- *   and `mw-888`, `kit-defs` and `kit-hatch-line` (the hatch pattern's stroke), `print-footer`, `icon`;
+ *   and `mw-888` (`data-print="fit"` lets a marks-only SVG scale to the printed column), `kit-defs` and `kit-hatch-line` (the hatch pattern's stroke), `print-footer`, `icon`;
  * - components `exhibit` (`exhibit__head`, `exhibit__letter`, `exhibit__tag`, `exhibit__note`, `exhibit__placeholder`,
  *   `exhibit--thin`, `exhibit--empty`, `is-cited`), `cite`, `ledger` (`ledger-row`, `ledger-row__label`, `__rule`,
  *   `__value`, `__dots`, `__window`, `ledger-components`), `seal` (`seal--struck|provisional|flagged`, `seal-ring`,
@@ -85,7 +88,8 @@ const MONO_12_CAPS = [`font-family:${FONT_STACK.mono}`, "font-size:12px", "font-
 
 /* ---------- sections ---------- */
 
-const TEXT_TOKENS: readonly ColorToken[] = ["ink", "muted", "faint", "gold", "vermilion", "verdigris"];
+/** Text colour utilities. Gold is not one: it is kept for the subject's measurements and the seal, which have their own classes. */
+const TEXT_TOKENS: readonly ColorToken[] = ["ink", "muted", "faint", "vermilion", "verdigris"];
 
 function themes(): string[] {
   return [
@@ -105,9 +109,9 @@ function base(): string[] {
     rule("h1,h2,h3,h4,p,figure,blockquote", ["margin:0"]),
     rule("h1,h2,h3,h4", ["font-weight:inherit"]),
     rule("a", ["color:inherit", `text-decoration-color:${v("axis")}`, "text-underline-offset:.2em"]),
-    rule("a:hover", [`text-decoration-color:${v("gold")}`]),
+    rule("a:hover", [`text-decoration-color:${v("ink")}`]),
     rule(":focus-visible", [`outline:2px solid ${v("goldHi")}`, "outline-offset:2px"]),
-    rule("::selection", [`background:${v("gold")}`, `color:${v("onAccent")}`]),
+    rule("::selection", [`background:${v("ink")}`, `color:${v("bg")}`]),
     rule("button", ["font:inherit", "color:inherit", "background:none", "border:0", "padding:0", "cursor:pointer", "border-radius:0"]),
     rule("table", ["border-collapse:collapse", "width:100%", `font-family:${FONT_STACK.mono}`, "font-size:14px", "line-height:1.45",
       "font-variant-numeric:tabular-nums slashed-zero", "font-synthesis:none"]),
@@ -124,7 +128,7 @@ function base(): string[] {
 function layout(): string[] {
   return [
     rule(".skip-link", ["position:absolute", "left:var(--s4)", "top:-100px", "z-index:3", `padding:var(--s2) var(--s4)`,
-      `background:${v("gold")}`, `color:${v("onAccent")}`, ...MONO_12_CAPS]),
+      `background:${v("bg")}`, `color:${v("ink")}`, `border:1px solid ${v("ink")}`, ...MONO_12_CAPS]),
     rule(".skip-link:focus", ["top:var(--s4)"]),
     rule(".page", ["max-width:1360px", "margin:0 auto", "padding:0 var(--s6) var(--s9)"]),
     rule(".masthead", ["display:flex", "flex-wrap:wrap", "align-items:center", "justify-content:space-between", "gap:var(--s3) var(--s6)",
@@ -132,11 +136,12 @@ function layout(): string[] {
     rule(".kit-controls", ["display:flex", "gap:var(--s2)"]),
     rule(".kit-controls button", ["display:inline-flex", "align-items:center", "gap:var(--s2)", "padding:var(--s2) var(--s3)",
       `border:1px solid ${v("axis")}`, ...MONO_12_CAPS]),
-    rule('.kit-controls button:hover,.kit-controls button[aria-pressed="true"]', [`border-color:${v("gold")}`, `color:${v("gold")}`]),
+    rule('.kit-controls button:hover,.kit-controls button[aria-pressed="true"]', [`border-color:${v("ink")}`, `color:${v("ink")}`]),
     rule(".rail", ["display:none"]),
     rule(".rail ol,.chapter-bar ol", ["list-style:none", "margin:0", "padding:0"]),
     rule(".rail a,.chapter-bar a", [...MONO_12_CAPS, `color:${v("muted")}`, "text-decoration:none"]),
-    rule(".rail a:hover,.chapter-bar a:hover,.rail a[aria-current],.chapter-bar a[aria-current]", [`color:${v("gold")}`]),
+    rule(".rail a:hover,.chapter-bar a:hover,.rail a[aria-current],.chapter-bar a[aria-current]", [`color:${v("ink")}`,
+      "text-decoration:underline", `text-decoration-color:${v("ink")}`, "text-underline-offset:.3em"]),
     rule(".chapter-bar", ["position:sticky", "top:0", "z-index:2", `background:${v("bg")}`, `border-bottom:1px solid ${v("rule")}`,
       "overflow-x:auto", "overscroll-behavior-x:contain", "white-space:nowrap", "margin-bottom:var(--s8)"]),
     rule(".chapter-bar ol", ["display:flex", "gap:var(--s5)", "padding:var(--s3) 0"]),
@@ -166,8 +171,9 @@ function components(): string[] {
     // tags, dots, cites
     rule(".tag", [...MONO_12_CAPS, `color:${v("faint")}`]),
     rule(".dots", ["display:inline-flex", "gap:3px", "vertical-align:middle"]),
-    rule(".cite", [`color:${v("gold")}`, "text-decoration:none", `border-bottom:1px solid ${v("gold")}`]),
-    rule(".cite:hover,.cite:focus-visible,.cite[aria-pressed=\"true\"]", [`color:${v("goldHi")}`, `border-bottom-color:${v("goldHi")}`]),
+    // A cite link is neutral; the exhibit it points at takes the goldHi outline (`is-cited`), and focus the goldHi ring.
+    rule(".cite", [`color:${v("ink")}`, "text-decoration:none", `border-bottom:1px solid ${v("axis")}`]),
+    rule(".cite:hover,.cite:focus-visible,.cite[aria-pressed=\"true\"]", [`border-bottom-color:${v("ink")}`]),
     // exhibit frame
     rule("figure.exhibit", [`padding:var(--s5)`, `background:${v("surface")}`, "outline:2px solid transparent", "outline-offset:2px",
       "transition:outline-color 160ms ease-out"]),
@@ -273,8 +279,8 @@ function print(footerLeft: string): string[] {
       rule(".chapter + .chapter", ["break-before:page", "margin-top:0"]),
       rule("figure.exhibit", ["break-inside:avoid", "outline:none"]),
       rule("tr,.ledger-row", ["break-inside:avoid"]),
-      rule(".scroll-x", ["overflow:visible"]),
-      rule(".scroll-x>*", ["min-width:0!important", "width:100%"]),
+      // Only a marks-only SVG may scale to the column; a chart with text keeps its size and Task 7 gives it a print layout.
+      rule('.scroll-x[data-print="fit"]>svg', ["min-width:0", "width:100%"]),
       rule(".seal>svg", ["width:48mm", "height:48mm", "animation:none"]),
       rule("html.no-margin-boxes .print-footer", ["display:flex", "position:fixed", "left:0", "right:0", "bottom:0",
         "justify-content:space-between", ...box]),

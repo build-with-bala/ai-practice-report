@@ -69,3 +69,19 @@ describe("tokens", () => {
     expect([0, 1, 2, 3, 4, 5, 6, 7].map(heatLevel)).toEqual([0, 1, 1, 2, 2, 3, 3, 4]);
   });
 });
+
+describe("interaction states", () => {
+  test("the neutral state pairs pass in every theme: text at least 4.5, borders and underlines at least 3", () => {
+    // Rail, chapter bar, controls, cites and the skip link: ink text on every ground; selection: bg on ink.
+    const text: [ColorToken, ColorToken][] = [["ink", "bg"], ["ink", "surface"], ["ink", "raised"], ["bg", "ink"]];
+    // Hover and pressed borders and underlines (ink), resting button borders and cite underlines (axis).
+    const boundary: [ColorToken, ColorToken][] = [["ink", "bg"], ["ink", "surface"], ["axis", "bg"], ["axis", "surface"]];
+    const failing: string[] = [];
+    for (const theme of THEME_NAMES) {
+      const t = THEMES[theme];
+      for (const [fg, bg] of text) if (contrast(t[fg], t[bg]) < 4.5) failing.push(`${theme} text ${fg}/${bg}`);
+      for (const [fg, bg] of boundary) if (contrast(t[fg], t[bg]) < 3) failing.push(`${theme} boundary ${fg}/${bg}`);
+    }
+    expect(failing).toEqual([]);
+  });
+});
