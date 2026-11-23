@@ -45,6 +45,10 @@ export interface SealInput {
   score: number | null;
   interval: readonly [number, number] | null;
   coverage: string;
+  /**
+   * The ring text. Its last " · " (`RING_SEPARATOR` in seal.ts) splits it: the part before runs over the top of the
+   * ring, the part after under it, both upright, e.g. "AI practice report · No. 7F3A-91C2 · 18 Nov 2026".
+   */
   ringText: string;
 }
 

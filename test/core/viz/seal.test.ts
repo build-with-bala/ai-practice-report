@@ -29,8 +29,6 @@ describe("seal", () => {
     expect(out).toContain("seal--provisional");
     expect(out).not.toContain("seal--struck");
     expect(out).toContain('class="seal-outline t-mono-64"');
-    // A missing score's dash is no numeral: it stays solid.
-    expect(seal({ ...S, state: "provisional", score: null })).toContain('<text class="seal-text t-mono-64" x="96" y="111" text-anchor="middle">—</text>');
   });
 
   test("flagged: the vermilion state class", () => {
@@ -39,8 +37,12 @@ describe("seal", () => {
     expect(out).not.toContain("seal--struck");
   });
 
-  test("a null score prints —", () => {
-    expect(sealSvg({ ...S, score: null })).toMatch(/t-mono-64"[^>]*>—<\/text>/);
+  test("a null score draws a short solid hairline in place of the numerals, in every state", () => {
+    for (const state of ["struck", "provisional", "flagged"] as const) {
+      const out = sealSvg({ ...S, state, score: null });
+      expect([state, out.includes('<path class="seal-dash" d="M80 88H112"/>'), out.includes("t-mono-64")]).toEqual([state, true, false]);
+    }
+    expect(sealSvg(S)).not.toContain("seal-dash");
   });
 
   test("the interval and the coverage are HTML after the </svg>, never SVG text", () => {
@@ -63,7 +65,28 @@ describe("seal", () => {
     expect(out).toContain("&lt;b&gt;");
     expect(out).toContain("a&amp;b");
     expect(out).not.toContain("<script>");
-    expect(out).toContain('d="M96 183a87 87 0 1 1 0-174a87 87 0 1 1 0 174"');
+  });
+
+  test("ring text: two arcs with caps centred on r 87, both reading left to right; the part after the last ' · ' goes on the bottom", () => {
+    const out = sealSvg(S);
+    // Baselines at 87 ∓ half the cap height (4.38): 82.62 on the top arc, where glyphs point out; 91.38 underneath.
+    expect(out).toContain('<path id="seal-ringtop" d="M24.45 137.31A82.62 82.62 0 1 1 167.55 137.31"/>');
+    expect(out).toContain('<path id="seal-ringbottom" d="M16.86 141.69A91.38 91.38 0 0 0 175.14 141.69"/>');
+    expect(out).toContain('<textPath href="#seal-ringtop" startOffset="50%">AI practice report · No. 7F3A-91C2</textPath>');
+    expect(out).toContain('<textPath href="#seal-ringbottom" startOffset="50%">18 Nov 2026</textPath>');
+    expect(out).not.toContain("textLength");
+  });
+
+  test("ring text with no separator: the top arc only", () => {
+    const out = sealSvg({ ...S, ringText: "AI practice report" });
+    expect(out).toContain(">AI practice report</textPath>");
+    expect(out).not.toContain("ringbottom");
+  });
+
+  test("ring text too long for its arc is fitted to the arc, never cut or run past it", () => {
+    const out = sealSvg({ ...S, ringText: "A very long practice report title that runs on and on · a long bottom line here" });
+    expect(out).toContain('textLength="311.47" lengthAdjust="spacingAndGlyphs"');
+    expect(out).toContain('textLength="172.25" lengthAdjust="spacingAndGlyphs"');
   });
 
   test("sealSvg is the seal's <svg> alone, and seal() holds it unchanged", () => {
@@ -79,9 +102,9 @@ describe("seal", () => {
 
   test("idPrefix names the ring path, so two seals on one page do not share an id", () => {
     const a = sealSvg(S, { idPrefix: "card" });
-    expect(a).toContain('id="card-ringpath"');
-    expect(a).toContain('href="#card-ringpath"');
-    expect(sealSvg(S)).toContain('id="seal-ringpath"');
+    expect(a).toContain('id="card-ringtop"');
+    expect(a).toContain('href="#card-ringbottom"');
+    expect(seal(S, { idPrefix: "you" })).toContain(sealSvg(S, { idPrefix: "you" }));
   });
 
   test("size sets the svg's width and height; the viewBox stays 192", () => {
@@ -95,11 +118,16 @@ describe("seal", () => {
   });
 
   test("every class is a kit class, and the page is clean", () => {
-    const body = "<main>" + seal(S) + seal({ ...S, state: "provisional", score: null }, { size: 144 }) + seal({ ...S, state: "flagged" }) + "</main>";
+    const body = "<main>" + seal(S, { idPrefix: "s1" }) + seal({ ...S, state: "provisional", score: null }, { idPrefix: "s2" })
+      + seal({ ...S, state: "flagged" }, { idPrefix: "s3" }) + "</main>";
     const used = new Set([...body.matchAll(/ class="([^"]*)"/g)].flatMap((m) => m[1]!.split(" ")));
     expect([...used].filter((c) => !KIT_CLASSES.includes(c))).toEqual([]);
-    // Each seal's ring path id is unique on a real page only with distinct prefixes; here the audit checks the markup.
     const a = auditHtml(page({ title: "t", footerLeft: "f", body, fonts: "none" }));
     expect([a.nonCanonical, a.styleAttrs, a.inlineHandlers, a.externalRefs, a.uncovered]).toEqual([[], 0, 0, [], []]);
+  });
+
+  test("two seals with the default prefix share ids, and the audit says so", () => {
+    const a = auditHtml(page({ title: "t", footerLeft: "f", body: "<main>" + seal(S) + seal(S) + "</main>", fonts: "none" }));
+    expect(a.nonCanonical.some((f) => f.startsWith("duplicate-id"))).toBe(true);
   });
 });
