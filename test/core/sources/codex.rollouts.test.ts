@@ -357,6 +357,22 @@ describe("codex rollouts: tools", () => {
     expect(toolsByTs(r).find((t) => t.editExt === "go")).not.toHaveProperty("linesRemoved");
   });
 
+  test("a shell call that runs apply_patch, completed by the CLI's file change under the call's id, is one edit per file", async () => {
+    const r1 = rollout((r) => {
+      const p = r.fn("exec_command", { cmd: "apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: src/a.ts\n@@\n-old\n+new\n+more\n*** Add File: b.md\n+x\n*** End Patch\nEOF" });
+      r.fileChange({
+        [`${CANARY.path}/src/a.ts`]: { type: "update", unified_diff: "@@ -1 +1,2 @@\n-old\n+new\n+more\n" },
+        [`${CANARY.path}/b.md`]: { type: "add", content: "x\n" },
+      }, { id: p });
+    });
+    r1.write(h);
+    const r = await run();
+    expect(toolsByTs(r).map((t) => [t.name, t.category, t.editExt, t.linesAdded, t.linesRemoved, t.ok])).toEqual([
+      ["apply_patch", "edit", "ts", 2, 1, true], ["apply_patch", "edit", "md", 1, 0, true],
+    ]);
+    expectNoCanaries(allEvents(r));
+  });
+
   test("a line whose time is well-formed but implausible counts once, as bad-ts; one without a time is drift and no-ts", async () => {
     const r1 = rollout((r) => {
       r.user("Fix the importer");
