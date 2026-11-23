@@ -58,8 +58,8 @@ export interface ComponentResult { id: string; weight: number; status: "ok" | "n
 export const repoSignalsOff = (s: Signals): boolean => s.repoSignals === "off" || s.repoSignals === "git-missing";
 
 /**
- * A numeric guard, not a scoring rule: a component's z is clamped to [-Z_GUARD, Z_GUARD]. No realistic input reaches it
- * (it is 8 reference sigmas out), but it keeps every later weighted sum finite, Task 8's overall included.
+ * A numeric guard, not a scoring rule: a component's z is clamped to [-Z_GUARD, Z_GUARD]. It guards extreme inputs (it
+ * is 8 reference sigmas out), and keeps every later weighted sum finite, Task 8's overall included.
  */
 export const Z_GUARD = 8;
 const clampZ = (z: number): number => (Number.isNaN(z) ? z : Math.min(Z_GUARD, Math.max(-Z_GUARD, z)));
