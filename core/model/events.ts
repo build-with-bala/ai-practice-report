@@ -32,6 +32,11 @@ import type {
  * - `SessionEv.parentId` (child → parent session) is the delegation link every tool with subagents fills.
  *   `ToolEv.delegateTo` (the delegating call → the child's session) exists only for Claude Code, and `EdgeEv`
  *   (parent → child thread) only for Codex's thread index.
+ *
+ * Orphan events. An event whose `sessionId` names no session in the store is an orphan: analysis counts it per kind and
+ * leaves it out of the per-session walk (lifetime counts may still take it). Claude Code's workflow-run totals are
+ * orphans by design: a `TotalsEv` per workflow run, keyed `claude-code:wf:<keyed hash of the run>`, names no session,
+ * since a workflow run has no transcript of its own (its agents' transcripts are sessions with `workflowId`).
  */
 
 /** What a prompt's text shows, computed in memory (`promptFeatures`). `chars`: the UTF-16 length of the trimmed prompt. */
