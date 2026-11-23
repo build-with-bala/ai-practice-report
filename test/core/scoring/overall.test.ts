@@ -35,7 +35,7 @@ describe("overall", () => {
     expect(o.status).toBe("insufficient");
     expect([o.z, o.score, o.interval, o.band]).toEqual([null, null, null, "insufficient"]);
     expect(o.included).toEqual(["leverage", "verification"]);
-    expect(o.coverage).toBe("3/7");
+    expect(o.coverage).toBe("2/7");
   });
 
   test("weights renormalize over the included dimensions; low confidence is left out", () => {
@@ -46,12 +46,20 @@ describe("overall", () => {
     expect(o.z!).toBeCloseTo(want, 12);
     expect(o.score).toBe(displayScore(want).score);
     expect(o.included).toEqual(["leverage", "verification", "judgment"]);
-    expect(o.coverage).toBe("4/7");
+    expect(o.coverage).toBe("3/7");
     expect(o.interval).toEqual([50, 70]);
     // equal z everywhere gives that z, whatever the included set
     const flat = overall(all({ leverage: { z: 0.7 }, orchestration: { z: 0.7 }, delivery: { z: 0.7 }, context: { z: 0.7, confidence: "high" } }), null);
     expect(flat.z!).toBeCloseTo(0.7, 12);
     expect(flat.interval).toBeNull();
+  });
+
+  test("coverage counts the dimensions behind the overall: 6 scored, 3 included, reads 3/7", () => {
+    const o = overall(all({ leverage: { z: 1 }, orchestration: { z: 1 }, verification: { z: 1 },
+      steering: { z: 1, confidence: "low" }, context: { z: 1, confidence: "low" }, judgment: { z: 1, confidence: "low" } }), null);
+    expect(o.status).toBe("scored");
+    expect(o.included).toEqual(["leverage", "orchestration", "verification"]);
+    expect(o.coverage).toBe("3/7");
   });
 
   test("the band edges are 34/35, 59/60 and 79/80", () => {

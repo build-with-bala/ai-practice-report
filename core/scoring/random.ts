@@ -1,6 +1,6 @@
 /**
- * mulberry32: a small, fast seeded generator (32-bit state), the only source of randomness in the analysis. The seed is
- * read as an unsigned 32-bit integer (`seed >>> 0`); each call returns a draw in [0, 1).
+ * mulberry32: a small, fast seeded generator (32-bit state), the only source of randomness in the analysis. A finite seed
+ * is truncated to an integer and taken modulo 2^32 as an unsigned integer (`seed >>> 0`); each call returns a draw in [0, 1).
  */
 export function mulberry32(seed: number): () => number {
   let a = seed >>> 0;

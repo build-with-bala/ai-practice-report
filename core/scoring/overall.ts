@@ -10,7 +10,8 @@ export type Band = "exceptional" | "strong" | "developing" | "limited" | "insuff
  * - `status`: `insufficient` under 3 included dimensions; `z`, `score` and `interval` are then null and `band` is
  *   `insufficient`. Otherwise `z` = Σ w·z′ / Σ w over `included` (shrinkage carries the confidence weighting), `score`
  *   its display score, `band` read from the score, and `interval` the bootstrap's.
- * - `coverage`: `"<scored dimensions>/7"`, counting every dimension with status `scored`, whatever its confidence.
+ * - `coverage`: `"<included>/7"`: the dimensions behind the overall (`included.length`), so "6/7" never shows when 3
+ *   dimensions feed it.
  * - `meta`: window `detail`; the union of the included dimensions' sources (sorted), their earliest `from` and latest
  *   `to`; `n` = the number of included dimensions.
  */
@@ -46,7 +47,7 @@ export function overall(dims: readonly DimensionResult[], interval: [number, num
   const included = DIMENSION_IDS.map((id) => dims.find((d) => d.id === id))
     .filter((d): d is DimensionResult => d !== undefined && d.status === "scored" && d.z !== null && Number.isFinite(d.z)
       && (d.confidence === "medium" || d.confidence === "high"));
-  const coverage = `${dims.filter((d) => d.status === "scored").length}/${DIMENSION_IDS.length}`;
+  const coverage = `${included.length}/${DIMENSION_IDS.length}`;
   const meta = metaOf(included);
   const ids = included.map((d) => d.id);
   const z = included.length >= MIN_INCLUDED ? weightedZ(included.map((d) => [d.id, d.z!] as const)) : null;

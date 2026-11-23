@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { Metric } from "../../../core/analysis/types";
 import type { SessionStats } from "../../../core/analysis/walk";
 import type { Window } from "../../../core/model/ids";
-import { bootstrap, DEFAULT_B, DEFAULT_SEED, intervalOf, intervalRanks } from "../../../core/scoring/bootstrap";
+import { bootstrap, DEFAULT_B, DEFAULT_SEED, intervalOf, intervalRanks, widen } from "../../../core/scoring/bootstrap";
 import { DIMENSION_IDS, type DimensionId } from "../../../core/scoring/dimensions";
 import { overall } from "../../../core/scoring/overall";
 import { mulberry32 } from "../../../core/scoring/random";
@@ -82,6 +82,12 @@ describe("interval ranks", () => {
     const scores = Array.from({ length: 200 }, (_, i) => 1 + ((i * 37) % 99));
     const sorted = [...scores].sort((x, y) => x - y);
     expect(intervalOf(scores)).toEqual([sorted[4]!, sorted[195]!]);
+  });
+  test("widen extends the percentile ends to the score, and only where needed", () => {
+    expect(widen([73, 80], 71)).toEqual([71, 80]);
+    expect(widen([60, 68], 71)).toEqual([60, 71]);
+    expect(widen([63, 78], 71)).toEqual([63, 78]);
+    expect(widen([71, 71], 71)).toEqual([71, 71]);
   });
   test("defaults: B = 200, seed 0x5eed", () => {
     expect(DEFAULT_B).toBe(200);
@@ -194,8 +200,60 @@ describe("bootstrap", () => {
     expect(JSON.parse(JSON.stringify(r))).toEqual(r);
   });
 
-  test("rejects a B that is not a positive integer", () => {
-    for (const B of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) expect(() => bootstrap(rows50, g, ref, [], { B, seed: 1 })).toThrow(RangeError);
+  test("rejects a B that is not an integer in [1, 10,000], and a seed that is not finite", () => {
+    for (const B of [0, -1, 1.5, 10_001, Number.NaN, Number.POSITIVE_INFINITY]) expect(() => bootstrap(rows50, g, ref, [], { B, seed: 1 })).toThrow(RangeError);
+    expect(() => bootstrap(rows50.slice(0, 2), g, ref, [], { B: 10_000, seed: 1 })).not.toThrow();
+    for (const seed of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) expect(() => bootstrap(rows50, g, ref, [], { B: 5, seed })).toThrow(RangeError);
+    // a finite seed is taken modulo 2^32 as an unsigned integer
+    expect(bootstrap(rows50, g, ref, [], { B: 20, seed: 2 ** 32 + 9 })).toEqual(bootstrap(rows50, g, ref, [], { B: 20, seed: 9 }));
+  });
+
+  test("the overall sums in DIMENSION_IDS order, whatever order included arrives in", () => {
+    const included = includedOf(rows50, g);
+    expect(included.length).toBeGreaterThanOrEqual(3);
+    const a = bootstrap(rows50, g, ref, included, { B: 60, seed: 4 });
+    const b = bootstrap(rows50, g, ref, [...included].reverse(), { B: 60, seed: 4 });
+    expect(b).toEqual(a);
+    expect(a.overall).not.toBeNull();
+  });
+
+  test("sweep: over varied, skewed samples every interval holds its point score", () => {
+    const rng = mulberry32(2026);
+    const pick = (k: number): number => Math.floor(rng() * k);
+    let checked = 0;
+    for (let trial = 0; trial < 40; trial++) {
+      const n = 2 + pick(59);
+      const rows = Array.from({ length: n }, (_, i) => {
+        const base = varied(pick(400));
+        const big = rng() < 0.1 ? 20 + pick(80) : 1; // a few very large sessions
+        const skew = rng() < 0.5; // half the rows lean on one side of every rate
+        return {
+          ...base, id: `t${trial}r${i}`, days: base.days.concat(big > 1 ? Array.from({ length: 7 }, (_, d) => dayKey(T0 + (100 + i * 7 + d) * DAY)) : []),
+          turns: base.turns * big, stickySum: (skew ? base.turns * 3 : base.stickySum) * big, actions: base.actions * big,
+          editTurns: base.editTurns * big, editWeight: base.editWeight * big, verifiedWeight: (skew ? 0 : base.verifiedWeight) * big,
+          episodes: base.episodes * big, followUps: base.followUps * big, briefs: base.briefs * big,
+          correctedBriefs: (skew ? base.briefs : base.correctedBriefs) * big, briefScoreSum: base.briefScoreSum * big,
+          tierPairs: big > 1 ? Array.from({ length: big }, (_, k) => [20 + (k % 13), pick(7)]).flat() : base.tierPairs,
+          editEpisodesInRepo: base.editEpisodesInRepo * big, landedEpisodes: (skew ? base.editEpisodesInRepo : 0) * big,
+        };
+      });
+      const point = pointOf(rows, g);
+      const o = overall(point, null);
+      const r = bootstrap(rows, g, ref, o.included, { B: 40, seed: trial });
+      for (const d of point) {
+        const iv = r.intervals[d.id];
+        if (!iv) continue;
+        expect(iv[0]).toBeLessThanOrEqual(d.score!);
+        expect(iv[1]).toBeGreaterThanOrEqual(d.score!);
+        checked++;
+      }
+      if (r.overall) {
+        expect(r.overall[0]).toBeLessThanOrEqual(o.score!);
+        expect(r.overall[1]).toBeGreaterThanOrEqual(o.score!);
+        checked++;
+      }
+    }
+    expect(checked).toBeGreaterThan(100);
   });
 
   test("budget: 5,000 rows x 200 replicates in under 4 s", () => {
