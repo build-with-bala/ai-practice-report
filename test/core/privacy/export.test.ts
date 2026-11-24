@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import path from "node:path";
 import { analyze, type Analysis } from "../../../core/analyze";
-import { canonicalJson, exportPayload, scan } from "../../../core/index";
+import { canonicalJson, exportPayload, scan, VERSION } from "../../../core/index";
 import { ExportError, RevealError } from "../../../core/privacy/export";
 import { questionFor, type CheckResult } from "../../../core/forensics/index";
 import type { ConfigEv, CoverageEv, Ev, FileFactEv, PromptEv, SessionEv } from "../../../core/model/events";
@@ -133,6 +133,38 @@ describe("exportPayload: raw channels", () => {
     expect(JSON.stringify(out)).not.toContain("acme");
   });
 
+  test("model words include fable and mythos", () => {
+    for (const id of ["claude-fable-5-2", "claude-mythos-1", "claude-fable-5"]) expect(`${id} → ${modelExportId(id)}`).toBe(`${id} → ${id}`);
+  });
+
+  test("the two public cloud forms reduce to the plain id before the grammar runs; nothing else about them is looser", () => {
+    for (const [id, out] of [
+      ["anthropic.claude-3-5-sonnet-20241022-v2:0", "claude-3-5-sonnet-20241022"],
+      ["us.anthropic.claude-sonnet-4-20250514-v1:0", "claude-sonnet-4-20250514"],
+      ["eu.anthropic.claude-3-haiku-20240307-v1:0", "claude-3-haiku-20240307"],
+      ["apac.anthropic.claude-opus-4-1-20250805-v1:0", "claude-opus-4-1-20250805"],
+      ["claude-3-5-sonnet@20240620", "claude-3-5-sonnet"],
+      ["claude-opus-4-1@20250805", "claude-opus-4-1"],
+      // the reduced id still meets the grammar
+      ["anthropic.claude-3-acme-payroll-v1:0", "claude-other"],
+      ["claude-acme-payroll@20240620", "claude-other"],
+      // anything else about the two forms stays as strict as before
+      ["anthropic.claude-3-5-sonnet-20241022-v2", "other"],
+      ["anthropic.claude-3-5-sonnet-20241022-v2:0:1", "other"],
+      ["us.east.anthropic.claude-3-haiku-20240307-v1:0", "other"],
+      ["acme.claude-3-haiku-20240307-v1:0", "other"],
+      ["Anthropic.claude-3-haiku-20240307-v1:0", "other"],
+      ["claude-3-5-sonnet@2024-06-20", "other"],
+      ["claude-3-5-sonnet@20241332", "other"],
+      ["claude-3-5-sonnet@20240620@20240620", "other"],
+      ["anthropic.claude-3-5-sonnet@20240620-v1:0", "other"],
+    ] as const) expect(`${id} → ${modelExportId(id)}`).toBe(`${id} → ${out}`);
+    // counts of the cloud forms and the plain id sum under one export id
+    const a = analyze(personaScan("expert"), UTC);
+    a.private.models = { "claude-3-5-sonnet-20241022": 1, "anthropic.claude-3-5-sonnet-20241022-v2:0": 2, "us.anthropic.claude-3-5-sonnet-20241022-v2:0": 3 };
+    expect((parsed(a).exposure as Json).models).toEqual({ "claude-3-5-sonnet-20241022": 6 });
+  });
+
   test("150 model ids give 64 keys: the 63 most used and other with the summed rest", () => {
     const a = analyze(personaScan("expert"), UTC);
     const raw: Record<string, number> = { "acme-model": 5 };
@@ -220,6 +252,50 @@ describe("exportPayload: projects and reveal", () => {
     const label = a.projects[0]!.label;
     const out = parsed(a, { ...OPTS, reveal: [{ label, name: "first" }, { label: label.toLowerCase(), name: "second" }] });
     expect((out.projects as Json[])[0]!.name).toBe("second");
+  });
+
+  test("a revealed name may be written in any script: combining marks and the zero-width (non-)joiner inside a name", () => {
+    const label = a.projects[0]!.label;
+    const ok = (name: string): boolean => {
+      try { return (parsed(a, { ...OPTS, reveal: [{ label, name }] }).projects as Json[])[0]!.name === name; } catch { return false; }
+    };
+    const accepted = ["\u0939\u093f\u0902\u0926\u0940", "\u0ba4\u0bae\u0bbf\u0bb4\u0bcd", "\u0645\u064e\u0643\u0652\u062a\u064e\u0628\u064e\u0629",
+      "cafe\u0301", "cafe\u0301 lib", "\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645", "\u0915\u094d\u200d\u0937", "my-lib_2.0"];
+    const refused = ["a/b", "a\\b", "x\n", "<script>", " lead", "trail ", "\u0301abc", "abc\u200d", "\u200dabc", "\u200c", "a\u0000b", "a:b", "x".repeat(65),
+      "a\u202eb"];
+    expect(accepted.map((n) => `${JSON.stringify(n)} ${ok(n)}`)).toEqual(accepted.map((n) => `${JSON.stringify(n)} true`));
+    expect(refused.map((n) => `${JSON.stringify(n)} ${ok(n)}`)).toEqual(refused.map((n) => `${JSON.stringify(n)} false`));
+  });
+
+  test("labels are P- and 4, 6, 8 … 16 upper-case hex; reveal matches one label exactly, never a prefix", () => {
+    const b = structuredClone(a);
+    expect(b.projects.length).toBeGreaterThanOrEqual(3);
+    b.projects[0]!.label = "P-ABCD12";
+    b.projects[1]!.label = "P-ABCD34";
+    b.projects[2]!.label = "P-ABCD12EF90AB34CD";
+    const out = parsed(b, { ...OPTS, reveal: [{ label: "p-abcd12", name: "my-lib" }] });
+    const named = (out.projects as Json[]).filter((p) => "name" in p);
+    expect(named).toEqual([expect.objectContaining({ label: "P-ABCD12", name: "my-lib" })]);
+    expect(() => exportPayload(b, { ...OPTS, reveal: [{ label: "P-ABCD", name: "x" }] })).toThrow(RevealError);
+    for (const [label, ok] of [["P-ABCD", true], ["P-ABCDEF01", true], ["P-0123456789ABCDEF", true], ["P-ABCDE", false], ["P-ABC", false],
+      ["P-0123456789ABCDEF01", false], ["P-abcd", false]] as const) {
+      const c = structuredClone(b);
+      c.projects[0]!.label = label;
+      let err: unknown;
+      try { exportPayload(c, OPTS); } catch (e) { err = e; }
+      expect(`${label} ${err === undefined}`).toBe(`${label} ${ok}`);
+    }
+  });
+
+  test("a reveal label that would name two exported projects throws RevealError, naming neither", () => {
+    const b = structuredClone(a);
+    b.projects[0]!.label = "P-ABCD12";
+    b.projects[1]!.label = "P-ABCD12";
+    let err: unknown;
+    try { exportPayload(b, { ...OPTS, reveal: [{ label: "P-ABCD12", name: "secret-name" }] }); } catch (e) { err = e; }
+    expect(err).toBeInstanceOf(RevealError);
+    expect((err as Error).message).toBe('exportPayload: the reveal label "P-ABCD12" names more than one exported project');
+    expect((err as Error).message).not.toContain("secret-name");
   });
 
   test("at most 100 projects, ranked by sessions; the rest are counted", () => {
@@ -326,8 +402,9 @@ describe("exportPayload: the preview contract and deny by default", () => {
 
   test("an unexpected key added at every depth of a real analysis never survives", () => {
     const a = analyze(personaScan("expert", { canaries: true }), UTC);
-    // open records whose entries all pass on: text planted there fails the export instead (tests below)
-    const checkValues = new Set<unknown>([...a.forensics.checks.map((c) => c.values), a.private.models, a.risk.permission, a.risk.approval, a.risk.sandbox]);
+    // open records whose entries all pass on or are counted: text planted there fails the export instead (tests below)
+    const checkValues = new Set<unknown>([...a.forensics.checks.map((c) => c.values), a.private.models, a.risk.permission, a.risk.approval, a.risk.sandbox,
+      a.stack.languages, a.stack.toolchains, a.stack.techCategories, a.exposure.arcs.prompts, a.exposure.arcs.durations, a.config.byKind]);
     let planted = 0;
     const plant = (v: unknown): void => {
       if (Array.isArray(v)) { for (const x of v) plant(x); return; }
@@ -591,8 +668,8 @@ describe("exportPayload: the preview contract and deny by default", () => {
 
   test("the top level holds exactly the declared parts", () => {
     const out = parsed(analyze(personaScan("intermediate"), UTC));
-    expect(Object.keys(out).sort()).toEqual(["config", "core", "coverage", "dimensions", "exclusions", "exposure", "forensics", "identity", "otherProjects",
-      "overall", "personas", "projects", "reference", "risk", "schema", "signals", "stack"]);
+    expect(Object.keys(out).sort()).toEqual(["config", "core", "coverage", "dimensions", "exclusions", "exposure", "forensics", "identity", "omitted",
+      "otherProjects", "overall", "personas", "projects", "reference", "repoSignals", "risk", "schema", "signals", "stack"]);
   });
 
   test("an empty scan exports a valid payload with nothing scored", () => {
@@ -610,7 +687,202 @@ describe("exportPayload: the preview contract and deny by default", () => {
     a.risk.permission = { default: 2, acceptEdits: 1, [CANARY.slug]: 3, weird: 4 };
     a.risk.approval = { never: 1, [CANARY.slug]: 2 };
     a.risk.sandbox = { "workspace-write": 5, other: 1, [CANARY.project]: 1 };
-    expect(parsed(a).risk).toEqual({ permission: { default: 2, acceptEdits: 1, other: 7 }, approval: { never: 1, other: 2 }, sandbox: { "workspace-write": 5, other: 2 } });
+    expect(parsed(a).risk).toEqual({ permission: { default: 2, acceptEdits: 1, other: 7 }, approval: { never: 1, other: 2 }, sandbox: { "workspace-write": 5, other: 2 },
+      window: a.risk.meta.window, n: a.risk.meta.n });
+  });
+});
+
+describe("exportPayload: the numeric ranges the schema holds", () => {
+  const base = analyze(personaScan("expert"), UTC);
+  const rhythm = base.forensics.checks.findIndex((c) => c.id === "soft:rhythm");
+  const scored = base.dimensions.findIndex((d) => d.status === "scored" && d.components.some((c) => c.z !== null));
+  const comp = base.dimensions[scored]!.components.findIndex((c) => c.z !== null);
+  const pathOf = (mutate: (a: Analysis) => void): string[] => {
+    const a = structuredClone(base);
+    mutate(a);
+    try { exportPayload(a, OPTS); } catch (e) { return [...(e as ExportError).paths]; }
+    return [];
+  };
+
+  test("out of range: a keyed hash not of 16 hex digits, a score or interval end outside 1 to 99, activeDays over 7, |z| over 3", () => {
+    const cases: Array<[(a: Analysis) => void, string]> = [
+      [(a) => { a.identity.hashes = ["0123456789abcdef0123456789abcdef"]; }, "$.identity.bindings[0]"],
+      [(a) => { a.identity.hashes = ["01234567"]; }, "$.identity.bindings[0]"],
+      [(a) => { a.overall.score = 0; }, "$.overall.score"],
+      [(a) => { a.overall.score = 100; }, "$.overall.score"],
+      [(a) => { a.dimensions[scored]!.score = 100; }, `$.dimensions[${scored}].score`],
+      [(a) => { a.dimensions[scored]!.interval = [0, 50]; }, `$.dimensions[${scored}].interval[0]`],
+      [(a) => { a.overall.interval = [50, 100]; }, "$.overall.interval[1]"],
+      [(a) => { a.exposure.weekly[0]!.activeDays = 8; }, "$.exposure.weekly[0].activeDays"],
+      [(a) => { a.dimensions[scored]!.components[comp]!.z = 3.0001; }, `$.dimensions[${scored}].components[${comp}].z`],
+      [(a) => { a.dimensions[scored]!.components[comp]!.z = -3.5; }, `$.dimensions[${scored}].components[${comp}].z`],
+    ];
+    for (const [mutate, path] of cases) expect(`${path} ${pathOf(mutate).join(",")}`).toBe(`${path} ${path}`);
+  });
+
+  test("forensic values: a ratio over 1000, or any value with more decimals than its kind keeps, fails", () => {
+    const at = `$.forensics.checks[${rhythm}].values`;
+    const set = (v: Record<string, number>) => (a: Analysis) => { a.forensics.checks[rhythm]!.values = hostile({ ...a.forensics.checks[rhythm]!.values, ...v }); };
+    for (const [v, key] of [[{ medianCv: 1000.01 }, "medianCv"], [{ medianCv: 0.123 }, "medianCv"], [{ share: 0.12345 }, "share"], [{ rho: 0.12345 }, "rho"],
+      [{ days: 1.5 }, "days"]] as const) {
+      expect(`${key} ${pathOf(set(v)).join(",")}`).toBe(`${key} ${at}.${key}`);
+    }
+  });
+
+  test("the edges are inside: z of ±3, scores 1 and 99, activeDays 7, a ratio of 1000, 4-decimal shares and correlations", () => {
+    expect(pathOf((a) => {
+      a.dimensions[scored]!.components[comp]!.z = -3;
+      a.overall.score = 1;
+      a.overall.interval = [1, 99];
+      a.dimensions[scored]!.score = 99;
+      a.exposure.weekly[0]!.activeDays = 7;
+      a.forensics.checks[rhythm]!.values = hostile({ ...a.forensics.checks[rhythm]!.values, medianCv: 1000, share: 0.1234, rho: -0.9999 });
+    })).toEqual([]);
+  });
+});
+
+describe("exportPayload: nothing is left out silently", () => {
+  const NONE = { coverage: 0, weeks: 0, tools: 0, mcpServers: 0, bindings: 0, promptArcs: 0, durationArcs: 0, languages: 0, toolchains: 0,
+    techCategories: 0, configKinds: 0, features: 0 };
+
+  test("a persona leaves nothing out", () => {
+    expect(parsed(analyze(personaScan("expert"), UTC)).omitted).toEqual(NONE);
+  });
+
+  test("70 identity hashes export 64 bindings and say 6 were left out", () => {
+    const a = analyze(personaScan("expert"), UTC);
+    a.identity.hashes = Array.from({ length: 70 }, (_, i) => i.toString(16).padStart(16, "0"));
+    a.identity.accounts = 70;
+    const out = parsed(a);
+    expect(((out.identity as Json).bindings as string[]).length).toBe(64);
+    expect(out.omitted).toEqual({ ...NONE, bindings: 6 });
+  });
+
+  test("300 MCP servers export 256 labels and say 44 were left out", () => {
+    const a = analyze(personaScan("expert"), UTC);
+    a.private.config = Array.from({ length: 300 }, (_, i) => ({ kind: "mcp-server" as const, name: `internal-${i}`, key: i.toString(16).padStart(16, "0"),
+      provenance: "authored" as const, used: false }));
+    const out = parsed(a);
+    expect(((out.config as Json).mcpServers as string[]).length).toBe(256);
+    expect(out.omitted).toEqual({ ...NONE, mcpServers: 44 });
+  });
+
+  test("coverage rows, weeks and exposure tools past their caps are counted", () => {
+    const a = analyze(personaScan("expert"), UTC);
+    const row = a.coverage.rows[0]!;
+    a.coverage.rows = Array.from({ length: 70 }, () => structuredClone(row));
+    const w = a.exposure.weekly.at(-1)!;
+    a.exposure.weekly = Array.from({ length: 60 }, () => structuredClone(w));
+    const t = a.exposure.tools[0]!;
+    a.exposure.tools = Array.from({ length: 65 }, () => structuredClone(t));
+    expect(parsed(a).omitted).toEqual({ ...NONE, coverage: 6, weeks: 8, tools: 1 });
+  });
+
+  test("a key outside a vocabulary is counted with its count, never dropped with it", () => {
+    const a = analyze(personaScan("expert"), UTC);
+    hostile<Json>(a.stack.languages).cobol = 5;
+    hostile<Json>(a.stack.toolchains).fortran = 2;
+    hostile<Json>(a.stack.techCategories).quantum = 3;
+    hostile<Json>(a.exposure.arcs.prompts)["99+"] = 4;
+    hostile<Json>(a.exposure.arcs.durations)[">1d"] = 1;
+    hostile<Json>(a.config.byKind).widget = { authored: 1, installed: 2, other: 3, used: 1 };
+    hostile<Json>(a.exposure.firstSeen).teleport = Date.UTC(2026, 9, 1);
+    hostile<Json>(a.risk.permission).yolo = 7; // a block with an other bucket counts it there
+    const before = (a.risk.permission.other ?? 0);
+    const out = parsed(a);
+    expect(out.omitted).toEqual({ ...NONE, languages: 5, toolchains: 2, techCategories: 3, promptArcs: 4, durationArcs: 1, configKinds: 6, features: 1 });
+    expect(((out.risk as Json).permission as Json).other).toBe(before + 7);
+    expect(JSON.stringify(out)).not.toMatch(/cobol|fortran|quantum|widget|teleport|yolo/);
+  });
+
+  test("a value under an unknown key that is no count fails the export instead of vanishing", () => {
+    const a = analyze(personaScan("expert"), UTC);
+    hostile<Json>(a.stack.languages).cobol = "LEAKVALUE";
+    let err: unknown;
+    try { exportPayload(a, OPTS); } catch (e) { err = e; }
+    expect((err as ExportError).paths).toEqual(["$.omitted.languages"]);
+    expect((err as Error).message).not.toContain("LEAK");
+  });
+});
+
+describe("exportPayload: the unchecked-command share", () => {
+  test("a measured value reaches the payload with its window, span and n, like every metric; sources never leave", () => {
+    const a = analyze(personaScan("expert"), UTC);
+    expect(parsed(a).signals).toHaveProperty("uncheckedCommandShare");
+    a.signals.uncheckedCommandShare = { value: 0.25, n: 12, window: "detail", sources: ["codex.rollouts"], from: Date.UTC(2026, 9, 3), to: Date.UTC(2026, 10, 9) };
+    const out = parsed(a);
+    expect((out.signals as Json).uncheckedCommandShare).toEqual({ value: 0.25, n: 12, window: "detail", from: "2026-10", to: "2026-11" });
+    expect(JSON.stringify(out)).not.toContain("codex.rollouts");
+  });
+
+  test("it is a share: a value outside [0, 1] fails the export", () => {
+    const a = analyze(personaScan("expert"), UTC);
+    a.signals.uncheckedCommandShare = { value: 1.5, n: 2, window: "detail", sources: [] };
+    expect(() => exportPayload(a, OPTS)).toThrow("$.signals.uncheckedCommandShare.value");
+  });
+});
+
+describe("exportPayload: provenance", () => {
+  test("each component carries its metric's window; the stack and risk panels their window and n; the repo pass its status", () => {
+    const a = analyze(personaScan("expert"), UTC);
+    const out = parsed(a);
+    const dims = out.dimensions as Array<{ components: Json[] }>;
+    const windows = dims.flatMap((d) => d.components.map((c) => c.window));
+    expect(windows).toEqual(a.dimensions.flatMap((d) => d.components.map((c) => c.meta.window)));
+    expect(new Set(windows)).toEqual(new Set(["detail", "lifetime"])); // a dimension can mix them: the reader must see which
+    expect(out.stack).toMatchObject({ window: a.stack.meta.window, n: a.stack.meta.n });
+    expect(out.risk).toMatchObject({ window: a.risk.meta.window, n: a.risk.meta.n });
+    expect(out.repoSignals).toBe(a.meta.repoSignals);
+    for (const status of ["partial", "off", "git-missing"] as const) {
+      const b = structuredClone(a);
+      b.meta.repoSignals = status;
+      expect(parsed(b).repoSignals).toBe(status);
+    }
+  });
+
+  test("a component window, a panel n or a repo status outside its form fails the export", () => {
+    const base = analyze(personaScan("expert"), UTC);
+    for (const [mutate, path] of [
+      [(a: Analysis) => { a.dimensions[0]!.components[0]!.meta.window = hostile("weekly"); }, "$.dimensions[0].components[0].window"],
+      [(a: Analysis) => { a.stack.meta.n = -1; }, "$.stack.n"],
+      [(a: Analysis) => { a.risk.meta.window = hostile("all"); }, "$.risk.window"],
+      [(a: Analysis) => { a.meta.repoSignals = hostile("half"); }, "$.repoSignals"],
+    ] as const) {
+      const a = structuredClone(base);
+      mutate(a);
+      let err: unknown;
+      try { exportPayload(a, OPTS); } catch (e) { err = e; }
+      expect(`${path} ${(err as ExportError | undefined)?.paths?.join(",")}`).toBe(`${path} ${path}`);
+    }
+  });
+});
+
+describe("exportPayload: what was excluded", () => {
+  test("exclusions is exactly tools, projects, sessions, dateRange and weeksOutside; no date leaves", () => {
+    const a = analyze(personaScan("expert"), UTC);
+    delete a.exclusions.dateRange;
+    delete a.exclusions.weeksOutside;
+    expect(parsed(a).exclusions).toEqual({ tools: 0, projects: 0, sessions: 0, dateRange: false, weeksOutside: 0 }); // the defaults when absent
+    a.exclusions = { tools: 1, projects: 2, sessions: 3, dateRange: true, weeksOutside: 4 };
+    (a.exclusions as Json).from = Date.UTC(2026, 9, 1);
+    const out = parsed(a);
+    expect(out.exclusions).toEqual({ tools: 1, projects: 2, sessions: 3, dateRange: true, weeksOutside: 4 });
+    expect(JSON.stringify(out.exclusions)).not.toMatch(/\d{4}-\d{2}/);
+  });
+
+  test("a weeksOutside that is no count, or a dateRange that is no boolean, fails the export", () => {
+    const base = analyze(personaScan("expert"), UTC);
+    for (const [mutate, path] of [
+      [(a: Analysis) => { a.exclusions.weeksOutside = -1; }, "$.exclusions.weeksOutside"],
+      [(a: Analysis) => { a.exclusions.weeksOutside = 1.5; }, "$.exclusions.weeksOutside"],
+      [(a: Analysis) => { a.exclusions.dateRange = hostile("2026-10-01"); }, "$.exclusions.dateRange"],
+    ] as const) {
+      const a = structuredClone(base);
+      mutate(a);
+      let err: unknown;
+      try { exportPayload(a, OPTS); } catch (e) { err = e; }
+      expect(`${path} ${(err as ExportError | undefined)?.paths?.join(",")}`).toBe(`${path} ${path}`);
+    }
   });
 });
 
@@ -671,9 +943,16 @@ describe("the reading side rebuilds every question from the export", () => {
 });
 
 describe("exportPayload: golden bytes", () => {
+  /** The bytes with the core version replaced by a fixed token: a release must not change the golden bytes. */
+  const unversioned = (json: string): string => {
+    const at = `"core":${JSON.stringify(VERSION)}`;
+    expect(json.split(at).length).toBe(2); // the version appears once, as the core field
+    return json.replace(at, `"core":"<version>"`);
+  };
+
   test("the intermediate persona (fixed salt, now, seed, TZ=UTC) exports these exact bytes", () => {
     const result = withTz("UTC", () => exportPayload(analyze(personaScan("intermediate"), { timeZone: "UTC", seed: 0x5eed }), OPTS));
-    expect(result.json).toMatchSnapshot();
+    expect(unversioned(result.json)).toMatchSnapshot();
     const dims = (JSON.parse(result.json) as Json).dimensions as Array<{ components: Array<{ x: number | null; z: number | null }> }>;
     let checked = 0;
     for (const d of dims) {
@@ -704,7 +983,7 @@ describe("exportPayload: golden bytes", () => {
     expect([c5.status, c5.reason, (c5.values as Json).date]).toEqual(["note", "restore-cluster", "2026-11-02"]);
     expect((out.projects as Json[])[0]!.name).toBe("bibliothèque ü-lib");
     expectNoCanaries(result.json);
-    expect(result.json).toMatchSnapshot();
+    expect(unversioned(result.json)).toMatchSnapshot();
   });
 
   test("persona canaries: the expert with canaries exports none (P3 pre-flight F25)", () => {

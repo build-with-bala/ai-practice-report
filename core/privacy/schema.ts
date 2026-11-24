@@ -1,4 +1,5 @@
 import type { Feature, DurationArc, PromptArc } from "../analysis/exposure";
+import type { RepoSignals } from "../git/types";
 import type { ConfigEv, CoverageEv } from "../model/events";
 import type { TechCategory, Toolchain, ToolId, Window } from "../model/ids";
 import type { CheckId, CheckStatus, Forensics } from "../forensics/index";
@@ -10,7 +11,7 @@ import { PRACTICE_ROLES, STACK_ROLES } from "../scoring/roles";
 import type { Metric } from "../analysis/types";
 import type { Evidence } from "../signals/types";
 import type { EditLang } from "../text/langs";
-import { MCP_PUBLIC, MODEL_FAMILY_PATTERN, RISK_TOKENS } from "./allowlists";
+import { MCP_PUBLIC, MODEL_FAMILY_PATTERN, MODEL_WORDS, modelExportId, RISK_TOKENS } from "./allowlists";
 
 /**
  * The sensitivity class of an exported value (spec §6.7): `public` (fixed vocabulary), `aggregate` (counts, rates,
@@ -21,7 +22,8 @@ export type Sensitivity = "public" | "aggregate" | "pseudonymous" | "revealed";
 /**
  * One declared field of the export. Leaves carry their sensitivity class: `count` is a non-negative safe integer (every
  * count of the payload), `integer` a signed one (no payload field needs a sign today), `number` any finite number,
- * `bounded` a finite number in [min, max] (shares, weights, correlations), `day` a real calendar day "YYYY-MM-DD"
+ * `bounded` a finite number in [min, max] (shares, weights, correlations, scores), with at most `decimals` decimals
+ * when given (0: an integer), `day` a real calendar day "YYYY-MM-DD"
  * (`isDay`). A `variant` is an object whose string field `tag` picks the spec in `cases` it must fit.
  * `nullable`, `optional`, `array` (at most `max` elements),
  * `tuple` (exactly one element per spec in `of`, all or nothing), `object` (exactly the declared `fields`) and `record`
@@ -30,11 +32,13 @@ export type Sensitivity = "public" | "aggregate" | "pseudonymous" | "revealed";
  * may be absent (`null` is a value, for `nullable`). Every pattern is anchored at both ends.
  */
 export type FieldSpec =
-  | { t: "number" | "integer" | "count" | "boolean"; s: Sensitivity } | { t: "bounded"; min: number; max: number; s: Sensitivity }
+  | { t: "number" | "integer" | "count" | "boolean"; s: Sensitivity } | { t: "bounded"; min: number; max: number; decimals?: number; s: Sensitivity }
   | { t: "day"; s: Sensitivity } | { t: "optional"; of: FieldSpec } | { t: "variant"; tag: string; cases: Readonly<Record<string, FieldSpec>> } | { t: "enum"; values: readonly string[]; s: Sensitivity }
   | { t: "string"; pattern: RegExp; s: Sensitivity } | { t: "nullable"; of: FieldSpec }
   | { t: "array"; of: FieldSpec; max: number } | { t: "tuple"; of: readonly FieldSpec[] } | { t: "object"; fields: Readonly<Record<string, FieldSpec>> }
-  | { t: "record"; key: RegExp; of: FieldSpec; maxKeys: number; fields?: Readonly<Record<string, FieldSpec>> };
+  | { t: "record"; key: KeyTest; of: FieldSpec; maxKeys: number; fields?: Readonly<Record<string, FieldSpec>> };
+/** What a record key must pass: an anchored pattern, or a predicate in the same shape. */
+export interface KeyTest { test(key: string): boolean }
 
 /**
  * A value as the schema allows it (deny by default), or `undefined` when it is not allowed at all:
@@ -51,7 +55,8 @@ export function sanitize(value: unknown, spec: FieldSpec): unknown {
   switch (spec.t) {
     case "number": return typeof value === "number" && Number.isFinite(value) ? value + 0 : undefined;
     case "integer": return typeof value === "number" && Number.isSafeInteger(value) ? value + 0 : undefined;
-    case "bounded": return typeof value === "number" && Number.isFinite(value) && value >= spec.min && value <= spec.max ? value + 0 : undefined;
+    case "bounded": return typeof value === "number" && Number.isFinite(value) && value >= spec.min && value <= spec.max && hasDecimals(value, spec.decimals)
+      ? value + 0 : undefined;
     case "count": return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value + 0 : undefined;
     case "day": return isDay(value) ? value : undefined;
     case "optional": return sanitize(value, spec.of);
@@ -179,6 +184,13 @@ function variantCase(value: unknown, spec: Extract<FieldSpec, { t: "variant" }>)
   return typeof tag === "string" && Object.hasOwn(spec.cases, tag) ? spec.cases[tag] : undefined;
 }
 
+/** True when `x` has at most `decimals` decimals (always, when `decimals` is undefined): rounding to them gives `x` back. */
+function hasDecimals(x: number, decimals: number | undefined): boolean {
+  if (decimals === undefined) return true;
+  const f = 10 ** decimals;
+  return Math.round(x * f) / f === x;
+}
+
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   if (v === null || typeof v !== "object" || Array.isArray(v)) return false;
   const proto = Object.getPrototypeOf(v);
@@ -229,11 +241,13 @@ export const TECH_CATEGORIES = keysOf<TechCategory>({ data: true, infra: true, s
 export const CONFIG_KINDS = keysOf<ConfigEv["kind"]>({ skill: true, command: true, agent: true, plugin: true, hook: true, "mcp-server": true, "memory-file": true,
   "instruction-file": true, profile: true, feature: true });
 const BANDS = keysOf<Band>({ exceptional: true, strong: true, developing: true, limited: true, insufficient: true });
-const FORENSIC_BANDS = keysOf<Forensics["band"]>({ consistent: true, "consistent-with-notes": true, inconsistent: true, unverifiable: true });
-const CHECK_IDS = keysOf<CheckId>({ C1: true, C2: true, C3: true, C4: true, C5: true, C6: true, C7: true, C8: true, C9: true, C10: true,
+/** The integrity bands, and the checks every analysis runs (C1–C10, then the soft flags): the acceptance script reads these. */
+export const FORENSIC_BANDS = keysOf<Forensics["band"]>({ consistent: true, "consistent-with-notes": true, inconsistent: true, unverifiable: true });
+export const CHECK_IDS = keysOf<CheckId>({ C1: true, C2: true, C3: true, C4: true, C5: true, C6: true, C7: true, C8: true, C9: true, C10: true,
   "soft:rhythm": true, "soft:repeated-long": true, "soft:recent-burst": true, "soft:unclosed-tools": true, "soft:new-config": true,
   "soft:no-server-pass": true, "soft:missing-ids": true });
 const CHECK_STATUS = keysOf<CheckStatus>({ pass: true, note: true, warn: true, fail: true, "n/a": true, info: true });
+const REPO_STATUS = keysOf<RepoSignals["status"]>({ ok: true, partial: true, off: true, "git-missing": true });
 const ROLES: readonly string[] = Object.freeze([...Object.values(PRACTICE_ROLES), ...Object.values(STACK_ROLES)]);
 
 // ---------- building blocks ----------
@@ -241,7 +255,7 @@ const ROLES: readonly string[] = Object.freeze([...Object.values(PRACTICE_ROLES)
 const esc = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const oneOf = (values: readonly string[]): RegExp => new RegExp(`^(?:${values.map(esc).join("|")})$`);
 
-/** A count: a non-negative safe integer. Every integer of the payload is one (scores and interval ends included). */
+/** A count: a non-negative safe integer. Every integer of the payload is one, but scores and interval ends (`SCORE`) and `activeDays`. */
 const int = (s: Sensitivity = "aggregate"): FieldSpec => ({ t: "count", s });
 /** A field that may be absent (its type in `Analysis` is optional). */
 const opt = (of: FieldSpec): FieldSpec => ({ t: "optional", of });
@@ -259,14 +273,19 @@ const counts = (keys: readonly string[], of: FieldSpec = int()): FieldSpec => ({
 const MONTH = str(/^\d{4}-(?:0[1-9]|1[0-2])$/, "aggregate");
 /** "YYYY-Www": an ISO week. */
 const WEEK = str(/^\d{4}-W(?:0[1-9]|[1-4]\d|5[0-3])$/, "aggregate");
-const KEYED_HASH = str(/^[0-9a-f]{8,64}$/, "pseudonymous");
+/** A keyed hash as the engine makes it: exactly 16 lower-case hex digits (`keyedHash`'s length). */
+const KEYED_HASH = str(/^[0-9a-f]{16}$/, "pseudonymous");
 const TOOL = en(TOOL_IDS);
 const WINDOW = en(WINDOWS);
-/** A bootstrap interval: both ends or none (a one-point interval would claim more than the data holds). */
-const INTERVAL = nullable({ t: "tuple", of: [int(), int()] });
-
-/** A finite number in [min, max]. */
-const bounded = (min: number, max: number, s: Sensitivity = "aggregate"): FieldSpec => ({ t: "bounded", min, max, s });
+/** A finite number in [min, max], with at most `decimals` decimals when given. */
+const bounded = (min: number, max: number, decimals?: number, s: Sensitivity = "aggregate"): FieldSpec =>
+  (decimals === undefined ? { t: "bounded", min, max, s } : { t: "bounded", min, max, decimals, s });
+/** A display score: an integer in [1, 99] (`displayScore` clamps to it). */
+const SCORE = bounded(1, 99, 0);
+/** A bootstrap interval: both ends or none (a one-point interval would claim more than the data holds), each a score. */
+const INTERVAL = nullable({ t: "tuple", of: [SCORE, SCORE] });
+/** A component's z: the scoring limits it to [-3, 3]. */
+const Z = bounded(-3, 3);
 /** A share (or a weight): a fraction in [0, 1]. */
 const share = (): FieldSpec => bounded(0, 1);
 
@@ -280,12 +299,20 @@ const METRIC = metricOf(num());
  */
 export const SHARE_METRICS: ReadonlySet<MetricKey> = new Set<MetricKey>(["vae", "closure", "parallelShare", "backgroundShare", "correctionRate",
   "healthyInterruptShare", "maintainedShare", "briefScore", "hygiene", "landedShare", "reworkShare", "aiCoauthoredShare", "commitAfterSession",
-  "guardrails"]);
+  "guardrails", "uncheckedCommandShare"]);
 const metricSpec = (k: MetricKey): FieldSpec => (SHARE_METRICS.has(k) ? metricOf(share()) : k === "rho" ? metricOf(bounded(-1, 1)) : METRIC);
 
-/** The spec of each kind of forensic value (`VALUE_KINDS`, owned by core/forensics: `questionFor` reads the same table). */
+/**
+ * The ceiling of a forensic `ratio` (a coefficient of variation of prompt gaps): a population CV of n gaps is at most
+ * sqrt(n - 1), so 1000 needs a session of about a million prompts.
+ */
+const RATIO_MAX = 1000;
+/**
+ * The spec of each kind of forensic value, with the decimals core/forensics stores it to: a share and a correlation 4,
+ * a ratio 2, a count none (`VALUE_KINDS`, owned by core/forensics: `questionFor` reads the same table).
+ */
 export const KIND_SPECS: Readonly<Record<ValueKind, FieldSpec>> = {
-  count: { t: "count", s: "aggregate" }, share: bounded(0, 1), corr: bounded(-1, 1), ratio: bounded(0, Infinity), date: { t: "day", s: "aggregate" },
+  count: { t: "count", s: "aggregate" }, share: bounded(0, 1, 4), corr: bounded(-1, 1, 4), ratio: bounded(0, RATIO_MAX, 2), date: { t: "day", s: "aggregate" },
 };
 /** The checks whose values may hold the date: only the file-time check (C5). */
 const DATED_CHECKS: ReadonlySet<CheckId> = new Set<CheckId>(["C5"]);
@@ -307,10 +334,20 @@ const CHECK: FieldSpec = (() => {
 
 /** An MCP server's export label: a public name, or "custom #n". */
 const MCP_LABEL = str(new RegExp(`^(?:${[...MCP_PUBLIC].map(esc).join("|")}|custom #[1-9]\\d{0,3})$`), "pseudonymous");
-/** A model's export id: a known family's allowlisted id or `<family>-other`, "fine-tuned" or "other" (at most 64 characters). */
-const MODEL_KEY = new RegExp(`^(?=.{1,64}$)(?:fine-tuned|other|(?:${MODEL_FAMILY_PATTERN})(?:-[a-z0-9.]+)*)$`);
-/** A project name the person chose to reveal: letters, digits, spaces and ". _ -", 1 to 64 of them, no edge space. */
-const REVEALED_NAME = str(/^[\p{L}\p{N}](?:[\p{L}\p{N} ._-]{0,62}[\p{L}\p{N}])?$/u, "revealed");
+/**
+ * A model's export id: exactly what `modelExportId` gives back unchanged (a known family's allowlisted id or
+ * `<family>-other`), or one of its two fixed tokens, "fine-tuned" and "other". No looser shape is accepted.
+ */
+const MODEL_KEY: KeyTest = { test: (k) => k === "fine-tuned" || k === "other" || modelExportId(k) === k };
+/** A project's opaque label: "P-" and the upper-case hex of 4, 6, 8 … or 16 digits, the shortest unique in the store. */
+const PROJECT_LABEL = str(/^P-(?:[0-9A-F]{2}){2,8}$/, "pseudonymous");
+/**
+ * A project name the person chose to reveal, in any script: letters, combining marks, digits, spaces and ". _ -", and
+ * the zero-width non-joiner and joiner (U+200C, U+200D) that some scripts write words with; 1 to 64 code points. It
+ * starts with a letter or digit and ends with a letter, mark or digit (no edge space or joiner). No path separator,
+ * control or format character other than the two joiners, or markup character can appear.
+ */
+const REVEALED_NAME = str(/^[\p{L}\p{N}](?:[\p{L}\p{M}\p{N} ._\u200C\u200D-]{0,62}[\p{L}\p{M}\p{N}])?$/u, "revealed");
 
 /**
  * The `aiprof/2` payload: every field the export may hold, with its type and sensitivity class (spec §6.7, Task 14's
@@ -320,20 +357,22 @@ export const AIPROF2: FieldSpec = obj({
   schema: en(["aiprof/2"]),
   core: str(/^(?=.{1,64}$)(?:0|[1-9]\d{0,3})\.(?:0|[1-9]\d{0,3})\.(?:0|[1-9]\d{0,3})(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/, "public"),
   reference: en(["v0"]),
+  /** The repo pass's status: a reader must see a pass that was partial or off. */
+  repoSignals: en(REPO_STATUS),
   coverage: arr(obj({
     tool: TOOL, window: WINDOW, statuses: arr(en(COVERAGE_STATUS), 64), beta: bool("public"), from: opt(MONTH), to: opt(MONTH),
     sessions: int(), prompts: int(), formatChanged: bool(),
   }), 64),
   overall: obj({
-    status: en(["scored", "insufficient"]), score: nullable(int()), interval: INTERVAL, band: en(BANDS),
+    status: en(["scored", "insufficient"]), score: nullable(SCORE), interval: INTERVAL, band: en(BANDS),
     coverage: str(/^[0-7]\/7$/, "aggregate"),
   }),
   dimensions: arr(obj({
-    id: en(DIMENSION_IDS), status: en(["scored", "insufficient", "not-measurable", "not-measured"]), score: nullable(int()), interval: INTERVAL,
+    id: en(DIMENSION_IDS), status: en(["scored", "insufficient", "not-measurable", "not-measured"]), score: nullable(SCORE), interval: INTERVAL,
     openTail: bool(), confidence: nullable(en(["low", "medium", "high"])), n: int(), needs: int(), part: en(EVIDENCE_PARTS), window: WINDOW,
     components: arr(obj({
-      id: en(COMPONENTS.map((c) => c.id)), status: en(["ok", "not-measurable", "not-measured"]), x: nullable(num()), z: nullable(num()), n: int(),
-      weight: share(),
+      id: en(COMPONENTS.map((c) => c.id)), status: en(["ok", "not-measurable", "not-measured"]), x: nullable(num()), z: nullable(Z), n: int(),
+      weight: share(), window: WINDOW,
     }), 16),
   }), DIMENSION_IDS.length),
   personas: arr(en(ROLES), 3),
@@ -341,7 +380,7 @@ export const AIPROF2: FieldSpec = obj({
   exposure: obj({
     tenureWeeks: METRIC,
     activeWeeks: obj({ detail: METRIC, lifetime: METRIC }),
-    weekly: arr(obj({ week: WEEK, activeDays: int(), detailPrompts: int(), lifetimePrompts: int() }), 52),
+    weekly: arr(obj({ week: WEEK, activeDays: bounded(0, 7, 0), detailPrompts: int(), lifetimePrompts: int() }), 52),
     tools: arr(obj({ tool: TOOL, window: WINDOW, sessions: int(), prompts: int(), actions: int(), from: opt(MONTH), to: opt(MONTH) }), 64),
     rotation: obj({ active90d: arr(TOOL, TOOL_IDS.length), ever: arr(TOOL, TOOL_IDS.length) }),
     arcs: obj({
@@ -351,17 +390,19 @@ export const AIPROF2: FieldSpec = obj({
     firstSeen: counts(FEATURES, WEEK),
     models: { t: "record", key: MODEL_KEY, of: int(), maxKeys: 64 },
   }),
-  stack: obj({ languages: counts(EDIT_LANGS), toolchains: counts(TOOLCHAINS), techCategories: counts(TECH_CATEGORIES) }),
+  /** The stack, with the window and n of its edit counts (`Stack.meta`). */
+  stack: obj({ languages: counts(EDIT_LANGS), toolchains: counts(TOOLCHAINS), techCategories: counts(TECH_CATEGORIES), window: WINDOW, n: int() }),
+  /** The risk posture, with its window and n (the sessions that gave a mode). */
   risk: obj({
     permission: counts([...RISK_TOKENS.permission, "other"]), approval: counts([...RISK_TOKENS.approval, "other"]),
-    sandbox: counts([...RISK_TOKENS.sandbox, "other"]),
+    sandbox: counts([...RISK_TOKENS.sandbox, "other"]), window: WINDOW, n: int(),
   }),
   config: obj({
     byKind: counts(CONFIG_KINDS, obj({ authored: int(), installed: int(), other: int(), used: int() })),
     hooksDisabled: bool(), memoryFiles: int(), mcpServers: arr(MCP_LABEL, 256),
   }),
   projects: arr(obj({
-    label: str(/^P-[0-9A-F]{4,6}$/, "pseudonymous"), name: opt(REVEALED_NAME), sessions: int(), activeWeeks: int(), tools: arr(TOOL, TOOL_IDS.length),
+    label: PROJECT_LABEL, name: opt(REVEALED_NAME), sessions: int(), activeWeeks: int(), tools: arr(TOOL, TOOL_IDS.length),
     inRepo: bool(), lastWeek: opt(WEEK),
   }), 100),
   otherProjects: obj({ projects: int(), sessions: int() }),
@@ -370,5 +411,43 @@ export const AIPROF2: FieldSpec = obj({
     checks: arr(CHECK, 32),
   }),
   identity: obj({ accounts: int(), bindings: arr(KEYED_HASH, 64) }),
-  exclusions: obj({ tools: int(), projects: int(), sessions: int() }),
+  /** What the exclusions left out: tool, project and session counts, whether a date range was given, and the active weeks outside it (no dates). */
+  /**
+   * What the builder left out, never silently: entries a cap cut from a list (`coverage`, `weeks`, `tools`,
+   * `mcpServers`, `bindings`), the summed counts under keys outside a vocabulary (`promptArcs`, `durationArcs`,
+   * `languages`, `toolchains`, `techCategories`; `configKinds` = config entries of an unknown kind), and the first-seen
+   * features outside `FEATURES` (`features`).
+   */
+  omitted: obj(Object.fromEntries(["coverage", "weeks", "tools", "mcpServers", "bindings", "promptArcs", "durationArcs", "languages", "toolchains",
+    "techCategories", "configKinds", "features"].map((k) => [k, int()]))),
+  exclusions: obj({ tools: int(), projects: int(), sessions: int(), dateRange: bool(), weeksOutside: int() }),
 });
+
+/**
+ * Every word a payload may hold by its own schema, lower-cased: each declared field name, each enum value, each key
+ * of a vocabulary-keyed table (features, arcs, languages, toolchains, tech categories, config kinds, risk tokens,
+ * check value keys), the reasons, the public MCP names, the model families and words, and the fixed tokens
+ * ("other", "fine-tuned", "custom"). Built from the closed lists only, never from data: the acceptance script uses it
+ * to tell a payload word from a folder name.
+ */
+export const PAYLOAD_WORDS: ReadonlySet<string> = (() => {
+  const out = new Set<string>();
+  const walk = (f: FieldSpec): void => {
+    switch (f.t) {
+      case "enum": for (const v of f.values) out.add(v); return;
+      case "optional": case "nullable": case "array": walk(f.of); return;
+      case "tuple": f.of.forEach(walk); return;
+      case "variant": for (const [k, c] of Object.entries(f.cases)) { out.add(k); walk(c); } return;
+      case "object": for (const [k, c] of Object.entries(f.fields)) { out.add(k); walk(c); } return;
+      case "record": walk(f.of); for (const [k, c] of Object.entries(f.fields ?? {})) { out.add(k); walk(c); } return;
+      default: return;
+    }
+  };
+  walk(AIPROF2);
+  const families = MODEL_FAMILY_PATTERN.split("|").filter((w) => /^[a-z]+$/.test(w));
+  for (const list of [FEATURES, PROMPT_ARCS, DURATION_ARCS, EDIT_LANGS, TOOLCHAINS, TECH_CATEGORIES, CONFIG_KINDS, ...Object.values(RISK_TOKENS),
+    Object.keys(REASONS), Object.keys(VALUE_KEYS), [...MCP_PUBLIC], [...MODEL_WORDS], families, ["other", "fine-tuned", "custom"]]) {
+    for (const w of list) out.add(w);
+  }
+  return new Set([...out].map((w) => w.toLowerCase()));
+})();

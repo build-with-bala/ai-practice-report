@@ -7,8 +7,9 @@ import { AIPROF2, CONFIG_KINDS, DURATION_ARCS, EDIT_LANGS, FEATURES, METRIC_KEYS
 
 /**
  * How to export. `schema`: the payload schema (`aiprof/2`, the only one). `reveal`: projects the person chose to name,
- * by label (matched without regard to letter case); every other project stays a label. A label that names no exported
- * project is a `RevealError`; when two entries name the same label, the last one wins.
+ * by label (matched exactly, without regard to letter case: never a prefix); every other project stays a label. A label
+ * that names no exported project, or more than one, is a `RevealError`; when two entries name the same label, the last
+ * one wins.
  */
 export interface ExportOptions { schema: "aiprof/2"; reveal?: Array<{ label: string; name: string }> }
 /** The export: `value` is the payload, `json` its canonical bytes (RFC 8785), `bytes` their UTF-8 length; `JSON.parse(json)` deep-equals `value` (the preview contract). */
@@ -47,14 +48,19 @@ const ours = (e: unknown): boolean => {
   }
 };
 
-/** A `reveal` label that names no exported project. The message quotes the label only when it has a label's shape, and never the name. */
+/**
+ * A `reveal` label that names no exported project, or (`ambiguous`) more than one. The message quotes the label only
+ * when it has a label's shape, and never the name.
+ */
 export class RevealError extends ExportError {
   override readonly name: string = "RevealError";
-  constructor(label: string) {
-    const shown = /^P-[0-9A-Fa-f]{4,6}$/.test(label) ? ` "${label}"` : "";
-    super([], "reveal", `exportPayload: the reveal label${shown} names no exported project`);
+  constructor(label: string, ambiguous = false) {
+    const shown = LABEL_SHAPE.test(label) ? ` "${label}"` : "";
+    super([], "reveal", `exportPayload: the reveal label${shown} names ${ambiguous ? "more than one exported project" : "no exported project"}`);
   }
 }
+/** A project label's shape, any letter case: "P-" and 4, 6, 8 … 16 hex digits. */
+const LABEL_SHAPE = /^P-(?:[0-9A-Fa-f]{2}){2,8}$/;
 
 /** At most this many projects are exported, by sessions; the rest are counted in `otherProjects`. */
 const MAX_PROJECTS = 100;
@@ -81,18 +87,33 @@ const roundOrNull = (x: number | null): number | null => (x === null ? null : ro
 const cmp = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 /** Plain data keyed by arbitrary strings, without a prototype a key could reach. */
 const dict = <T>(): Record<string, T> => Object.create(null) as Record<string, T>;
-/** The entries of `h` under the keys of a vocabulary (anything else in `h` is not the payload's). */
-function pick<T>(h: Partial<Record<string, T>>, keys: readonly string[]): Record<string, T> {
+/** The entries of `h` under the keys of a vocabulary; `rest` gets every other entry's value (the caller counts them). */
+function pick<T>(h: Partial<Record<string, T>>, keys: readonly string[], rest: (v: T) => void): Record<string, T> {
   const out = dict<T>();
   for (const k of keys) if (Object.hasOwn(h, k) && h[k] !== undefined) out[k] = h[k] as T;
+  for (const k of Object.keys(h)) if (!keys.includes(k) && h[k] !== undefined) rest(h[k] as T);
   return out;
 }
+/** `pick` over counts: the record, and the summed counts under keys outside the vocabulary (NaN when one is no count). */
+function pickCounts(h: Partial<Record<string, number>>, keys: readonly string[]): [Record<string, number>, number] {
+  let rest = 0;
+  const out = pick(h, keys, (v) => { rest = addCount(rest, v); });
+  return [out, rest];
+}
+/** How many entries a cap leaves out of a list. */
+const cut = (list: readonly unknown[], max: number): number => Math.max(0, list.length - max);
 
 /**
  * The `aiprof/2` export of an analysis: the only payload that may leave the machine (spec §6.7). Fail closed:
  * 1. a builder maps the analysis to the payload's form (spans by month, first-seen times by ISO week, raw channels
- *    through the allowlists, fractions rounded to 4 decimals) and applies every cap (100 projects, the rest in
- *    `otherProjects`; 64 model ids, the rest in "other"; the latest 52 weeks);
+ *    through the allowlists, fractions rounded to 4 decimals) and applies every cap, none silently: 100 projects (the
+ *    rest counted in `otherProjects`), 64 model ids (the rest folded into "other"), and in `omitted` the entries cut
+ *    from the latest 52 weeks (`weeks`), 64 coverage rows (`coverage`), 64 exposure tools (`tools`), 256 MCP labels
+ *    (`mcpServers`) and 64 identity bindings (`bindings`). A key outside its vocabulary is never dropped with its count:
+ *    a risk token outside the known ones counts under its table's "other"; the counts under unknown keys of the arcs,
+ *    stack and config tables are summed in `omitted` (`promptArcs`, `durationArcs`, `languages`, `toolchains`,
+ *    `techCategories`, and `configKinds` = the config entries of unknown kinds), and `features` counts unknown
+ *    first-seen features;
  * 2. the draft is checked against `AIPROF2` (deny by default): a required field missing or undefined, or anything the
  *    schema would drop or change, is an `ExportError` naming the paths (`violations`), and nothing is exported;
  * 3. the payload is serialized canonically (RFC 8785).
@@ -138,18 +159,37 @@ function build(a: Analysis, o: ExportOptions): Record<string, unknown> {
     value: roundOrNull(m.value), n: m.n, window: m.window, from: month(m.from), to: month(m.to), reason: m.reason,
   });
 
-  // reveal: by label, case-insensitive; the last entry for a label wins; every label must name an exported project
+  // reveal: by label, exactly but for letter case; the last entry for a label wins; every label must name exactly one
+  // exported project (a label two projects share would put the name on both)
   const shown = a.projects.slice(0, MAX_PROJECTS);
   const rest = a.projects.slice(MAX_PROJECTS);
   const reveal = new Map<string, string>();
   for (const r of o.reveal ?? []) reveal.set(r.label.toUpperCase(), r.name);
-  const exported = new Set(shown.map((p) => p.label.toUpperCase()));
-  for (const r of o.reveal ?? []) if (!exported.has(r.label.toUpperCase())) throw new RevealError(r.label);
+  const exported = new Map<string, number>();
+  for (const p of shown) exported.set(p.label.toUpperCase(), (exported.get(p.label.toUpperCase()) ?? 0) + 1);
+  for (const r of o.reveal ?? []) {
+    const n = exported.get(r.label.toUpperCase()) ?? 0;
+    if (n !== 1) throw new RevealError(r.label, n > 1);
+  }
+
+  const [promptArcs, omittedPromptArcs] = pickCounts(a.exposure.arcs.prompts, PROMPT_ARCS);
+  const [durationArcs, omittedDurationArcs] = pickCounts(a.exposure.arcs.durations, DURATION_ARCS);
+  const [languages, omittedLanguages] = pickCounts(a.stack.languages, EDIT_LANGS);
+  const [toolchains, omittedToolchains] = pickCounts(a.stack.toolchains, TOOLCHAINS);
+  const [techCategories, omittedTech] = pickCounts(a.stack.techCategories, TECH_CATEGORIES);
+  let omittedConfig = 0;
+  const byKind = pick(a.config.byKind, CONFIG_KINDS, (v) => {
+    for (const n of [v.authored, v.installed, v.other]) omittedConfig = addCount(omittedConfig, n);
+  });
+  let omittedFeatures = 0;
+  for (const k of Object.keys(a.exposure.firstSeen)) if (!(FEATURES as readonly string[]).includes(k) && a.exposure.firstSeen[k as never] !== undefined) omittedFeatures++;
+  const mcp = mcpServers(a);
 
   return {
     schema: "aiprof/2",
     core: a.meta.core,
     reference: a.meta.reference,
+    repoSignals: a.meta.repoSignals,
     coverage: a.coverage.rows.slice(0, MAX_COVERAGE).map((r) => ({
       tool: r.tool, window: r.window, statuses: r.sources.map((x) => x.status).sort(cmp), beta: r.sources.some((x) => x.beta),
       from: month(r.from), to: month(r.to), sessions: r.sessions, prompts: r.prompts, formatChanged: r.formatChanged,
@@ -158,7 +198,8 @@ function build(a: Analysis, o: ExportOptions): Record<string, unknown> {
     dimensions: a.dimensions.map((d) => ({
       id: d.id, status: d.status, score: d.score, interval: d.interval, openTail: d.openTail, confidence: d.confidence, n: d.n, needs: d.needs,
       part: d.part, window: d.meta.window,
-      components: d.components.map((c) => ({ id: c.id, status: c.status, x: roundOrNull(c.x), z: roundOrNull(c.z), n: c.n, weight: round(c.weight) })),
+      // each component's own window: a dimension may mix detail and lifetime components
+      components: d.components.map((c) => ({ id: c.id, status: c.status, x: roundOrNull(c.x), z: roundOrNull(c.z), n: c.n, weight: round(c.weight), window: c.meta.window })),
     })),
     personas: a.personas,
     signals: Object.fromEntries(METRIC_KEYS.map((k) => [k, metric(a.signals[k])])),
@@ -171,18 +212,22 @@ function build(a: Analysis, o: ExportOptions): Record<string, unknown> {
       })),
       rotation: { active90d: a.exposure.rotation.active90d, ever: a.exposure.rotation.ever },
       arcs: {
-        prompts: pick(a.exposure.arcs.prompts, PROMPT_ARCS), medianPrompts: roundOrNull(a.exposure.arcs.medianPrompts),
-        durations: pick(a.exposure.arcs.durations, DURATION_ARCS),
+        prompts: promptArcs, medianPrompts: roundOrNull(a.exposure.arcs.medianPrompts), durations: durationArcs,
       },
       firstSeen: firstSeen(a, week),
       models: models(a.private.models),
     },
-    stack: { languages: pick(a.stack.languages, EDIT_LANGS), toolchains: pick(a.stack.toolchains, TOOLCHAINS), techCategories: pick(a.stack.techCategories, TECH_CATEGORIES) },
-    risk: { permission: risk("permission", a.risk.permission), approval: risk("approval", a.risk.approval), sandbox: risk("sandbox", a.risk.sandbox) },
+    stack: {
+      languages, toolchains, techCategories,
+      window: a.stack.meta.window, n: a.stack.meta.n,
+    },
+    risk: {
+      permission: risk("permission", a.risk.permission), approval: risk("approval", a.risk.approval), sandbox: risk("sandbox", a.risk.sandbox),
+      window: a.risk.meta.window, n: a.risk.meta.n,
+    },
     config: {
-      byKind: Object.fromEntries(Object.entries(pick(a.config.byKind, CONFIG_KINDS)).map(([k, v]) =>
-        [k, { authored: v.authored, installed: v.installed, other: v.other, used: v.used }])),
-      hooksDisabled: a.config.hooksDisabled, memoryFiles: a.config.memoryFiles, mcpServers: mcpServers(a).slice(0, MAX_MCP),
+      byKind: Object.fromEntries(Object.entries(byKind).map(([k, v]) => [k, { authored: v.authored, installed: v.installed, other: v.other, used: v.used }])),
+      hooksDisabled: a.config.hooksDisabled, memoryFiles: a.config.memoryFiles, mcpServers: mcp.slice(0, MAX_MCP),
     },
     projects: shown.map((p) => ({
       label: p.label, name: reveal.get(p.label.toUpperCase()), sessions: p.sessions, activeWeeks: p.activeWeeks, tools: p.tools, inRepo: p.inRepo,
@@ -196,11 +241,22 @@ function build(a: Analysis, o: ExportOptions): Record<string, unknown> {
       })),
     },
     identity: { accounts: a.identity.accounts, bindings: a.identity.hashes.slice(0, MAX_BINDINGS) },
-    exclusions: { tools: a.exclusions.tools, projects: a.exclusions.projects, sessions: a.exclusions.sessions },
+    // what the caps cut and the vocabularies did not know (see `exportPayload`)
+    omitted: {
+      coverage: cut(a.coverage.rows, MAX_COVERAGE), weeks: cut(a.exposure.weekly, MAX_WEEKS), tools: cut(a.exposure.tools, MAX_EXPOSURE_TOOLS),
+      mcpServers: cut(mcp, MAX_MCP), bindings: cut(a.identity.hashes, MAX_BINDINGS), promptArcs: omittedPromptArcs, durationArcs: omittedDurationArcs,
+      languages: omittedLanguages, toolchains: omittedToolchains, techCategories: omittedTech, configKinds: omittedConfig, features: omittedFeatures,
+    },
+    // what the person asked to leave out: counts, and whether a date range was given (never its dates); a field the
+    // analysis does not set yet exports its default (no date range, no week outside it)
+    exclusions: {
+      tools: a.exclusions.tools, projects: a.exclusions.projects, sessions: a.exclusions.sessions,
+      dateRange: a.exclusions.dateRange ?? false, weeksOutside: a.exclusions.weeksOutside ?? 0,
+    },
   };
 }
 
-/** Each feature's first evidence as its ISO week. */
+/** Each feature's first evidence as its ISO week (a feature outside `FEATURES` is counted in `omitted.features`). */
 function firstSeen(a: Analysis, week: (ms: unknown) => unknown): Record<string, unknown> {
   const out = dict<unknown>();
   for (const f of FEATURES) {
