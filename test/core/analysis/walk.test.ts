@@ -72,7 +72,7 @@ describe("tiers", () => {
       ["claude-haiku-4-5", 1], ["gpt-5.1-codex-mini", 1], ["gpt-4.1-nano", 1], ["gemini-2.5-flash-lite", 1], ["mistral-small", 1], ["o4-mini", 1],
       ["claude-sonnet-4-5", 2], ["gemini-2.5-flash", 2], ["gpt-5", 2], ["gpt-5.1", 2], ["gpt-5-codex", 2], ["standard", 2],
       ["claude-opus-4-1", 3], ["gpt-5.1-codex-max", 3], ["gemini-2.5-pro", 3], ["gpt-5-pro", 3], ["kimi-ultra", 3], ["mistral-large", 3],
-      ["fable", undefined], ["", undefined], ["o3", undefined],
+      ["claude-fable-5", 3], ["fable", 3], ["claude-mythos-1", 3], ["fabled", undefined], ["", undefined], ["o3", undefined],
     ];
     for (const [m, want] of cases) expect([m, modelTier(m)]).toEqual([m, want]);
   });
