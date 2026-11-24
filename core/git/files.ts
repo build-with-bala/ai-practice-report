@@ -49,6 +49,8 @@ const DAY_MS = 86_400_000;
 const HISTORY_DAYS = 180;
 const HISTORY_MAX = 50;
 const HISTORY_BYTES = 64 * 1024;
+/** Output cap of the HEAD check (one sha). */
+const HEAD_BYTES = 1024;
 
 const CHECK_ORDER: readonly CheckKind[] = ["test", "build", "lint", "typecheck"];
 /** Check kinds in one fixed order, each once. */
@@ -244,7 +246,8 @@ export interface RepoFileOptions {
  * its real path. A file over MAX_REPO_FILE_BYTES, or refused, counts as present but unread; a missing one, one that is
  * no regular file, or one outside, as absent. Between files the pass lets the event loop run, and it stops at an abort.
  * `instructions.touched`: commits by any author touching an instruction path within the 180 days before `now` (at most
- * 50), by `git log` in `root`; `lastTouched`, the newest of them.
+ * 50), by `git log` in `root` from HEAD; `lastTouched`, the newest of them. An unborn HEAD (no commit yet on the current
+ * branch) is an empty history: no log is run, `touched` is 0, and nothing is counted.
  */
 export async function readRepoFiles(root: string, cwds: readonly string[], o: RepoFileOptions):
   Promise<Pick<RepoFacts, "instructions" | "hooks" | "ci" | "precommit">> {
@@ -368,6 +371,24 @@ export async function readRepoFiles(root: string, cwds: readonly string[], o: Re
     const paths = [...Object.values(INSTRUCTION_FILES), ...subs.flatMap((sub) => SESSION_FOLDER_FILES.map((n) => path.join(sub, n)))]
       .map((p) => `:(literal)${p.split(path.sep).join("/").replace(/\/$/, "")}`);
     try {
+      // HEAD must name a commit first: in a repo with no commits yet, or on an orphan branch, HEAD is unborn — an empty
+      // history, not a failed read — and the log below would exit 128, as a real failure does. `--verify --quiet`
+      // tells them apart: exit 1 for a name that resolves to nothing, 128 for a read that failed.
+      const head = await o.runner(["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+        { cwd: root, timeoutMs: o.timeoutMs, maxBytes: HEAD_BYTES, signal: o.signal });
+      if (o.signal.aborted) {
+        skip("budget");
+        return { instructions, hooks, ci, precommit };
+      }
+      if (head.timedOut) {
+        skip("timeout");
+        return { instructions, hooks, ci, precommit };
+      }
+      if (head.code === 1) return { instructions, hooks, ci, precommit }; // unborn HEAD: touched 0, nothing counted
+      if (head.code !== 0) {
+        skip("history-error");
+        return { instructions, hooks, ci, precommit };
+      }
       // `--no-use-mailmap`, not `--no-mailmap` (git 2.27): see OLDEST_GIT
       const r = await o.runner(["log", "--no-use-mailmap", `-n${HISTORY_MAX}`, sinceArg(since, o.sinceAsFilter), "--format=%ct", "--", ...paths],
         { cwd: root, timeoutMs: o.timeoutMs, maxBytes: HISTORY_BYTES, signal: o.signal });

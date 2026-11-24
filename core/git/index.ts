@@ -84,6 +84,7 @@ export const REPO_SIGNALS_DESCRIBE: { reads: string[]; runs: string[] } = {
   runs: [
     "git --version",
     "git rev-parse --show-toplevel --git-common-dir",
+    "git rev-parse --verify --quiet HEAD^{commit} (whether HEAD names a commit, before the instruction-file history)",
     "git config --get user.email",
     "git config --get extensions.partialClone, git config --get remote.origin.promisor (git older than 2.44 only)",
     "git log --no-use-mailmap --exclude=refs/stash --all --no-merges --no-renames --since-as-filter=<date> --max-count=<n> --name-only -z (commit metadata only)",
@@ -91,7 +92,8 @@ export const REPO_SIGNALS_DESCRIBE: { reads: string[]; runs: string[] } = {
     "on a git older than 2.37, --since instead of --since-as-filter: there, a commit whose recorded date is older than the window " +
       "hides the ancestors no other branch reaches, so their commits are not read. --since-as-filter walks the whole history: on a " +
       "very large one without a commit-graph a log can end by its timeout, and the pass then reads as partial, with a cut list",
-    `every argument is one git ${OLDEST_GIT.join(".")}, the oldest supported, accepts (--since-as-filter only from 2.37)`,
+    `every argument is one git ${OLDEST_GIT.join(".")}, the oldest supported, accepts (--since-as-filter only from 2.37); ` +
+      "an older git is not used (git-missing)",
     "every git command: started by its absolute path on PATH (never from the repo folder), with no stdin, no pager and no prompt; " +
       "no transport at all (-c protocol.allow=never, GIT_ALLOW_PROTOCOL=none) and GIT_NO_LAZY_FETCH=1, so nothing is " +
       "fetched whatever the repo config says; fsmonitor and signature checks off; log output in UTF-8; no .mailmap; no system config; " +
@@ -236,6 +238,11 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
       }
       version = v.code === 0 && !v.timedOut ? versionOf(v.stdout) : undefined;
       if (version === undefined) return result("git-missing");
+      // a git older than the oldest supported may refuse an argument, or read differently: it is not used
+      if (!atLeast(version, OLDEST_GIT)) {
+        skip("git-too-old");
+        return result("git-missing");
+      }
     } catch (e) {
       if (isEnoent(e)) return result("git-missing");
       skip("error", cands.length);

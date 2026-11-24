@@ -50,13 +50,14 @@ export interface RepoFacts { repoKey: string; projectKeys: string[]; identity: b
  * What repo signals found. `status`: `ok`; `partial` (a read did not finish: the time budget ran out, the scan was
  * aborted, or a timeout or error dropped a repo or cut its data — any count of `budget`, `timeout`, `error`,
  * `identity-error`, `config-error`, `log-error`, `history-error`, `files-error` or `file-io-error` in `skipped`); `off` (switched off); `git-missing` (no
- * git to run: none on PATH, or `git --version` failed, timed out or named no version). `roots`: repoKey → the raw root
+ * git to run: none on PATH, or `git --version` failed, timed out or named no version; or a git older than
+ * `OLDEST_GIT`, counted once as `git-too-old`). `roots`: repoKey → the raw root
  * path, held in memory only (for the repo-file pass and display on this machine) and never part of an analysis or an
  * export. `skipped`: session folders or repos left out, by reason (`not-absolute` (a session folder not named by an absolute path), `missing`, `not-a-repo`, `root-mismatch` (the root
  * git reports is not the session's repo folder itself, or its answer is malformed), `too-many-repos`, `budget`,
  * `timeout`, `error`, `identity-error` (`user.email` could not be read: the repo is listed without commits), `config-error` (on a git
  * older than 2.44, a partial-clone key could not be read: the repo is read without paths), `history-error` (the
- * instruction-file history failed: `touched` stays 0),
+ * instruction-file history, or its HEAD check, failed: `touched` stays 0; an unborn HEAD is no failure),
  * `log-error` (the commit log failed: the repo is listed without commits)), and repo files left unread (`file-not-file`, `file-too-large`, `file-refused`, `file-io-error`,
  * `file-parse`, `file-outside`, `files-capped`, `folders-capped`: `readRepoFiles`; `files-error`: a files pass that failed, the repo's
  * commits kept). `since`: the earliest commit time asked for (epoch ms). `ms`: time taken.

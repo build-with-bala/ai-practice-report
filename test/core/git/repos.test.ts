@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { collectRepoSignals } from "../../../core/git/index";
-import { runGit, type GitRunner } from "../../../core/git/run";
+import { resolveGit, runGit, type GitRunner } from "../../../core/git/run";
 import type { Ev } from "../../../core/model/events";
 import { scan, type ScanOptions } from "../../../core/scan";
 import type { Candidate, SourcePlugin } from "../../../core/sources/types";
@@ -270,43 +270,140 @@ describe("repo signals: the log reads commits only, whatever the repo holds", ()
 
 describe("repo signals: every argument is one the oldest supported git accepts", () => {
   /**
-   * The options git 2.13 (the oldest the engine supports) accepts for each subcommand the engine runs, as far as the
-   * engine uses them; `--since-as-filter` only from 2.37. Any other argument is refused as git refuses it (exit 129).
+   * A fake `git` first on PATH that sees the whole argument vector the runner passes (the safe arguments, the
+   * subcommand, its options, the `--format=` placeholders and the pathspecs after `--`), refuses what git 2.13 does not
+   * accept as git does (exit 129, the vector written to `refusedFile`), answers `--version` as `version`, and runs the
+   * real git for everything else. The allowlist is written from git's own history, not from the engine's code:
+   * - before the subcommand: `--no-pager`, and `-c <section>.<key>=<value>` (any key: an unknown one is ignored);
+   * - `rev-parse`: `--show-toplevel` (1.7.0), `--git-common-dir` (2.5), `--verify`, `--quiet`, a revision `HEAD^{commit}`;
+   * - `config --get <key>`;
+   * - `log`: `--use-mailmap` and its `--no-` form (1.8.2), `--exclude=<glob>` (1.9.0), `--all`, `--no-merges`,
+   *   `--no-renames`, `--since=<date>`, `--max-count=<n>`, `-n<n>`, `--name-only`, `-z`, `--format=<fmt>` whose
+   *   placeholders are among `%x00`-style hex bytes, `%H`, `%ct`, `%ae`, `%n`, `%B` (1.7.2); `--since-as-filter=<date>`
+   *   from 2.37 only; after `--`, pathspecs with the `:(literal)` magic (1.8).
    */
-  const accepts = (version: [number, number], a: readonly string[]): boolean => {
-    const [cmd, ...rest] = a;
-    const dashDash = rest.indexOf("--");
-    const opts = dashDash === -1 ? rest : rest.slice(0, dashDash);
-    const known: Record<string, RegExp> = {
-      "--version": /^$/,
-      "rev-parse": /^--(show-toplevel|git-common-dir)$/,
-      config: /^(--get|user\.email|extensions\.partialClone|remote\.origin\.promisor)$/,
-      log: new RegExp(`^(--no-use-mailmap|--exclude=refs/stash|--all|--no-merges|--no-renames|--since=\\S+|--max-count=\\d+|--name-only|-z|--format=\\S+|-n\\d+${
-        version[0] > 2 || (version[0] === 2 && version[1] >= 37) ? "|--since-as-filter=\\S+" : ""})$`),
-    };
-    const re = known[cmd!];
-    return re !== undefined && opts.every((x) => re.test(x));
-  };
-  const strict = (version: [number, number], refused: string[][]): GitRunner => async (a, o) => {
-    if (a[0] === "--version") return { code: 0, stdout: `git version ${version.join(".")}.0\n`, timedOut: false, truncated: false };
-    if (!accepts(version, a)) {
-      refused.push([...a]);
-      return { code: 129, stdout: "", timedOut: false, truncated: false };
-    }
-    return runGit(a, o);
-  };
+  function strictGit(version: string): { bin: string; refusedFile: string } {
+    const real = resolveGit(process.env)!;
+    const bin = path.join(h.root, "strict-bin");
+    const refusedFile = path.join(h.root, "refused.jsonl");
+    mkdirSync(bin, { recursive: true });
+    const script = `#!${process.execPath}
+const fs = require("node:fs");
+const VERSION = ${JSON.stringify(version)};
+const [maj, min] = VERSION.split(".").map(Number);
+const args = process.argv.slice(2);
+const date = /^\\d{4}-\\d{2}-\\d{2}T[0-9:.]+Z$/;
+const format = (f) => /^%[a-zA-Z0-9%]/.test(f) && f.replace(/%x[0-9a-f]{2}|%H|%ct|%ae|%n|%B/g, "") === "";
+const ok = (() => {
+  let i = 0;
+  while (i < args.length && (args[i] === "--no-pager" || args[i] === "-c")) {
+    if (args[i] === "-c") { if (!/^[a-zA-Z0-9]+\\.[a-zA-Z0-9.]+=\\S*$/.test(args[i + 1] ?? "")) return false; i += 2; } else i++;
+  }
+  const [cmd, ...rest] = args.slice(i);
+  if (cmd === "--version") return rest.length === 0;
+  if (cmd === "rev-parse") return rest.every((a) => ["--show-toplevel", "--git-common-dir", "--verify", "--quiet", "HEAD^{commit}"].includes(a));
+  if (cmd === "config") return rest.length === 2 && rest[0] === "--get" && /^[a-zA-Z0-9]+\\.[a-zA-Z0-9.]+$/.test(rest[1]);
+  if (cmd !== "log") return false;
+  const dd = rest.indexOf("--");
+  const opts = dd === -1 ? rest : rest.slice(0, dd);
+  const specs = dd === -1 ? [] : rest.slice(dd + 1);
+  const filter = maj > 2 || (maj === 2 && min >= 37);
+  return specs.every((s) => s.startsWith(":(literal)") && s.length > 10) && opts.every((o) =>
+    ["--no-use-mailmap", "--use-mailmap", "--all", "--no-merges", "--no-renames", "--name-only", "-z"].includes(o)
+    || /^--exclude=\\S+$/.test(o) || /^--max-count=\\d+$/.test(o) || /^-n\\d+$/.test(o)
+    || (o.startsWith("--since=") && date.test(o.slice(8))) || (filter && o.startsWith("--since-as-filter=") && date.test(o.slice(18)))
+    || (o.startsWith("--format=") && format(o.slice(9))));
+})();
+if (!ok) { fs.appendFileSync(${JSON.stringify(refusedFile)}, JSON.stringify(args) + "\\n"); process.exit(129); }
+if (args.includes("--version")) { process.stdout.write("git version " + VERSION + "\\n"); process.exit(0); }
+const r = Bun.spawnSync([${JSON.stringify(real)}, ...args], { stdin: "ignore", stdout: "inherit", stderr: "ignore" });
+process.exit(r.exitCode ?? 1);
+`;
+    writeFileSync(path.join(bin, "git"), script);
+    chmodSync(path.join(bin, "git"), 0o755);
+    return { bin, refusedFile };
+  }
 
-  for (const version of [[2, 13], [2, 36], [2, 37], [2, 51]] as [number, number][]) {
-    test(`git ${version.join(".")}: no argument is refused, and the repo reads whole`, async () => {
+  for (const version of ["2.13.0", "2.36.9", "2.37.0", "2.51.0"]) {
+    test.skipIf(!POSIX)(`git ${version}: the whole argument vector of every call is accepted, and the repo reads whole (POSIX)`, async () => {
       const r1 = makeRepo(path.join(h.root, "strict"), [1, 2].map((i) => ({ files: { "CLAUDE.md": `${i}` }, message: `c${i}`, at: ago(3 - i) })));
-      const refused: string[][] = [];
-      const r = await run([r1], { repoSignals: { runner: strict(version, refused) } });
-      expect(refused).toEqual([]);
+      const { bin, refusedFile } = strictGit(version);
+      const saved = process.env.PATH;
+      process.env.PATH = `${bin}${path.delimiter}${saved ?? ""}`;
+      let r: Awaited<ReturnType<typeof run>>;
+      try {
+        r = await run([r1]);
+      } finally {
+        process.env.PATH = saved;
+      }
+      expect(existsSync(refusedFile) ? readFileSync(refusedFile, "utf8") : "").toBe("");
       expect(r.repos).toMatchObject({ status: "ok", skipped: {} });
       expect(r.repos.repos[0]).toMatchObject({ instructions: { touched: 2 } });
       expect(r.repos.repos[0]!.commits).toHaveLength(2);
-    });
+    }, 30_000);
   }
+
+  test.skipIf(!POSIX)("the fake is live: an argument 2.13 does not know is refused (POSIX)", async () => {
+    const { bin, refusedFile } = strictGit("2.13.0");
+    const r = await runGit(["log", "--no-mailmap"], { cwd: h.root, timeoutMs: 10_000, maxBytes: 1 << 16, signal: new AbortController().signal, git: path.join(bin, "git") });
+    expect(r.code).toBe(129);
+    expect(readFileSync(refusedFile, "utf8")).toContain("--no-mailmap");
+  }, 30_000);
+
+  test("a git older than the oldest supported is not used: git-missing, counted git-too-old once", async () => {
+    const calls: string[] = [];
+    const runner: GitRunner = async (a, o) => {
+      calls.push(a[0]!);
+      return a[0] === "--version" ? { code: 0, stdout: "git version 2.12.5\n", timedOut: false, truncated: false } : runGit(a, o);
+    };
+    const r = await run([repo1(), repo2()], { repoSignals: { runner } });
+    expect(r.repos).toMatchObject({ status: "git-missing", repos: [], skipped: { "git-too-old": 1 } });
+    expect(calls).toEqual(["--version"]);
+  });
+});
+
+describe("repo signals: an unborn HEAD is an empty history, not a failed read", () => {
+  test("a fresh repository (no commits) with an instruction file and a session: ok, nothing skipped", async () => {
+    const dir = path.join(h.root, "fresh");
+    mkdirSync(dir);
+    git(dir, ["init", "-q", "-b", "main"]);
+    git(dir, ["config", "user.email", "dev@fixture.test"]);
+    writeFileSync(path.join(dir, "CLAUDE.md"), "`bun test`");
+    const r = await run([dir]);
+    expect(r.repos).toMatchObject({ status: "ok", skipped: {} });
+    expect(r.repos.repos[0]).toMatchObject({ commits: [], instructions: { files: ["claude"], touched: 0 } });
+  });
+
+  test("HEAD on an orphan branch while other branches have commits: ok, nothing skipped, the other commits read", async () => {
+    const r1 = makeRepo(path.join(h.root, "orphan"), [{ files: { "CLAUDE.md": "x" }, message: "one", at: ago(2) }]);
+    git(r1, ["checkout", "-q", "--orphan", "empty"]);
+    const r = await run([r1]);
+    expect(r.repos).toMatchObject({ status: "ok", skipped: {} });
+    expect(r.repos.repos[0]!.commits).toHaveLength(1);
+    expect(r.repos.repos[0]!.instructions.touched).toBe(0);
+  });
+
+  test("a detached HEAD, a merge in progress and a shallow clone read ok, their history read", async () => {
+    const base = () => makeRepo(path.join(h.root, `r${Math.random().toString(36).slice(2)}`), [1, 2].map((i) => ({ files: { "CLAUDE.md": `${i}` }, message: `c${i}`, at: ago(4 - i) })));
+    const detached = base();
+    git(detached, ["checkout", "-q", "--detach", "HEAD~1"]);
+    const merging = base();
+    git(merging, ["checkout", "-q", "-b", "t", "HEAD~1"]);
+    commitAt(merging, "t", ago(1));
+    writeFileSync(path.join(merging, "CLAUDE.md"), "t");
+    git(merging, ["-c", "user.email=dev@fixture.test", "-c", "user.name=Fixture Dev", "-c", "commit.gpgsign=false", "commit", "-qam", "t2"]);
+    git(merging, ["checkout", "-q", "main"]);
+    try { git(merging, ["-c", "user.email=dev@fixture.test", "-c", "user.name=Fixture Dev", "merge", "-q", "t"]); } catch { /* the conflict is the point */ }
+    const src = base();
+    const shallow = path.join(h.root, "shallow");
+    git(h.root, ["clone", "-q", "--depth", "1", `file://${src.startsWith("/") ? "" : "/"}${src.replace(/\\/g, "/")}`, shallow]);
+    git(shallow, ["config", "user.email", "dev@fixture.test"]);
+    for (const dir of [detached, merging, shallow]) {
+      const r = await run([dir]);
+      expect(r.repos).toMatchObject({ status: "ok", skipped: {} });
+      expect(r.repos.repos[0]!.instructions.touched).toBeGreaterThan(0);
+    }
+  });
 });
 
 describe("repo signals: the window start by git version", () => {
@@ -559,6 +656,12 @@ describe("repo signals: a read that did not finish is never ok", () => {
     }
   });
 
+  test("a HEAD check that fails (not git's exit 1 for an unborn HEAD) is history-error, and the pass partial", async () => {
+    const runner = except((a) => (a[0] === "rev-parse" && a.includes("--verify") ? Promise.resolve(res(128)) : undefined));
+    const r = await run([repo1()], { repoSignals: { runner } });
+    expect(r.repos).toMatchObject({ status: "partial", skipped: { "history-error": 1 } });
+  });
+
   test("on a git older than 2.44, a partial-clone key read that fails is counted (config-error), and the pass partial", async () => {
     const runner = except((a) => {
       if (a[0] === "--version") return Promise.resolve(res(0, "git version 2.40.1\n"));
@@ -620,7 +723,7 @@ describe("repo signals: options and inputs are checked", () => {
   test("candidate folders are asked in order of their detail sessions, most first", async () => {
     const dirs = ["a", "b", "c"].map((n) => makeRepo(path.join(h.root, n), [{ files: { "x.txt": n }, message: n, at: ago(2) }]));
     const asked: string[] = [];
-    const runner: GitRunner = (a, o) => { if (a[0] === "rev-parse") asked.push(path.basename(o.cwd)); return runGit(a, o); };
+    const runner: GitRunner = (a, o) => { if (a[0] === "rev-parse" && a.includes("--show-toplevel")) asked.push(path.basename(o.cwd)); return runGit(a, o); };
     await direct([["pa", dirs[0]!], ["pb", dirs[1]!], ["pc", dirs[2]!]], { runner, concurrency: 1 },
       { detailSessions: new Map([["pa", 1], ["pb", 5], ["pc", 3]]) });
     expect(asked).toEqual(["b", "c", "a"]);
