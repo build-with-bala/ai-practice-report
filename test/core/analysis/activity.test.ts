@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { dayKey, isoWeek } from "../../../core/analysis/activity";
+import { activityOf, dayKey, isoWeek } from "../../../core/analysis/activity";
 import { buildSessionTable } from "../../../core/analysis/sessions";
 import type { DailyEv, Ev, PromptEv, SessionEv } from "../../../core/model/events";
 import type { ToolId } from "../../../core/model/ids";
@@ -8,7 +8,7 @@ import { withTz } from "../../kit/tz";
 
 const DAY = 86_400_000;
 const T0 = Date.UTC(2026, 10, 2, 12, 0);
-const opts = { now: T0 + 60 * DAY, timeZone: "UTC" };
+const opts = { timeZone: "UTC" };
 
 const sess = (id: string, over: Partial<SessionEv> = {}): SessionEv => ({
   k: "session", tool: "claude-code", source: "claude-code.transcripts", id, window: "detail", origin: "human",
@@ -155,5 +155,13 @@ describe("activity", () => {
     expect(t.activity.detailDays).toEqual(["2026-11-02", "2026-11-03"]);
     expect(t.activity.lifetimeDays).toEqual(["2026-11-06"]);
     expect(Object.keys(t.activity.byTool).sort()).toEqual(["claude-code", "codex"]);
+  });
+});
+
+describe("per-day rows labelled either", () => {
+  test("an either day (the UTC or the local date) is used as given; a utc day is not; neither is shifted to match another zone", () => {
+    const row = (day: string, zone: "local" | "utc" | "either") => ({ k: "daily" as const, tool: "claude-code" as const, source: "x.stats", day, zone, unit: "prompts" as const, count: 2 });
+    const a = activityOf({ timeZone: "Pacific/Auckland", detail: [], lifetime: [], daily: [row("2026-11-02", "either"), row("2026-11-03", "utc"), row("2026-11-04", "local")] });
+    expect(a.lifetimeDays).toEqual(["2026-11-02", "2026-11-04"]);
   });
 });

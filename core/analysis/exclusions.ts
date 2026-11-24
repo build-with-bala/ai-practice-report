@@ -15,6 +15,9 @@ export const LABEL_SHAPE = /^P-(?:[0-9A-F]{2}){2,8}$/;
 /** A keyed hash as the engine makes it: 16 lower-case hex digits. */
 const KEY_SHAPE = /^[0-9a-f]{16}$/;
 
+/** The largest epoch-ms time a Date can hold (±100,000,000 days). */
+const MAX_DATE_MS = 8.64e15;
+
 /** The option an `ExclusionError` names. */
 export type ExclusionOption = "tools" | "projects" | "from" | "to";
 
@@ -40,8 +43,8 @@ export class ExclusionError extends RangeError {
 
 /**
  * Checks the exclusions before anything is left out, so a typo never silently excludes nothing: every tool must be in
- * the closed tool list, every project entry a string, `from` and `to` (when given) finite numbers, and `from` no later
- * than `to`. Throws `ExclusionError`; the project entries are resolved (and fail closed) by `analyze`.
+ * the closed tool list, every project entry a string, `from` and `to` (when given) finite times a date can hold, and
+ * `from` no later than `to`. Throws `ExclusionError`; the project entries are resolved (and fail closed) by `analyze`.
  */
 export function checkExclusions(ex: Exclusions | undefined): void {
   if (ex === undefined) return;
@@ -57,7 +60,9 @@ export function checkExclusions(ex: Exclusions | undefined): void {
   }
   for (const k of ["from", "to"] as const) {
     const v: unknown = ex[k];
-    if (v !== undefined && (typeof v !== "number" || !Number.isFinite(v))) throw new ExclusionError(k, "is not a finite epoch-ms time");
+    if (v !== undefined && (typeof v !== "number" || !Number.isFinite(v) || Math.abs(v) > MAX_DATE_MS)) {
+      throw new ExclusionError(k, "is not a finite epoch-ms time a date can hold");
+    }
   }
   if (ex.from !== undefined && ex.to !== undefined && ex.from > ex.to) throw new ExclusionError("from", "is later than the date range's end");
 }

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import path from "node:path";
-import { registry, scan, type ToolId, type Window } from "../../core/index";
+import { analyze, exportPayload, registry, scan, type ToolId, type Window } from "../../core/index";
 import { safeList } from "../../core/io/fs";
 import { TempRegistry } from "../../core/io/temp";
 import type { TempDirs } from "../../core/sources/types";
@@ -101,6 +101,15 @@ describe("integration: every P0 source in one home", () => {
       expect(`${key} ${drift.has(key)}`).toBe(`${key} true`);
     }
     expect(r.store.all("ratelimit").map((l) => l.bucket)).toContain(keyedHash(r.salt, CANARY.slug));
+    // Cursor and Copilot VS Code read the canary sessions: the model id comes through raw (a model-id field), the path
+    // canary lives only in the cwds map, and the agent, mode, status, part kind and tool names never come through
+    const canaryModels = r.store.all("session").filter((x) => x.models.includes(CANARY.slug)).map((x) => x.tool);
+    expect([...new Set(canaryModels)].sort()).toEqual(["copilot", "cursor"]);
+    const a = analyze(r, { timeZone: "UTC" });
+    expectNoCanaries({ ...a, private: undefined });
+    expect(Object.keys(a.private.models)).toContain(CANARY.slug);
+    const out = exportPayload(a, { schema: "aiprof/2" });
+    expectNoCanaries(out.json);
     expect(r.store.session(`codex:${planted.rollout}`)).toMatchObject({ surface: "other" });
     expect(r.store.session(`codex:${planted.thread}`)).toMatchObject({ surface: "other", approval: "other", sandbox: "other" });
   }, 30_000); // a full scan of every fixture: on a stalled CI runner it has needed more than the default 5 s

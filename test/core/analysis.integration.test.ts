@@ -5,7 +5,7 @@ import { analyze, type Analysis } from "../../core/analyze";
 import { buildSessionTable, childType, detectEnv, exportPayload, isAction, modelExportId, registry, scan, type Env } from "../../core/index";
 import { CcTranscript, ccSid, fixtureStart, slug } from "../fixtures/claude-code";
 import { metricMetaProblems } from "../../scripts/smoke-local";
-import { makeRepo } from "../fixtures/repos";
+import { isolateGitHome, makeRepo } from "../fixtures/repos";
 import { buildAll } from "../kit/allsources";
 import { expectNoCanaries } from "../kit/canary";
 import { fakeHome, type FakeHome } from "../kit/home";
@@ -67,8 +67,10 @@ function buildHome(h: FakeHome): string[] {
 }
 
 let h: FakeHome;
-beforeEach(() => { h = fakeHome(); });
-afterEach(() => h.cleanup());
+let restoreHome: () => void = () => {};
+// the engine's git inherits this process's environment: HOME points into the fake home, so it reads no developer config
+beforeEach(() => { h = fakeHome(); restoreHome = isolateGitHome(path.join(h.root, "git-home")); });
+afterEach(() => { restoreHome(); h.cleanup(); });
 
 describe("analysis integration: scan → analyze → export, end to end", () => {
   test("every P0 source and two repos: coverage, repo signals, seven dimensions, metric meta, finite numbers, a clean export", async () => {

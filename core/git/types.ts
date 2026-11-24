@@ -11,20 +11,19 @@ export type InstructionKind = "claude" | "agents" | "gemini" | "cursorrules" | "
  * commit), the AI co-author or generated-with trailer it names, whether its subject marks rework, and the keyed hashes
  * of the paths it changed (capped). The message itself is never kept.
  *
- * `owner`: the same commit can sit in several repos (clones, forks): every repo lists it, and it is the owner's in
- * exactly one — the repo with the most detail-window sessions, then the smallest repoKey (compared by full sha, in
- * memory only). Whole-report totals count owner commits only; per-repo matching (delivery, rework, file history) may
- * use all of a repo's commits.
+ * The same commit can sit in several repos (clones, forks): every repo lists it, with the same `id`. The analysis counts
+ * it once among the repositories in scope (by `id`); per-repo matching (delivery, rework, file history) may use all of a
+ * repo's commits.
  *
  * `id`: a keyed hash (16 lowercase hex digits) of the commit's full sha: equal for the same commit in every clone of one
  * repository within one scan, never the sha itself. Repo signals set it on every commit; it is optional in the type only
  * for facts made elsewhere (tests, synthetic personas).
  *
  * `mine`: the commit's author is the person (author email = the repo's `user.email`, the rule that decides which commits
- * are listed at all): true in every clone that lists the commit, unlike `owner`. Deciding "once" among the repos in
- * scope is the analysis's job, by `id`.
+ * are listed at all): true in every clone that lists the commit. Deciding "once" among the repos in scope is the
+ * analysis's job, by `id`.
  */
-export interface CommitFact { id?: string; ts: number; shaKey: string; ai?: AiTool; generated?: AiTool; rework?: "revert" | "fixup" | "fix"; files: string[]; owner: boolean;
+export interface CommitFact { id?: string; ts: number; shaKey: string; ai?: AiTool; generated?: AiTool; rework?: "revert" | "fixup" | "fix"; files: string[];
   mine: boolean }
 export interface InstructionFacts { files: InstructionKind[]; namesChecks: CheckKind[]; touched: number; lastTouched?: number }
 /** `.claude/settings.json` hooks: the entries there, the checks their commands run, and `disableAllHooks` (then none runs, and `checks` is empty). */

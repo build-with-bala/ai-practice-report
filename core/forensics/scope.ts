@@ -1,5 +1,5 @@
 import { dayKey } from "../analysis/activity";
-import { analysisScope, type AnalysisScope } from "../analysis/scope";
+import { analysisScope, identityInScope, type AnalysisScope } from "../analysis/scope";
 import type { SessionRow, SessionTable } from "../analysis/types";
 import type { AnchorEv, ConfigEv, CoverageEv, DailyEv, FileFactEv, IdentityEv, PromptEv, RateLimitEv, RolloutFactEv, ThreadRowEv, ToolEv } from "../model/events";
 import type { ToolId } from "../model/ids";
@@ -98,7 +98,7 @@ export function forensicScope(raw: ScanResult, t: SessionTable): ForensicScope {
       return [...s].sort();
     }),
     anchors: memo(() => raw.store.all("anchor").filter((e) => keptTool(e.tool) && inRange(e.ts) && session(e.sessionId))),
-    identities: memo(() => raw.store.all("identity").filter((e) => keptTool(e.tool) && (e.scope === "config" || session(e.sessionId)))),
+    identities: memo(() => raw.store.all("identity").filter((e) => identityInScope(e, t))), // the analysis's one rule
     files: memo(() => raw.store.all("file").filter((f) => {
       if (!keptTool(f.tool) || !session(f.sessionId)) return false;
       const first = f.firstTs ?? f.lastTs, last = f.lastTs ?? f.firstTs;

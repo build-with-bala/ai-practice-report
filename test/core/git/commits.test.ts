@@ -136,7 +136,7 @@ describe("parseLog", () => {
     const facts = parseLog(out, { salt, email: "me@x.test", maxFiles: 200 });
     expect(facts).toHaveLength(2);
     expect(facts[0]).toEqual({ id: keyedHash(salt, SHA1), ts: 1_700_000_000_000, shaKey: keyedHash(salt, "abc1234"), ai: "claude",
-      files: [keyedHash(salt, "src/a.ts"), keyedHash(salt, "dir with space/ünï.ts")], owner: true, mine: true });
+      files: [keyedHash(salt, "src/a.ts"), keyedHash(salt, "dir with space/ünï.ts")], mine: true });
     expect(facts[1]!.rework).toBe("fix");
     expect(facts[1]!.files).toHaveLength(200);
     for (const f of facts.flatMap((c) => c.files)) expect(f).toMatch(/^[0-9a-f]{16}$/);

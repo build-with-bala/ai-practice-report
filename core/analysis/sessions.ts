@@ -2,8 +2,8 @@ import type { Ev, PromptEv, SessionEv } from "../model/events";
 import type { ToolId } from "../model/ids";
 import type { ScanResult } from "../scan";
 import { activityOf, dayKey, isoWeek } from "./activity";
-import { dedupe } from "./dedupe";
-import { checkExclusions } from "./exclusions";
+import { dedupe, type DedupeResult } from "./dedupe";
+import { checkExclusions, ExclusionError } from "./exclusions";
 import { promptInScope, type PromptScope } from "./scope";
 import type { Capabilities, Exclusions, SessionRow, SessionTable } from "./types";
 
@@ -94,11 +94,17 @@ function capabilitiesOf(raw: ScanResult, counted: (sessionId: string | undefined
  * outside the date range (with their descendants too: a subagent is part of its session's work). `timeZone` keys the
  * activity days. The table reads no clock and no analysis time.
  */
-export function buildSessionTable(raw: ScanResult, o: { timeZone: string; exclude?: Exclusions; /** Unread; kept so older callers still type-check. */ now?: number }): SessionTable {
+export function buildSessionTable(raw: ScanResult, o: { timeZone: string; exclude?: Exclusions }): SessionTable {
   checkExclusions(o.exclude);
   const ex = o.exclude ?? {};
   const toolEx = new Set<ToolId>(ex.tools ?? []);
   const projEx = new Set<string>(ex.projects ?? []);
+  if (projEx.size > 0) {
+    // a key that no session, prompt or config entry carries excludes nothing: fail closed (`analyze` resolves labels first)
+    const known = new Set<string>();
+    for (const k of ["session", "prompt", "config"] as const) for (const e of raw.store.all(k)) if (e.projectKey !== undefined) known.add(e.projectKey);
+    for (const key of projEx) if (!known.has(key)) throw new ExclusionError("projects", "matches no project label or key", key);
+  }
   const from = ex.from ?? -Infinity;
   const to = ex.to ?? Infinity;
   const keepTool = (tool: ToolId): boolean => !toolEx.has(tool);
@@ -202,6 +208,9 @@ export function buildSessionTable(raw: ScanResult, o: { timeZone: string; exclud
     for (const e of raw.store.all(k)) {
       const id = (e as { sessionId?: string }).sessionId;
       const sessionless = id === undefined && e.k === "prompt" && e.window === "detail";
+      // an event that carries an excluded project is left out, not an orphan
+      const pk = (e as { projectKey?: string }).projectKey;
+      if (pk !== undefined && projEx.has(pk)) continue;
       if ((id === undefined && !sessionless) || (id !== undefined && sessions.has(id)) || !keepTool(e.tool)) continue;
       const ts = (e as { ts?: number }).ts;
       if (ts !== undefined && !inRange(ts)) continue;
@@ -237,8 +246,8 @@ export function buildSessionTable(raw: ScanResult, o: { timeZone: string; exclud
 
   return {
     rows, detailTop, hosts, repoOf, scope: { from, to, tools: toolEx, projects: projEx }, timeZone: o.timeZone, isHuman, activity, capabilities: capabilitiesOf(raw, (id) => id !== undefined && rows.has(id) && !hosts.has(id)),
-    dedupe: { hostSessions: d.hosts.size, pairedPrompts: d.pairedPrompts, relabelled: d.relabelled.size },
-    exclusions: exclusionsRecord(raw, { ex, toolEx, projEx, dropped, inRange, timeZone: o.timeZone, outsideOk: (p) => isHuman(p) && promptInScope(p, anyDate) }), orphans, orphanPrompts: sortedKeys(orphanPrompts), dailyRowsLeftOut,
+    dedupe: dedupeDiagnostics(d, (id) => rows.has(id) && !hosts.has(id)),
+    exclusions: exclusionsRecord(raw, { ex, toolEx, projEx, dropped: new Set([...dropped].filter((id) => !hosts.has(id))), inRange, timeZone: o.timeZone, outsideOk: (p) => isHuman(p) && promptInScope(p, anyDate) }), orphans, orphanPrompts: sortedKeys(orphanPrompts), dailyRowsLeftOut,
   };
 }
 
@@ -274,4 +283,22 @@ function exclusionsRecord(raw: ScanResult, c: { ex: Exclusions; toolEx: Readonly
     }
   }
   return { tools: tools.size, projects: projects.size, sessions: c.dropped.size, dateRange, weeksOutside: weeks.size };
+}
+
+/**
+ * What the dedupe found, counted only where the person's own session is kept: a host pair whose original is a kept row
+ * (no copy of an excluded session shows), a coincidental prompt pair when both its sessions are kept rows, and the
+ * relabelled prompts of kept originals.
+ */
+function dedupeDiagnostics(d: DedupeResult, kept: (id: string) => boolean): SessionTable["dedupe"] {
+  let hostSessions = 0;
+  let pairedPrompts = 0;
+  for (const p of d.pairs) {
+    if (p.original !== undefined ? !kept(p.original) : !(kept(p.a) && kept(p.b))) continue;
+    if (p.host !== undefined) hostSessions++;
+    pairedPrompts += p.prompts;
+  }
+  let relabelled = 0;
+  for (const p of d.relabelled) if (kept(p.sessionId!)) relabelled++;
+  return { hostSessions, pairedPrompts, relabelled };
 }

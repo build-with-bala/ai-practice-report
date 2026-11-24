@@ -7,8 +7,8 @@ import { vscodeUser } from "../../core/env/paths";
 import { agId, buildAntigravity, CLI_BRAIN_REL, historyLine, historyRel, P as AG_P, STEP, writeBrain, writeSteps } from "../fixtures/antigravity";
 import { buildCcLifetime, buildCcTranscripts, CcTranscript, ccSid, fixtureStart, slug } from "../fixtures/claude-code";
 import { buildCodexIndex, buildCodexRollouts, CxRollout, rateLimits, rolloutRel, threadRow, turnRow, uuidV7 } from "../fixtures/codex";
-import { buildCopilot, CliEvents, cpSid, writeSessionStore } from "../fixtures/copilot";
-import { buildAgentCli, buildCursor } from "../fixtures/cursor";
+import { buildCopilot, CliEvents, cpSid, fileUrl, markdown, request, sessionRoot, tool as cpTool, userRel as cpUserRel, writeSessionStore } from "../fixtures/copilot";
+import { bubble, buildAgentCli, buildCursor, composer, cuSid, globalRel } from "../fixtures/cursor";
 import { CANARY } from "./canary";
 import type { FakeHome } from "./home";
 
@@ -72,6 +72,21 @@ function plantSlug(h: FakeHome): Planted {
     .event("token_count", { info: null, rate_limits: { ...rateLimits(t, 5), limit_id: CANARY.slug } })
     .done("t1");
   h.writeJsonl(rolloutRel(t, rollout), cx.records);
+  // Copilot VS Code: a chat session whose agent, mode, response part kind, tool id and model id are the token-shaped
+  // canary, in a workspace whose folder is the path canary
+  const wsDir = path.join(cpUserRel(h), "workspaceStorage", "slughash");
+  h.writeJson(path.join(wsDir, "workspace.json"), { folder: fileUrl(CANARY.path) });
+  const cpReq = request({ id: "request_slug", text: "Tidy the release notes", ts: t + 2 * 60_000, modelId: CANARY.slug, agentId: CANARY.slug, modes: [CANARY.slug],
+    parts: [markdown("On it."), { kind: CANARY.slug, value: CANARY.slug }, cpTool(CANARY.slug)], modelState: { value: 1, completedAt: t + 3 * 60_000 } });
+  h.writeJson(path.join(wsDir, "chatSessions", `${cpSid("SLUG")}.json`), sessionRoot(cpSid("SLUG"), [cpReq], { created: t + 60_000 }));
+  // Cursor: a composer whose mode, status and model, and a bubble whose model and tool name, are the token-shaped canary
+  const cu = cuSid("SLUG");
+  const cuIds = ["s1", "s2"].map(cuSid);
+  insertRow(h, globalRel(h), "cursorDiskKV", { key: `composerData:${cu}`, value: JSON.stringify(composer(cu, { created: t, updated: t + 5 * 60_000, agentic: true,
+    mode: CANARY.slug, model: CANARY.slug, headers: cuIds, extra: { status: CANARY.slug } })) });
+  insertRow(h, globalRel(h), "cursorDiskKV", { key: `bubbleId:${cu}:${cuIds[0]}`, value: JSON.stringify(bubble(cuIds[0]!, { type: 1, ts: t + 60_000, text: "Tidy the notes" })) });
+  insertRow(h, globalRel(h), "cursorDiskKV", { key: `bubbleId:${cu}:${cuIds[1]}`, value: JSON.stringify(bubble(cuIds[1]!, { type: 2, ts: t + 2 * 60_000, model: CANARY.slug,
+    tool: { name: CANARY.slug, tool: 99, status: CANARY.slug, params: { path: CANARY.path } } })) });
   // …and a thread's source, approval and sandbox, and a turn's status, in the index
   const thread = uuidV7(t, 0x5b);
   insertRow(h, path.join(".codex", "state_5.sqlite"), "threads",

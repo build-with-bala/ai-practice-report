@@ -24,7 +24,7 @@ const HIST = "claude-code.history";
 
 const stat = (id: string, over: Partial<SessionStats> = {}): SessionStats => ({
   id, tool: "claude-code", source: CC, origin: "human", start: T0, end: T0 + HOUR, scripted: false, days: [],
-  turns: 0, stickySum: 0, actions: 0, successRuns: {}, gatedVae: true, editTurns: 0, editWeight: 0, verifiedWeight: 0, uncheckedEditTurns: 0, uncheckedCommandTurns: 0,
+  turns: 0, stickySum: 0, actions: 0, successRuns: {}, gatedVae: true, editTurns: 0, editWeight: 0, verifiedWeight: 0, uncheckedEditTurns: 0, uncheckedCommandTurns: 0, humanPrompts: 0, openerPrompts: 0,
   failingChecks: 0, closedChecks: 0, fixCycles: {}, episodes: 0, followUps: 0, briefs: 0, correctedBriefs: 0, briefScoreSum: 0,
   interrupts: 0, healthyInterrupts: 0, workEpisodes: 0, turnsPerWorkSum: 0, queued: 0,
   children: 0, finishedChildren: 0, bgKnown: 0, bgChildren: 0, childTypes: {}, workflowRuns: 0, maxDepth: 0,
@@ -82,6 +82,16 @@ describe("computeSignals: the sample formulas", () => {
     expect(five.tokensPerLanded.sources).toEqual([CC, CX, "git"]);
     const off = computeSignals([{ ...a, landed: 5 }, b], globals({ repoSignals: "off" }));
     expect(off.tokensPerLanded.sources).toEqual([CC, CX]);
+  });
+
+  test("corrected-brief rate: not captured when under 1% of at least 200 human prompts carry an opener the classifier knows", () => {
+    const row = (humanPrompts: number, openerPrompts: number) => stat("r", { turns: humanPrompts, humanPrompts, openerPrompts, episodes: 50, briefs: 50,
+      correctedBriefs: 5, interrupts: 20, healthyInterrupts: 10 });
+    const none = computeSignals([row(300, 0)], globals()).correctionRate;
+    expect([none.value, none.reason, none.n]).toEqual([null, "not-captured", 50]);
+    expect(computeSignals([row(300, 2)], globals()).correctionRate.reason).toBe("not-captured"); // 0.67%
+    expect(computeSignals([row(300, 3)], globals()).correctionRate.value).toBe(0.1); // 1%
+    expect(computeSignals([row(199, 0)], globals()).correctionRate.value).toBe(0.1); // under 200 prompts the guard does not apply
   });
 
   test("unchecked-command share: over the unchecked edit turns of gated rows, with their rows' sources and span", () => {
@@ -244,7 +254,7 @@ const config = (kind: ConfigEv["kind"], name: string | undefined, over: Partial<
   if (name !== undefined) c.name = name;
   return c;
 };
-const commit = (ts: number, shaKey: string, files: string[], over: Partial<CommitFact> = {}): CommitFact => ({ ts, shaKey, files, owner: true, mine: true, ...over });
+const commit = (ts: number, shaKey: string, files: string[], over: Partial<CommitFact> = {}): CommitFact => ({ ts, shaKey, files, mine: true, ...over });
 const repo = (repoKey: string, projectKeys: string[], over: Partial<RepoFacts> = {}): RepoFacts => ({
   repoKey, projectKeys, identity: true, commits: [], commitsTruncated: false, fileLists: true,
   instructions: { files: [], namesChecks: [], touched: 0 }, hooks: { entries: 0, checks: [], disabled: false },
@@ -255,7 +265,7 @@ const signals = (repos: RepoFacts[], status: RepoSignals["status"] = "ok"): Repo
 function globalsOf(evs: Ev[], o: { repos?: RepoSignals; exclude?: Exclusions; now?: number } = {}): { g: Globals; stats: SessionStats[] } {
   const raw = scanResultOf([...COVERAGE, ...evs], o.repos ? { repos: o.repos } : {});
   const now = o.now ?? raw.finishedAt;
-  const t = buildSessionTable(raw, { now, timeZone: "UTC", ...(o.exclude ? { exclude: o.exclude } : {}) });
+  const t = buildSessionTable(raw, { timeZone: "UTC", ...(o.exclude ? { exclude: o.exclude } : {}) });
   const stats = buildSessionStats(t, raw.store, raw.repos, { timeZone: "UTC" });
   return { g: computeGlobals(t, stats, raw, { now }), stats };
 }
@@ -287,7 +297,7 @@ const REPOS = (): RepoSignals => signals([
     commits: [
       commit(T0 + 30 * MIN, "c1", ["f1"], { ai: "claude" }), commit(T0 + 5 * HOUR, "c2", ["f1", "f3"], { rework: "fix" }),
       commit(T0 - 10 * DAY, "c3", ["f1"]), commit(T0 + 6 * HOUR, "c4", ["f9"], { rework: "revert" }),
-      commit(T0 + 3 * HOUR, "c5", ["f2"], { owner: false }),
+      commit(T0 + 3 * HOUR, "c5", ["f2"], { mine: false }),
     ],
   }),
   repo("S", ["PS"], { instructions: { files: [], namesChecks: ["test"], touched: 0 } }),
@@ -342,7 +352,7 @@ describe("computeGlobals", () => {
 
   test("rework, AI co-authored share and commits after a session, from own commits", () => {
     const { g } = globalsOf(WORLD, { repos: REPOS(), now: T0 + 15 * DAY });
-    // own non-revert commits in [detail from − 3 days, now]: c1, c2 (c3 is older, c5 is no owner's); c2 fixes c1's file
+    // own non-revert commits in [detail from − 3 days, now]: c1, c2 (c3 is older, c5 is another author's); c2 fixes c1's file
     expect([g.reworkShare.value, g.reworkShare.n, g.reworkShare.sources]).toEqual([0.5, 2, ["git"]]);
     expect([g.reworkShare.from, g.reworkShare.to]).toEqual([T0 - 3 * DAY, T0 + 15 * DAY]);
     // own commits in the detail span: c1 (claude), c2, c4
@@ -358,9 +368,44 @@ describe("computeGlobals", () => {
     expect([none.value, none.reason, none.n]).toEqual([null, "not-captured", 3]); // c4 is no revert now: it joins c1, c2
     const other = REPOS();
     other.repos[0]!.commits = other.repos[0]!.commits.filter((c) => c.shaKey !== "c2" && c.shaKey !== "c4");
-    other.repos[0]!.commits.push(commit(T0 + 20 * DAY, "c6", ["f7"], { owner: false, rework: "fixup" }));
+    other.repos[0]!.commits.push(commit(T0 + 20 * DAY, "c6", ["f7"], { mine: false, rework: "fixup" }));
     const marked = globalsOf(WORLD, { repos: other, now: T0 + 25 * DAY }).g.reworkShare;
     expect([marked.value, marked.reason]).toEqual([0, undefined]);
+  });
+
+  test("a commit two kept clones list counts once: the second clone's project excluded or not, n is the same", () => {
+    const shared = (): CommitFact[] => [0, 1, 2, 3].map((i) => commit(T0 + (i + 1) * HOUR, `s${i}`, [`f${i}`], { id: `id${i}`, ai: "claude" }));
+    const two = signals([repo("R", ["PK"], { commits: shared() }), repo("S", ["PS"], { commits: shared() })]);
+    const evs: Ev[] = [sess("a", { projectKey: "PK" }), prompt("a", T0), sess("b", { projectKey: "PS" }), prompt("b", T0)];
+    const both = globalsOf(evs, { repos: two, now: T0 + 15 * DAY }).g;
+    const one = globalsOf(evs, { repos: two, now: T0 + 15 * DAY, exclude: { projects: ["PS"] } }).g;
+    expect([both.aiCoauthoredShare.n, both.evidence.ownCommits]).toEqual([4, 4]);
+    expect([one.aiCoauthoredShare.n, one.reworkShare.n]).toEqual([4, both.reworkShare.n]);
+  });
+
+  test("counting a shared commit once does not depend on the scan's salt", () => {
+    const run = (fill: number) => {
+      const salt = new Uint8Array(32).fill(fill);
+      const h = (v: string) => keyedHash(salt, v);
+      const shared = (): CommitFact[] => [0, 1, 2].map((i) => commit(T0 + (i + 1) * HOUR, h(`sha${i}`), [h(`f${i}`)], { id: h(`id${i}`), ai: i === 0 ? "claude" : undefined }));
+      const repos = signals([repo(h("R"), ["PK"], { commits: shared() }), repo(h("S"), ["PS"], { commits: [...shared(), commit(T0 + 5 * HOUR, h("solo"), [])] })]);
+      const g = globalsOf([sess("a", { projectKey: "PK" }), prompt("a", T0), sess("b", { projectKey: "PS" }), prompt("b", T0)], { repos, now: T0 + 15 * DAY }).g;
+      return [g.aiCoauthoredShare.n, g.aiCoauthoredShare.value, g.reworkShare.n, g.commitAfterSession.value];
+    };
+    expect(run(1)).toEqual([4, 0.25, 4, 1]);
+    for (const fill of [2, 7, 200]) expect(run(fill)).toEqual(run(1));
+  });
+
+  test("a cut list: windows start no earlier than its reach; a session before it is no 'no commit after'", () => {
+    const reach = T0 + 5 * DAY;
+    const r: RepoFacts = repo("R", ["PK"], { commits: [commit(T0 + 6 * DAY, "c1", ["f1"]), commit(T0 + 6 * DAY + HOUR, "c2", ["f1"], { rework: "fix" })],
+      commitsTruncated: true, commitsReach: reach });
+    const evs: Ev[] = [sess("a", { projectKey: "PK" }), prompt("a", T0), sess("b", { projectKey: "PK", start: T0 + 6 * DAY - HOUR, end: T0 + 6 * DAY - MIN }),
+      prompt("b", T0 + 6 * DAY - HOUR)];
+    const g = globalsOf(evs, { repos: signals([r]), now: T0 + 15 * DAY }).g;
+    expect([g.commitAfterSession.value, g.commitAfterSession.n]).toEqual([1, 1]); // a ended before the reach: not counted
+    expect(g.aiCoauthoredShare.from).toBe(reach);
+    expect(g.reworkShare.from).toBe(reach);
   });
 
   test("used artifacts, weighted by provenance; memory files shown", () => {

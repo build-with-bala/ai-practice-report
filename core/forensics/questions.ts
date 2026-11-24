@@ -87,7 +87,7 @@ const unverifiedIds: { readonly [R in Reason]?: Ask } = {
     return f === undefined ? undefined
       : `${digits(f)} server-issued ${plural(f, "id carries a value that fits", "ids carry values that fit")} no plausible time on the service's time line, so ${plural(f, "it", "they")} could not be checked against ${plural(f, "its time", "their times")}. Were some sessions run through another provider or a gateway that issues its own ids?`;
   },
-  degenerate: () => "All server-issued ids, or all their recorded times, are the same, so their order could not be checked. Were these ids or times copied or rewritten?",
+  degenerate: () => "The server-issued ids do not grow with their recorded times (all the same, or falling as time goes on), so they could not be checked against their times. Were these ids or times copied or rewritten?",
 };
 
 const QUESTIONS: { readonly [I in CheckId]?: { readonly [R in Reason]?: Ask } } = {

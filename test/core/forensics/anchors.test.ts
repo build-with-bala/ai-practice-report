@@ -579,3 +579,25 @@ describe("checkAnchors: C2 needs a day of ids to rank", () => {
     expect(anchorsOf(scanResultOf(spread.map((e, i) => ({ ...e, ts: times[i]! }))))[1].status).toBe("fail");
   });
 });
+
+describe("ids that do not grow with time are no time line", () => {
+  /** 200 ids per kind over 23 hours, their recorded times reversed: the newest id at the oldest time. */
+  const reversed = (): AnchorEv[] => (["cc-msg", "cc-req"] as const).flatMap((kind, k) => {
+    const r = rng(7 + k);
+    const times = Array.from({ length: 200 }, (_, i) => T0 + Math.floor((i * 23 * HOUR) / 200));
+    return times.map((ts, i) => anchor(times[times.length - 1 - i]!, genuineTail(ts, r), kind));
+  });
+
+  test("C1 is not applicable (degenerate) for a line whose slope is not positive, and never a pass", () => {
+    const [c1, c2] = anchorsOf(scanResultOf(reversed()));
+    expect([c1.status, c1.reason]).toEqual(["n/a", "degenerate"]);
+    expect(c2.status).toBe("n/a");
+  });
+
+  test("such a history does not read consistent", async () => {
+    const { runForensics } = await import("../../../core/forensics/index");
+    const raw = scanResultOf(reversed());
+    const f = runForensics(raw, tableOf(raw), [], { now: raw.finishedAt, timeZone: "UTC" });
+    expect(f.band).not.toBe("consistent");
+  });
+});

@@ -10,7 +10,7 @@ import { MCP_PUBLIC, mcpExportName, mcpLabels, MODEL_WORDS, modelExportId } from
 import type { ScanResult } from "../../../core/scan";
 import { CcTranscript, ccSid, fixtureStart, slug } from "../../fixtures/claude-code";
 import { personaScan } from "../../fixtures/personas";
-import { makeRepo } from "../../fixtures/repos";
+import { isolateGitHome, makeRepo } from "../../fixtures/repos";
 import { buildAll } from "../../kit/allsources";
 import { CANARY, expectNoCanaries } from "../../kit/canary";
 import { fakeHome, type FakeHome } from "../../kit/home";
@@ -53,8 +53,10 @@ function rawIds(v: unknown, out: Set<string>, under = false): Set<string> {
 
 describe("exportPayload end to end", () => {
   let h: FakeHome;
-  beforeEach(() => { h = fakeHome(); });
-  afterEach(() => h.cleanup());
+  let restoreHome: () => void = () => {};
+  // the engine's git inherits this process's environment: HOME points into the fake home, so it reads no developer config
+  beforeEach(() => { h = fakeHome(); restoreHome = isolateGitHome(path.join(h.root, "git-home")); });
+  afterEach(() => { restoreHome(); h.cleanup(); });
 
   test("every Plan 1 fixture plus a canary repo: scan → analyze → export holds no canary and no raw id", async () => {
     buildAll(h);
@@ -1042,11 +1044,13 @@ describe("the reading side rebuilds every question from the export", () => {
 
   test("the end-to-end scan of every fixture", async () => {
     const h = fakeHome();
+    const restoreHome = isolateGitHome(path.join(h.root, "git-home"));
     try {
       buildAll(h);
       const a = analyze(await scan({ env: h.env }), UTC);
       expect(rebuildAll(a)).toBeGreaterThan(0);
     } finally {
+      restoreHome();
       h.cleanup();
     }
   }, 30_000);

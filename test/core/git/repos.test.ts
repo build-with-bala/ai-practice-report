@@ -268,41 +268,23 @@ describe("repo signals: the log reads commits only, whatever the repo holds", ()
   }, 30_000);
 });
 
-describe("repo signals: every argument is one the oldest supported git accepts", () => {
-  /**
-   * A fake `git` first on PATH that sees the whole argument vector the runner passes (the safe arguments, the
-   * subcommand, its options, the `--format=` placeholders and the pathspecs after `--`), refuses what git 2.13 does not
-   * accept as git does (exit 129, the vector written to `refusedFile`), answers `--version` as `version`, and runs the
-   * real git for everything else. The allowlist is written from git's own history, not from the engine's code:
-   * - before the subcommand: `--no-pager`, and `-c <section>.<key>=<value>` (any key: an unknown one is ignored);
-   * - `rev-parse`: `--show-toplevel` (1.7.0), `--git-common-dir` (2.5), `--verify`, `--quiet`, a revision `HEAD^{commit}`;
-   * - `config --get <key>`;
-   * - `log`: `--use-mailmap` and its `--no-` form (1.8.2), `--exclude=<glob>` (1.9.0), `--all`, `--no-merges`,
-   *   `--no-renames`, `--since=<date>`, `--max-count=<n>`, `-n<n>`, `--name-only`, `-z`, `--format=<fmt>` whose
-   *   placeholders are among `%x00`-style hex bytes, `%H`, `%ct`, `%ae`, `%n`, `%B` (1.7.2); `--since-as-filter=<date>`
-   *   from 2.37 only; after `--`, pathspecs with the `:(literal)` magic (1.8).
-   */
-  function strictGit(version: string): { bin: string; refusedFile: string } {
-    const real = resolveGit(process.env)!;
-    const bin = path.join(h.root, "strict-bin");
-    const refusedFile = path.join(h.root, "refused.jsonl");
-    mkdirSync(bin, { recursive: true });
-    const script = `#!${process.execPath}
-const fs = require("node:fs");
-const VERSION = ${JSON.stringify(version)};
-const [maj, min] = VERSION.split(".").map(Number);
-const args = process.argv.slice(2);
-const date = /^\\d{4}-\\d{2}-\\d{2}T[0-9:.]+Z$/;
-const format = (f) => /^%[a-zA-Z0-9%]/.test(f) && f.replace(/%x[0-9a-f]{2}|%H|%ct|%ae|%n|%B/g, "") === "";
-const ok = (() => {
+/**
+ * Whether git `version` accepts the argument vector `args`, as written from git's own history (see the describe below).
+ * Plain JavaScript in its body: the script fake embeds it by `toString()`.
+ */
+const acceptedBy = (version: string, args: string[]): boolean => {
+  const [maj, min] = version.split(".").map(Number) as [number, number];
+  const date = /^\d{4}-\d{2}-\d{2}T[0-9:.]+Z$/;
+  const format = (f: string): boolean => /^%[a-zA-Z0-9%]/.test(f) && f.replace(/%x[0-9a-f]{2}|%H|%ct|%ae|%n|%B/g, "") === "";
   let i = 0;
   while (i < args.length && (args[i] === "--no-pager" || args[i] === "-c")) {
-    if (args[i] === "-c") { if (!/^[a-zA-Z0-9]+\\.[a-zA-Z0-9.]+=\\S*$/.test(args[i + 1] ?? "")) return false; i += 2; } else i++;
+    if (args[i] === "-c") { if (!/^[a-zA-Z0-9]+\.[a-zA-Z0-9.]+=\S*$/.test(args[i + 1] ?? "")) return false; i += 2; } else i++;
   }
   const [cmd, ...rest] = args.slice(i);
   if (cmd === "--version") return rest.length === 0;
-  if (cmd === "rev-parse") return rest.every((a) => ["--show-toplevel", "--git-common-dir", "--verify", "--quiet", "HEAD^{commit}"].includes(a));
-  if (cmd === "config") return rest.length === 2 && rest[0] === "--get" && /^[a-zA-Z0-9]+\\.[a-zA-Z0-9.]+$/.test(rest[1]);
+  if (cmd === "rev-parse") return rest.every((a) => ["--show-toplevel", "--git-common-dir", "--verify", "--quiet", "HEAD^{commit}", "HEAD"].includes(a));
+  if (cmd === "symbolic-ref") return rest.length === 2 && rest[0] === "-q" && rest[1] === "HEAD";
+  if (cmd === "config") return rest.length === 2 && rest[0] === "--get" && /^[a-zA-Z0-9]+\.[a-zA-Z0-9.]+$/.test(rest[1]!);
   if (cmd !== "log") return false;
   const dd = rest.indexOf("--");
   const opts = dd === -1 ? rest : rest.slice(0, dd);
@@ -310,24 +292,59 @@ const ok = (() => {
   const filter = maj > 2 || (maj === 2 && min >= 37);
   return specs.every((s) => s.startsWith(":(literal)") && s.length > 10) && opts.every((o) =>
     ["--no-use-mailmap", "--use-mailmap", "--all", "--no-merges", "--no-renames", "--name-only", "-z"].includes(o)
-    || /^--exclude=\\S+$/.test(o) || /^--max-count=\\d+$/.test(o) || /^-n\\d+$/.test(o)
+    || /^--exclude=\S+$/.test(o) || /^--max-count=\d+$/.test(o) || /^-n\d+$/.test(o)
     || (o.startsWith("--since=") && date.test(o.slice(8))) || (filter && o.startsWith("--since-as-filter=") && date.test(o.slice(18)))
     || (o.startsWith("--format=") && format(o.slice(9))));
-})();
-if (!ok) { fs.appendFileSync(${JSON.stringify(refusedFile)}, JSON.stringify(args) + "\\n"); process.exit(129); }
+};
+
+describe("repo signals: every argument is one the oldest supported git accepts", () => {
+  /**
+   * A fake `git` first on PATH that sees the whole argument vector the runner passes (the safe arguments, the
+   * subcommand, its options, the `--format=` placeholders and the pathspecs after `--`), refuses what git 2.13 does not
+   * accept as git does (exit 129, the vector written to `refusedFile`), answers `--version` as `version`, and runs the
+   * real git for everything else. The allowlist is written from git's own history, not from the engine's code:
+   * - before the subcommand: `--no-pager`, and `-c <section>.<key>=<value>` (any key: an unknown one is ignored);
+   * - `rev-parse`: `--show-toplevel` (1.7.0), `--git-common-dir` (2.5), `--verify`, `--quiet`, a revision `HEAD^{commit}`
+   *   or `HEAD`; `symbolic-ref -q HEAD`;
+   * - `config --get <key>`;
+   * - `log`: `--use-mailmap` and its `--no-` form (1.8.2), `--exclude=<glob>` (1.9.0), `--all`, `--no-merges`,
+   *   `--no-renames`, `--since=<date>`, `--max-count=<n>`, `-n<n>`, `--name-only`, `-z`, `--format=<fmt>` whose
+   *   placeholders are among `%x00`-style hex bytes, `%H`, `%ct`, `%ae`, `%n`, `%B` (1.7.2); `--since-as-filter=<date>`
+   *   from 2.37 only; after `--`, pathspecs with the `:(literal)` magic (1.8).
+   */
+  function strictGit(version: string): { bin: string; refusedFile: string; callsFile: string } {
+    const real = resolveGit(process.env)!;
+    const bin = path.join(h.root, "strict-bin");
+    const refusedFile = path.join(h.root, "refused.jsonl");
+    const callsFile = path.join(h.root, "calls.jsonl");
+    mkdirSync(bin, { recursive: true });
+    // the same allowlist as the in-process variant: `acceptedBy` is written into the script as plain JavaScript
+    const script = `#!${process.execPath}
+const fs = require("node:fs");
+const VERSION = ${JSON.stringify(version)};
+const args = process.argv.slice(2);
+const acceptedBy = ${acceptedBy.toString()};
+fs.appendFileSync(${JSON.stringify(callsFile)}, JSON.stringify(args) + "\\n");
+if (!acceptedBy(VERSION, args)) { fs.appendFileSync(${JSON.stringify(refusedFile)}, JSON.stringify(args) + "\\n"); process.exit(129); }
 if (args.includes("--version")) { process.stdout.write("git version " + VERSION + "\\n"); process.exit(0); }
 const r = Bun.spawnSync([${JSON.stringify(real)}, ...args], { stdin: "ignore", stdout: "inherit", stderr: "ignore" });
 process.exit(r.exitCode ?? 1);
 `;
     writeFileSync(path.join(bin, "git"), script);
     chmodSync(path.join(bin, "git"), 0o755);
-    return { bin, refusedFile };
+    return { bin, refusedFile, callsFile };
   }
 
+  /** The calls a fake saw: every argument vector, in order. */
+  const callsIn = (file: string): string[][] => (existsSync(file) ? readFileSync(file, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l) as string[]) : []);
+  /** The window options of the log calls: `--since` or `--since-as-filter`. */
+  const windowOpts = (calls: string[][]): string[] => [...new Set(calls.filter((a) => a.includes("log")).flatMap((a) => a.filter((x) => /^--since/.test(x)).map((x) => x.replace(/=.*/, ""))))];
+
   for (const version of ["2.13.0", "2.36.9", "2.37.0", "2.51.0"]) {
+    const filter = version === "2.37.0" || version === "2.51.0";
     test.skipIf(!POSIX)(`git ${version}: the whole argument vector of every call is accepted, and the repo reads whole (POSIX)`, async () => {
       const r1 = makeRepo(path.join(h.root, "strict"), [1, 2].map((i) => ({ files: { "CLAUDE.md": `${i}` }, message: `c${i}`, at: ago(3 - i) })));
-      const { bin, refusedFile } = strictGit(version);
+      const { bin, refusedFile, callsFile } = strictGit(version);
       const saved = process.env.PATH;
       process.env.PATH = `${bin}${path.delimiter}${saved ?? ""}`;
       let r: Awaited<ReturnType<typeof run>>;
@@ -336,9 +353,33 @@ process.exit(r.exitCode ?? 1);
       } finally {
         process.env.PATH = saved;
       }
+      // the fake really ran: it logged the version question, the rev-parse and both logs
+      const calls = callsIn(callsFile);
+      expect(calls.some((a) => a.includes("--version"))).toBe(true);
+      expect(calls.filter((a) => a.includes("log")).length).toBeGreaterThanOrEqual(2);
+      expect(windowOpts(calls)).toEqual([filter ? "--since-as-filter" : "--since"]);
       expect(existsSync(refusedFile) ? readFileSync(refusedFile, "utf8") : "").toBe("");
       expect(r.repos).toMatchObject({ status: "ok", skipped: {} });
       expect(r.repos.repos[0]).toMatchObject({ instructions: { touched: 2 } });
+      expect(r.repos.repos[0]!.commits).toHaveLength(2);
+    }, 30_000);
+
+    // in process, on every platform: the same allowlist over the exact vectors the engine passes its runner
+    test(`git ${version}, in process: every argument vector the engine passes is accepted`, async () => {
+      const r1 = makeRepo(path.join(h.root, "strict-in"), [1, 2].map((i) => ({ files: { "CLAUDE.md": `${i}` }, message: `c${i}`, at: ago(3 - i) })));
+      const calls: string[][] = [];
+      const refused: string[][] = [];
+      const runner: GitRunner = async (a, o) => {
+        calls.push([...a]);
+        if (!acceptedBy(version, [...a])) { refused.push([...a]); return { code: 129, stdout: "", timedOut: false, truncated: false }; }
+        if (a[0] === "--version") return { code: 0, stdout: `git version ${version}\n`, timedOut: false, truncated: false };
+        return runGit(a, o);
+      };
+      const r = await run([r1], { repoSignals: { runner } });
+      expect(refused).toEqual([]);
+      expect(calls.filter((a) => a[0] === "log").length).toBeGreaterThanOrEqual(2);
+      expect(windowOpts(calls)).toEqual([filter ? "--since-as-filter" : "--since"]);
+      expect(r.repos).toMatchObject({ status: "ok", skipped: {} });
       expect(r.repos.repos[0]!.commits).toHaveLength(2);
     }, 30_000);
   }
@@ -372,6 +413,24 @@ describe("repo signals: an unborn HEAD is an empty history, not a failed read", 
     const r = await run([dir]);
     expect(r.repos).toMatchObject({ status: "ok", skipped: {} });
     expect(r.repos.repos[0]).toMatchObject({ commits: [], instructions: { files: ["claude"], touched: 0 } });
+  });
+
+  test("a HEAD whose commit object is missing, or whose branch file holds garbage, is no unborn HEAD: history-error", async () => {
+    const broken = (name: string, breakIt: (dir: string) => void) => {
+      const dir = makeRepo(path.join(h.root, name), [{ files: { "CLAUDE.md": "x" }, message: "one", at: ago(2) }]);
+      breakIt(dir);
+      return dir;
+    };
+    const missing = broken("missing", (dir) => {
+      const sha = git(dir, ["rev-parse", "HEAD"]);
+      rmSync(path.join(dir, ".git", "objects", sha.slice(0, 2), sha.slice(2)));
+    });
+    const garbage = broken("garbage", (dir) => writeFileSync(path.join(dir, ".git", "refs", "heads", "main"), "not-a-sha\n"));
+    for (const dir of [missing, garbage]) {
+      const r = await run([dir], { repoSignals: { runner: (a, o) => runGit(a, o) } });
+      expect(r.repos.skipped).toMatchObject({ "history-error": 1 });
+      expect(r.repos.status).toBe("partial");
+    }
   });
 
   test("HEAD on an orphan branch while other branches have commits: ok, nothing skipped, the other commits read", async () => {
@@ -438,32 +497,16 @@ describe("repo signals: one repo, one count; hostile repos", () => {
     expect(r.repos.repos[0]!.commits).toHaveLength(2);
   });
 
-  test("two clones of one repo: both list every commit; each is the owner's in one — most detail sessions, then smallest key", async () => {
+  test("two clones of one repo: both list every commit, with the same ids, each the person's (counting once is the analysis's job)", async () => {
     const a = makeRepo(path.join(h.root, "a"), [1, 2, 3].map((i) => ({ files: { "n.txt": `${i}` }, message: `c${i}`, at: ago(5 - i) })));
     const b = path.join(h.root, "b");
     git(h.root, ["clone", "-q", a, b]);
     git(b, ["config", "user.email", "dev@fixture.test"]);
-    mkdirSync(path.join(a, "sub"));
-    mkdirSync(path.join(b, "sub"));
-    const salt = new Uint8Array(32).fill(3);
-    const owners = (r: Awaited<ReturnType<typeof run>>) => r.repos.repos.map((x) => [x.repoKey, x.commits.length, x.commits.filter((c) => c.owner).length]).sort();
-
-    // a tie in sessions: the smaller key owns; both list all 3
-    const t = await run([a, b], { salt });
-    const [small, large] = t.repos.repos.map((x) => x.repoKey).sort();
-    expect(owners(t)).toEqual([[small, 3, 3], [large, 3, 0]]);
-
-    // the larger-key clone has more sessions: it owns
-    const largeDir = t.repos.roots.get(large!)!;
-    const largeIsB = path.basename(largeDir) === "b";
-    const r = await run(largeIsB ? [a, b, path.join(b, "sub")] : [a, path.join(a, "sub"), b], { salt });
-    expect(owners(r)).toEqual([[small, 3, 0], [large, 3, 3]]);
-
-    // a pass that ends partial (aborted once both were read) still owns each shared commit once
-    const ac = new AbortController();
-    const p = await run([a, b], { salt, signal: ac.signal, onProgress: (x) => { if (x.plugin === "repo-signals" && x.done === x.total) ac.abort(); } });
-    expect(p.repos.status).toBe("partial");
-    expect(owners(p)).toEqual([[small, 3, 3], [large, 3, 0]]);
+    const t = await run([a, b], { salt: new Uint8Array(32).fill(3) });
+    const [x, y] = t.repos.repos;
+    expect([x!.commits.length, y!.commits.length]).toEqual([3, 3]);
+    expect(x!.commits.map((c) => c.id)).toEqual(y!.commits.map((c) => c.id));
+    expect([...x!.commits, ...y!.commits].every((c) => c.mine && !("owner" in c))).toBe(true);
   });
 
   test("commits of the same time are listed by id, smallest first", async () => {
@@ -500,7 +543,7 @@ describe("repo signals: one repo, one count; hostile repos", () => {
     const r = await run([r6]);
     const commits = r.repos.repos[0]!.commits;
     expect(commits).toHaveLength(1);
-    expect(commits[0]).toMatchObject({ shaKey: keyedHash(r.salt, git(r6, ["rev-parse", "HEAD"]).slice(0, 7)), owner: true });
+    expect(commits[0]).toMatchObject({ shaKey: keyedHash(r.salt, git(r6, ["rev-parse", "HEAD"]).slice(0, 7)), mine: true });
     expect(commits[0]!.ai).toBeUndefined();
     expect(commits[0]!.files).toHaveLength(2);
   });

@@ -7,7 +7,7 @@ import { scanResultOf } from "../../kit/scanresult";
 const T0 = Date.UTC(2026, 10, 2, 9, 0);
 const SEC = 1_000;
 const MIN = 60 * SEC;
-const opts = { now: T0 + 86_400_000, timeZone: "UTC" };
+const opts = { timeZone: "UTC" };
 
 const sess = (id: string, tool: ToolId, over: Partial<SessionEv> = {}): SessionEv => ({
   k: "session", tool, source: `${tool}.x`, id, window: "detail", origin: "human", start: T0, end: T0 + 30 * MIN, models: [], ...over,
@@ -215,5 +215,30 @@ describe("host copies are decided before any exclusion", () => {
     expect([...t.hosts].sort()).toEqual(["H", "Hc", "Hcc"]);
     expect(t.dedupe.hostSessions).toBe(1);
     expect(t.capabilities.lines).toEqual([]);
+  });
+});
+
+describe("dedupe at scale and in its diagnostics", () => {
+  test("20,000 repeated short prompts per side relabel inside the runaway guard", () => {
+    const { evs } = hosted(5 * SEC);
+    for (let i = 0; i < 20_000; i++) {
+      const ts = T0 + 40 * MIN + i * SEC;
+      evs.push(prompt("H", "copilot", ts, "ok", "human", 1), prompt("A", "claude-code", ts + 500, "ok", "scripted", 1));
+    }
+    const t0 = performance.now();
+    const t = buildSessionTable(scanResultOf(evs), opts);
+    expect(performance.now() - t0).toBeLessThan(30_000);
+    expect(t.dedupe.relabelled).toBe(20_004);
+  }, 60_000);
+
+  test("diagnostics count only pairs whose original is kept; exclusions.sessions never counts a host copy", () => {
+    const { evs } = hosted(5 * SEC);
+    evs.push(sess("Hc", "copilot", { parentId: "H", origin: "subagent" }));
+    const kept = buildSessionTable(scanResultOf(evs), { ...opts, exclude: { tools: ["copilot"] } });
+    expect(kept.dedupe).toEqual({ hostSessions: 1, pairedPrompts: 4, relabelled: 4 });
+    expect(kept.exclusions.sessions).toBe(0); // the copy and its child were never the person's sessions
+    const out = buildSessionTable(scanResultOf(evs), { ...opts, exclude: { tools: ["claude-code"] } });
+    expect(out.dedupe).toEqual({ hostSessions: 0, pairedPrompts: 0, relabelled: 0 });
+    expect(out.exclusions.sessions).toBe(1); // A only
   });
 });

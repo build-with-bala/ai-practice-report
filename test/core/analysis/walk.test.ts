@@ -61,7 +61,7 @@ const outcomesFor = (sessionId: string, ts: number, t: ToolId = "claude-code"): 
 
 function walk(evs: Ev[], o: { repos?: RepoSignals; timeZone?: string; exclude?: Exclusions } = {}): Map<string, SessionStats> {
   const raw = scanResultOf([...COVERAGE, ...evs], o.repos ? { repos: o.repos } : {});
-  const t = buildSessionTable(raw, { now: raw.finishedAt, timeZone: o.timeZone ?? "UTC", ...(o.exclude ? { exclude: o.exclude } : {}) });
+  const t = buildSessionTable(raw, { timeZone: o.timeZone ?? "UTC", ...(o.exclude ? { exclude: o.exclude } : {}) });
   const out = buildSessionStats(t, raw.store, raw.repos, { timeZone: o.timeZone ?? "UTC" });
   return new Map(out.map((s) => [s.id, s]));
 }
@@ -405,21 +405,27 @@ describe("walk: interrupts and briefs (rules 10–11)", () => {
   };
   const perWork = (st: SessionStats): number => st.turnsPerWorkSum / st.workEpisodes;
 
-  test("turns per work measures steering, not the length of a sitting: equal for sittings of 3 to 40 turns", () => {
-    const want = 1 / Math.log2(12);
-    for (const n of [3, 6, 12, 25, 40]) expect([n, perWork(one(sitting(n, 10)))]).toEqual([n, expect.closeTo(want, 12) as unknown as number]);
-    // one follow-up turn after every brief: the same at every length too
-    const pairs = 2 / Math.log2(22);
-    for (const n of [6, 12, 40]) expect(perWork(one(sitting(n, 10, (i) => i % 2 === 1)))).toBeCloseTo(pairs, 12);
+  test("human prompts and those with an opener the classifier knows (correction, redirect, continuation, ack)", () => {
+    const s = one([sess("s"), prompt("s", T0), tool("s", T0 + SEC), prompt("s", T0 + MIN, { intent: "continuation" }), tool("s", T0 + MIN + SEC),
+      prompt("s", T0 + 2 * MIN, { intent: "ack" }), tool("s", T0 + 2 * MIN + SEC), prompt("s", T0 + 3 * MIN, { intent: "question" }), tool("s", T0 + 3 * MIN + SEC)]);
+    expect([s.humanPrompts, s.openerPrompts]).toEqual([4, 2]);
   });
 
-  test("clearing the context every 5 turns does not change it; follow-up turns raise it", () => {
-    const base = perWork(one(sitting(25, 10)));
-    expect(perWork(one(sitting(25, 10, () => false, 5)))).toBeCloseTo(base, 12);
-    const some = perWork(one(sitting(25, 10, (i) => i % 4 === 1)));
-    const more = perWork(one(sitting(25, 10, (i) => i % 4 !== 0)));
-    expect(base).toBeLessThan(some);
-    expect(some).toBeLessThan(more);
+  // turns per work is shown unscored: these state what it reads
+  test("turns per work follows the length of a sitting when the follow-ups are short continue turns", () => {
+    // one brief, then "continue" turns (classified as continuations): one instruction holding every turn
+    const at = (n: number): number => perWork(one(sitting(n, 10, () => true)));
+    for (const n of [3, 6, 12, 25]) expect(at(n)).toBeCloseTo(n / Math.log2(2 + 10 * n), 12);
+    expect(at(3)).toBeLessThan(at(6));
+    expect(at(6)).toBeLessThan(at(25));
+  });
+
+  test("turns per work follows how follow-ups are worded: the same sitting with long follow-ups (new briefs) reads as one turn each", () => {
+    const short = perWork(one(sitting(25, 10, () => true)));
+    const long = perWork(one(sitting(25, 10, () => false)));
+    expect(long).toBeCloseTo(1 / Math.log2(12), 12);
+    expect(short).toBeGreaterThan(5 * long);
+    expect(one(sitting(25, 10, () => true)).turns).toBe(one(sitting(25, 10, () => false)).turns); // the same work and turn count
   });
 
   test("slash-command turns are no turns of their instruction; their actions are its work", () => {
@@ -483,7 +489,7 @@ describe("walk: tiers and tokens (rules 15–16)", () => {
   });
 });
 
-const commit = (ts: number, shaKey: string, owner = true): CommitFact => ({ ts, shaKey, files: [], owner, mine: true });
+const commit = (ts: number, shaKey: string, mine = true, id?: string): CommitFact => ({ ts, shaKey, files: [], mine, ...(id ? { id } : {}) });
 const repo = (repoKey: string, projectKeys: string[], commits: CommitFact[], identity = true): RepoFacts => ({
   repoKey, projectKeys, identity, commits, commitsTruncated: false, fileLists: true,
   instructions: { files: [], namesChecks: [], touched: 0 }, hooks: { entries: 0, checks: [], disabled: false },
@@ -508,7 +514,7 @@ describe("walk: delivery (rules 17–18)", () => {
     const s = all.get("s")!;
     expect([s.repoKey, s.editEpisodes, s.editEpisodesInRepo, s.landedEpisodes]).toEqual(["R", 1, 1, 1]);
     expect(s.prKeys).toEqual(["pr1"]);
-    expect(s.landed).toBe(2); // own commit k1 (k2 is another repo's, k3 is past the window) + one PR
+    expect(s.landed).toBe(2); // own commit k1 (k2 is another author's, k3 is past the window) + one PR
     const n = all.get("n")!;
     expect([n.editEpisodes, n.editEpisodesInRepo, n.landedEpisodes, n.landed]).toEqual([1, 0, 0, 0]);
   });
@@ -543,6 +549,28 @@ describe("walk: delivery (rules 17–18)", () => {
     expect(all.get("a")!.landedEpisodes).toBe(1);
     const m = all.get("m")!;
     expect([m.editEpisodesInRepo, m.landedEpisodes, m.landed]).toEqual([0, 0, 1]);
+  });
+});
+
+describe("walk: commits once among kept clones, and a cut commit list", () => {
+  test("a commit two kept clones list is one landed unit, for the latest-starting row across repositories", () => {
+    const shared = [commit(T0 + 3 * HOUR, "k1", true, "id1"), commit(T0 + 4 * HOUR, "k2", true, "id2")];
+    const repos = signals([repo("R1", ["P1"], shared.map((c) => ({ ...c }))), repo("R2", ["P2"], shared.map((c) => ({ ...c })))]);
+    const all = walk([
+      sess("a", { projectKey: "P2", start: T0, end: T0 + HOUR }), prompt("a", T0),
+      sess("b", { projectKey: "P1", start: T0 + 2 * HOUR, end: T0 + 2 * HOUR + MIN }), prompt("b", T0 + 2 * HOUR),
+    ], { repos });
+    expect([all.get("a")!.landed, all.get("b")!.landed]).toEqual([0, 2]); // b, of the other clone, starts later and holds both
+  });
+
+  test("a cut list: an edit episode that ends before the reach is in no delivery denominator", () => {
+    const cut: RepoFacts = { ...repo("R", ["PK"], [commit(T0 + 30 * HOUR, "k1")]), commitsTruncated: true, commitsReach: T0 + 24 * HOUR };
+    const all = walk([
+      sess("old", { projectKey: "PK", start: T0, end: T0 + HOUR }), prompt("old", T0), edit("old", T0 + SEC, "ts", 2),
+      sess("new", { projectKey: "PK", start: T0 + 29 * HOUR, end: T0 + 29 * HOUR + MIN }), prompt("new", T0 + 29 * HOUR), edit("new", T0 + 29 * HOUR + SEC, "ts", 2),
+    ], { repos: signals([cut]) });
+    expect([all.get("old")!.editEpisodes, all.get("old")!.editEpisodesInRepo, all.get("old")!.landedEpisodes]).toEqual([1, 0, 0]);
+    expect([all.get("new")!.editEpisodesInRepo, all.get("new")!.landedEpisodes]).toEqual([1, 1]);
   });
 });
 
@@ -684,7 +712,7 @@ describe("walk: budget", () => {
       evs.push(i % 50 === 0 ? check("s", ts, i % 100 === 0) : i % 7 === 0 ? edit("s", ts, "ts", 3, 1) : tool("s", ts));
     }
     const raw = scanResultOf([...COVERAGE, ...evs]);
-    const t = buildSessionTable(raw, { now: raw.finishedAt, timeZone: "UTC" });
+    const t = buildSessionTable(raw, { timeZone: "UTC" });
     raw.store.forSession("s", "tool"); // the store's index is built by the first lookup: not the walk's cost
     const t0 = performance.now();
     const stats = buildSessionStats(t, raw.store, raw.repos, { timeZone: "UTC" });

@@ -20,7 +20,7 @@ const dayKey = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
 
 const stat = (id: string, over: Partial<SessionStats> = {}): SessionStats => ({
   id, tool: "claude-code", source: CC, origin: "human", start: T0, end: T0 + HOUR, scripted: false, days: [],
-  turns: 0, stickySum: 0, actions: 0, successRuns: {}, gatedVae: true, editTurns: 0, editWeight: 0, verifiedWeight: 0, uncheckedEditTurns: 0, uncheckedCommandTurns: 0,
+  turns: 0, stickySum: 0, actions: 0, successRuns: {}, gatedVae: true, editTurns: 0, editWeight: 0, verifiedWeight: 0, uncheckedEditTurns: 0, uncheckedCommandTurns: 0, humanPrompts: 0, openerPrompts: 0,
   failingChecks: 0, closedChecks: 0, fixCycles: {}, episodes: 0, followUps: 0, briefs: 0, correctedBriefs: 0, briefScoreSum: 0,
   interrupts: 0, healthyInterrupts: 0, workEpisodes: 0, turnsPerWorkSum: 0, queued: 0,
   children: 0, finishedChildren: 0, bgKnown: 0, bgChildren: 0, childTypes: {}, workflowRuns: 0, maxDepth: 0,

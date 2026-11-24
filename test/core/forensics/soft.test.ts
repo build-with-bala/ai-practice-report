@@ -53,7 +53,7 @@ function rng(seed: number): () => number {
 
 const flags = (events: Ev[]): CheckResult[] => {
   const raw = scanResultOf([cov(CC, "detail"), cov("claude-code.history", "lifetime"), sess("s"), ...events], { finishedAt: NOW });
-  return asks(softFlags(raw, buildSessionTable(raw, { now: NOW, timeZone: "UTC" }), { now: NOW, timeZone: "UTC" }));
+  return asks(softFlags(raw, buildSessionTable(raw, { timeZone: "UTC" }), { now: NOW, timeZone: "UTC" }));
 };
 const flag = (events: Ev[], id: CheckResult["id"]): CheckResult => flags(events).find((f) => f.id === id)!;
 
@@ -275,7 +275,7 @@ describe("softFlags", () => {
         config({ kind: "feature", name: "prompt-queue", ...at }),
       ];
       const raw = scanResultOf([cov(CC, "detail"), cov("claude-code.history", "lifetime"), sess("s"), ...evs], { finishedAt: NOW });
-      const t = buildSessionTable(raw, { now: NOW, timeZone: "UTC" });
+      const t = buildSessionTable(raw, { timeZone: "UTC" });
       const g = computeGlobals(t, buildSessionStats(t, raw.store, raw.repos, { timeZone: "UTC" }), raw, { now: NOW });
       const f = asks(softFlags(raw, t, { now: NOW, timeZone: "UTC" })).find((x) => x.id === "soft:new-config")!;
       expect(g.evidence.artifacts).toBe(3); // used-skill, docs, reviewer

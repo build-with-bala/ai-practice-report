@@ -1,4 +1,4 @@
-import type { ConfigEv, CoverageEv, PromptEv } from "../model/events";
+import type { ConfigEv, CoverageEv, IdentityEv, PromptEv } from "../model/events";
 import type { ToolId } from "../model/ids";
 import type { ScanResult } from "../scan";
 import type { SessionRow, SessionTable } from "./types";
@@ -50,16 +50,21 @@ export function detailSourcesOf(coverage: readonly CoverageEv[]): Set<string> {
 }
 
 /**
- * The distinct identity hashes in scope, sorted: of kept tools, and for a session-scope hash that names a session, only
+ * The one identity rule (the analysis's `identity` and the integrity checks read it): an identity event is in scope when
+ * its tool is kept and, for a session-scope one that names a session, that session is a kept row and no host copy.
+ */
+export function identityInScope(e: IdentityEv, t: SessionTable): boolean {
+  if (t.scope.tools.has(e.tool)) return false;
+  return e.scope !== "session" || e.sessionId === undefined || (t.rows.has(e.sessionId) && !t.hosts.has(e.sessionId));
+}
+
+/**
+ * The distinct identity hashes in scope (`identityInScope`), sorted: of kept tools, and for a session-scope hash that names a session, only
  * when that session is a kept row that is no host copy (not excluded by project or date).
  */
 export function identityHashes(raw: ScanResult, t: SessionTable): string[] {
-  const kept = (id: string): boolean => t.rows.has(id) && !t.hosts.has(id);
   const hashes = new Set<string>();
-  for (const e of raw.store.all("identity")) {
-    if (t.scope.tools.has(e.tool) || (e.scope === "session" && e.sessionId !== undefined && !kept(e.sessionId))) continue;
-    hashes.add(e.hash);
-  }
+  for (const e of raw.store.all("identity")) if (identityInScope(e, t)) hashes.add(e.hash);
   return [...hashes].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 

@@ -27,7 +27,7 @@ const usage = (sessionId: string, ts: number, model: string): UsageEv =>
   ({ k: "usage", tool: "claude-code", source: "claude-code.transcripts", ts, sessionId, model, inTok: 1, outTok: 1, cacheR: 0, cacheW: 0 });
 const check = (events: Ev[], table: ReleaseTable = TABLE) => {
   const raw = scanResultOf(events);
-  return asks(checkReleases(buildSessionTable(raw, { now: raw.finishedAt, timeZone: "UTC" }), table, raw));
+  return asks(checkReleases(buildSessionTable(raw, { timeZone: "UTC" }), table, raw));
 };
 
 describe("checkReleases (C9)", () => {

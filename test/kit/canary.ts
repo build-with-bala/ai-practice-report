@@ -17,12 +17,14 @@ const KEYS = Object.keys(CANARY) as CanaryKey[];
 const dec = new TextDecoder();
 
 /**
- * The two fields that hold raw config names by design (global constraints): `ConfigEv.name` and `ToolEv.mcpServer`.
+ * The fields that hold a tool's own strings raw by design (global constraints): the raw config names `ConfigEv.name` and
+ * `ToolEv.mcpServer`, and the model ids `SessionEv.models`, `TurnEv.model`, `UsageEv.model` (allowlisted at export).
  * Their strings are collected apart, so that an allowed canary may sit there and nowhere else.
  */
 const isExempt = (owner: object, key: string): boolean => {
   const k = (owner as { k?: unknown }).k;
-  return (k === "config" && key === "name") || (k === "tool" && key === "mcpServer");
+  return (k === "config" && key === "name") || (k === "tool" && key === "mcpServer") || (k === "session" && key === "models")
+    || ((k === "turn" || k === "usage") && key === "model");
 };
 
 function collect(value: unknown, out: string[], seen: WeakSet<object>, exempt: string[] = out): void {

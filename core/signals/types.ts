@@ -9,7 +9,7 @@ import type { ToolId, Window } from "../model/ids";
  * `editTurns` (gated rows), `followUps`, `briefs`, `failingChecks`, `interrupts`, `workEpisodes` (the instructions with
  * an action: the unit of turns per work, under its older name), `tierEpisodes` (episodes with a known tier and effort), `editEpisodesInRepo`, `landed`, `bgKnown`. Global: `repos` (active repos
  * with repo facts), `buckets` (active buckets), `artifacts` (distinct used artifacts), `lifetimeWeeks`, `ownCommits`
- * (owner commits in the detail span).
+ * (the person's commits in the detail span, each once among the kept repos).
  */
 export interface Evidence { typedTurns: number; sessions: number; days: number; weeks: number; episodes: number; editTurns: number;
   followUps: number; briefs: number; failingChecks: number; interrupts: number; workEpisodes: number; tierEpisodes: number;
@@ -25,7 +25,20 @@ export interface Signals {
   stickyMean: Metric; p90Run: Metric; actionsPerTurn: Metric;
   parallelShare: Metric; peakConcurrency: number; backgroundShare: Metric;
   fanoutPerEpisode: Metric; childTypes: Record<ChildType, number>; workflowRunsPerEpisode: Metric; maxDepth: number;
-  correctionRate: Metric; healthyInterruptShare: Metric; turnsPerWork: Metric; queuePerTurn: Metric;
+  /**
+   * Corrected briefs per brief. Null (`not-captured`) when fewer than 1% of at least 200 human detail prompts in scope
+   * are classified as a correction, redirect, continuation or acknowledgement: the classifier reads those from English
+   * opening words, so a person who writes in another language would otherwise read as a perfect 0.
+   */
+  correctionRate: Metric; healthyInterruptShare: Metric;
+  /**
+   * Unscored. Typed turns per instruction, discounted by the work the instruction set off: per instruction (an episode's
+   * first typed turn or a later brief, with the follow-up turns after it) turns / log2(2 + actions), averaged. It follows
+   * how much work one instruction sets off and how follow-up turns are worded (a longer follow-up starts a new
+   * instruction), so it is shown for context and not scored.
+   */
+  turnsPerWork: Metric;
+  queuePerTurn: Metric;
   maintainedShare: Metric; artifacts: Metric; memoryFiles: number; briefScore: Metric; hygiene: Metric;
   switchesPerWeek: Metric; rho: Metric; tokensPerLanded: Metric; usdPerLanded: Metric;
   landedShare: Metric; reworkShare: Metric; prsPerWeek: Metric; aiCoauthoredShare: Metric; commitAfterSession: Metric;

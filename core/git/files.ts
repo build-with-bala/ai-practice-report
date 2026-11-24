@@ -384,7 +384,16 @@ export async function readRepoFiles(root: string, cwds: readonly string[], o: Re
         skip("timeout");
         return { instructions, hooks, ci, precommit };
       }
-      if (head.code === 1) return { instructions, hooks, ci, precommit }; // unborn HEAD: touched 0, nothing counted
+      if (head.code === 1) {
+        // exit 1 is also what a HEAD whose commit object is missing, or whose branch file holds garbage, gives: only a
+        // HEAD that names a branch (`symbolic-ref`) and resolves to nothing at all (no peel) is truly unborn
+        const unborn = await unbornHead(root, o);
+        if (unborn === "stopped") { skip("budget"); return { instructions, hooks, ci, precommit }; }
+        if (unborn === "timeout") { skip("timeout"); return { instructions, hooks, ci, precommit }; }
+        if (unborn) return { instructions, hooks, ci, precommit }; // unborn HEAD: touched 0, nothing counted
+        skip("history-error");
+        return { instructions, hooks, ci, precommit };
+      }
       if (head.code !== 0) {
         skip("history-error");
         return { instructions, hooks, ci, precommit };
@@ -404,4 +413,22 @@ export async function readRepoFiles(root: string, cwds: readonly string[], o: Re
     }
   }
   return { instructions, hooks, ci, precommit };
+}
+
+/**
+ * After the peel check (`HEAD^{commit}`) exited 1: is HEAD truly unborn? Only when HEAD does not resolve at all
+ * (`rev-parse --verify --quiet HEAD` exits 1: no object, so not a missing commit object) and names a branch
+ * (`symbolic-ref -q HEAD` exits 0: so not a branch file holding garbage, which gives 128). Both are arguments git 2.13
+ * accepts. "stopped" on an abort, "timeout" when either timed out.
+ */
+async function unbornHead(root: string, o: { runner: GitRunner; timeoutMs: number; signal: AbortSignal }): Promise<boolean | "stopped" | "timeout"> {
+  const ask = (args: string[]) => o.runner(args, { cwd: root, timeoutMs: o.timeoutMs, maxBytes: HEAD_BYTES, signal: o.signal });
+  const plain = await ask(["rev-parse", "--verify", "--quiet", "HEAD"]);
+  if (o.signal.aborted) return "stopped";
+  if (plain.timedOut) return "timeout";
+  if (plain.code !== 1) return false; // 0: HEAD names an object that is no readable commit; anything else failed
+  const sym = await ask(["symbolic-ref", "-q", "HEAD"]);
+  if (o.signal.aborted) return "stopped";
+  if (sym.timedOut) return "timeout";
+  return sym.code === 0;
 }

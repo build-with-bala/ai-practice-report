@@ -22,7 +22,7 @@ const windows = (events: Ev[], exclude?: Exclusions) => {
   const mains = new Set<ToolId>();
   for (const e of events) if (e.k === "prompt" && e.sessionId === `${e.tool}:main`) mains.add(e.tool);
   const raw = scanResultOf([...[...mains].map(mainSession), ...events]);
-  return promptWindowByTool(raw, buildSessionTable(raw, { now: raw.finishedAt, timeZone: "UTC", ...(exclude ? { exclude } : {}) }));
+  return promptWindowByTool(raw, buildSessionTable(raw, { timeZone: "UTC", ...(exclude ? { exclude } : {}) }));
 };
 
 describe("promptWindowByTool", () => {
@@ -104,7 +104,7 @@ describe("promptWindowByTool", () => {
       ...many(2, () => prompt("copilot", "lifetime")),
     ];
     const raw = scanResultOf(evs);
-    const t = buildSessionTable(raw, { now: raw.finishedAt, timeZone: "UTC" });
+    const t = buildSessionTable(raw, { timeZone: "UTC" });
     expect(t.hosts.has("copilot:host")).toBe(true);
     expect(promptWindowByTool(raw, t).get("copilot")).toBe("lifetime");
   });

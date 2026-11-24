@@ -26,7 +26,8 @@ export type { CheckId, CheckResult, CheckStatus, CheckValues, ProvenanceKey, Rea
  * warn; a check that is not applicable does not count against it (a note, such as the note for unverified ids,
  * passes the ids that could be checked). Every typed turn of a backed tool counts, including turns of its sessions
  * that carry no server id themselves. `anchorable` /
- * `notAnchorable`: the tools in scope that do or do not record server-issued data (neutral, never a penalty);
+ * `notAnchorable`: the tools in scope that do or do not record server-issued data, and every tool one of whose
+ * server-anchored checks measured something (neutral, never a penalty);
  * `checks`: C1–C10, then the soft flags, always in that order.
  */
 export interface Forensics { band: "consistent" | "consistent-with-notes" | "inconsistent" | "unverifiable"; serverBacked: number | null;
@@ -76,14 +77,15 @@ export function bandOf(checks: readonly CheckResult[]): Forensics["band"] {
 
 /**
  * soft:no-server-pass: n/a (`no-data`) when every check tied to an anchorable tool is n/a (the band is then
- * `unverifiable`); a pass when a check on server-issued data passed; else a note: what was checked rests on the tools'
- * local records alone. `tools`: the tools of the anchorable checks that measured something.
+ * `unverifiable`); a pass when a check on server-issued data passed and a backed tool has typed turns in scope (or no
+ * tool has any); else a note: what was checked rests on the tools' local records alone, or the pass came from a tool
+ * none of whose typed turns are here, so the server-backed share (0) and the band agree. `tools`: the tools of the anchorable checks that measured something.
  */
-function noServerPass(checks: readonly CheckResult[]): CheckResult {
+function noServerPass(checks: readonly CheckResult[], backedTurns: boolean): CheckResult {
   const measured = checks.filter((c) => ANCHOR_CHECKS.has(c.id) && c.status !== "n/a");
   const tools = [...new Set(measured.flatMap((c) => c.tools))].sort();
   if (measured.length === 0) return { id: "soft:no-server-pass", status: "n/a", n: 0, reason: "no-data", values: {}, tools };
-  const passed = measured.some((c) => SERVER_CHECKS.has(c.id) && c.status === "pass");
+  const passed = backedTurns && measured.some((c) => SERVER_CHECKS.has(c.id) && c.status === "pass");
   return asked({ id: "soft:no-server-pass", status: passed ? "pass" : "note", n: measured.length, reason: passed ? "ok" : "no-server-pass", values: {}, tools });
 }
 
@@ -133,10 +135,6 @@ export function runForensics(raw: ScanResult, t: SessionTable, stats: readonly S
     c1, c2, checkClaudeHistory(raw, t, scope), checkAccount(raw, t, scope), checkFileTimes(raw, t, { timeZone: o.timeZone }, scope), c6, c7, c8,
     checkReleases(t, o.releases ?? RELEASES, raw, scope), provenance(raw, t, scope), ...softFlags(raw, t, o, scope),
   ];
-  checks.push(noServerPass(checks), missingIds(scope, stats));
-  guardVocabulary(checks);
-  const tools = scope.tools();
-
   const status = new Map(checks.map((c) => [c.id, c.status]));
   // backed: at least one server check passes or notes, and none fails or warns (a not-applicable check counts for nothing)
   const backed = new Set(ANCHORS.filter((a) => {
@@ -148,6 +146,14 @@ export function runForensics(raw: ScanResult, t: SessionTable, stats: readonly S
     all += st.turns;
     if (backed.has(st.tool)) server += st.turns;
   }
+  // a server pass confirms the history only through a backed tool with typed turns here (or when there are none at
+  // all): else the share (0) and the band agree on `consistent-with-notes`
+  checks.push(noServerPass(checks, all === 0 || server > 0), missingIds(scope, stats));
+  guardVocabulary(checks);
+  // anchorable: the tools in scope that record server-issued data, and every tool one of whose server checks measured
+  // something (its readings may name no session in scope)
+  const measuredTools = new Set(checks.filter((c) => SERVER_CHECKS.has(c.id) && c.status !== "n/a").flatMap((c) => c.tools).filter((x) => ANCHORABLE.has(x)));
+  const tools = [...new Set([...scope.tools(), ...measuredTools])].sort();
 
   return {
     band: bandOf(checks), serverBacked: all > 0 ? round(server / all) : null,

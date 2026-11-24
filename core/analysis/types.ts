@@ -40,7 +40,8 @@ export interface Capabilities { outcomes: ToolId[]; lines: ToolId[]; background:
 /**
  * Active days ("YYYY-MM-DD" in the analysis zone, sorted) and their ISO weeks ("YYYY-Www"), per window: a day is active
  * only with at least one human prompt (spec §6.2) — file times and zero-count days never count. `DailyEv` "local" days
- * are days in the scanning machine's zone when the tool wrote them, so they can misalign with the analysis zone; and
+ * are days in the scanning machine's zone when the tool wrote them, and "either" days the UTC or the local date, so both
+ * can misalign with the analysis zone (they are taken as given, never shifted to match another zone); and
  * the date-range exclusion applies to them by whole day (a day is kept when it lies within the range's first and last
  * day in the analysis zone). `byTool[tool].lifetimeSources`: the sorted sources of the prompts and daily rows that made
  * that tool's lifetime days (the same filtered inputs).

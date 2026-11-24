@@ -53,7 +53,7 @@ const config = (kind: ConfigEv["kind"], name: string, over: Partial<ConfigEv> = 
 function run(evs: Ev[], o: { exclude?: Exclusions; timeZone?: string; coverage?: Ev[] } = {}) {
   const raw = scanResultOf([...(o.coverage ?? COVERAGE), ...evs], { salt: SALT });
   const timeZone = o.timeZone ?? "UTC";
-  const t = buildSessionTable(raw, { now: raw.finishedAt, timeZone, ...(o.exclude ? { exclude: o.exclude } : {}) });
+  const t = buildSessionTable(raw, { timeZone, ...(o.exclude ? { exclude: o.exclude } : {}) });
   return { t, raw, p: panels(t, raw, { timeZone }) };
 }
 
@@ -252,7 +252,7 @@ describe("project labels", () => {
         fileLists: true, instructions: { files: [], namesChecks: [], touched: 0 }, hooks: { entries: 0, checks: [], disabled: false },
         ci: { present: false, checks: [] }, precommit: { present: false, checks: [] } }] },
     });
-    const t = buildSessionTable(raw, { now: raw.finishedAt, timeZone: "UTC" });
+    const t = buildSessionTable(raw, { timeZone: "UTC" });
     const labels = projectLabels(SALT, ["PA", "PB"]);
     expect(projects(t, labels)).toEqual([
       { key: "PA", label: labels.get("PA")!, sessions: 2, activeWeeks: 2, tools: ["claude-code", "codex"], inRepo: false, lastWeek: "2026-W46" },

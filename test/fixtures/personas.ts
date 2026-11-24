@@ -135,8 +135,11 @@ interface SessionPlan { g: number; id: string; repo: number; episodes: EpisodePl
  * weeks (Monday to Sunday, UTC) before the week holding it. `hourUtc` (default 12) is the hour every active day starts.
  * `canaries`: config names, cwds and model ids embed canary values (pre-flight P13); a canary model id keeps its family
  * word after the canary (`<CANARY.slug>-opus`), so it has no vendor prefix (P3 pre-flight F25) and keeps its tier.
+ * `cutDays`: every repo's commit list is cut, as a commit cap would cut it: only the commits of the newest `cutDays`
+ * days are read, the oldest record read being another author's commit at the cut (00:00 UTC), so `commitsReach` is the
+ * cut itself.
  */
-export function personaScan(kind: PersonaKind, o: { now?: number; hourUtc?: number; canaries?: boolean } = {}): ScanResult {
+export function personaScan(kind: PersonaKind, o: { now?: number; hourUtc?: number; canaries?: boolean; cutDays?: number } = {}): ScanResult {
   const k = KNOBS[kind];
   const now = o.now ?? DEFAULT_NOW;
   const hourUtc = o.hourUtc ?? 12;
@@ -248,7 +251,7 @@ export function personaScan(kind: PersonaKind, o: { now?: number; hourUtc?: numb
   const commits: CommitFact[][] = k.repos.map(() => []);
   let shas = 0;
   const commit = (r: number, ts: number, files: string[], rework?: CommitFact["rework"]): void => {
-    const c: CommitFact = { ts, shaKey: hash((++shas).toString(16).padStart(7, "0")), files, owner: true, mine: true, ai: "claude" };
+    const c: CommitFact = { ts, shaKey: hash((++shas).toString(16).padStart(7, "0")), files, mine: true, ai: "claude" };
     if (rework !== undefined) c.rework = rework;
     commits[r]!.push(c);
   };
@@ -446,8 +449,11 @@ export function personaScan(kind: PersonaKind, o: { now?: number; hourUtc?: numb
   // repo signals
   const repos: RepoFacts[] = k.repos.map((spec, r) => {
     const instr = spec.maintained || spec.instrTest;
+    const cut = o.cutDays === undefined ? undefined : now - o.cutDays * DAY;
+    const listed = cut === undefined ? commits[r]! : [...commits[r]!.filter((c) => c.ts >= cut), { ts: cut, shaKey: hash(`cut-${r}`), files: [], mine: false }];
     return {
-      repoKey: repoKeys[r]!, projectKeys: [projectKeys[r]!], identity: true, commits: commits[r]!.sort((a, b) => a.ts - b.ts), commitsTruncated: false,
+      repoKey: repoKeys[r]!, projectKeys: [projectKeys[r]!], identity: true, commits: listed.sort((a, b) => a.ts - b.ts), commitsTruncated: cut !== undefined,
+      ...(cut === undefined ? {} : { commitsReach: cut }),
       fileLists: true,
       instructions: {
         files: instr ? [spec.maintained ? "claude" : "agents"] : [], namesChecks: spec.instrTest ? ["test", "lint"] : [],

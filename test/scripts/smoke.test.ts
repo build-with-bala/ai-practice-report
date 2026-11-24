@@ -12,7 +12,7 @@ import { CC_H1, CC_H2, CC_S1, CC_S2, CcTranscript, ccSid, fixtureStart, slug } f
 import { S_J, S_L } from "../fixtures/copilot";
 import { A, B } from "../fixtures/cursor";
 import { personaScan } from "../fixtures/personas";
-import { makeRepo } from "../fixtures/repos";
+import { isolateGitHome, makeRepo } from "../fixtures/repos";
 import { buildAll } from "../kit/allsources";
 import { CANARY, expectNoCanaries } from "../kit/canary";
 import { scanResultOf } from "../kit/scanresult";
@@ -74,11 +74,14 @@ function buildHome(): string[] {
   ];
 }
 
+let restoreHome: () => void = () => {};
+// the child gets the fake home's HOME below; this process's own git (and any engine call in it) gets one too
 beforeEach(() => {
   h = fakeHome();
+  restoreHome = isolateGitHome(path.join(h.root, "git-home"));
   secrets = buildHome();
 });
-afterEach(() => h.cleanup());
+afterEach(() => { restoreHome(); h.cleanup(); });
 
 /** Runs the smoke as a child whose every home, config and temp variable points into the fake home: never at this machine. */
 async function smoke(...args: string[]): Promise<Run> {

@@ -17,7 +17,11 @@ export interface ComponentSpec { id: string; dimension: DimensionId; weight: num
 const c = (id: string, dimension: DimensionId, weight: number, unit: "s" | "f", signal: MetricKey, o: { negate?: boolean; repo?: boolean } = {}): ComponentSpec =>
   Object.freeze({ id, dimension, weight, unit, signal, negate: o.negate ?? false, repo: o.repo ?? false });
 
-/** The 22 components, in reference-table order (grouped by dimension, in `DIMENSION_IDS` order). */
+/**
+ * The 21 scored components, in reference-table order (grouped by dimension, in `DIMENSION_IDS` order). Steering is
+ * scored from the corrected-brief rate and the healthy-interrupt share; turns per work is a signal shown unscored (it
+ * reads how much work an instruction sets off and how follow-up turns are worded, not steering).
+ */
 export const COMPONENTS: readonly ComponentSpec[] = Object.freeze([
   c("lev.sticky", "leverage", 0.6, "s", "stickyMean"),
   c("lev.run", "leverage", 0.4, "s", "p90Run"),
@@ -28,9 +32,8 @@ export const COMPONENTS: readonly ComponentSpec[] = Object.freeze([
   c("ver.vae", "verification", 0.5, "s", "vae"),
   c("ver.closure", "verification", 0.3, "s", "closure"),
   c("ver.guardrails", "verification", 0.2, "f", "guardrails", { repo: true }),
-  c("ste.correction", "steering", 0.4, "s", "correctionRate", { negate: true }),
-  c("ste.interrupts", "steering", 0.3, "s", "healthyInterruptShare"),
-  c("ste.turnsPerWork", "steering", 0.3, "s", "turnsPerWork", { negate: true }),
+  c("ste.correction", "steering", 0.5, "s", "correctionRate", { negate: true }),
+  c("ste.interrupts", "steering", 0.5, "s", "healthyInterruptShare"),
   c("ctx.instructions", "context", 0.35, "f", "maintainedShare", { repo: true }),
   c("ctx.artifacts", "context", 0.35, "f", "artifacts"),
   c("ctx.hygiene", "context", 0.15, "s", "hygiene"),

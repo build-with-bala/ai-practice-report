@@ -31,7 +31,7 @@ const stats = (day: string): DailyEv => ({ k: "daily", tool: "claude-code", sour
 const day = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
 const tableOf = (events: Ev[]) => {
   const raw = scanResultOf(events);
-  return { raw, t: buildSessionTable(raw, { now: raw.finishedAt, timeZone: "UTC" }) };
+  return { raw, t: buildSessionTable(raw, { timeZone: "UTC" }) };
 };
 
 /**
@@ -144,7 +144,7 @@ describe("checkClaudeHistory (C3)", () => {
     const ts = Date.UTC(2026, 9, 7, 23, 30);
     const evs: Ev[] = [sess("s", ts), tPrompt("s", ts, "p"), stats("2026-10-06"), stats("2026-10-07"), stats("2026-10-09")];
     const raw = scanResultOf(evs);
-    const t = buildSessionTable(raw, { now: raw.finishedAt, timeZone: "Pacific/Auckland" });
+    const t = buildSessionTable(raw, { timeZone: "Pacific/Auckland" });
     expect(historyOf(raw, t).values.missingDays).toBe(0);
   });
 

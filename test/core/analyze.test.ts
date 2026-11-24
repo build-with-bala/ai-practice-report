@@ -302,7 +302,7 @@ describe("Review Focus 3: one persona under two zones", () => {
     if (hourUtc === 12) expect(localDay(firstWork, "Pacific/Auckland")).not.toBe(localDay(firstWork, "UTC"));
     else expect(localDay(firstWork, "Pacific/Auckland")).toBe(localDay(firstWork, "UTC"));
     const u = xs(utc);
-    expect(u.length).toBe(22);
+    expect(u.length).toBe(21);
     expect(xs(akl).filter(([id]) => !perWeek.has(id))).toEqual(u.filter(([id]) => !perWeek.has(id)));
     expect(u.filter(([, x]) => x !== null).length).toBeGreaterThan(10);
   });
@@ -348,5 +348,26 @@ describe("the date range at analyze level", () => {
     expect(all.identity).toEqual(only.identity);
     expect(all.identity.accounts).toBe(6);
     expect(all.exclusions.sessions).toBe(6);
+  });
+});
+
+describe("a person whose prompts the opener lexicon does not fit", () => {
+  test("300 prompts with no correction, redirect, continuation or ack: the corrected-brief rate is not captured; Steering scores from interrupts", () => {
+    const T = Date.UTC(2026, 9, 5, 9);
+    const evs: Ev[] = [covEv(CC, "detail")];
+    for (let d = 0; d < 30; d++) {
+      const id = `claude-code:s${d}`;
+      const start = T + d * DAY;
+      evs.push(sessEv(id, start));
+      for (let j = 0; j < 10; j++) {
+        evs.push(promptEv(id, start + j * 60_000, d * 10 + j), toolEv(id, start + j * 60_000 + 5_000));
+        if (j === 2) evs.push({ k: "marker", tool: "claude-code", source: CC, ts: start + j * 60_000 + 10_000, sessionId: id, kind: "interrupt", detail: "user" });
+      }
+    }
+    const a = analyze(scanResultOf(evs), UTC);
+    expect([a.signals.correctionRate.value, a.signals.correctionRate.reason]).toEqual([null, "not-captured"]);
+    const st = a.dimensions.find((d) => d.id === "steering")!;
+    expect(st.status).toBe("scored");
+    expect(st.components.filter((c) => c.status === "ok").map((c) => c.id)).toEqual(["ste.interrupts"]);
   });
 });

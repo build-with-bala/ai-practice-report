@@ -96,8 +96,8 @@ describe("scoreDimensions at the anchors", () => {
     const d = dim(scoreDimensions(signalsAt("p50"), ref), "context");
     const art = d.components.find((c) => c.id === "ctx.artifacts")!;
     expect(art.n).toBe(N);
-    expect(art.meta).toEqual({ window: "detail", sources: ["claude-code.transcripts"], from: T0 + 13 * DAY, to: T0 + 43 * DAY, n: N });
-    expect(d.meta).toEqual({ window: "detail", sources: ["claude-code.transcripts", "git"], from: T0 + 12 * DAY, to: T0 + 45 * DAY, n: 200 });
+    expect(art.meta).toEqual({ window: "detail", sources: ["claude-code.transcripts"], from: T0 + 12 * DAY, to: T0 + 42 * DAY, n: N }); // ctx.artifacts is component 12
+    expect(d.meta).toEqual({ window: "detail", sources: ["claude-code.transcripts", "git"], from: T0 + 11 * DAY, to: T0 + 44 * DAY, n: 200 });
   });
   test("displayScore is open-tailed: 99 at most, with the mark whenever it shows 99", () => {
     expect(displayScore(2.4)).toEqual({ score: 99, openTail: true });
@@ -243,6 +243,12 @@ describe("degenerate input (Review Focus 2)", () => {
     const zs = j.components.filter((c) => c.status === "ok");
     expect(j.zRaw!).toBeCloseTo(zs.reduce((a, c) => a + c.weight * c.z!, 0), 12);
     expect(j.z!).toBeCloseTo(j.zRaw! * 10 / 11, 12);
+  });
+  test("with the corrected-brief rate not captured, Steering is scored from the interrupts alone", () => {
+    const s = signalsAt("p90", { correctionRate: metric(null, { n: 300, reason: "not-captured" }) });
+    const st = dim(scoreDimensions(s, ref), "steering");
+    expect(st.status).toBe("scored");
+    expect(st.components.map((c) => [c.id, c.status, c.weight])).toEqual([["ste.correction", "not-measurable", 0], ["ste.interrupts", "ok", 1]]);
   });
   test("one signal cannot set a whole dimension: a component's z is limited to [-3, 3]", () => {
     const e = ref.components["lev.sticky"]!;
