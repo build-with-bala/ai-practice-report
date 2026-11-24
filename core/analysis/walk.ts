@@ -41,7 +41,7 @@ export type Hist = Record<number, number>;
  *   (of those in a repo: a commit of the repo — any, clones' included — or a commit or PR marker of the row within
  *   [episode start, episode end + DELIVERY_WINDOW_MS]; the row's markers include its descendants'); `prKeys` and
  *   `commitShaKeys` (marker details of the row and its descendants, sorted; a key two rows name belongs to the
- *   earliest-starting one only); `landed` units (rule 18, from owner commits only). A git commit becomes a landed unit
+ *   earliest-starting one only); `landed` units (rule 18, from the person's commits, each once). A git commit becomes a landed unit
  *   only in a repo with an identity (`RepoFacts.identity`); marker keys count without one. In a repo whose commit
  *   list was cut (`RepoFacts.commitsReach`), an edit episode that ended before the reach is in no delivery
  *   denominator (`editEpisodesInRepo`, `landedEpisodes`): its commits may not have been read.
@@ -208,8 +208,9 @@ export const commitKey = (c: CommitFact): string => c.id ?? c.shaKey;
 
 /**
  * Rule 18: each of the person's commits (`mine`) in a repo with an identity counts once among the repositories with
- * kept rows (by `commitKey`, first by repository key, then by the repo's own order), and goes to the earliest-starting
- * `detailTop` row, across those repositories, whose repo lists it and whose [start, end + DELIVERY_WINDOW_MS] holds it.
+ * kept rows (by `commitKey`, first by repository key, then by the repo's own order), and goes to the latest-starting
+ * `detailTop` row (then the largest id), across the kept repositories that list it, whose [start, end +
+ * DELIVERY_WINDOW_MS] holds it.
  * Each row's landed units become |its commit marker keys ∪ the commits assigned to it| + its distinct PRs. A commit a
  * commit marker of any row already names is not assigned again: the marker's row counts it (one commit, counted once).
  */
@@ -241,7 +242,7 @@ function assignCommits(repos: RepoSignals, out: SessionStats[], inRange: (ts: nu
     for (const key of c.repos) {
       for (const s of rowsByRepo.get(key)!) {
         if (s.start > c.ts || c.ts > s.end + DELIVERY_WINDOW_MS) continue;
-        if (!best || s.start < best.start || (s.start === best.start && s.id < best.id)) best = s;
+        if (!best || s.start > best.start || (s.start === best.start && s.id > best.id)) best = s;
       }
     }
     if (!best) continue;

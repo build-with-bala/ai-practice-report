@@ -18,8 +18,7 @@ export const EVIDENCE: Readonly<Record<DimensionId, EvidenceRule>> = Object.free
   leverage: all({ field: "typedTurns", min: 60 }, { field: "sessions", min: 5 }, { field: "days", min: 10 }),
   orchestration: all({ field: "days", min: 14 }, { field: "episodes", min: 20 }),
   verification: all({ field: "editTurns", min: 20 }),
-  // the denominators of its two components: the corrected-brief rate (briefs) and the healthy-interrupt share
-  steering: any({ field: "briefs", min: 15 }, { field: "interrupts", min: 15 }),
+  steering: all({ field: "followUps", min: 30 }),
   context: any({ field: "episodes", min: 20 }, { field: "repos", min: 3 }),
   judgment: all({ field: "tierEpisodes", min: 30 }),
   delivery: all({ field: "editEpisodesInRepo", min: 10 }),

@@ -102,10 +102,10 @@ describe("persona golden output", () => {
   const GOLDEN: Record<"intermediate" | "expert", { dims: Record<DimensionId, [number, [number, number]]>; overall: Pick<Overall, "score" | "interval" | "band" | "coverage"> }> = {
     intermediate: {
       dims: {
-        leverage: [50, [49, 52]], orchestration: [50, [47, 52]], verification: [50, [46, 53]], steering: [50, [35, 67]],
-        context: [50, [49, 50]], judgment: [50, [43, 61]], delivery: [49, [44, 55]],
+        leverage: [50, [49, 52]], orchestration: [50, [47, 52]], verification: [50, [46, 53]], steering: [50, [34, 68]],
+        context: [50, [49, 50]], judgment: [50, [43, 62]], delivery: [49, [44, 55]],
       },
-      overall: { score: 50, interval: [48, 52], band: "developing", coverage: "7/7" },
+      overall: { score: 50, interval: [47, 52], band: "developing", coverage: "7/7" },
     },
     expert: {
       dims: {
