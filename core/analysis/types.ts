@@ -52,7 +52,7 @@ export interface SessionTable {
   rows: Map<string, SessionRow>; detailTop: SessionRow[]; hosts: Set<string>; repoOf: Map<string, string>;
   /**
    * What the exclusions left in scope: the date range (epoch ms, inclusive; ±Infinity when open), the tools left out, and
-   * the project keys left out (`projects`: exactly the keys whose sessions the project exclusion drops; empty when no
+   * the project keys left out (`projects`: every excluded key given, whether or not anything carries it; empty when no
    * project is excluded).
    * Every later stage clips to the range: events, commits and markers outside it never count, even in a kept row.
    */
@@ -64,6 +64,8 @@ export interface SessionTable {
   activity: Activity; capabilities: Capabilities;
   dedupe: { hostSessions: number; pairedPrompts: number; relabelled: number };
   exclusions: { tools: number; projects: number; sessions: number }; orphans: Partial<Record<Ev["k"], number>>;
+  /** Per-day rows left out because a project exclusion is in force and a per-day row carries no project. */
+  dailyRowsLeftOut: number;
 }
 
 /** Tools whose readers emit `pr-link` markers. */

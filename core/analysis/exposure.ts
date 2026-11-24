@@ -244,9 +244,7 @@ function firstSeen(t: SessionTable, raw: ScanResult, scope: AnalysisScope, first
     else if (m.kind === "model-switch") see("model-switching", m.ts);
     else if (m.kind === "compact-manual") see("manual-compaction", m.ts);
   }
-  for (const c of raw.store.all("config")) {
-    if (c.kind === "skill" && !excluded.has(c.tool) && c.firstSeen !== undefined) see("skills", c.firstSeen);
-  }
+  for (const c of scope.configs) if (c.kind === "skill" && c.firstSeen !== undefined) see("skills", c.firstSeen);
   if (firstParallelBucket !== undefined) see("parallel-sessions", firstParallelBucket);
   return out;
 }

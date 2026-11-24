@@ -135,9 +135,9 @@ describe("buildSessionTable: exclusions", () => {
     expect(t.exclusions).toEqual({ tools: 0, projects: 1, sessions: 2 });
   });
 
-  test("scope.projects holds the keys the project exclusion drops sessions of; empty without one", () => {
+  test("scope.projects holds every excluded key given; empty without one", () => {
     const t = buildSessionTable(scanResultOf(evs()), { ...opts, exclude: { projects: ["P1", "P9"] } });
-    expect([...t.scope.projects]).toEqual(["P1"]);
+    expect([...t.scope.projects]).toEqual(["P1", "P9"]);
     const u = buildSessionTable(scanResultOf(evs()), { ...opts, exclude: { tools: ["codex"] } });
     expect(u.scope.projects.size).toBe(0);
   });

@@ -4,6 +4,7 @@ import type { ScanResult } from "../scan";
 import { activityOf, dayKey } from "./activity";
 import { dedupe } from "./dedupe";
 import { checkExclusions } from "./exclusions";
+import { promptInScope, type PromptScope } from "./scope";
 import type { Capabilities, Exclusions, SessionRow, SessionTable } from "./types";
 
 /** The event kinds that name a session (`sessionId`): an event of these whose session is not in the store is an orphan. */
@@ -112,11 +113,10 @@ export function buildSessionTable(raw: ScanResult, o: { timeZone: string; exclud
   const toolsHit = new Set<ToolId>();
   const projectsHit = new Set<string>();
   const direct: string[] = [];
-  const directProject: string[] = [];
   for (const [id, s] of sessions) {
     let drop = false;
     if (toolEx.has(s.tool)) { toolsHit.add(s.tool); drop = true; }
-    if (s.projectKey !== undefined && projEx.has(s.projectKey)) { projectsHit.add(s.projectKey); directProject.push(id); drop = true; }
+    if (s.projectKey !== undefined && projEx.has(s.projectKey)) { projectsHit.add(s.projectKey); drop = true; }
     if (s.end < from || s.start > to) drop = true;
     if (drop) direct.push(id);
   }
@@ -129,7 +129,6 @@ export function buildSessionTable(raw: ScanResult, o: { timeZone: string; exclud
   for (const [id, s] of sessions) if (s.window === "detail") detailSessions.set(id, s);
   const d = dedupe(prompts, detailSessions);
   const hosts = withDescendants(d.hosts, allChildren);
-  const droppedByProject = withDescendants(directProject, allChildren);
 
   // rows
   const rows = new Map<string, SessionRow>();
@@ -198,21 +197,32 @@ export function buildSessionTable(raw: ScanResult, o: { timeZone: string; exclud
     }
   }
 
-  // activity: detail prompts need a kept, non-host row; lifetime ones are taken whether or not their session has a row
+  // activity: human prompts in scope (the one prompt rule, `promptInScope`); a source's per-day rows only when that
+  // source supplied no lifetime prompts (its prompts say which day and which project), and never under a project
+  // exclusion (a per-day row carries no project)
+  const ps: PromptScope = { inRange, tools: toolEx, projects: projEx, rows, hosts, inStore: (id) => sessions.has(id) };
+  const inScope = (p: PromptEv): boolean => isHuman(p) && promptInScope(p, ps);
+  const promptSources = new Set<string>();
+  for (const p of prompts) if (p.window === "lifetime") promptSources.add(p.source);
   const fromDay = Number.isFinite(from) ? dayKey(from, o.timeZone) : undefined;
   const toDay = Number.isFinite(to) ? dayKey(to, o.timeZone) : undefined;
+  let dailyRowsLeftOut = 0;
+  const daily = raw.store.all("daily").filter((e) => {
+    if (!keepTool(e.tool) || promptSources.has(e.source)) return false;
+    if ((fromDay !== undefined && e.day < fromDay) || (toDay !== undefined && e.day > toDay)) return false;
+    if (projEx.size > 0) { dailyRowsLeftOut++; return false; }
+    return true;
+  });
   const activity = activityOf({
     timeZone: o.timeZone,
-    detail: prompts.filter((p) => p.window === "detail" && p.sessionId !== undefined && rows.has(p.sessionId)
-      && !hosts.has(p.sessionId) && inRange(p.ts) && isHuman(p)),
-    lifetime: prompts.filter((p) => p.window === "lifetime" && keepTool(p.tool) && inRange(p.ts) && isHuman(p)
-      && (p.sessionId === undefined || (!droppedByProject.has(p.sessionId) && !hosts.has(p.sessionId)))),
-    daily: raw.store.all("daily").filter((e) => keepTool(e.tool) && (fromDay === undefined || e.day >= fromDay) && (toDay === undefined || e.day <= toDay)),
+    detail: prompts.filter((p) => p.window === "detail" && inScope(p)),
+    lifetime: prompts.filter((p) => p.window === "lifetime" && inScope(p)),
+    daily,
   });
 
   return {
-    rows, detailTop, hosts, repoOf, scope: { from, to, tools: toolEx, projects: projectsHit }, timeZone: o.timeZone, isHuman, activity, capabilities: capabilitiesOf(raw, (id) => id !== undefined && rows.has(id) && !hosts.has(id)),
+    rows, detailTop, hosts, repoOf, scope: { from, to, tools: toolEx, projects: projEx }, timeZone: o.timeZone, isHuman, activity, capabilities: capabilitiesOf(raw, (id) => id !== undefined && rows.has(id) && !hosts.has(id)),
     dedupe: { hostSessions: d.hosts.size, pairedPrompts: d.pairedPrompts, relabelled: d.relabelled.size },
-    exclusions: { tools: toolsHit.size, projects: projectsHit.size, sessions: dropped.size }, orphans,
+    exclusions: { tools: toolsHit.size, projects: projectsHit.size, sessions: dropped.size }, orphans, dailyRowsLeftOut,
   };
 }

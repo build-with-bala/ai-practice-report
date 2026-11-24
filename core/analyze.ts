@@ -42,11 +42,17 @@ export interface AnalyzeOptions { reference?: "v0"; bootstrap?: number; seed?: n
  * - `forensics` is display only: it never changes a score, an evidence minimum or a confidence.
  * - `identity`: the distinct `IdentityEv` hashes (sorted) and their count: of kept tools, and for a session-scope hash
  *   that names a session, only when that session is a kept row (not excluded by project or date, no host copy).
- * - `exclusions`: the tools and projects the exclusions hit, and the sessions they dropped. `dateRange`: a start or an
+ * - `exclusions`: the tools and projects the exclusions hit, and the sessions they dropped. A project exclusion removes
+ *   every session, prompt and config entry that carries the project (a prompt or entry carries one when its source
+ *   records it). It cannot remove: per-day totals, which carry no project (a source that also supplied prompts is read
+ *   from its prompts; any other source's per-day totals are left out of the activity whole under a project exclusion,
+ *   counted in `diagnostics.dailyRowsLeftOut`); lifetime prompts of a tool that records no project per prompt and
+ *   whose session file is gone; the commits of a repository that still has another folder in the report. `dateRange`: a start or an
  *   end of the date range was given. `weeksOutside`: the number of distinct ISO weeks in which the person was active,
  *   with a tool and project that are not excluded, and that lie outside the date range; 0 when no range was given.
- * - `diagnostics`: orphan events per kind, what the cross-tool dedupe found, and the scan's warnings, less those that
- *   name an excluded tool.
+ * - `diagnostics`: orphan events per kind, what the cross-tool dedupe found, the scan's warnings, less those that
+ *   name an excluded tool, and `dailyRowsLeftOut` (a tool's own per-day totals left out under a project exclusion,
+ *   since they carry no project).
  */
 export interface Analysis {
   meta: { core: string; reference: "v0"; bootstrap: number; seed: number; now: number; timeZone: string; repoSignals: RepoSignals["status"] };
@@ -54,7 +60,8 @@ export interface Analysis {
   exposure: Exposure; stack: Stack; risk: RiskPosture; config: ConfigPanel; projects: ProjectSummary[]; forensics: Forensics;
   identity: { accounts: number; hashes: string[] }; exclusions: { tools: number; projects: number; sessions: number;
     dateRange?: boolean; weeksOutside?: number };
-  diagnostics: { orphans: Partial<Record<Ev["k"], number>>; dedupe: { hostSessions: number; pairedPrompts: number; relabelled: number }; warnings: Warning[] };
+  diagnostics: { orphans: Partial<Record<Ev["k"], number>>; dedupe: { hostSessions: number; pairedPrompts: number; relabelled: number }; warnings: Warning[];
+    dailyRowsLeftOut: number };
   private: { dayParts: DayParts; config: Array<{ kind: ConfigEv["kind"]; name: string; key: string; provenance: ConfigEv["provenance"]; used: boolean }>;
     models: Record<string, number> };
 }
@@ -79,9 +86,10 @@ export function analyze(raw: ScanResult, o: AnalyzeOptions = {}): Analysis {
   const timeZone = o.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
   const ref = loadReference(reference);
 
-  // labels over every project of the store, so a label names the same project whatever is excluded
+  // labels over every project key of the store (sessions, prompts, config entries), so a label names the same project
+  // whatever is excluded, and an exclusion may name any of them
   const keys: string[] = [];
-  for (const s of raw.store.all("session")) if (s.projectKey !== undefined) keys.push(s.projectKey);
+  for (const k of ["session", "prompt", "config"] as const) for (const e of raw.store.all(k)) if (e.projectKey !== undefined) keys.push(e.projectKey);
   const labels = projectLabels(raw.salt, keys);
   const keyOf = new Map<string, string>();
   for (const [key, label] of labels) keyOf.set(label.toUpperCase(), key);
@@ -121,7 +129,8 @@ export function analyze(raw: ScanResult, o: AnalyzeOptions = {}): Analysis {
     exposure: exp, stack: p.stack, risk: p.risk, config: p.config, projects: projectList, forensics,
     identity: { accounts: hashes.size, hashes: [...hashes].sort(cmp) },
     exclusions: { ...t.exclusions },
-    diagnostics: { orphans: { ...t.orphans }, dedupe: { ...t.dedupe }, warnings: raw.warnings.filter((w) => w.tool === "scan" || !t.scope.tools.has(w.tool)).map((w) => ({ ...w })) },
+    diagnostics: { orphans: { ...t.orphans }, dedupe: { ...t.dedupe }, warnings: raw.warnings.filter((w) => w.tool === "scan" || !t.scope.tools.has(w.tool)).map((w) => ({ ...w })),
+      dailyRowsLeftOut: t.dailyRowsLeftOut },
     private: { dayParts: p.dayParts, config: p.privateConfig, models: p.privateModels },
   };
 }
