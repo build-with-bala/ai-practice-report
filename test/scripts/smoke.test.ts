@@ -5,6 +5,7 @@ import path from "node:path";
 import { analyze, type Analysis } from "../../core/analyze";
 import type { ScanResult } from "../../core/scan";
 import type { CoverageEv } from "../../core/model/events";
+import { PAYLOAD_WORDS } from "../../core/privacy/schema";
 import { analysisLines, coverageLine, exportOf, metricMetaProblems } from "../../scripts/smoke-local";
 import { C as AG_C, I1, I2, K, P } from "../fixtures/antigravity";
 import { CC_H1, CC_H2, CC_S1, CC_S2, CcTranscript, ccSid, fixtureStart, slug } from "../fixtures/claude-code";
@@ -279,11 +280,26 @@ describe("the smoke's analysis lines (in process)", () => {
     const leaked = run(`${exported.json}"acmepayroll"`, withPaths);
     expect(valuesOf(leaked)["export-no-raw-paths"]).toBe("FAIL");
     expect(valuesOf(leaked)["export-folder-names"]).toBe("1");
-    expect(valuesOf(run(`${exported.json}LEDGER-SVC`, withPaths))["export-no-raw-paths"]).toBe("FAIL");
+    expect(valuesOf(run(`${exported.json}"x/LEDGER-SVC"`, withPaths))["export-no-raw-paths"]).toBe("FAIL");
     // "prompts" is a word of the payload itself, and "abcd" is under 5 characters: neither counts
     expect(valuesOf(run(`${exported.json}abcd`, withPaths))).toMatchObject({ "export-no-raw-paths": "PASS", "export-folder-names": "0" });
     for (const l of [...leaked, ...run(exported.json, withPaths)]) expect(l.toLowerCase()).not.toMatch(/acme|ledger|abcd/);
     expect(leaked.flatMap(offGrammar)).toEqual([]);
+  });
+
+  test("export-no-raw-paths: a folder named like a public tool, name or payload word never counts, nor one inside a payload word", () => {
+    const raw = personaScan("expert");
+    const a = analyze(raw, { timeZone: "UTC" });
+    const exported = exportOf(a);
+    if (!exported.ok) throw new Error("the persona's export must fit the schema");
+    expect(PAYLOAD_WORDS.has("prompt")).toBe(false); // a part of the payload word "prompts", but no word of its own
+    const cwds = new Map(["github", "claude-code", "playwright", "sonnet", "fine-tuned", "subagents", "prompt", "techCategories"]
+      .map((n, i) => [`k${i}`, `/home/dev/${n}`]));
+    const r = { ...raw, cwds };
+    const json = `${exported.json}"github""claude-code""playwright""claude-sonnet-4-5""fine-tuned"`;
+    expect(json).toContain('"prompts"');
+    const v = valuesOf(analysisLines(r, a, { ...exported, json }, home).lines);
+    expect([v["export-no-raw-paths"], v["export-folder-names"]]).toEqual(["PASS", "0"]);
   });
 
   test("a missing dimension: the line still reads /7, and the analysis checks fail", () => {

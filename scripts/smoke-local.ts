@@ -8,9 +8,9 @@
 import path from "node:path";
 import { detectEnv, type Env } from "../core/env/env";
 import { homesToScan } from "../core/env/paths";
-import { analyze, EventStore, ExportError, exportPayload, registry, scan, type Analysis, type CoverageEv, type ScanResult } from "../core/index";
+import { analyze, ExportError, exportPayload, registry, scan, type Analysis, type CoverageEv, type ScanResult } from "../core/index";
 import { safeList, walk } from "../core/io/fs";
-import { CHECK_IDS, FORENSIC_BANDS } from "../core/privacy/schema";
+import { CHECK_IDS, FORENSIC_BANDS, PAYLOAD_WORDS } from "../core/privacy/schema";
 import { DIMENSION_IDS } from "../core/scoring/dimensions";
 import { ccTranscripts } from "../core/sources/claude-code";
 import { SHELL_TOOLS } from "../core/sources/codex/tools";
@@ -201,27 +201,37 @@ function rawPaths(r: ScanResult, home: string): string[] {
 /** The last segment of a path, lower-cased (either separator). */
 const lastSegment = (p: string): string => (p.replaceAll("\\", "/").replace(/\/+$/, "").split("/").at(-1) ?? "").toLowerCase();
 
-let vocabulary: string | undefined;
-/** The payload's own words: the lower-cased export of a synthetic empty scan (made once, never of this machine). */
-function payloadVocabulary(): string {
-  if (vocabulary === undefined) {
-    const empty: ScanResult = { store: new EventStore(), coverage: [], warnings: [], cwds: new Map(), salt: new Uint8Array(32), startedAt: 0, finishedAt: 0,
-      tempClean: true, repos: { status: "off", repos: [], roots: new Map(), skipped: {}, ms: 0 } };
-    vocabulary = exportPayload(analyze(empty, { timeZone: "UTC" }), { schema: "aiprof/2" }).json.toLowerCase();
+/**
+ * The shapes of the payload's own data strings (a month, an ISO week, a day, a project label, a keyed hash, a version,
+ * an MCP "custom #n" label): such a string is the payload's, whatever it contains.
+ */
+const DATA_SHAPES = [/^\d{4}-\d{2}$/, /^\d{4}-w\d{2}$/, /^\d{4}-\d{2}-\d{2}$/, /^p-[0-9a-f]{4,16}$/, /^[0-9a-f]{16}$/, /^\d+\.\d+\.\d+(?:[-+][0-9a-z.+-]+)?$/,
+  /^custom #\d+$/];
+
+/**
+ * The strings of an export text (its JSON string literals, keys included, lower-cased) that are neither a payload
+ * word (`PAYLOAD_WORDS`) nor in a data shape the payload declares: the only places a folder name could hide.
+ */
+function exportStrings(json: string): string[] {
+  const out: string[] = [];
+  for (const m of json.matchAll(/"((?:[^"\\]|\\.)*)"/g)) {
+    let s: string;
+    try { s = (JSON.parse(`"${m[1]}"`) as string).toLowerCase(); } catch { s = m[1]!.toLowerCase(); }
+    if (!PAYLOAD_WORDS.has(s) && !DATA_SHAPES.some((re) => re.test(s))) out.push(s);
   }
-  return vocabulary;
+  return out;
 }
 
 /**
  * The folder names an export must never hold: the last segment of each session folder and each repo root, lower-cased,
- * of at least 5 characters and not found in the payload's own vocabulary (so "prompts" or "tools" never count).
+ * of at least 5 characters and not a word the payload may hold by its schema (`PAYLOAD_WORDS`: "prompts", "github",
+ * "claude-code" never count).
  */
 function folderNames(r: ScanResult): string[] {
-  const words = payloadVocabulary();
   const out = new Set<string>();
   for (const p of [...r.cwds.values(), ...r.repos.roots.values()]) {
     const name = lastSegment(p);
-    if (name.length >= MIN_FOLDER_NAME && !words.includes(name)) out.add(name);
+    if (name.length >= MIN_FOLDER_NAME && !PAYLOAD_WORDS.has(name)) out.add(name);
   }
   return [...out];
 }
@@ -261,7 +271,8 @@ export function analysisLines(r: ScanResult, a: Analysis, exported: Exported, ho
   if (!exported.ok) lines.push(`export-violations=${exported.violations}`);
   const needles = rawPaths(r, home);
   const haystack = exported.ok ? exported.json.toLowerCase() : "";
-  const names = folderNames(r).filter((n) => haystack.includes(n)).length;
+  const strings = exported.ok ? exportStrings(exported.json) : [];
+  const names = folderNames(r).filter((n) => strings.some((x) => x.includes(n))).length;
   lines.push(`export-folder-names=${names}`);
   check("export-no-raw-paths", exported.ok && !needles.some((p) => haystack.includes(p)) && names === 0);
   check("export-under-300kb", exported.ok && exported.bytes <= MAX_EXPORT_BYTES);

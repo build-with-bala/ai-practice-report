@@ -11,7 +11,7 @@ import { PRACTICE_ROLES, STACK_ROLES } from "../scoring/roles";
 import type { Metric } from "../analysis/types";
 import type { Evidence } from "../signals/types";
 import type { EditLang } from "../text/langs";
-import { MCP_PUBLIC, modelExportId, RISK_TOKENS } from "./allowlists";
+import { MCP_PUBLIC, MODEL_FAMILY_PATTERN, MODEL_WORDS, modelExportId, RISK_TOKENS } from "./allowlists";
 
 /**
  * The sensitivity class of an exported value (spec §6.7): `public` (fixed vocabulary), `aggregate` (counts, rates,
@@ -423,3 +423,31 @@ export const AIPROF2: FieldSpec = obj({
   exclusions: obj({ tools: int(), projects: int(), sessions: int(), dateRange: bool(), weeksOutside: int() }),
 });
 
+/**
+ * Every word a payload may hold by its own schema, lower-cased: each declared field name, each enum value, each key
+ * of a vocabulary-keyed table (features, arcs, languages, toolchains, tech categories, config kinds, risk tokens,
+ * check value keys), the reasons, the public MCP names, the model families and words, and the fixed tokens
+ * ("other", "fine-tuned", "custom"). Built from the closed lists only, never from data: the acceptance script uses it
+ * to tell a payload word from a folder name.
+ */
+export const PAYLOAD_WORDS: ReadonlySet<string> = (() => {
+  const out = new Set<string>();
+  const walk = (f: FieldSpec): void => {
+    switch (f.t) {
+      case "enum": for (const v of f.values) out.add(v); return;
+      case "optional": case "nullable": case "array": walk(f.of); return;
+      case "tuple": f.of.forEach(walk); return;
+      case "variant": for (const [k, c] of Object.entries(f.cases)) { out.add(k); walk(c); } return;
+      case "object": for (const [k, c] of Object.entries(f.fields)) { out.add(k); walk(c); } return;
+      case "record": walk(f.of); for (const [k, c] of Object.entries(f.fields ?? {})) { out.add(k); walk(c); } return;
+      default: return;
+    }
+  };
+  walk(AIPROF2);
+  const families = MODEL_FAMILY_PATTERN.split("|").filter((w) => /^[a-z]+$/.test(w));
+  for (const list of [FEATURES, PROMPT_ARCS, DURATION_ARCS, EDIT_LANGS, TOOLCHAINS, TECH_CATEGORIES, CONFIG_KINDS, ...Object.values(RISK_TOKENS),
+    Object.keys(REASONS), Object.keys(VALUE_KEYS), [...MCP_PUBLIC], [...MODEL_WORDS], families, ["other", "fine-tuned", "custom"]]) {
+    for (const w of list) out.add(w);
+  }
+  return new Set([...out].map((w) => w.toLowerCase()));
+})();

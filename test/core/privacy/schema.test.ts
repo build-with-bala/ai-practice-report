@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { AIPROF2, KIND_SPECS, sanitize, violations, type FieldSpec, type KeyTest } from "../../../core/privacy/schema";
+import { AIPROF2, KIND_SPECS, PAYLOAD_WORDS, sanitize, violations, type FieldSpec, type KeyTest } from "../../../core/privacy/schema";
 import { modelExportId } from "../../../core/privacy/allowlists";
 import { isValueOf, VALUE_KEYS, VALUE_KINDS, type ValueKind } from "../../../core/forensics/types";
 
@@ -307,5 +307,17 @@ describe("AIPROF2: model keys", () => {
       expect(modelExportId(k) === k).toBe(false);
       expect(`${k} ${violations({ [k]: 1 }, models).join(",")}`).toBe(`${k} $.<key>`);
     }
+  });
+});
+
+describe("PAYLOAD_WORDS", () => {
+  test("holds the schema's closed lists, the forensic vocabularies included, lower-cased", () => {
+    for (const w of ["techcategories", "weeksoutside", "claude-code", "detail", "soft:missing-ids", "soft:no-server-pass", "no-server-pass", "missing-ids",
+      "changed-after-write", "long-before-release", "offids", "changedfiles", "longbefore", "turns", "github", "playwright", "fable", "sonnet", "claude",
+      "acceptedits", "workspace-write", "subagents", "fine-tuned", "other", "custom", "consistent-with-notes", "leverage"]) {
+      expect(`${w} ${PAYLOAD_WORDS.has(w)}`).toBe(`${w} true`);
+    }
+    for (const w of ["bulk-change", "acme", "projb", "smoke-repo"]) expect(`${w} ${PAYLOAD_WORDS.has(w)}`).toBe(`${w} false`);
+    for (const w of PAYLOAD_WORDS) expect(w).toBe(w.toLowerCase());
   });
 });
