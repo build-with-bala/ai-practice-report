@@ -57,8 +57,12 @@ const sorted = (s: Set<string>): string[] => [...s].sort();
 const weeks = (days: Set<string>): string[] => sorted(new Set([...days].map(isoWeek)));
 
 /**
- * Active days and weeks per window, overall and per tool. Only prompts and `DailyEv{unit:"prompts", zone:"local"}` days
- * with a count of at least 1 count; nothing else (file times, config birth times, proxy-timed markers) is read.
+ * Active days and weeks per window, overall and per tool. Only prompts and `DailyEv{unit:"prompts"}` days of zone
+ * `local` or `either` with a count of at least 1 count; nothing else (file times, config birth times, proxy-timed
+ * markers) is read. A per-day row is used as given, as a day of the analysis zone: a `local` day is the scanning
+ * machine's, and an `either` day is the UTC or the local date (a tool that changed its key between releases), so it is
+ * never matched one to one against a day of another zone; a `utc` day is not read. The caller passes per-day rows only
+ * for a source that supplied no prompts.
  */
 export function activityOf(input: ActivityInput): Activity {
   const detail = new Set<string>();
@@ -81,7 +85,7 @@ export function activityOf(input: ActivityInput): Activity {
     of(p.tool).sources.add(p.source);
   }
   for (const d of input.daily) {
-    if (d.unit !== "prompts" || d.zone !== "local" || !(d.count >= 1)) continue;
+    if (d.unit !== "prompts" || d.zone === "utc" || !(d.count >= 1)) continue; // local or either: the day as given
     lifetime.add(d.day);
     of(d.tool).lifetime.add(d.day);
     of(d.tool).sources.add(d.source);
