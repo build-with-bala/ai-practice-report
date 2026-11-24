@@ -76,7 +76,6 @@ export const cxConfig: SourcePlugin = {
   tier: "P0",
   beta: false,
   windows: ["lifetime"],
-  primary: { lifetime: ["config"] },
   describe: {
     reads: [
       "<codex>/config.toml — section headers only: [profiles.<name>], [mcp_servers.<name>], [plugins.<id>]",

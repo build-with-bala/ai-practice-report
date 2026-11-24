@@ -36,7 +36,6 @@ const KNOWN_EVENTS: ReadonlySet<string> = new Set([
   "tool.execution_complete", "subagent.started", "subagent.completed", "subagent.failed", "subagent.selected", "hook.start", "hook.end",
   "skill.invoked", "permission.requested", "exit_plan_mode.requested",
 ]);
-/** An event type as a drift key: dotted lower-case schema tokens are kept, anything else is `(other)` / `(none)`. */
 /** An event type the reader does not know, as a drift key: never echoed. */
 const eventKey = (t: unknown): string => `event:${typeof t !== "string" ? "(none)" : "(other)"}`;
 
@@ -64,10 +63,33 @@ const PATH_TOOLS = new Set(["edit", "str_replace", "insert", "create", "str_repl
 const EXIT_TAIL = /<exited with exit code (\d{1,3})>\s*$/;
 const PATCH_FILE = /^\*\*\* (?:Add|Update|Delete) File: (.+)$/m;
 /** Context blocks the CLI wraps into a user message's content (what the VS Code extension strips before showing it). */
-const INJECTED = [/<reminder>[\s\S]*?<\/reminder>\s*/g, /<attachments>[\s\S]*?<\/attachments>\s*/g, /<userRequest>[\s\S]*?<\/userRequest>\s*/g,
-  /<user_query>[\s\S]*?<\/user_query>\s*/g, /<context>[\s\S]*?<\/context>\s*/g, /<current_datetime>[\s\S]*?<\/current_datetime>\s*/g,
-  /<pr_metadata[^>]*\/?>\s*/g];
-const userText = (content: string): string => INJECTED.reduce((t, re) => t.replace(re, ""), content).trim();
+const INJECTED: readonly [string, string][] = [["<reminder>", "</reminder>"], ["<attachments>", "</attachments>"], ["<userRequest>", "</userRequest>"],
+  ["<user_query>", "</user_query>"], ["<context>", "</context>"], ["<current_datetime>", "</current_datetime>"], ["<pr_metadata", ">"]];
+const SPACE = /\s/;
+
+/**
+ * `t` without each `open`…`close` block (the first `close` after its `open`, left to right) and the spaces after it. Found
+ * by position, never by a backtracking pattern, so text of any length costs linear time: once an `open` has no `close`
+ * after it, no later one has either.
+ */
+function stripBlocks(t: string, open: string, close: string): string {
+  let out = "";
+  let pos = 0;
+  for (;;) {
+    const a = t.indexOf(open, pos);
+    if (a < 0) break;
+    const b = t.indexOf(close, a + open.length);
+    if (b < 0) break;
+    let end = b + close.length;
+    while (end < t.length && SPACE.test(t[end]!)) end++;
+    out += t.slice(pos, a);
+    pos = end;
+  }
+  return pos === 0 ? t : out + t.slice(pos);
+}
+
+/** The person's text of a user message: the context blocks the CLI wraps into it removed, trimmed. */
+export const userText = (content: string): string => INJECTED.reduce((t, [open, close]) => stripBlocks(t, open, close), content).trim();
 /** Bounded per-file state: tool calls awaiting their completion. */
 const PENDING_TOOLS = 4096;
 
@@ -338,13 +360,13 @@ function storeColumns(db: RoDb, tables: Set<string>, table: string, wanted: read
 
 /**
  * Maps every row of `table` in rowid pages, on the shared pager (`Pass`): a first page that fails other than busy is
- * drift `table-unreadable:<table>`; a busy store, or a later page that fails, is an io-error; either ends the table, with
+ * drift `store.table-unreadable:<table>` (a page that does not advance: `store.page-stalled:<table>`); a busy store, or a later page that fails, is an io-error; either ends the table, with
  * warn `cp.db-busy` for a busy store and `cp.db-query` for any other failure. A row the mapping fails on is skipped as
  * bad-record and the others go on.
  */
 async function eachStoreRow(db: RoDb, table: string, cols: string[], map: (r: Obj) => void, ctx: ScanCtx, tally: Tally): Promise<void> {
   const sql = `SELECT rowid AS rid, ${cols.map(q).join(", ")} FROM ${q(table)} WHERE rowid > ? ORDER BY rowid LIMIT ?`;
-  await new Pass(db, table, tally, ctx, "cp.db-query", { page: STORE_PAGE, busyLogCode: "cp.db-busy" }).byRowid(sql, (rows) => {
+  await new Pass(db, table, tally, ctx, "cp.db-query", { page: STORE_PAGE, busyLogCode: "cp.db-busy", driftPrefix: "store." }).byRowid(sql, (rows) => {
     for (const r of rows) eachRow(() => map(r), tally);
   });
 }

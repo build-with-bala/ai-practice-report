@@ -110,6 +110,20 @@ export interface PassOptions {
   page?: number;
   /** The code a query that fails on a busy store logs, where the reader tells it apart (default: `logCode`). */
   busyLogCode?: string;
+  /** Put before the pass's own drift keys (`table-unreadable:`, `page-stalled:`), for a reader whose store keys carry one (default none). */
+  driftPrefix?: string;
+}
+
+/** Compares two strings by code point, the order SQLite's BINARY collation gives UTF-8 text: negative, zero or positive. */
+export function cmpCodePoints(a: string, b: string): number {
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) {
+    const x = a.codePointAt(i)!;
+    const y = b.codePointAt(i)!;
+    if (x !== y) return x - y;
+    if (x > 0xffff) i++; // both strings hold the same pair here
+  }
+  return a.length - b.length;
 }
 
 /**
@@ -117,7 +131,10 @@ export interface PassOptions {
  * long pass lets timers, signals and an abort in; once the scan is aborted it reads nothing more. The first query of the
  * pass that fails other than busy means it can never work on this table: drift `table-unreadable:<table>`. A busy
  * store, or any later failure, is an io-error. Any failure ends the pass, and is logged: warn `logCode` (a busy store:
- * `busyLogCode`, when given).
+ * `busyLogCode`, when given). A full page whose last row would not move the next page forward (a rowid that is not a
+ * safe integer above the one the page started after; a key that does not sort after its start key, inside the range
+ * asked for) also ends the pass, as drift `page-stalled:<table>`: resuming from it could read the same rows for ever, or
+ * rows outside the range. The rows already handed on stay.
  */
 export class Pass {
   private started = false;
@@ -125,11 +142,21 @@ export class Pass {
   unreadable = false;
   private readonly page: number;
   private readonly busyLogCode: string;
+  private readonly prefix: string;
 
   constructor(private readonly db: RoDb, private readonly table: string, private readonly tally: Tally, private readonly ctx: ScanCtx,
     private readonly logCode: string, o: PassOptions = {}) {
     this.page = o.page ?? PAGE;
     this.busyLogCode = o.busyLogCode ?? logCode;
+    this.prefix = o.driftPrefix ?? "";
+  }
+
+  /** Ends the pass at a page that did not advance: drift, logged as a failed query. */
+  private stalled(): false {
+    this.failed = true;
+    this.tally.unknownKey(`${this.prefix}page-stalled:${this.table}`);
+    this.ctx.log("warn", this.logCode);
+    return false;
   }
 
   /** One query; undefined once the pass has failed, once the scan is aborted, or when this query fails. */
@@ -145,7 +172,7 @@ export class Pass {
       this.failed = true;
       const busy = isBusyError(e);
       if (first && !busy) {
-        this.tally.unknownKey(`table-unreadable:${this.table}`);
+        this.tally.unknownKey(`${this.prefix}table-unreadable:${this.table}`);
         this.unreadable = true;
       } else this.tally.skip("io-error");
       this.ctx.log("warn", busy ? this.busyLogCode : this.logCode);
@@ -171,7 +198,9 @@ export class Pass {
       if (rows.length > 0) each(rows);
       if (rows.length < this.page) return true;
       const last = rows[rows.length - 1]!.key;
-      if (typeof last !== "string") return false; // keys inside a text range are text
+      // keys inside a text range are text; one that does not sort after the start key (the runtime reads text that is not valid
+      // UTF-8 as other text), or lies outside the range, cannot place the next page
+      if (typeof last !== "string" || cmpCodePoints(last, after) <= 0 || cmpCodePoints(last, hi) >= 0) return this.stalled();
       after = last;
     }
   }
@@ -183,7 +212,10 @@ export class Pass {
       if (rows === undefined) return false;
       if (rows.length > 0) each(rows);
       if (rows.length < this.page) return true;
-      after = rows[rows.length - 1]!.rid as number;
+      const last = rows[rows.length - 1]!.rid;
+      // a rowid above 2^53 reads rounded: resuming from it could repeat or skip rows
+      if (typeof last !== "number" || !Number.isSafeInteger(last) || last <= after) return this.stalled();
+      after = last;
     }
   }
 

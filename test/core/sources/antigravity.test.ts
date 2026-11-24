@@ -522,7 +522,7 @@ describe("antigravity cli: conversations/<id>.db steps", () => {
     expect(markers(r, "denial").map((m) => [m.detail, m.ts - at])).toEqual([["user", 0]]);
   });
 
-  test("times from the step metadata: without metadata or a creation time no-ts; metadata that is not protobuf is drift; errors only with a time", async () => {
+  test("times from the step metadata: without metadata or a creation time no-ts, an implausible one bad-ts; metadata that is not protobuf is drift; errors only with a time", async () => {
     const at = t0();
     writeSteps(h, P, [
       { type: STEP.VIEW_FILE, ts: at },
@@ -537,7 +537,8 @@ describe("antigravity cli: conversations/<id>.db steps", () => {
     expect(tools(r).map((t) => t.ts - at)).toEqual([0]);
     expect(markers(r, "error").map((m) => m.ts - at)).toEqual([1_000]);
     const cov = covOf(r, "antigravity.cli");
-    expect([cov.skipped, cov.unknownTypes]).toEqual([{ "no-ts": 3 }, { "steps.metadata:shape": 2 }]);
+    // a creation time of 7 s after the epoch is a time, but implausible: bad-ts
+    expect([cov.skipped, cov.unknownTypes]).toEqual([{ "no-ts": 2, "bad-ts": 1 }, { "steps.metadata:shape": 2 }]);
     expectNoCanaries([...allEvents(r), r.coverage]);
   });
 

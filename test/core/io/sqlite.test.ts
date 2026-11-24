@@ -1,6 +1,6 @@
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { __observeQueries, copyBytes, MAX_COPY_BYTES, openRo, openUriReadOnly, ReadOnlyQueryError, type RoDb, sqliteUri, storePath } from "../../../core/io/sqlite";
@@ -210,6 +210,39 @@ describe("openRo", () => {
     db.close();
     t.disposeAll();
   });
+  test.skipIf(process.platform === "win32")("anything at the path that is not a regular file is null before any open: a pipe never blocks", () => {
+    const fifo = path.join(root, "pipe.db");
+    expect(Bun.spawnSync(["mkfifo", fifo]).exitCode).toBe(0);
+    const opened: string[] = [];
+    expect(openRo(fifo, new TempRegistry(root), recording(opened))).toBeNull();
+    expect(opened).toEqual([]);
+    mkdirSync(path.join(root, "a-folder.db"));
+    expect(openRo(path.join(root, "a-folder.db"), new TempRegistry(root))).toBeNull();
+  });
+
+  test("a busy store's private copy never follows a linked -wal or -shm", () => {
+    const f = path.join(root, "busy-linked-companion", "b.db");
+    const w = mk(f, false);
+    w.close();
+    const outside = path.join(root, "busy-linked-companion", "elsewhere-wal");
+    writeFileSync(outside, "not a wal");
+    if (!linkFile(outside, `${f}-wal`)) return;
+    const base = path.join(root, "busy-linked-companion", "tmp");
+    mkdirSync(base);
+    const t = new TempRegistry(base);
+    let calls = 0;
+    const db = kept(openRo(f, t, (uri) => {
+      if (calls++ === 0) throw new Error("SQLITE_BUSY: database is locked");
+      return openUriReadOnly(uri);
+    }))!;
+    expect(db.copied).toBe(true);
+    const [copyDir] = readdirSync(base);
+    expect(readdirSync(path.join(base, copyDir!))).not.toContain("b.db-wal"); // the store was copied, its linked -wal not
+    expect(readdirSync(path.join(base, copyDir!))).toContain("b.db");
+    db.close();
+    t.disposeAll();
+  });
+
   test("cannot-open is like any other failure that is not busy: null, no retry", () => {
     const f = path.join(root, "cant", "c.db");
     mk(f, false).close();

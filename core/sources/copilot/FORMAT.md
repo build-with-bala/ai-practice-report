@@ -10,11 +10,12 @@ chat session serializer, journal reader and response model). **(extension progra
 Copilot Chat extension 0.66 (its `package.json` and code). **(unverified)** = from the extension's code and the CLI's
 published event list only, not verified against a real store. This file records names and value types only, never values.
 
-**Zero-yield.** A coverage window that read records but yielded none of its reader's primary events is drift
-`zero-yield` (set by the scan), except records skipped as `copied` or `empty`, and coverage stamped `aborted`, so a
-renamed field never passes as a quiet store. Primary events: `copilot.vscode` and
-`copilot.cli` (`detail`) — a session, prompt or tool call; their `lifetime` windows (the session stores) are checked
-by their columns instead, and `copilot.jetbrains` reads no records.
+**Zero-yield.** A coverage window that read records, or found files whose lines it could not use (skipped `parse` or
+`oversize`), but yielded none of its reader's primary events is drift `zero-yield` (set by the scan), except records
+skipped as `copied` or `empty`, and coverage stamped `aborted`, so a renamed field or a changed container never passes
+as a quiet store; files with no lines at all stay `empty`. Primary events: `copilot.vscode` and `copilot.cli`
+(`detail`) — a session, prompt or tool call; their `lifetime` windows (the session stores) are checked by their
+columns instead, and `copilot.jetbrains` reads no records.
 
 **io-error.** A file or store that cannot be opened or read counts as skipped `io-error`, and so does a never-opened
 file — a credential, token or key file, by its name or by the name of the file behind a link (`core/io/observe.ts`):
@@ -184,7 +185,9 @@ Built-in tool ids (VS Code program and extension program): see `VSCODE_TOOLS` in
   0 and 4 have not ended: no turn), else `isCanceled` true → interrupted, else `result.errorDetails` → failed, else
   completed (a request with neither response nor result has no turn). `ms` = `elapsedMs`, else
   `result.timings.totalElapsed`, else `modelState.completedAt` − (`responseTimestamp` or `timestamp`); never
-  `timeSpentWaiting`. `ts` = `completedAt`, else request time + `ms`, else the request time. `model` = the request's model.
+  `timeSpentWaiting`; each duration counts only when it is a finite, non-negative number of ms of at most a day (else
+  the next one is tried). `ts` = `completedAt`, else request time + `ms`, else the request time; a `ts` outside the
+  plausible range drops the turn, skipped `bad-ts`. `model` = the request's model.
 - **MarkerEv** `interrupt` per cancelled request (`detail: "user"`), at `completedAt` (else the request time); `denial`
   per denied tool, at the request's time.
 - **Session store** (`globalStorage/github.copilot-chat/session-store.db`): lifetime sessions and turns, as below; they
@@ -200,8 +203,9 @@ Built-in tool ids (VS Code program and extension program): see `VSCODE_TOOLS` in
     well-formed time outside the plausible range: dropped with its prompt and tools, and counted once, never also
     `no-ts`), `duplicate`, `empty-session`, `bad-record`, `parse`, `oversize`, `too-large`, `io-error`.
   - `lifetime` (the session store): `files`/`bytes` = the store; `records` = its rows; `from`/`to` = its sessions and
-    turns. Drift: `store.missing-table:<t>`, `store.missing-column:<c>`, `table-unreadable:<t>` (a table whose first
-    page fails other than busy). Skipped: `bad-row`, `no-ts`, `io-error` (a store that cannot be opened — warn
+    turns. Drift: `store.missing-table:<t>`, `store.missing-column:<c>`, `store.table-unreadable:<t>` (a table whose first
+    page fails other than busy), `store.page-stalled:<t>` (a full page whose last rowid cannot place the next one: the
+    rows read stay, the table ends). Skipped: `bad-row`, `no-ts`, `io-error` (a store that cannot be opened — warn
     `cp.db-unopenable` — or that fails while read — warn `cp.db-unreadable` —, a busy page — warn `cp.db-busy` —, a later
     page that fails — warn `cp.db-query`), `too-large` (a locked store whose private copy — the store and its `-wal` —
     would exceed `MAX_COPY_BYTES`: never copied, `note: "too-large"`, warn `cp.db-too-large`), `bad-record`. `absent`

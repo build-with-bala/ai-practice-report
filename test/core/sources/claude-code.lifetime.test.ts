@@ -8,7 +8,7 @@ import { ccConfig, ccHistory, ccStats } from "../../../core/sources/claude-code"
 import { commandMarker } from "../../../core/sources/claude-code/history";
 import { registry } from "../../../core/sources/registry";
 import type { SourcePlugin } from "../../../core/sources/types";
-import { keyedHash } from "../../../core/text/hash";
+import { keyedHash, normalizePath } from "../../../core/text/hash";
 import { CANARY, expectNoCanaries } from "../../kit/canary";
 import { fakeHome, type FakeHome } from "../../kit/home";
 import { buildCcLifetime, CC_H1, CC_H2, CC_HAIKU, CC_OPUS, ccHistoryLine, ccSid, nzdt } from "../../fixtures/claude-code";
@@ -115,9 +115,9 @@ describe("claude-code lifetime: Task 10 scenario", () => {
     buildCcLifetime(h);
     const r = await run([ccStats]);
     expect(r.store.all("daily")).toEqual([
-      { k: "daily", tool: "claude-code", source: "claude-code.stats", day: "2026-01-13", zone: "utc", unit: "messages", count: 120, sessions: 2, toolCalls: 40, models: { [CC_OPUS]: 50_000, [CC_HAIKU]: 4_000 } },
-      { k: "daily", tool: "claude-code", source: "claude-code.stats", day: "2026-01-14", zone: "utc", unit: "messages", count: 80, sessions: 1, toolCalls: 25, models: { [CC_OPUS]: 20_000 } },
-      { k: "daily", tool: "claude-code", source: "claude-code.stats", day: "2026-01-16", zone: "utc", unit: "messages", count: 10, sessions: 1, toolCalls: 0 },
+      { k: "daily", tool: "claude-code", source: "claude-code.stats", day: "2026-01-13", zone: "either", unit: "messages", count: 120, sessions: 2, toolCalls: 40, models: { [CC_OPUS]: 50_000, [CC_HAIKU]: 4_000 } },
+      { k: "daily", tool: "claude-code", source: "claude-code.stats", day: "2026-01-14", zone: "either", unit: "messages", count: 80, sessions: 1, toolCalls: 25, models: { [CC_OPUS]: 20_000 } },
+      { k: "daily", tool: "claude-code", source: "claude-code.stats", day: "2026-01-16", zone: "either", unit: "messages", count: 10, sessions: 1, toolCalls: 0 },
     ] satisfies DailyEv[]);
     expect(r.coverage[0]).toMatchObject({
       source: "claude-code.stats", window: "lifetime", status: "ok", files: 1, records: 5, unknownTypes: {},
@@ -415,7 +415,7 @@ describe("claude-code config: mapping", () => {
     ]);
   });
 
-  test("MCP server names come from the global table and every project; definitions and project paths are never read", async () => {
+  test("MCP server names come from the global table and every project, a project's with its project key; definitions and project paths are never read", async () => {
     mkdirSync(path.join(h.env.home, ".claude"), { recursive: true });
     claudeJson({
       mcpServers: { [CANARY.mcp]: { command: CANARY.path, args: [CANARY.secret], env: { TOKEN: CANARY.token } } },
@@ -427,7 +427,8 @@ describe("claude-code config: mapping", () => {
       oauthAccount: { emailAddress: CANARY.email, organizationUuid: "org-1" },
     });
     const r = await run([ccConfig]);
-    expect(configs(r, "mcp-server").map((c) => c.name)).toEqual([CANARY.mcp, "proj-only"]);
+    const key = keyedHash(r.salt, normalizePath(CANARY.path));
+    expect(configs(r, "mcp-server").map((c) => [c.name, c.projectKey])).toEqual([[CANARY.mcp, undefined], [CANARY.mcp, key], ["proj-only", key]]);
     expect(r.store.all("identity")).toEqual([]);                        // no accountUuid: nothing else in oauthAccount is used
     expectNoCanaries([r.store, r.coverage], { allow: ["mcp"] });
   });
@@ -462,7 +463,8 @@ describe("claude-code config: mapping", () => {
       { k: "config", tool: "claude-code", source: "claude-code.config", kind: "feature", name: "hooks-disabled", provenance: "authored" },
     ]);
     expect(r.coverage[0]).toMatchObject({ skipped: { "hooks-disabled": 3 }, unknownTypes: { "hooks:shape": 1 }, records: 2 });
-    expect(configs(r, "skill")[0]!.firstSeen).toBeGreaterThan(0);
+    const st = statSync(path.join(h.env.home, ".claude/skills/still-listed"));
+    expect(configs(r, "skill")[0]!.firstSeen).toBe(st.birthtimeMs > 0 ? Math.floor(st.birthtimeMs) : undefined);
     expectNoCanaries([r.store, r.coverage]);
   });
 
@@ -490,7 +492,7 @@ describe("claude-code config: mapping", () => {
     h.write(".claude/plugins/cache/up/x", "a cache entry outside the plugin's own folder");
     claudeJson({ skillUsage: { "usage-only": { usageCount: 1 } }, pluginUsage: { "gamma@market": { usageCount: 2 } } });
     const r = await run([ccConfig]);
-    const born = (rel: string) => { const st = statSync(path.join(h.env.home, rel)); return Math.floor(st.birthtimeMs > 0 ? st.birthtimeMs : st.ctimeMs); };
+    const born = (rel: string) => { const st = statSync(path.join(h.env.home, rel)); return st.birthtimeMs > 0 ? Math.floor(st.birthtimeMs) : undefined; };
     expect(r.store.all("config").filter((c) => c.kind !== "plugin").map((c) => [c.kind, c.name, c.firstSeen])).toEqual([
       ["skill", "own", born(".claude/skills/own")], ["skill", "usage-only", undefined],
       ["command", "review", born(".claude/commands/review.md")], ["agent", "helper", born(".claude/agents/helper.md")],
@@ -498,7 +500,6 @@ describe("claude-code config: mapping", () => {
     expect(configs(r, "plugin").map((c) => [c.name, c.firstSeen])).toEqual([
       ["../up@market", undefined], ["alpha@market", born(".claude/plugins/cache/market/alpha")], ["beta@market", undefined], ["gamma@market", undefined],
     ]);
-    expect(born(".claude/skills/own")).toBeGreaterThan(0);
     expectNoCanaries([r.store, r.coverage]);
   });
 
@@ -510,7 +511,7 @@ describe("claude-code config: mapping", () => {
     symlinkSync(path.join(h.env.home, "dotfiles/skills/linked"), path.join(h.env.home, ".claude/skills/linked"));
     symlinkSync(path.join(h.env.home, "dotfiles/commands/linked-cmd.md"), path.join(h.env.home, ".claude/commands/linked-cmd.md"));
     const r = await run([ccConfig]);
-    const born = (rel: string) => { const st = statSync(path.join(h.env.home, rel)); return Math.floor(st.birthtimeMs > 0 ? st.birthtimeMs : st.ctimeMs); };
+    const born = (rel: string) => { const st = statSync(path.join(h.env.home, rel)); return st.birthtimeMs > 0 ? Math.floor(st.birthtimeMs) : undefined; };
     expect(r.store.all("config").map((c) => [c.kind, c.name, c.firstSeen])).toEqual([
       ["skill", "linked", born("dotfiles/skills/linked")], ["command", "linked-cmd", born("dotfiles/commands/linked-cmd.md")],
     ]);
@@ -619,5 +620,27 @@ describe("claude-code lifetime: plugins and coverage", () => {
     expect(r.coverage.map((c) => [c.source, c.status])).toEqual([
       ["claude-code.history", "absent"], ["claude-code.stats", "absent"], ["claude-code.config", "absent"],
     ]);
+  });
+});
+
+describe("claude-code: events say which project or session they belong to", () => {
+  test("a history prompt carries the project key a session of the same folder carries; the folder itself never", async () => {
+    const { CcTranscript, slug } = await import("../../fixtures/claude-code");
+    const { ccTranscripts } = await import("../../../core/sources/claude-code");
+    const sid = ccSid("PK");
+    new CcTranscript(sid, { cwd: CANARY.path }).prompt("Fix the importer").text("Done.").write(h, `.claude/projects/${slug(CANARY.path)}/${sid}.jsonl`);
+    h.writeJsonl(".claude/history.jsonl", [ccHistoryLine("Fix the importer", Date.now() - 60_000, sid), { display: "No folder", timestamp: Date.now() - 30_000 }]);
+    const r = await run([ccHistory, ccTranscripts]);
+    const session = r.store.all("session")[0]!;
+    const prompts = r.store.all("prompt").filter((p) => p.source === ccHistory.id);
+    expect(session.projectKey).toBeDefined();
+    expect(prompts.map((p) => p.projectKey)).toEqual([session.projectKey, undefined]);
+    expect(session.projectKey).toBe(keyedHash(r.salt, normalizePath(CANARY.path)));
+    // anchors and file facts name their session
+    const anchors = r.store.all("anchor");
+    expect(anchors.length).toBeGreaterThan(0);
+    expect(new Set(anchors.map((a) => a.sessionId))).toEqual(new Set([session.id]));
+    expect(r.store.all("file").map((f) => f.sessionId)).toEqual([session.id]);
+    expectNoCanaries([r.store, r.coverage], { allow: [] });
   });
 });

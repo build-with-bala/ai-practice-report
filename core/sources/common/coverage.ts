@@ -44,12 +44,12 @@ export class Tally {
     this.skipped[reason] = (this.skipped[reason] ?? 0) + 1;
   }
 
-  /** Unknown record types keep their name only when it looks like a schema token. */
+  /** An unknown record type, as a drift key that never echoes it (`typeKey`). */
   unknown(type: unknown): void {
     this.unknownKey(typeKey(type));
   }
 
-  /** A pre-shaped drift key (e.g. `turnOrigin:<value>`, `event_msg:<type>`). */
+  /** A drift key built by the reader from its own vocabulary (e.g. `turnOrigin:(other)`, `event_msg:(none)`): never a value read. */
   unknownKey(key: string): void {
     this.unknownTypes[key] = (this.unknownTypes[key] ?? 0) + 1;
   }
@@ -61,6 +61,14 @@ export class Tally {
   badTime(v: unknown, field = "timestamp"): void {
     if (timeIssue(v) === "implausible") this.skip("bad-ts");
     else this.unknownKey(`${field}:shape`);
+  }
+
+  /**
+   * An item dropped for want of a time: `bad-ts` when one of the values it could have taken its time from is a
+   * well-formed time outside the plausible range (bad data), else `no-ts` (none there, or of no time's shape).
+   */
+  noTime(...raw: unknown[]): void {
+    this.skip(raw.some((v) => v !== undefined && v !== null && timeIssue(v) === "implausible") ? "bad-ts" : "no-ts");
   }
 
   span(ts: number): void {

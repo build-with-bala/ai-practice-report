@@ -271,16 +271,16 @@ function lockedSkills(home: string, tally: Tally): Set<string> | undefined {
 
 /**
  * `<codex>/skills/<name>/` folders holding a SKILL.md (hidden ones — `.system`, the bundled skills — are skipped); never
- * opened. `firstSeen`: when the folder appeared (`bornAt`, links followed).
+ * opened. `firstSeen`: when the folder appeared (`bornAt`: a plausible birth time, links followed; none without one).
  */
-function skills(c: Candidate, tally: Tally, out: Out): void {
+function skills(c: Candidate, tally: Tally, out: Out, now: number): void {
   const dir = path.join(c.root, "skills");
   const names = listDir(dir, tally).filter((n) => !n.startsWith(".") && isFile(path.join(dir, n, "SKILL.md")));
   if (names.length === 0) return;
   const lock = lockedSkills(c.home, tally);
   for (const name of names) {
     const ev = cfg("skill", lock === undefined ? "unknown" : lock.has(name) ? "installed" : "authored", name);
-    const born = bornAt(path.join(dir, name));
+    const born = bornAt(path.join(dir, name), now);
     if (born !== undefined) ev.firstSeen = born;
     out(ev);
   }
@@ -306,7 +306,7 @@ export async function scanCxConfig(c: Candidate, ctx: ScanCtx): Promise<void> {
   for (const name of sorted(tables.profiles)) out(cfg("profile", "authored", isTypeName(name) ? name : undefined));
   for (const name of sorted(tables.servers)) out(cfg("mcp-server", "unknown", name));
   for (const id of sorted(new Set([...tables.plugins, ...cachedPlugins(c.root, tally)]))) out(cfg("plugin", "installed", id));
-  skills(c, tally, out);
+  skills(c, tally, out, ctx.now);
   memoryFiles(c.root, tally, out);
   ctx.emit(tally.coverage());
 }

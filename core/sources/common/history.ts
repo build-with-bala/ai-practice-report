@@ -26,7 +26,7 @@ export class PromptLog {
   constructor(private readonly ctx: ScanCtx, private readonly tool: ToolId, private readonly source: string, private readonly tally: Tally) {}
 
   /** `hasPaste`: whether the prompt carried pasted content, for a log that records it (absent otherwise). */
-  add(p: { text: string; ts: number; sessionId?: string; hasPaste?: boolean }): void {
+  add(p: { text: string; ts: number; sessionId?: string; hasPaste?: boolean; projectKey?: string }): void {
     const key = p.sessionId ?? "";
     const prev = this.sessions.get(key);
     const isTaskStart = prev === undefined || p.ts - prev.lastTs >= TASK_GAP_MS;
@@ -38,6 +38,7 @@ export class PromptLog {
     };
     if (p.hasPaste !== undefined) ev.hasPaste = p.hasPaste;
     if (p.sessionId !== undefined) ev.sessionId = p.sessionId;
+    if (p.projectKey !== undefined) ev.projectKey = p.projectKey;
     this.tally.span(p.ts);
     this.ctx.emit(ev);
 

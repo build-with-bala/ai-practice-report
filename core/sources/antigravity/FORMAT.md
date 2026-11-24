@@ -9,11 +9,16 @@ or by count-only smoke runs of the readers. **(program)** = read from the Antigr
 protobuf descriptors and database column tags built into the CLI and into the IDE's language server — not confirmed in
 data. This file records names and value types only, never values.
 
-**Zero-yield.** A coverage window that read records but yielded none of its reader's primary events is drift
-`zero-yield` (set by the scan), except records skipped as `copied` or `empty`, and coverage stamped `aborted`, so a
-renamed field never passes as a quiet store. Primary events: `antigravity.cli` (`detail`) — a session,
+**Zero-yield.** A coverage window that read records, or found files whose lines it could not use (skipped `parse` or
+`oversize`), but yielded none of its reader's primary events is drift `zero-yield` (set by the scan), except records
+skipped as `copied` or `empty`, and coverage stamped `aborted`, so a renamed field or a changed container never passes
+as a quiet store; files with no lines at all stay `empty`. Primary events: `antigravity.cli` (`detail`) — a session,
 prompt or tool call (its `lifetime` window is checked by its columns); `antigravity.history` — a prompt;
-`antigravity.ide` — a session; `antigravity.brain` — a plan artifact's marker.
+`antigravity.ide` — a session. `antigravity.brain` is not guarded: its records are its own markers.
+
+**Times.** Wherever this file says an item without a time is skipped `no-ts`, an item whose time is well-formed but
+outside the plausible range (before 2015, or more than two days ahead) is skipped `bad-ts` instead (Go's zero time,
+written for a time never set, is no time).
 
 **io-error.** A file or store that cannot be opened or read counts as skipped `io-error`, and so does a never-opened
 file — a credential, token or key file, by its name or by the name of the file behind a link (`core/io/observe.ts`):
@@ -30,7 +35,7 @@ the engine refuses it before it is opened, so it reads as unreadable.
   brain/<conversation id>/{task,implementation_plan,walkthrough}.md  antigravity.brain (existence only)
 <home>/.gemini/antigravity/brain/<conversation id>/<artifact>.md     antigravity.brain (the IDE's; unverified)
 vscodeUser(env, "Antigravity")/globalStorage/state.vscdb             antigravity.ide
-vscodeUser(env, "Antigravity IDE")/globalStorage/state.vscdb         antigravity.ide (both app folders verified locally)
+vscodeUser(env, "Antigravity IDE")/globalStorage/state.vscdb         antigravity.ide (the app's folder has either name)
 not read: brain/<id>/.system_generated/logs/{transcript_full.jsonl, chunks/, media/}, brain/<id>/.system_generated/
           {steps/, messages/, tasks/}, brain/<id>/{scratch/, .user_uploaded/}, the CLI's settings.json, its state and summary
           .pb/.pbtxt files, log/, cache/, annotations/, implicit/, knowledge/, presence/, plugin_data/, updater/, bin/;
@@ -52,7 +57,8 @@ TEXT (primary key), `title`, `preview` TEXT, `step_count` INTEGER, `last_modifie
 `last_user_input_step_index` INTEGER, `app_data_dir` TEXT, `raw_summary` BLOB, `group_id` TEXT. Program: the text columns
 default to `''` (so "no parent" and "no battle" are empty strings), booleans are stored 0/1, `workspace_uris` is a JSON
 array of URIs, and the time columns are not null — Go times as text, `YYYY-MM-DD hh:mm:ss.fffffffff±hh:mm` (the zero time
-when never set, which `toEpochMs` rejects as implausible). There is no creation time.
+when never set, which `toEpochMs` rejects as implausible; a row with no other time is skipped `no-ts`, while a set time
+outside the plausible range is `bad-ts`). There is no creation time.
 
 - **Columns read**: `conversation_id`, `step_count`, `last_modified_time`, `last_user_input_time`, `workspace_uris`,
   `parent_conversation_id`, `nesting_depth`, `killed`; and, inside SQL only (their values never leave SQLite), `battle_id`
@@ -61,7 +67,9 @@ when never set, which `toEpochMs` rejects as implausible). There is no creation 
   `CASE COALESCE("source", '') WHEN '<enum name>' THEN '<code>' … ELSE 'other' END AS src` (below). Rowid pages of 1,000
   (`WHERE rowid > ? ORDER BY rowid LIMIT ?`). Each one missing is drift `missing-column:<name>` (without `conversation_id`
   nothing is read); no table is drift `missing-table:conversation_summaries`; `WITHOUT ROWID`, or a first page that fails for
-  any reason but a busy store, is drift `table-unreadable:conversation_summaries`.
+  any reason but a busy store, is drift `table-unreadable:conversation_summaries`. A full page whose last rowid is not a
+  safe integer above the page's start ends the table as drift `page-stalled:<table>` (here and for `steps`); the rows
+  already read stay.
 - **Never selected**: `title`, `preview`, `raw_summary` (the summary message, title inside), `agent_name`, `status`,
   `project_id`, `app_data_dir`, `group_id`, `not_fully_idle`, `last_user_input_step_index`, and the values of `battle_id`,
   `winning_conversation_id` and `source`.
@@ -245,8 +253,8 @@ SQLite, VS Code's `ItemTable` (`key` TEXT, `value` BLOB; verified locally) — w
 
 ## Brain artifacts (`antigravity.brain`)
 
-`<brain>/<conversation id>/task.md`, `implementation_plan.md`, `walkthrough.md` (the agent's plan artifacts; from the task
-brief; unverified). Each brain folder is its own candidate.
+`<brain>/<conversation id>/task.md`, `implementation_plan.md`, `walkthrough.md` (the agent's plan artifacts;
+unverified). Each brain folder is its own candidate.
 
 - **MarkerEv** `plan-artifact` per regular file present (`lstat` only: never opened), `detail` = `task`,
   `implementation_plan` or `walkthrough`, `ts` = its last modification with `proxyTs: true` (a file time stands in for

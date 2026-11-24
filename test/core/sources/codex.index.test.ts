@@ -36,7 +36,7 @@ const tally = (xs: (string | undefined)[]) => xs.reduce<Record<string, number>>(
 const skipChmod = process.platform === "win32" || process.getuid?.() === 0;
 const MIN = 60_000;
 /** A path's birth time by stat, links followed; its ctime where the file system records none. */
-const born = (rel: string): number => { const st = statSync(path.join(h.env.home, rel)); return Math.floor(st.birthtimeMs > 0 ? st.birthtimeMs : st.ctimeMs); };
+const born = (rel: string): number | undefined => { const st = statSync(path.join(h.env.home, rel)); return st.birthtimeMs > 0 ? Math.floor(st.birthtimeMs) : undefined; };
 
 /**
  * What each SELECT may name, by the table it reads: the columns the thread reader is allowed to select (written out here,
@@ -221,7 +221,8 @@ describe("codex threads: thread index and turn history", () => {
       ["cli", "Claude Code", "peer", "cli"],
       [JSON.stringify({ subagent: "review" }), null, "subagent", "subagent"],
       [spawn("not-a-uuid", CANARY.project), "Claude Code", "subagent", "subagent"],
-      [CANARY.prompt, null, "human", "other"],
+      [CANARY.prompt, null, "system", "other"], // a source the CLI is not known to write: never a human
+      ["desktop", "Claude Code", "peer", "other"],
       [JSON.stringify(["subagent"]), null, "human", "other"],
       ["{not json", null, "human", "other"],
     ];
@@ -233,7 +234,7 @@ describe("codex threads: thread index and turn history", () => {
     expect(r.store.session(sidOf(ids[7]!))).toMatchObject({
       parentId: sidOf(keyedHash(r.salt, "not-a-uuid")), spawnDepth: 2, agentType: keyedHash(r.salt, CANARY.project),
     });
-    expect(covOf(r, "codex.threads").unknownTypes).toEqual({ "threads.source:shape": 2 });
+    expect(covOf(r, "codex.threads").unknownTypes).toEqual({ "threads.source:shape": 2, "threads.source:(other)": 2 });
     expectNoCanaries([r.store, r.coverage, r.warnings]);
   });
 

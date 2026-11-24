@@ -34,7 +34,6 @@ const TURN_COLUMNS = ["thread_id", "status", "started_at", "completed_at", "dura
 /** `thread_turns.status` values of finished turns (the app server's TurnStatus); `inProgress` turns have not ended. */
 const FINISHED: ReadonlyMap<string, NonNullable<TurnEv["status"]>> = new Map([["completed", "completed"], ["failed", "failed"], ["interrupted", "interrupted"]]);
 const IN_PROGRESS = "inProgress";
-/** An unknown status keeps its value in the drift key when it has the enum's shape (camelCase letters), else `(other)`. */
 /** Sandbox modes: the state DB's policy types (FORMAT) and the CLI's own sandbox modes (CLI program). */
 const SANDBOX_MODES: ReadonlySet<string> = new Set(["read-only", "workspace-write", "danger-full-access", "external-sandbox", "disabled", "managed"]);
 /** Approval policies (CLI program; `on-failure` from older versions). */
@@ -150,8 +149,9 @@ function thread(r: Obj, ctx: ScanCtx, tally: Tally): void {
   const updated = toEpochMs(r.updated_at_ms, ctx.now) ?? toEpochMs(r.updated_at, ctx.now);
   const end = Math.max(start, updated ?? start);
   // origin, surface and subagent links, by the rules the rollouts reader shares (origin.ts)
-  const { unknownShape, subagent: _subagent, ...driver } = cxSource(sourceValue(r.source), r.originator, ctx);
+  const { unknownShape, unknownValue, subagent: _subagent, ...driver } = cxSource(sourceValue(r.source), r.originator, ctx);
   if (unknownShape) tally.unknownKey("threads.source:shape");
+  if (unknownValue) tally.unknownKey("threads.source:(other)");
   const model = str(r.model);
   const s: SessionEv = {
     k: "session", tool: TOOL, source: THREADS_SOURCE, id, window: "lifetime", ...driver, start, end, models: model === undefined ? [] : [safeModel(model)],

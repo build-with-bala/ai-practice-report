@@ -71,7 +71,6 @@ export const agBrain: SourcePlugin = {
   tier: "P0",
   beta: false,
   windows: ["lifetime"],
-  primary: { lifetime: ["marker"] },
   describe: {
     reads: [
       "<home>/.gemini/antigravity/brain/<conversation>/{task,implementation_plan,walkthrough}.md and <home>/.gemini/antigravity-cli/brain/<conversation>/… — existence and last modification time only",

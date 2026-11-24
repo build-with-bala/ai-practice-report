@@ -1,5 +1,5 @@
 import type { CheckKind, ToolCategory, Toolchain } from "../../model/ids";
-import { classifyCommand } from "../../text/commands";
+import { classifyCommand, shellScript } from "../../text/commands";
 import { extOfPath, isObj, num, str } from "../common/guards";
 
 /**
@@ -37,8 +37,6 @@ const OWN_NAMESPACES = new Set(["collaboration", "clock", "image_gen", "web"]);
 /** Tools whose arguments carry a command line (`cmd`, or `command` as argv or string): the CLI's shell-command tools. */
 export const SHELL_TOOLS: ReadonlySet<string> = new Set(["exec_command", "shell", "shell_command", "container.exec", "local_shell"]);
 /** Shells whose last argument after a `-c`-style flag is the script (`["/bin/zsh", "-lc", "<script>"]`). */
-const SHELLS = new Set(["bash", "zsh", "sh", "dash", "fish", "ksh", "pwsh", "powershell", "cmd"]);
-const SCRIPT_FLAG = /^(?:-[A-Za-z]*c|\/c|-Command)$/i;
 const MCP_NAME = /^mcp__(.+?)__(.+)$/;
 const MCP_NAMESPACE = /^mcp__(.+?)(?:__)?$/;
 /** Older CLIs named MCP tools `<server>__<tool>`. */
@@ -49,14 +47,15 @@ const NOT_AGENT_COMMANDS = new Set(["user_shell", "unified_exec_interaction"]);
 const plain = (name: string, category: ToolCategory): CxToolCall => ({ name, category, checks: [] });
 const mcp = (server: string | undefined): CxToolCall => (server === undefined ? plain("mcp", "mcp") : { ...plain("mcp", "mcp"), mcpServer: server });
 
-/** The command line of `cmd`/`command`: a string as is; argv joined, or a shell's `-c` script unwrapped. */
+/**
+ * The command line of `cmd`/`command`: a string as is; argv joined, or a shell's script unwrapped by the classifier's
+ * own rule (`shellScript`), so a command reads the same here as in every other tool.
+ */
 function commandLine(cmd: unknown): string {
   if (typeof cmd === "string") return cmd;
   if (!Array.isArray(cmd) || !cmd.every((x) => typeof x === "string")) return "";
   const argv = cmd as string[];
-  const shell = (argv[0] ?? "").split(/[\\/]/).pop()!.toLowerCase().replace(/\.exe$/, "");
-  if (argv.length >= 3 && SHELLS.has(shell) && SCRIPT_FLAG.test(argv[argv.length - 2]!)) return argv[argv.length - 1]!;
-  return argv.join(" ");
+  return shellScript(argv) ?? argv.join(" ");
 }
 
 /** `apply_patch` as a command's first word: the CLI's own patch tool, run through the shell. */
@@ -197,6 +196,22 @@ function callOf(name: string | undefined, args: unknown, namespace: string | und
   if (fixed !== undefined) return [plain(name, fixed)];
   const server = MCP_NAME.exec(name)?.[1] ?? SERVER_TOOL.exec(name)?.[1];
   return [server === undefined ? plain("other", "other") : mcp(server)];
+}
+
+/**
+ * Whether a response_item payload applies a patch — the `apply_patch` tool, or a shell call whose command starts with
+ * `apply_patch` — so that one with no file section (no tool action at all) is counted, never silently dropped.
+ */
+export function isPatchCall(item: unknown): boolean {
+  if (!isObj(item)) return false;
+  if (item.type === "custom_tool_call") return item.name === "apply_patch";
+  if (item.type === "local_shell_call") return shellPatch(isObj(item.action) ? item.action.command : undefined) !== undefined;
+  if (item.type !== "function_call" || item.namespace !== undefined) return false;
+  const name = str(item.name);
+  if (name === "apply_patch") return true;
+  if (name === undefined || !SHELL_TOOLS.has(name)) return false;
+  const args = parseArgs(item.arguments);
+  return shellPatch(isObj(args) ? (args.cmd ?? args.command) : undefined) !== undefined;
 }
 
 /**

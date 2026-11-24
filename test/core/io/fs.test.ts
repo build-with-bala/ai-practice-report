@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { bornAt, fileState, isDir, isFile, readJsonSmall, readJsonSmallResult, readTextLines, readTextSmall, safeList, safeStat, walk } from "../../../core/io/fs";
@@ -64,26 +64,37 @@ describe("fileState, isDir, isFile", () => {
 });
 
 describe("bornAt", () => {
-  /** The rule, written out apart from the code: the birth time, else the ctime, in whole ms. */
-  const born = (p: string) => { const st = statSync(p); return Math.floor(st.birthtimeMs > 0 ? st.birthtimeMs : st.ctimeMs); };
+  /** The rule, written out apart from the code: the birth time in whole ms, only where the file system records one. */
+  const born = (p: string) => { const st = statSync(p); return st.birthtimeMs > 0 ? Math.floor(st.birthtimeMs) : undefined; };
+  const NOW = Date.now();
 
-  test("a file's or folder's birth time (its ctime where the file system has none); nothing there, none", () => {
+  test("a file's or folder's birth time; none where the file system records none (never the change time); nothing there, none", () => {
     const f = path.join(root, "born-file");
     writeFileSync(f, "x");
     const d = path.join(root, "born-dir");
     mkdirSync(d);
-    expect(bornAt(f)).toBe(born(f));
-    expect(bornAt(d)).toBe(born(d));
-    expect(bornAt(f)).toBeGreaterThan(0);
-    expect(bornAt(path.join(root, "born-nope"))).toBeUndefined();
-    expect(bornAt(path.join(f, "inside"))).toBeUndefined();
+    expect(bornAt(f, NOW)).toBe(born(f));
+    expect(bornAt(d, NOW)).toBe(born(d));
+    expect(bornAt(path.join(root, "born-nope"), NOW)).toBeUndefined();
+    expect(bornAt(path.join(f, "inside"), NOW)).toBeUndefined();
+  });
+
+  test("a birth time outside the plausible range gives none", () => {
+    const f = path.join(root, "born-old");
+    writeFileSync(f, "x");
+    const old = new Date("1985-10-26T08:15:00Z");
+    utimesSync(f, old, old); // where an earlier mtime pulls the birth time back (APFS), the birth time is implausible
+    const st = statSync(f);
+    if (st.birthtimeMs > 0 && st.birthtimeMs < Date.UTC(2015, 0, 1)) expect(bornAt(f, NOW)).toBeUndefined();
+    // whatever the file system, a now before the birth bounds it out too
+    expect(bornAt(f, Date.UTC(2000, 0, 1))).toBeUndefined();
   });
 
   test("a link counts as what it points to", () => {
     const target = path.join(root, "born-target");
     mkdirSync(target);
     const linked = path.join(root, "born-linked");
-    if (linkFolder(target, linked)) expect(bornAt(linked)).toBe(born(target));
+    if (linkFolder(target, linked)) expect(bornAt(linked, NOW)).toBe(born(target));
   });
 });
 

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, statSync, symlinkSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, statSync, symlinkSync, utimesSync } from "node:fs";
 import path from "node:path";
 import { scan } from "../../../core/scan";
 import { Tally } from "../../../core/sources/common/coverage";
@@ -87,6 +87,19 @@ describe("streamJsonlFile", () => {
     expect(seen).toEqual([{ n: 1 }, { n: 3 }]);
     expect(counts(tally)).toEqual({ files: 1, bytes: statSync(file).size, records: 3, skipped: { "bad-record": 1 } });
     expect(res.read).toBe(true);
+  });
+
+  test("a file written to while it is read: its stat is taken once the read reached its end, so its times follow its last write", async () => {
+    const file = h.writeJsonl("h.jsonl", LINES);
+    const later = new Date(Math.floor(statSync(file).mtimeMs / 1000) * 1000 + 3_600_000); // whole seconds: every file system keeps them
+    const { res, tally } = await run(file, (v) => {
+      if ((v as { n: number }).n !== 1) return;
+      appendFileSync(file, `${JSON.stringify({ n: 4 })}\n`);
+      utimesSync(file, later, later);
+    });
+    expect(res.read).toBe(true);
+    expect(res.stat!.mtimeMs).toBe(later.getTime());
+    expect([res.size, tally.bytes]).toEqual([statSync(file).size, statSync(file).size]);
   });
 
   test('"stop" ends the file: it is not counted as read to its end', async () => {

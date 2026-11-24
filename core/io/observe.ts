@@ -1,4 +1,4 @@
-import { lstatSync, realpathSync } from "node:fs";
+import { lstatSync, readlinkSync } from "node:fs";
 import path from "node:path";
 
 /**
@@ -29,17 +29,33 @@ const neverOpenedName = (name: string): boolean => {
   return NEVER_OPENED_NAMES.has(n) || NEVER_OPENED_ENDINGS.some((end) => n.endsWith(end)) || NEVER_OPENED_PATTERNS.some((re) => re.test(n));
 };
 
+/** Links followed one by one, at most this many: a longer chain is refused (the system gives up on a loop sooner). */
+const MAX_HOPS = 40;
+
 /**
  * Whether a path leads to a file no reader may ever open — a credential, token or key file — by its own name or, for a
- * link, by the name of the file it resolves to (names compare case-insensitively).
+ * link, by the name of any link of the chain it follows and of the file it resolves to (names compare
+ * case-insensitively; a chain longer than MAX_HOPS is refused too). Names are all a path shows: a hard link to such a
+ * file under another name is the same file, and cannot be told apart by name — the guarantee is about names.
  */
 export function isNeverOpened(p: string): boolean {
-  if (neverOpenedName(path.basename(p))) return true;
-  try {
-    return lstatSync(p).isSymbolicLink() && neverOpenedName(path.basename(realpathSync(p)));
-  } catch {
-    return false; // nothing to resolve: nothing there to open either
+  let at = p;
+  for (let hop = 0; hop <= MAX_HOPS; hop++) {
+    if (neverOpenedName(path.basename(at))) return true;
+    let link: boolean;
+    try {
+      link = lstatSync(at).isSymbolicLink();
+    } catch {
+      return false; // nothing to resolve: nothing there to open either
+    }
+    if (!link) return false;
+    try {
+      at = path.resolve(path.dirname(at), readlinkSync(at));
+    } catch {
+      return false;
+    }
   }
+  return true;
 }
 
 /** A never-opened file was about to be opened (`noteOpen`), and was not. */

@@ -38,7 +38,7 @@ export async function scanBrain(c: Candidate, ctx: ScanCtx): Promise<void> {
       if (!st?.isFile()) continue;
       const ts = toEpochMs(Math.floor(st.mtimeMs), ctx.now);
       if (ts === undefined) {
-        tally.skip("no-ts");
+        tally.noTime(Math.floor(st.mtimeMs));
         continue;
       }
       tally.records++;

@@ -8,10 +8,12 @@ probe (`scripts/probe.ts`, which prints names and value types, never values) or 
 reader's author. **(CLI program)** = read from the CLI program's own type tables (0.169.0), not confirmed with the
 probe. This file records names and value types only, never values.
 
-**Zero-yield.** A coverage window that read records but yielded none of its reader's primary events is drift
-`zero-yield` (set by the scan), except records skipped as `copied` or `empty`, and coverage stamped `aborted`, so a
-renamed field never passes as a quiet store. Primary events: `codex.rollouts` — a session, prompt or
-tool call; `codex.threads` — a session, turn or spawn edge; `codex.history` — a prompt; `codex.config` — a setting.
+**Zero-yield.** A coverage window that read records, or found files whose lines it could not use (skipped `parse` or
+`oversize`), but yielded none of its reader's primary events is drift `zero-yield` (set by the scan), except records
+skipped as `copied` or `empty`, and coverage stamped `aborted`, so a renamed field or a changed container never passes
+as a quiet store; files with no lines at all stay `empty`. Primary events: `codex.rollouts` — a session, prompt or
+tool call; `codex.threads` — a session, turn or spawn edge; `codex.history` — a prompt. `codex.config` is not guarded:
+its records are its own events, so it cannot read one without yielding one.
 
 **io-error.** A file or store that cannot be opened or read counts as skipped `io-error`, and so does a never-opened
 file — a credential, token or key file, by its name or by the name of the file behind a link (`core/io/observe.ts`):
@@ -196,7 +198,8 @@ CLI's EventMsg tags (`exec_command_end`, `mcp_tool_call_end`, `collab_*`, `realt
   diverge): origin from `source` — `exec` → scripted; `mcp` (Codex run through its MCP server,
   driven by another client or agent) → peer; `{subagent: …}` → subagent (`parentId` from
   `thread_spawn.parent_thread_id`, else `parent_thread_id`; `spawnDepth` = `depth`; `agentType` = the role when
-  built in, else its keyed hash); any other string, or no source → human; `originator` exactly `Claude Code` → peer,
+  built in, else its keyed hash); another string the CLI writes, or no source → human; a string it is not known to
+  write → system and drift `session_meta.source:(other)` (a future automated source never counts as typed prompts); `originator` exactly `Claude Code` → peer,
   whatever the string source (a subagent source wins: its subagents inherit the originator and stay subagents).
   `surface` = the source when the CLI writes it (`cli`, `vscode`, `exec`, `mcp`, `custom`, `internal`, `unknown`; CLI
   program), else `other`, or `subagent`; `version` = `cli_version`;
@@ -218,7 +221,8 @@ CLI's EventMsg tags (`exec_command_end`, `mcp_tool_call_end`, `collab_*`, `realt
   trimmed text) as for Claude Code; `isTaskStart` = first human prompt or ≥ 30 min since the thread's last line.
 - **ToolEv** (`cxToolCalls`), one per call, or per file for apply_patch:
   - shell tools (`exec_command`, `shell`, `shell_command`, `local_shell`): `classifyCommand` of the command line (a
-    `[<shell>, -c…, <script>]` argv is unwrapped to the script), as for Claude Code's shell tools — category, checks
+    `[<shell>, -c…, <script>]` argv is unwrapped to the script by the classifier's own `shellScript`, the rule that
+    also unwraps `bash -lc "<script>"` given as one string), as for Claude Code's shell tools — category, checks
     and the `toolchain` of the command that produced the first check; it recognises reading (`cat`, `head`, `tail`,
     `ls`, …) and searching (`rg`, `grep`, `find`, …) behind every other category. `parsed_cmd` is not read. A shell
     call whose command, as argv or as a string, starts with the word `apply_patch` is the CLI's patch tool run
@@ -257,15 +261,17 @@ CLI's EventMsg tags (`exec_command_end`, `mcp_tool_call_end`, `collab_*`, `realt
 - **RateLimitEv** per window (`primary`, `secondary`) present with a numeric `used_percent`: `windowMinutes`,
   `resetsAt` (`resets_at` in s or ms, else line time + `resets_in_seconds`), `bucket` = the keyed hash of `limit_id`
   (a server-issued id, never kept raw; absent without one); a snapshot equal to the previous one of its bucket and
-  window in the same rollout is not repeated. Rate limits belong to the account: the event has no session.
+  window in the same rollout is not repeated. Rate limits belong to the account, but the reading names the rollout it
+  came from (`sessionId`), so a session left out of the analysis takes its readings with it.
 - **MarkerEv**: `interrupt` per `turn_aborted`, `detail` by its `reason` — the person's: `interrupted` → `user`,
   `replaced` → `replaced` (new input replaced the turn); the tool's own: `review_ended` → `review-ended`,
   `budget_limited` → `budget-limited`; any other reason, or none → `other`. `denial` per declined item.
   `compact-auto` per `compacted` line.
 - **RolloutFactEv** per fully read rollout: `threadId` = the session id, `uuidTs` = the thread id's UUIDv7 time,
-  `fileTs` = the file name's local time; **FileFactEv** likewise.
+  `fileTs` = the file name's local time; **FileFactEv** likewise, naming its session (`sessionId`).
 - **CoverageEv**: `files`/`bytes` of fully read rollouts, `records` = parsed lines; skipped `sniffed`, `oversize`,
-  `parse`, `io-error`, `duplicate`, `foreign-item`, `exec-interaction`, `bad-record` (also logged once per root as
+  `parse`, `io-error`, `duplicate`, `foreign-item`, `exec-interaction`, `empty-patch` (a patch call — the `apply_patch`
+  tool, or a shell call starting `apply_patch` — with no file section: no edit), `bad-record` (also logged once per root as
   `warn cx.bad-record`), `bad-ts` (a line whose time is well-formed but outside the plausible range, counted once and
   never also `no-ts` for what it holds), `no-ts` (an event whose line gives no time, absent or shapeless; markers and
   command items take the latest earlier one when there is one); drift, beyond unknown types:
@@ -407,7 +413,9 @@ The SQL names only the columns below, validated against `pragma_table_info` firs
   `missing-table:<name>`. Without `threads.id`, `thread_turns.thread_id`/`status` or either edge column that table is
   skipped. Tables are read in rowid pages of 5,000 rows (`WHERE rowid > ? ORDER BY rowid LIMIT ?`). A table that
   cannot be paged — declared `WITHOUT ROWID` (checked in `sqlite_master.sql` before paging), or whose first page fails
-  for any reason but a busy store — is drift `table-unreadable:<name>` and is skipped.
+  for any reason but a busy store — is drift `table-unreadable:<name>` and is skipped. A full page whose last rowid is
+  not a safe integer above the page's start (it could not place the next page) ends that table as drift
+  `page-stalled:<name>`; the rows already read stay.
 - **Ids**: `codex:<thread id>`, the id verbatim when UUID-shaped, else its keyed hash — the same form as the rollouts'
   session ids and `RolloutFactEv.threadId`, so index rows and rollouts join and their sessions merge in the store:
   start = earliest, end = latest, models = the sorted union, a non-human origin wins (subagent > peer > scripted >
@@ -422,7 +430,8 @@ The SQL names only the columns below, validated against `pragma_table_info` firs
 - **SessionEv** (window `lifetime`) per thread with a creation time (else skipped `no-ts`): `start` = created,
   `end` = updated (never before `start`); origin, `surface`, `parentId`, `spawnDepth`, `agentType` from `source` and
   `originator` by the rollouts' rules (`origin.ts`: `exec` → scripted, `mcp` → peer, a subagent source → subagent,
-  `originator` exactly `Claude Code` → peer unless the source is a subagent one, else human). `source` text that starts
+  `originator` exactly `Claude Code` → peer unless the source is a subagent one; a source string the CLI is not known
+  to write → system and drift `threads.source:(other)`; else human). `source` text that starts
   with `{`, `[` or `"` is parsed as JSON; JSON that does not parse, or a source that is neither a string nor a subagent
   object, is drift `threads.source:shape` (surface `other`). `models` = [`model`] (model-id-shaped, else `other`);
   `effort` = `reasoning_effort` by the CLI's levels (`effort.ts`, shared with the rollouts' turns: `none`, `minimal`,
@@ -491,7 +500,7 @@ Tables (CLI program): `[features]`, `[tui]`, `[tui.<k>]`, `[notice.<k>]`, `[plug
   skipped; manifests are never opened.
 - **skill**: one per `skills/<name>/` folder holding a `SKILL.md` (symlinked folders followed; hidden ones skipped,
   among them `.system`, which holds the bundled skills and a `.codex-system-skills.marker`); `firstSeen` = the folder's
-  birth time by stat (links followed; the ctime where the file system records none). Provenance `installed` when
+  birth time by stat (links followed), when the file system records one and it is plausible; never the change time. Provenance `installed` when
   `<home>/.agents/.skill-lock.json` lists the name (only the keys of its `skills` are read), `unknown` when that lock
   exists but cannot be read, else `authored`. The lock is read only when there is at least one skill.
 - **memory-file**: one per `*.md` file directly in `memories/` (the CLI writes `MEMORY.md`, `memory_summary.md`,

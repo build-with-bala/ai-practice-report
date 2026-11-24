@@ -109,6 +109,10 @@ describe("codex rollouts: Task 11 scenario", () => {
     expect(r.store.forSession(r3, "usage")).toHaveLength(1);
     // rate limits belong to the account, not a session: R1's, then R3's own (its copied 40 % is skipped), then R2's
     expect(r.store.all("ratelimit").map((x) => [x.window, x.usedPercent])).toEqual([["primary", 10], ["secondary", 2], ["primary", 11], ["primary", 41], ["primary", 20]]);
+    // each reading, and each file fact, still names the rollout's session (the scope rules treat it like its session)
+    const sessions = new Set(r.store.all("session").map((x) => x.id));
+    for (const x of [...r.store.all("ratelimit"), ...r.store.all("file")]) expect(sessions.has(x.sessionId!)).toBe(true);
+    expect(r.store.forSession(r3, "ratelimit").map((x) => x.usedPercent)).toEqual([41]);
   });
 
   test("turns, usage, rate limits and markers of the cli rollout", async () => {
@@ -244,14 +248,14 @@ describe("codex rollouts: prompts", () => {
     expect(byOrigin("scripted")).toEqual([false, false]);
   });
 
-  test("sources: exec is scripted, mcp is peer, any other string is human, Claude Code as originator is peer whatever the source", async () => {
+  test("sources: exec is scripted, mcp is peer, the CLI's other strings human, an unknown one system and drift; Claude Code as originator is peer whatever the source", async () => {
     const cases: [unknown, string | undefined, string, string][] = [
       ["cli", undefined, "human", "cli"],
       ["vscode", undefined, "human", "vscode"],
       ["mcp", undefined, "peer", "mcp"],
       ["exec", undefined, "scripted", "exec"],
       ["exec", "Claude Code", "peer", "exec"],
-      [CANARY.prompt, undefined, "human", "other"],
+      [CANARY.prompt, undefined, "system", "other"],
       [{ subagent: "review" }, undefined, "subagent", "subagent"],
       [{ subagent: { thread_spawn: { parent_thread_id: "not-a-uuid", depth: 2, agent_role: CANARY.project } } }, undefined, "subagent", "subagent"],
     ];
@@ -265,8 +269,8 @@ describe("codex rollouts: prompts", () => {
     const deep = r.store.session(sidOf(ids[7]!))!;
     expect(deep).toMatchObject({ parentId: sidOf(keyedHash(r.salt, "not-a-uuid")), spawnDepth: 2, agentType: keyedHash(r.salt, CANARY.project) });
     expect(r.store.session(sidOf(ids[6]!))!.parentId).toBeUndefined();
-    expect(r.store.all("prompt").map((p) => p.origin)).toEqual(["human", "human", "peer", "scripted", "peer", "human"]);
-    expect(r.coverage[0]!.unknownTypes).toEqual({});
+    expect(r.store.all("prompt").map((p) => p.origin)).toEqual(["human", "human", "peer", "scripted", "peer", "system"]);
+    expect(r.coverage[0]!.unknownTypes).toEqual({ "session_meta.source:(other)": 1 });
     expectNoCanaries(allEvents(r));
   });
 });
@@ -370,6 +374,18 @@ describe("codex rollouts: tools", () => {
       ["apply_patch", "edit", "kt", 1, 0, undefined],
     ]);
     expect(toolsByTs(r).find((t) => t.editExt === "go")).not.toHaveProperty("linesRemoved");
+  });
+
+  test("a patch call with no file section is no edit, and is counted: skipped empty-patch", async () => {
+    rollout((r) => {
+      r.fn("shell_command", { command: "apply_patch" });
+      r.fn("exec_command", { cmd: "apply_patch '*** Begin Patch\n*** End Patch'" });
+      r.fn("apply_patch", { input: "" });
+      r.fn("exec_command", { cmd: "echo hi" });
+    }).write(h);
+    const r = await run();
+    expect(r.store.all("tool").map((t) => t.name)).toEqual(["exec_command"]);
+    expect(r.coverage.find((c) => c.source === "codex.rollouts")!.skipped["empty-patch"]).toBe(3);
   });
 
   test("a shell call that runs apply_patch, completed by the CLI's file change under the call's id, is one edit per file", async () => {

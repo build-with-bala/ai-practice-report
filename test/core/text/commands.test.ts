@@ -262,3 +262,68 @@ for (const [cmd, category, checks, toolchain] of rows) {
   });
 }
 test("at least 30 rows", () => expect(rows.length).toBeGreaterThanOrEqual(30));
+
+/**
+ * Ordinary check commands the classifier used to read as plain shell: subshells, wrapper flags that take a value, a
+ * shell given its script as one string, runners that run the command after them, and runners it had no row for. Each
+ * row: the command line and the checks it runs (and the toolchain of the first, when the table names one).
+ */
+const ordinary: [string, CheckKind[], Toolchain?][] = [
+  // a subshell's or a group's closing bracket
+  ["(cd web && npm test)", ["test"], "js"], ["(cd x && cargo test)", ["test"], "rust"], ["(cd x && make test)", ["test"], "any"],
+  ["(npm test)", ["test"], "js"], ["(cd x && tsc --noEmit)", ["typecheck"], "js"], ["{ npm test; }", ["test"], "js"],
+  ["cd web && npm test)", ["test"], "js"], ["(cd api && pytest -q)", ["test"], "py"],
+  // wrapper flags that take a value
+  ["npx -p typescript tsc --noEmit", ["typecheck"], "js"], ["npx --package typescript tsc --noEmit", ["typecheck"], "js"],
+  ["python -u -m pytest", ["test"], "py"], ["python -X dev -m pytest", ["test"], "py"], ["python3 -W error -m unittest", ["test"], "py"],
+  ["uv run --with pytest pytest", ["test"], "py"], ["uv run --python 3.12 pytest -q", ["test"], "py"],
+  // a shell given its script as one string
+  ['bash -lc "npm test"', ["test"], "js"], ["bash -c 'cd app && pytest -q'", ["test"], "py"], ['sh -c "make test"', ["test"], "any"],
+  ['zsh -lc "cargo test"', ["test"], "rust"], ["/bin/bash -lc 'npm run lint'", ["lint"], "js"], ['bash -c "tsc --noEmit"', ["typecheck"], "js"],
+  ['bash -o pipefail -c "go test ./..."', ["test"], "go"], ["cd x && bash -c 'bun test'", ["test"], "js"],
+  ['bash -c "sh -c \\"npm test\\""', ["test"], "js"],
+  // runners that run the command after them
+  ["pdm run pytest", ["test"], "py"], ["poetry run pytest", ["test"], "py"], ["hatch run pytest", ["test"], "py"],
+  ["pipenv run pytest", ["test"], "py"], ["bundle exec rspec", ["test"], "ruby"], ["bundle exec rails test", ["test"], "ruby"],
+  ["docker compose exec web npm test", ["test"], "js"], ["docker compose run --rm app pytest", ["test"], "py"],
+  ["docker compose exec -T -e CI=1 web npm test", ["test"], "js"], ["docker-compose run app pytest", ["test"], "py"],
+  ["docker exec -it api go test ./...", ["test"], "go"], ["docker compose exec app php artisan test", ["test"], "php"],
+  // rows of their own
+  ["./mvnw test", ["test"], "jvm"], ["mvnw -q verify", ["test"], "jvm"], ["mvnw.cmd test", ["test"], "jvm"], ["./mvnw package", ["build"], "jvm"],
+  ["./gradlew test", ["test"], "jvm"], ["gradlew build", ["build"], "jvm"],
+  ["python manage.py test", ["test"], "py"], ["python3 manage.py test app", ["test"], "py"],
+  ["rails test", ["test"], "ruby"], ["bin/rails test", ["test"], "ruby"],
+  ["ng test", ["test"], "js"], ["ng build", ["build"], "js"], ["ng lint", ["lint"], "js"],
+  ["cargo nextest run", ["test"], "rust"],
+  // script runners follow the rule `npm run <script>` has
+  ["turbo run test", ["test"], "js"], ["turbo test", ["test"], "js"], ["turbo run lint build", ["lint", "build"], "js"], ["pnpm turbo run lint", ["lint"], "js"],
+  ["npx turbo run build", ["build"], "js"], ["nx test app", ["test"], "js"], ["nx run app:test", ["test"], "js"], ["pnpm nx lint web", ["lint"], "js"],
+  ["just test", ["test"], "any"], ["just lint", ["lint"], "any"], ["task test", ["test"], "any"], ["task build", ["build"], "any"],
+  ["composer run test", ["test"], "php"], ["composer test", ["test"], "php"], ["composer run-script lint", ["lint"], "php"],
+];
+const notChecks = [
+  "just deploy", "task serve", "turbo run dev", "nx serve app", "composer install", "python manage.py runserver", "rails server", "ng serve",
+  "docker compose up", "docker compose exec web sh", "bash -lc 'echo hi'", "python -c \"print('make')\"", "uv run --with pytest python app.py",
+];
+
+test("ordinary check commands are read as the checks they run", () => {
+  const got = ordinary.map(([c]) => { const r = classifyCommand(c); return [c, r.checks, r.toolchain] as const; });
+  expect(got).toEqual(ordinary.map(([c, checks, tc]) => [c, checks, tc] as const));
+  expect(notChecks.map((c) => [c, classifyCommand(c).checks])).toEqual(notChecks.map((c) => [c, []]));
+  expect(classifyCommand("docker compose up").category).toBe("container");
+});
+
+test("a shell's script reads the same given as argv (Codex) and as one string", async () => {
+  const { shellScript } = await import("../../../core/text/commands");
+  expect(shellScript(["bash", "-lc", "npm test"])).toBe("npm test");
+  expect(shellScript(["/bin/zsh", "-c", "make test"])).toBe("make test");
+  expect(shellScript(["bash", "-o", "pipefail", "-c", "go test ./..."])).toBe("go test ./...");
+  expect(shellScript(["pwsh", "-NoProfile", "-Command", "dotnet test"])).toBe("dotnet test");
+  expect(shellScript(["cmd.exe", "/c", "npm test"])).toBe("npm test");
+  expect(shellScript(["bash", "script.sh"])).toBeUndefined();
+  expect(shellScript(["npm", "-c", "test"])).toBeUndefined();
+  for (const argv of [["bash", "-lc", "npm test"], ["sh", "-c", "cd a && pytest -q"]]) {
+    const quoted = `${argv.slice(0, -1).join(" ")} '${argv.at(-1)}'`;
+    expect(classifyCommand(quoted).checks).toEqual(classifyCommand(shellScript(argv)!).checks);
+  }
+});

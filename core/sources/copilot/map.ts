@@ -1,4 +1,4 @@
-import { timeIssue, toEpochMs } from "../../io/time";
+import { plausible, timeIssue, toEpochMs } from "../../io/time";
 import { TASK_GAP_MS } from "../../model/constants";
 import type { Ev, MarkerEv, PromptEv, SessionEv, ToolEv, TurnEv } from "../../model/events";
 import type { CheckKind, Origin, ToolCategory } from "../../model/ids";
@@ -12,6 +12,10 @@ import type { ScanCtx } from "../types";
 import { cpModel, cpSessionId, TOOL } from "./ids";
 
 export const VSCODE_SOURCE = "copilot.vscode";
+
+const MAX_TURN_MS = 86_400_000;
+/** A turn's duration: a finite, non-negative number of ms of at most a day; anything else is ignored. */
+const turnMs = (ms: number | undefined): number | undefined => (ms !== undefined && Number.isFinite(ms) && ms >= 0 && ms <= MAX_TURN_MS ? ms : undefined);
 
 /** Response part kinds VS Code writes (its serializer and response model, 1.138, plus kinds older versions wrote); any other kind is drift. */
 const PART_KINDS: ReadonlySet<string> = new Set([
@@ -317,12 +321,18 @@ class SessionMapper {
     else return undefined;
     const completedAt = state ? toEpochMs(state.completedAt, this.ctx.now) : undefined;
     const started = toEpochMs(r.responseTimestamp, this.ctx.now) ?? ts;
-    const elapsed = num(r.elapsedMs);
-    const total = isObj(r.result) && isObj(r.result.timings) ? num(r.result.timings.totalElapsed) : undefined;
-    let ms = elapsed !== undefined && elapsed >= 0 ? elapsed : total !== undefined && total >= 0 ? total : undefined;
-    if (ms === undefined && completedAt !== undefined && started !== undefined && completedAt >= started) ms = completedAt - started;
-    const at = completedAt ?? (ts !== undefined && ms !== undefined ? ts + ms : ts);
-    if (at === undefined) return undefined;
+    const elapsed = turnMs(num(r.elapsedMs));
+    const total = turnMs(isObj(r.result) && isObj(r.result.timings) ? num(r.result.timings.totalElapsed) : undefined);
+    let ms = elapsed ?? total;
+    if (ms === undefined && completedAt !== undefined && started !== undefined && completedAt >= started) ms = turnMs(completedAt - started);
+    const raw = completedAt ?? (ts !== undefined && ms !== undefined ? ts + ms : ts);
+    if (raw === undefined) return undefined;
+    // a time built from parts goes through the same bound as every parsed time
+    const at = plausible(raw, this.ctx.now);
+    if (at === undefined) {
+      this.tally.skip("bad-ts");
+      return undefined;
+    }
     if (status === "interrupted") {
       const m: MarkerEv = { k: "marker", tool: TOOL, source: VSCODE_SOURCE, ts: completedAt ?? ts ?? at, sessionId: this.id, kind: "interrupt", detail: "user" };
       this.out(m);

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionEv, ToolEv } from "../../../core/model/events";
 import { sid, type Origin, type Window } from "../../../core/model/ids";
-import { EventStore, mergeSession, mergeSessions } from "../../../core/model/store";
+import { EventStore, mergeSessions } from "../../../core/model/store";
 
 const sess = (over: Partial<SessionEv>): SessionEv => ({
   k: "session", tool: "codex", source: "t", id: "x", window: "detail", origin: "human",
@@ -144,7 +144,7 @@ describe("EventStore", () => {
     expect(results[0]).toMatchObject({ source: "codex.rollouts", window: "detail", surface: "cli", version: "2.0.0", projectKey: "pd" });
   });
 
-  test("mergeSessions gives the same session for any order of the reports; mergeSession(a, b) is mergeSessions([a, b])", () => {
+  test("mergeSessions gives the same session for any order of the reports", () => {
     const a = sess({ window: "detail", source: "s.b", origin: "human", start: 20, end: 30, models: ["m2"], surface: "cli" });
     const b = sess({ window: "lifetime", source: "s.a", origin: "peer", start: 10, end: 25, models: ["m1"], approval: "never", surface: "exec" });
     const c = sess({ window: "lifetime", source: "s.a", start: 15, end: 40, models: ["m2", "m0"], approval: "on-request", effort: "high" });
@@ -154,8 +154,20 @@ describe("EventStore", () => {
       k: "session", tool: "codex", id: "x", source: "s.b", window: "detail", origin: "peer", start: 10, end: 40, models: ["m0", "m1", "m2"],
       surface: "cli", approval: "never", effort: "high",
     });
-    expect(mergeSession(a, b)).toEqual(mergeSessions([a, b]));
-    expect(mergeSession(b, a)).toEqual(mergeSessions([a, b]));
+  });
+
+  test("many reports of one session cost one merge: 20,000 reports, then a read, equal mergeSessions of them all", () => {
+    const s = new EventStore();
+    const reports = Array.from({ length: 20_000 }, (_, i) => sess({ id: "one", window: i % 2 ? "lifetime" : "detail", source: `s.${i % 7}`, start: 1_000 + (i * 37) % 5_000, end: 9_000 + i, models: [`m${i % 5}`] }));
+    for (const r of reports) s.add(r);
+    s.add(sess({ id: "two" }));
+    expect(s.all("session")).toHaveLength(2);
+    expect(s.session("one")).toEqual(mergeSessions(reports));
+    expect(s.all("session")[0]).toEqual(mergeSessions(reports));
+    // a report added after a read is merged on the next one
+    const late = sess({ id: "one", window: "lifetime", source: "a.first", start: 1, end: 2, models: ["z"] });
+    s.add(late);
+    expect(s.session("one")).toEqual(mergeSessions([...reports, late]));
   });
 
   test("a merge replaces the session in place: the session list keeps one entry per id, in first-arrival order", () => {

@@ -1,6 +1,7 @@
 import { closeSync, constants, fstatSync, lstatSync, openSync, readdirSync, readFileSync, readSync, statSync, type Stats } from "node:fs";
 import path from "node:path";
 import { NeverOpenedError, noteOpen } from "./observe";
+import { plausible } from "./time";
 import { maybeYield } from "./yield";
 
 export function safeList(dir: string): string[] {
@@ -47,14 +48,16 @@ export function fileState(p: string): FileState {
 }
 
 /**
- * When the file or folder at a path came to be, by stat (links followed; nothing is opened): its birth time, else — on
- * a file system that records none — its ctime, in whole ms. Undefined when nothing is there or it cannot be stat'ed.
+ * When the file or folder at a path came to be, by stat (links followed; nothing is opened): its birth time, in whole
+ * ms, when the file system records one and it is a plausible time (`plausible`, against `now`). Undefined when nothing
+ * is there, it cannot be stat'ed, or there is no such birth time: a change time is never offered in its place (it moves
+ * with every rename, chmod or restore, so it does not say when the file appeared).
  */
-export function bornAt(p: string): number | undefined {
+export function bornAt(p: string, now: number): number | undefined {
   const s = statPath(p);
   if (!("stat" in s)) return undefined; // missing, or not stat-able
-  const ms = s.stat.birthtimeMs > 0 ? s.stat.birthtimeMs : s.stat.ctimeMs;
-  return ms > 0 ? Math.floor(ms) : undefined;
+  const ms = s.stat.birthtimeMs;
+  return ms > 0 ? plausible(Math.floor(ms), now) : undefined;
 }
 
 /**

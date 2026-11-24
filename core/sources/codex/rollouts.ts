@@ -13,7 +13,7 @@ import { streamJsonlFile } from "../common/stream";
 import type { Candidate, ScanCtx } from "../types";
 import { cxEffort } from "./effort";
 import { cxSource, cxThreadId } from "./origin";
-import { cxOutcome, cxToolCalls, type CxOutcome, type CxToolCall } from "./tools";
+import { cxOutcome, cxToolCalls, isPatchCall, type CxOutcome, type CxToolCall } from "./tools";
 import { uuidV7Ms } from "./uuid";
 
 export const ROLLOUTS_SOURCE = "codex.rollouts";
@@ -133,14 +133,26 @@ const QUESTION_REPLY = "send_user_message_question_reply";
  * An input_text part the CLI adds around an attached image: its wrapper tags (`<image name=[Image #1]>`, `</image>`) or a
  * notice that the image was resized.
  */
-const ATTACHMENT_PART = /^\s*(?:<image\b[^>]*>\s*(?:<\/image>)?|<\/image>|<image_resize_notice>[\s\S]*<\/image_resize_notice>)\s*$/;
+const IMAGE_OPEN = /^<image\b[^>]*>/;
+const RESIZE_OPEN = "<image_resize_notice>";
+const RESIZE_CLOSE = "</image_resize_notice>";
+/** Whether a part is only that (spaces around it aside); trimmed first, so no pattern backtracks over a run of spaces. */
+function isAttachmentPart(part: string): boolean {
+  const t = part.trim();
+  if (t === "</image>") return true;
+  if (t.length >= RESIZE_OPEN.length + RESIZE_CLOSE.length && t.startsWith(RESIZE_OPEN) && t.endsWith(RESIZE_CLOSE)) return true;
+  const open = IMAGE_OPEN.exec(t);
+  if (!open) return false;
+  const rest = t.slice(open[0].length).trimStart();
+  return rest === "" || rest === "</image>";
+}
 const RESIZE_NOTICES = /^\s*(?:<image_resize_notice>[\s\S]*?<\/image_resize_notice>\s*)+/;
 
 /**
  * The person's text in a user-role message's content, or undefined when the CLI wrote the message itself. Input text parts
  * are joined with "\n" after dropping attached images' wrapper parts and resize notices; a question reply is unwrapped.
  */
-function promptText(content: unknown): { text: string; images: boolean } | undefined {
+export function promptText(content: unknown): { text: string; images: boolean } | undefined {
   const texts: string[] = [];
   let images = false;
   if (typeof content === "string") texts.push(content);
@@ -148,7 +160,7 @@ function promptText(content: unknown): { text: string; images: boolean } | undef
     for (const c of content) {
       if (!isObj(c)) continue;
       if (c.type === "input_image") images = true;
-      else if (c.type === "input_text" && typeof c.text === "string" && !ATTACHMENT_PART.test(c.text)) texts.push(c.text);
+      else if (c.type === "input_text" && typeof c.text === "string" && !isAttachmentPart(c.text)) texts.push(c.text);
     }
   }
   let text = texts.join("\n").replace(RESIZE_NOTICES, "");
@@ -306,8 +318,9 @@ class RolloutReader {
     if (ts !== undefined) this.tick(ts);
 
     // origin, surface and subagent links, by the rules the thread index reader shares (origin.ts)
-    const { unknownShape, ...driver } = cxSource(p.source, p.originator, this.ctx, p.parent_thread_id);
+    const { unknownShape, unknownValue, ...driver } = cxSource(p.source, p.originator, this.ctx, p.parent_thread_id);
     if (unknownShape) this.tally.unknownKey("session_meta.source:shape");
+    if (unknownValue) this.tally.unknownKey("session_meta.source:(other)");
     const meta: Meta = { ...driver, inRepo: !!p.git };
     const version = str(p.cli_version);
     if (version !== undefined && VERSION.test(version)) {
@@ -422,7 +435,10 @@ class RolloutReader {
     if (id !== undefined && (this.pending.has(id) || this.done.has(id))) return; // the same call again
     if (ts === undefined) return this.noTs();
     const evs = cxToolCalls(p).map((c) => this.toolEv(c, ts, id));
-    if (evs.length === 0) return;
+    if (evs.length === 0) {
+      if (isPatchCall(p)) this.tally.skip("empty-patch"); // a patch with no file section: no edit to count, but counted
+      return;
+    }
     if (id === undefined) {
       for (const ev of evs) this.out(ev);
       return;
@@ -553,7 +569,7 @@ class RolloutReader {
   private rateLimit(bucket: string | undefined, window: "primary" | "secondary", x: unknown, ts: number, emit: boolean): void {
     const used = isObj(x) ? num(x.used_percent) : undefined;
     if (!isObj(x) || used === undefined) return;
-    const ev: RateLimitEv = { k: "ratelimit", tool: TOOL, source: ROLLOUTS_SOURCE, ts, window, usedPercent: used };
+    const ev: RateLimitEv = { k: "ratelimit", tool: TOOL, source: ROLLOUTS_SOURCE, ts, window, usedPercent: used, sessionId: this.sessionId };
     const minutes = num(x.window_minutes);
     if (minutes !== undefined) ev.windowMinutes = minutes;
     const resets = resetTime(x, ts);
@@ -604,7 +620,8 @@ class RolloutReader {
     if (uuidTs !== undefined) fact.uuidTs = uuidTs;
     if (this.fileTs !== undefined) fact.fileTs = this.fileTs;
     this.out(fact);
-    const f: FileFactEv = { k: "file", tool: TOOL, source: ROLLOUTS_SOURCE, pathHash: this.ctx.hash(this.file), bytes: stat.size, mtime: Math.floor(stat.mtimeMs) };
+    const f: FileFactEv = { k: "file", tool: TOOL, source: ROLLOUTS_SOURCE, pathHash: this.ctx.hash(this.file), bytes: stat.size, mtime: Math.floor(stat.mtimeMs),
+      sessionId: this.sessionId };
     if (stat.birthtimeMs > 0) f.birth = Math.floor(stat.birthtimeMs);
     if (stat.ctimeMs > 0) f.ctime = Math.floor(stat.ctimeMs);
     if (this.start !== undefined) f.firstTs = this.start;

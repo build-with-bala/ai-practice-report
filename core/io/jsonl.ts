@@ -41,9 +41,10 @@ export interface GcPacerOptions {
  * since its last collection, above `minRss`, and keeps doing so until a new phase begins: a look that finds RSS at or
  * below `minRss` (memory really handed back), or `newPhase()`, which a scan calls when it starts (`holdStreamGc`). A
  * later collection that does fall does not turn it off within the phase, since a fall can be garbage that filled kept
- * pages unseen, freed again, while RSS still says nothing of live memory. So every scan starts on the adaptive rule and
- * enters the fallback only after a collection of its own did not fall: a scan that stays under `minRss` pays nothing,
- * and one whose RSS falls as it should pays only the adaptive rule's collections, whatever scans ran before it.
+ * pages unseen, freed again, while RSS still says nothing of live memory. A scan starts on the adaptive rule only when
+ * no other scan holds the pacer (`newPhase` runs on the first hold); and a new phase keeps the baseline the phase before
+ * it left, so a long-lived process that scans again and again can grow by up to one `slack` per scan before a
+ * collection of its own does not fall and the fallback starts. A scan that stays under `minRss` pays nothing.
  */
 export class GcPacer {
   /** False: `add` does nothing (no look at the RSS, no collection). */
@@ -116,7 +117,7 @@ export class GcPacer {
 }
 
 const MiB = 1024 * 1024;
-/** The pacer every JSONL stream reports to, process-wide (concurrent readers share one memory budget). */
+/** The pacer every JSONL stream and git's log streams report to, process-wide (concurrent readers share one memory budget). */
 export const STREAM_GC = new GcPacer({ checkEvery: 8 * MiB, minRss: 384 * MiB, slack: 128 * MiB }, () => Bun.gc(true));
 
 /** The holds on STREAM_GC: every one held, and how many of them asked for `auto`. */

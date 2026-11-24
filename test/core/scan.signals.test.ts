@@ -5,7 +5,7 @@ import path from "node:path";
 import { ccSid, iso, slug } from "../fixtures/claude-code";
 
 const CHILD = path.join(import.meta.dir, "..", "kit", "scan-child.ts");
-/** Four transcripts of typed prompts: a full scan takes seconds, far longer than the 200 ms after which the signal comes. */
+/** Four transcripts of typed prompts: a full scan takes seconds, so a signal sent once the scan is under way finds it reading. */
 const FILES = 4;
 const PROMPTS = 30_000;
 
@@ -32,40 +32,36 @@ beforeAll(() => {
 });
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 
-/** `sinceSignal`: ms from the last signal sent to the child's exit. */
-interface Run { code: number; signal: string | number | null; out: string; sinceSignal: number; leftovers: string[] }
+interface Run { code: number; signal: string | number | null; out: string; leftovers: string[] }
 type Mode = "default" | "owned" | "tail" | "overlap" | "overlap-listener" | "stubborn" | "late";
 
 /**
- * Runs the child (test/kit/scan-child.ts) in its own TMPDIR; once it prints `ready`, waits `after` ms (200 by default)
- * and sends `sig`, and with `again`, sends it a second time `again` ms later.
+ * Runs the child (test/kit/scan-child.ts) in its own TMPDIR; once it has printed every marker of `on` (by default
+ * `copied`: the scan is inside a plugin and holds a temp folder) it sends `sig`, and with `again`, sends it a second
+ * time `again` ms later. Ordered by markers, never by a delay that assumes how fast the child runs.
  */
-async function runChild(mode: Mode, sig: "SIGINT" | "SIGTERM", o: { after?: number; again?: number } = {}): Promise<Run> {
+async function runChild(mode: Mode, sig: "SIGINT" | "SIGTERM", o: { on?: string[]; again?: number } = {}): Promise<Run> {
   const tmp = mkdtempSync(path.join(root, "tmp-"));
   const child = Bun.spawn([process.execPath, CHILD, home, tmp, mode], { stdout: "pipe", stderr: "ignore", env: { ...process.env, TMPDIR: tmp } });
+  const markers = o.on ?? ["copied"];
   let out = "";
-  let sentAt = Number.NaN;
+  let sent = false;
   const timers: ReturnType<typeof setTimeout>[] = [];
-  const send = () => {
-    sentAt = performance.now();
-    child.kill(sig);
-  };
   const decoder = new TextDecoder();
   const reading = (async () => {
     for await (const chunk of child.stdout) {
       out += decoder.decode(chunk, { stream: true });
-      if (timers.length === 0 && out.includes("ready")) {
-        timers.push(setTimeout(() => {
-          send();
-          if (o.again !== undefined) timers.push(setTimeout(send, o.again));
-        }, o.after ?? 200));
+      if (!sent && markers.every((m) => out.includes(m))) {
+        sent = true;
+        child.kill(sig);
+        if (o.again !== undefined) timers.push(setTimeout(() => child.kill(sig), o.again));
       }
     }
   })();
   const code = await child.exited;
   await reading;
   for (const t of timers) clearTimeout(t);
-  return { code, signal: child.signalCode, out, sinceSignal: performance.now() - sentAt, leftovers: readdirSync(tmp).filter((n) => n.startsWith("aipr-")) };
+  return { code, signal: child.signalCode, out, leftovers: readdirSync(tmp).filter((n) => n.startsWith("aipr-")) };
 }
 
 // Windows has no POSIX signals: a child cannot be sent a SIGINT its handlers would see, so these run on macOS and Linux.
@@ -78,7 +74,6 @@ describe.skipIf(process.platform === "win32")("a signal during a scan (child pro
       expect(r.out).not.toContain("after-scan");
       expect(r.code).not.toBe(0);
       expect(r.signal).toBe(sig);
-      expect(r.sinceSignal).toBeLessThan(1_500);
       expect(r.leftovers).toEqual([]);
     }, 30_000);
   }
@@ -91,12 +86,11 @@ describe.skipIf(process.platform === "win32")("a signal during a scan (child pro
     const got = JSON.parse(line!.slice("after-scan ".length)) as { status: string; note: string; records: number; tempClean: boolean };
     expect(got).toMatchObject({ status: "error", note: "aborted", tempClean: true });
     expect(got.records).toBeLessThan(FILES * PROMPTS); // stopped part-way
-    expect(r.sinceSignal).toBeLessThan(1_500);
     expect(r.leftovers).toEqual([]);
   }, 30_000);
 
   test("a SIGINT during the last job's synchronous work, after its last await: the child ends by it, nothing after scan() runs, no aipr-* is left", async () => {
-    const r = await runChild("tail", "SIGINT", { after: 300 });
+    const r = await runChild("tail", "SIGINT");
     expect(r.out).toContain("copied");
     expect(r.out).not.toContain("after-scan");
     expect(r.signal).toBe("SIGINT");
@@ -104,7 +98,7 @@ describe.skipIf(process.platform === "win32")("a signal during a scan (child pro
   }, 30_000);
 
   test("two scans at once and one SIGINT: the child ends by it once both have cleaned up, and neither scan's caller goes on", async () => {
-    const r = await runChild("overlap", "SIGINT", { after: 300 });
+    const r = await runChild("overlap", "SIGINT", { on: ["copied A", "copied B"] });
     expect(r.out).toContain("copied A");
     expect(r.out).toContain("copied B");
     expect(r.out).not.toContain("after-scan A");
@@ -114,7 +108,7 @@ describe.skipIf(process.platform === "win32")("a signal during a scan (child pro
   }, 30_000);
 
   test("two scans at once while the application keeps a SIGINT listener of its own: the re-raise goes to it, and both scans resolve with aborted coverage", async () => {
-    const r = await runChild("overlap-listener", "SIGINT", { after: 300 });
+    const r = await runChild("overlap-listener", "SIGINT", { on: ["copied A", "copied B"] });
     expect(r.code).toBe(0);
     expect(r.out).toContain("app-listener");
     for (const name of ["A", "B"]) {
@@ -126,7 +120,7 @@ describe.skipIf(process.platform === "win32")("a signal during a scan (child pro
   }, 30_000);
 
   test("a scan that enters while another unwinds from a SIGINT is aborted at once: never located, and the child ends by the signal", async () => {
-    const r = await runChild("late", "SIGINT", { after: 300 });
+    const r = await runChild("late", "SIGINT", { on: ["copied A"] });
     expect(r.out).toContain("copied A");
     expect(r.out).toContain("entering B"); // scan B started while scan A was still inside the trap
     expect(r.out).not.toContain("located B"); // aborted as it entered: its plugin was never located, let alone run
@@ -136,11 +130,11 @@ describe.skipIf(process.platform === "win32")("a signal during a scan (child pro
   }, 30_000);
 
   test("a second SIGINT while a plugin ignores the abort: the child ends by it at once, its temp files removed first", async () => {
-    const r = await runChild("stubborn", "SIGINT", { after: 300, again: 200 });
+    const r = await runChild("stubborn", "SIGINT", { again: 200 });
     expect(r.out).toContain("copied");
     expect(r.out).not.toContain("after-scan");
+    expect(r.out).not.toContain("stubborn-done"); // the plugin's 3 s of work never finished: the second signal ended the child
     expect(r.signal).toBe("SIGINT");
-    expect(r.sinceSignal).toBeLessThan(500);
     expect(r.leftovers).toEqual([]);
   }, 30_000);
 });

@@ -1,6 +1,6 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import os from "node:os";
-import { detectEnv } from "../../../core/env/env";
+import { fakeHome } from "../../kit/home";
 import { GcPacer, holdStreamGc, STREAM_GC } from "../../../core/io/jsonl";
 import { scan, type ScanOptions } from "../../../core/scan";
 import type { SourcePlugin } from "../../../core/sources/types";
@@ -286,7 +286,9 @@ describe("holdStreamGc", () => {
 });
 
 describe("scan gc option", () => {
-  const env = detectEnv({ home: os.tmpdir(), tmp: os.tmpdir(), platform: "linux", wslHomes: [] });
+  const h = fakeHome("linux");
+  afterAll(() => h.cleanup());
+  const env = h.env;
 
   /** A plugin that records the shared pacer's state when it starts, then waits for `go` before it finishes. */
   function gated(id: string) {

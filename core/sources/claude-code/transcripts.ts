@@ -1,6 +1,6 @@
 import { readdirSync, type Stats } from "node:fs";
 import path from "node:path";
-import { isFile, readJsonSmall, safeStat } from "../../io/fs";
+import { isFile, readJsonSmall, safeStat, statPath } from "../../io/fs";
 import { timeIssue, toEpochMs } from "../../io/time";
 import { TASK_GAP_MS } from "../../model/constants";
 import type { Ev, FileFactEv, MarkerEv, SessionEv, ToolEv, TotalsEv, TurnEv } from "../../model/events";
@@ -289,9 +289,9 @@ class TranscriptReader {
     let p = id === undefined ? undefined : this.messages.get(id);
     if (!p) {
       p = { ts, model, inTok: 0, outTok: 0, cacheR: 0, cacheW: 0, seen: false };
-      if (id?.startsWith("msg_") && id.length > 4) this.out({ k: "anchor", tool: TOOL, source: TRANSCRIPTS_SOURCE, kind: "cc-msg", ts, idTail: id.slice(4) });
+      if (id?.startsWith("msg_") && id.length > 4) this.out({ k: "anchor", tool: TOOL, source: TRANSCRIPTS_SOURCE, kind: "cc-msg", ts, idTail: id.slice(4), sessionId: this.spec.sessionId });
       const req = str(v.requestId);
-      if (req?.startsWith("req_") && req.length > 4) this.out({ k: "anchor", tool: TOOL, source: TRANSCRIPTS_SOURCE, kind: "cc-req", ts, idTail: req.slice(4) });
+      if (req?.startsWith("req_") && req.length > 4) this.out({ k: "anchor", tool: TOOL, source: TRANSCRIPTS_SOURCE, kind: "cc-req", ts, idTail: req.slice(4), sessionId: this.spec.sessionId });
       if (id !== undefined) {
         this.messages.set(id, p);
         if (this.messages.size > MESSAGE_WINDOW) {
@@ -324,7 +324,7 @@ class TranscriptReader {
     if (ts === undefined) return this.noTs();
     const { category, checks, editExt, toolchain } = ccToolCategory(name, b.input);
     const ev: ToolEv = {
-      k: "tool", tool: TOOL, source: TRANSCRIPTS_SOURCE, ts, sessionId: this.spec.sessionId, callId: id,
+      k: "tool", tool: TOOL, source: TRANSCRIPTS_SOURCE, ts, sessionId: this.spec.sessionId, callId: this.ctx.hash(id),
       name: category === "mcp" ? "mcp" : CC_BUILTIN_TOOLS.has(name) ? name : "other", category,
     };
     if (checks.length > 0) ev.checks = checks;
@@ -475,7 +475,8 @@ class TranscriptReader {
       this.tally.span(this.end);
     }
     if (stat) {
-      const f: FileFactEv = { k: "file", tool: TOOL, source: TRANSCRIPTS_SOURCE, pathHash: this.ctx.hash(this.spec.file), bytes: stat.size, mtime: Math.floor(stat.mtimeMs) };
+      const f: FileFactEv = { k: "file", tool: TOOL, source: TRANSCRIPTS_SOURCE, pathHash: this.ctx.hash(this.spec.file), bytes: stat.size,
+        mtime: Math.floor(stat.mtimeMs), sessionId: this.spec.sessionId };
       if (stat.birthtimeMs > 0) f.birth = Math.floor(stat.birthtimeMs);
       if (stat.ctimeMs > 0) f.ctime = Math.floor(stat.ctimeMs);
       if (this.start !== undefined) f.firstTs = this.start;
@@ -580,6 +581,25 @@ function retentionDays(root: string): number {
   return days !== undefined && days >= 0 ? days : DEFAULT_RETENTION_DAYS;
 }
 
+/**
+ * The top-level transcript to read of each session id found in more than one project folder: the one modified last
+ * (tie: the larger, then the first by path). A session is one conversation however many folders hold its file (a copy,
+ * a link), so the others are skipped `duplicate`, each once, with the session folder beside them.
+ */
+function chooseCopies(found: ReadonlyMap<string, string[]>): Map<string, string> {
+  const chosen = new Map<string, string>();
+  for (const [stem, dirs] of found) {
+    if (dirs.length < 2) continue;
+    const rank = dirs.map((dir) => {
+      const st = statPath(path.join(dir, `${stem}.jsonl`));
+      return { dir, mtime: "stat" in st ? st.stat.mtimeMs : -Infinity, size: "stat" in st ? st.stat.size : -1 };
+    });
+    rank.sort((a, b) => b.mtime - a.mtime || b.size - a.size || (a.dir < b.dir ? -1 : a.dir > b.dir ? 1 : 0));
+    chosen.set(stem, rank[0]!.dir);
+  }
+  return chosen;
+}
+
 /** Scan one Claude Code root (`$CLAUDE_CONFIG_DIR` or `~/.claude`); emits exactly one CoverageEv, last. */
 export async function scanTranscripts(c: Candidate, ctx: ScanCtx): Promise<void> {
   const tally = new CcTally();
@@ -591,19 +611,36 @@ export async function scanTranscripts(c: Candidate, ctx: ScanCtx): Promise<void>
     const code = (e as { code?: string }).code;
     if (code !== "ENOENT" && code !== "ENOTDIR") throw e; // an unreadable projects folder makes the source meaningless
   }
+  const folders: { projDir: string; sessions: string[] }[] = [];
+  const topLevel = new Map<string, string[]>(); // session stem → the project folders holding its top-level transcript
   for (const name of names) {
-    if (ctx.signal.aborted) break;
     const projDir = path.join(projects, name);
     if (!safeStat(projDir)?.isDirectory()) continue;
     const sessions = new Set<string>();
     for (const entry of listDir(projDir, tally)) {
       const p = path.join(projDir, entry);
       // a transcript is listed as it is read (`<stem>.jsonl` by name, links followed), so a linked one counts as the file it points to
-      if (entry.endsWith(".jsonl") && isFile(p)) sessions.add(entry.slice(0, -6));
-      else if (safeStat(p)?.isDirectory()) sessions.add(entry);
+      if (entry.endsWith(".jsonl") && isFile(p)) {
+        const stem = entry.slice(0, -6);
+        sessions.add(stem);
+        const dirs = topLevel.get(stem);
+        if (dirs) dirs.push(projDir);
+        else topLevel.set(stem, [projDir]);
+      } else if (safeStat(p)?.isDirectory()) sessions.add(entry);
     }
-    for (const stem of [...sessions].sort()) {
+    folders.push({ projDir, sessions: [...sessions].sort() });
+  }
+  const chosen = chooseCopies(topLevel);
+  for (const { projDir, sessions } of folders) {
+    if (ctx.signal.aborted) break;
+    for (const stem of sessions) {
       if (ctx.signal.aborted) break;
+      const keep = chosen.get(stem);
+      if (keep !== undefined && keep !== projDir) {
+        // another folder's copy of this session is read; a session folder here with no transcript beside it is no copy to count
+        if (topLevel.get(stem)!.includes(projDir)) tally.skip("duplicate");
+        continue;
+      }
       await scanSession(projDir, stem, ctx, tally);
     }
   }

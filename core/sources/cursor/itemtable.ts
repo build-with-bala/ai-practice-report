@@ -24,44 +24,51 @@ const dec = new TextDecoder();
 
 /**
  * The legacy keys of the stores of one Cursor user folder (the global store, then each workspace store): sessions
- * from the composer index and the chat tabs, timed prompts from the generation list. A generation seen in an earlier
- * store (by `generationUUID`) counts once.
+ * from the composer index and the chat tabs (the detail tally), timed prompts from the generation list. The generation
+ * list links no session, so it is a prompt log, like Claude Code's history file: its prompts are lifetime prompts and
+ * are counted in the lifetime tally (`life`). A generation seen in an earlier store (by `generationUUID`) counts once.
  */
 export class LegacyKeys {
   private readonly generations = new Set<string>();
 
-  constructor(private readonly ctx: ScanCtx, private readonly tally: Tally) {}
+  constructor(private readonly ctx: ScanCtx, private readonly tally: Tally, private readonly life: Tally) {}
 
   read(db: RoDb, tables: ReadonlySet<string>): void {
     if (!tables.has("ItemTable")) return;
     const have = new Set(db.columns("ItemTable"));
     for (const c of ["key", "value"]) if (!have.has(c)) this.tally.unknownKey(`missing-column:${c}`);
     if (!have.has("key") || !have.has("value")) return;
-    // the prompt list has no times (and repeats what the generations hold): its presence only
-    if (db.get(PRESENCE_SQL, "aiService.prompts") !== undefined) this.tally.records++;
+    // the prompt list has no times (and repeats what the generations hold): its presence only, in the prompt log's window
+    if (db.get(PRESENCE_SQL, "aiService.prompts") !== undefined) this.life.records++;
     for (const key of LEGACY_KEYS) {
       if (key === "aiService.prompts" || this.ctx.signal.aborted) continue;
-      const row = this.row(db, key);
+      const tally = this.tallyOf(key);
+      const row = this.row(db, key, tally);
       if (row === undefined) continue;
       // a value read is one record; the generation list's records are its entries, one per request, so that a blank
       // entry (skipped `empty`) is counted in the same units as `records`
-      this.tally.records += key === "aiService.generations" && Array.isArray(row.value) ? row.value.length : 1;
+      tally.records += key === "aiService.generations" && Array.isArray(row.value) ? row.value.length : 1;
       if (row.value !== undefined) this.map(key, row.value);
     }
   }
 
+  /** The tally a key's records count in: the generation list is the lifetime prompt log, the rest are detail sessions. */
+  private tallyOf(key: LegacyKey): Tally {
+    return key === "aiService.generations" ? this.life : this.tally;
+  }
+
   /**
    * The row of `key`, undefined when absent; its `value` is the parsed JSON, undefined when too large or not JSON (both
-   * counted).
+   * counted in `tally`).
    */
-  private row(db: RoDb, key: LegacyKey): { value: unknown } | undefined {
+  private row(db: RoDb, key: LegacyKey, tally: Tally): { value: unknown } | undefined {
     const got = db.get<{ n: unknown; value: unknown }>(VALUE_SQL, VALUE_MAX, key);
     if (got === undefined) return undefined;
     const raw = got.value;
     if (raw === null || raw === undefined) {
       if (typeof got.n === "number" && got.n > VALUE_MAX) {
-        this.tally.note = "too-large";
-        this.tally.skip("too-large");
+        tally.note = "too-large";
+        tally.skip("too-large");
       }
       return { value: undefined };
     }
@@ -73,12 +80,12 @@ export class LegacyKeys {
         /* counted below */
       }
     }
-    this.tally.skip("parse");
+    tally.skip("parse");
     return { value: undefined };
   }
 
   private map(key: LegacyKey, v: unknown): void {
-    if (key === "aiService.generations") return Array.isArray(v) ? this.prompts(v) : this.tally.unknownKey(`${key}:shape`);
+    if (key === "aiService.generations") return Array.isArray(v) ? this.prompts(v) : this.life.unknownKey(`${key}:shape`);
     if (key === "composer.composerData") {
       const heads = Array.isArray(v) ? v : isObj(v) && Array.isArray(v.allComposers) ? v.allComposers : undefined;
       return heads === undefined ? this.tally.unknownKey(`${key}:shape`) : this.heads(heads);
@@ -92,7 +99,8 @@ export class LegacyKeys {
 
   /**
    * `aiService.generations`: one entry per request the person made ({`unixMs`, `generationUUID`, `type`,
-   * `textDescription`, or `text` in some versions}) → a PromptEv (no session: the list does not link one), in time order.
+   * `textDescription`, or `text` in some versions}) → a lifetime PromptEv (no session: the list does not link one), in
+   * time order.
    * An entry with neither text field is drift `missing-field:text` (a renamed field, as for a bubble); one whose text is
    * blank is skipped `empty`.
    */
@@ -100,27 +108,27 @@ export class LegacyKeys {
     const timed: { ts: number; text: string; id?: string }[] = [];
     for (const e of list) {
       if (!isObj(e)) {
-        this.tally.skip("bad-record");
+        this.life.skip("bad-record");
         continue;
       }
       const id = str(e.generationUUID);
       if (id !== undefined && this.generations.has(id)) {
-        this.tally.skip("duplicate");
+        this.life.skip("duplicate");
         continue;
       }
       const ts = toEpochMs(e.unixMs, this.ctx.now);
       if (ts === undefined) {
-        this.tally.skip("no-ts");
+        this.life.noTime(e.unixMs);
         continue;
       }
       const texts = [e.textDescription, e.text].filter((x): x is string => typeof x === "string");
       if (texts.length === 0) {
-        this.tally.unknownKey("missing-field:text");
+        this.life.unknownKey("missing-field:text");
         continue;
       }
       const text = texts.find((x) => x.trim() !== "");
       if (text === undefined) {
-        this.tally.skip("empty");
+        this.life.skip("empty");
         continue;
       }
       if (id !== undefined) this.generations.add(id);
@@ -131,11 +139,11 @@ export class LegacyKeys {
     for (const g of timed) {
       const isTaskStart = prev === undefined || g.ts - prev.ts >= TASK_GAP_MS;
       const ev: PromptEv = {
-        k: "prompt", tool: TOOL, source: IDE_SOURCE, ts: g.ts, window: "detail", origin: "human", intent: classifyIntent(g.text),
+        k: "prompt", tool: TOOL, source: IDE_SOURCE, ts: g.ts, window: "lifetime", origin: "human", intent: classifyIntent(g.text),
         features: promptFeatures(g.text, { isTaskStart, prevText: prev?.text }), textHash: this.ctx.hash(g.text.trim()),
       };
       this.ctx.emit(ev);
-      this.tally.span(g.ts);
+      this.life.span(g.ts);
       prev = g;
     }
   }

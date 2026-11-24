@@ -51,9 +51,8 @@ export interface ScanOptions { env?: Env; plugins?: SourcePlugin[]; tools?: Tool
    * it is on if any of them asked for `auto`, and off only while all of them asked for `off`; when the last ends it is
    * restored as it was before (`holdStreamGc`). When its reading is over, a scan collects once more when the pacer is on
    * and RSS is above its floor (`GcPacer.settle`), so the caller's analysis reuses the pages the scan's garbage holds.
-   * Every scan logs `scan.gc` (debug) once, with the number of collections
-   * the pacer ran during the scan's lifetime. The pacer is process-wide, so that count includes collections caused by
-   * an overlapping scan's reading.
+   * Every scan logs `scan.gc` (debug) once, with the number of collections the pacer ran during the scan's lifetime.
+   * The pacer is process-wide, so that count includes collections caused by an overlapping scan's reading.
    */
   gc?: "auto" | "off";
   /** @internal test hook: builds the temp registry inside the scan's temp folder, when a private copy first needs one. */
@@ -92,6 +91,12 @@ const WINDOWED: ReadonlySet<string> = new Set(["session", "prompt", "turn"]);
 const yieldKey = (k: string, window: string): string => (WINDOWED.has(k) ? `${k}@${window}` : k);
 /** The records of a coverage that should have yielded events: all those read, but for the ones skipped on purpose. */
 const yielding = (c: CoverageEv): number => c.records - INERT_SKIPS.reduce((n, r) => n + (c.skipped[r] ?? 0), 0);
+/**
+ * Lines a stream found but could not use (`parse`, `oversize`): not records, yet a file made only of them is a format the
+ * reader no longer reads, never a quiet store.
+ */
+const UNUSABLE_SKIPS: readonly string[] = ["parse", "oversize"];
+const unusable = (c: CoverageEv): number => (c.files > 0 ? UNUSABLE_SKIPS.reduce((n, r) => n + (c.skipped[r] ?? 0), 0) : 0);
 
 /** Coverage the orchestrator writes for a plugin (absent, error, aborted): one per window the plugin reports. */
 function emptyCoverage(p: SourcePlugin, status: CoverageEv["status"], note?: string): CoverageEv[] {
@@ -165,9 +170,11 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
           // a coverage written after the abort may describe a source read only in part, so it never looks complete: the
           // abort stamp alone decides it
           if (signal.aborted) Object.assign(cov, { status: "error", note: "aborted" });
-          // records read, but none of the window's primary kinds yielded: the format moved under the reader. Records read
-          // on purpose that yield nothing (INERT_SKIPS) do not count.
-          else if (kinds && (cov.status === "ok" || cov.status === "drift") && yielding(cov) > 0 && !kinds.some((k) => (yielded.get(yieldKey(k, cov.window)) ?? 0) > 0)) {
+          // records read, or lines in files found that could not be used, but none of the window's primary kinds yielded:
+          // the format moved under the reader. Records read on purpose that yield nothing (INERT_SKIPS) do not count; files
+          // with no lines at all stay empty.
+          else if (kinds && (cov.status === "ok" || cov.status === "drift" || cov.status === "empty") && yielding(cov) + unusable(cov) > 0
+            && !kinds.some((k) => (yielded.get(yieldKey(k, cov.window)) ?? 0) > 0)) {
             cov.status = "drift";
             cov.unknownTypes = { ...cov.unknownTypes, "zero-yield": 1 };
           }
@@ -219,15 +226,25 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
       repos = await repoPass(store, cwds, { salt, now, signal, options, onProgress: opts.onProgress });
     }
   } finally {
-    // the reading is over: one collection, while the scan's own pacer state still holds, so the caller's analysis
-    // reuses the pages the scan's garbage holds
-    STREAM_GC.settle();
-    releaseGc();
-    try { opts.onLog?.("debug", "scan.gc", STREAM_GC.collections - collectionsBefore); } catch { /* never fails a scan */ }
-    tempClean = temp.close();
-    // cleaned up: a trapped SIGINT/SIGTERM, one caught at the tail included, now ends the process by that signal once
-    // every scan inside the trap has cleaned up, so nothing after scan() runs
-    await trap?.leave();
+    // nested, so the temp folder is removed and the trap is left whatever a step before them throws
+    try {
+      try {
+        // the reading is over: one collection, while the scan's own pacer state still holds, so the caller's analysis
+        // reuses the pages the scan's garbage holds
+        STREAM_GC.settle();
+      } finally {
+        releaseGc();
+      }
+      try { opts.onLog?.("debug", "scan.gc", STREAM_GC.collections - collectionsBefore); } catch { /* never fails a scan */ }
+    } finally {
+      try {
+        tempClean = temp.close();
+      } finally {
+        // cleaned up: a trapped SIGINT/SIGTERM, one caught at the tail included, now ends the process by that signal
+        // once every scan inside the trap has cleaned up, so nothing after scan() runs
+        await trap?.leave();
+      }
+    }
   }
 
   // one drift and one too-large warning per source, whatever the number of its windows; drift a store's two windows
