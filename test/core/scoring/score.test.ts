@@ -259,6 +259,7 @@ describe("degenerate input (Review Focus 2)", () => {
     expect(Number.isFinite(hi.z!)).toBe(true);
     const lo = dim(scoreDimensions(signalsAt("p50", { stickyMean: metric(-1e308) }), ref), "leverage");
     expect(lo.components[0]!.z).toBe(-3);
+    expect(lo.score).toBe(5);
     const big = 1e300;
     const ev = evidence(1, 6, { typedTurns: big, sessions: big, days: big, episodes: big, editTurns: big, followUps: big,
       tierEpisodes: big, editEpisodesInRepo: big, repos: big });

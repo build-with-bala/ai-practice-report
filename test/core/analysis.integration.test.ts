@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import path from "node:path";
 import { analyze, type Analysis } from "../../core/analyze";
-import { buildSessionTable, childType, exportPayload, isAction, modelExportId, registry, scan } from "../../core/index";
+import { buildSessionTable, childType, detectEnv, exportPayload, isAction, modelExportId, registry, scan, type Env } from "../../core/index";
 import { CcTranscript, ccSid, fixtureStart, slug } from "../fixtures/claude-code";
 import { metricMetaProblems } from "../../scripts/smoke-local";
 import { makeRepo } from "../fixtures/repos";
@@ -149,7 +149,9 @@ describe("analysis integration: scan → analyze → export, end to end", () => 
     expect(impurities(off)).toEqual([]);
   }, WHOLE_RUN_MS);
 
-  test("the value exports Plans 4 and 5b import through core/index are functions (P5 pre-flight J5)", () => {
-    expect([buildSessionTable, isAction, childType, modelExportId].map((f) => typeof f)).toEqual(["function", "function", "function", "function"]);
+  test("the value exports the reading apps import through core/index are functions", () => {
+    expect([buildSessionTable, isAction, childType, modelExportId, detectEnv].map((f) => typeof f)).toEqual(["function", "function", "function", "function", "function"]);
+    const env: Env = detectEnv({ home: "/home/dev" }); // a public option (ScanOptions.env) takes an Env
+    expect(env.home).toBe("/home/dev");
   });
 });

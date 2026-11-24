@@ -10,9 +10,9 @@ import { DAY, HOUR, MID, NOW, scanOf, T0, TABLE, world, type Tagged } from "./wo
 
 /*
  * Every check and soft flag reads in-scope data only. Excluding a slice of the world must give, check by check, what
- * the same world without that slice gives: the excluded data reaches no check. Sessionless events (anchors, file facts,
- * thread rows, usage-limit readings, history prompts without a session) cannot be tied to a project, so a project
- * exclusion leaves them in.
+ * the same world without that slice gives: the excluded data reaches no check. Events that name a session (anchors,
+ * file facts and usage-limit readings among them) follow that session; sessionless ones (and per-day totals) cannot
+ * be tied to a project, so a project exclusion leaves them in.
  */
 
 const run = (raw: ScanResult, exclude?: Exclusions): Forensics => {
@@ -32,8 +32,9 @@ const CASES: Case[] = [
   { name: "an excluded tool (Claude Code)", exclude: { tools: ["claude-code"] }, drop: (x) => x.tool === "claude-code" || x.case === "host",
     changes: ["C1", "C2", "C3", "C4", "C5", "C9", "C10", "soft:rhythm", "soft:repeated-long", "soft:recent-burst", "soft:unclosed-tools", "soft:new-config"] },
   { name: "an excluded project", exclude: { projects: ["kB"] }, drop: (x) => x.project === "B",
-    // the history keeps its sessionless echoes of project B's prompts, so B's days stay active: recent-burst stays
-    changes: ["C3", "C4", "C6", "C7", "C9", "C10", "soft:rhythm", "soft:repeated-long", "soft:unclosed-tools", "soft:new-config"] },
+    // the history keeps its sessionless echoes of project B's prompts, so B's days stay active: recent-burst stays; the
+    // server ids, trace files and usage-limit readings that name B's sessions go with them
+    changes: ["C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "soft:rhythm", "soft:repeated-long", "soft:unclosed-tools", "soft:new-config"] },
   { name: "a date range from the middle", exclude: { from: MID }, drop: (x) => x.period === 0,
     changes: ["C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "soft:rhythm", "soft:repeated-long", "soft:recent-burst", "soft:unclosed-tools"] },
   { name: "a date range up to the middle", exclude: { to: MID }, drop: (x) => x.period === 1,
@@ -86,10 +87,11 @@ describe("forensics over in-scope data only", () => {
     expect(Object.keys(byId(full, "C10").values).some((k) => k.startsWith("copilot/"))).toBe(false);
   });
 
-  test("orphans: tool calls, detail prompts and session accounts are out; lifetime prompts, rollouts and thread rows stay", () => {
+  test("orphans: tool calls, detail prompts, session accounts, ids, file facts and limit readings are out; lifetime prompts, rollouts and thread rows stay", () => {
     const bare = run(scanOf(all.filter((x) => x.case !== "orphan")));
-    for (const id of ["C4", "soft:unclosed-tools"] as const) expect([id, byId(full, id)]).toEqual([id, byId(bare, id)]);
-    expect(byId(full, "C10").n - byId(bare, "C10").n).toBe(1);
+    for (const id of ["C1", "C2", "C4", "C5", "C8", "soft:unclosed-tools"] as const) expect([id, byId(full, id)]).toEqual([id, byId(bare, id)]);
+    const counted = (f: Forensics) => Object.values(byId(f, "C10").values).reduce<number>((x, v) => x + (v as number), 0);
+    expect(counted(full) - counted(bare)).toBe(1);
     expect(byId(full, "C10").values["claude-code/human/lifetime"]! - byId(bare, "C10").values["claude-code/human/lifetime"]!).toBe(1);
     expect([byId(full, "C6").values.rollouts! - byId(bare, "C6").values.rollouts!, byId(full, "C6").values.missing]).toEqual([1, byId(bare, "C6").values.missing]);
     expect(byId(full, "C7").n - byId(bare, "C7").n).toBe(1);
@@ -112,6 +114,7 @@ describe("C6 under a project exclusion", () => {
     const withoutB = scanResultOf(evs.filter((e) => !("threadId" in e && e.threadId === "codex:b") && !(e.k === "session" && e.id === "codex:b")), { finishedAt: NOW });
     const excluded = byId(run(withB, { projects: ["kB"] }), "C6");
     expect(excluded).toEqual(byId(run(withoutB), "C6"));
-    expect([excluded.status, excluded.n, excluded.values.beforeIndex]).toEqual(["pass", 1, 1]);
+    // one rollout checked, none missing: too few for a pass
+    expect([excluded.status, excluded.reason, excluded.n, excluded.values.beforeIndex]).toEqual(["n/a", "too-few", 1, 1]);
   });
 });

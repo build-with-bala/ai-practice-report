@@ -10,6 +10,8 @@ import { detectEnv, type Env } from "../core/env/env";
 import { homesToScan } from "../core/env/paths";
 import { analyze, ExportError, exportPayload, registry, scan, type Analysis, type CoverageEv, type ScanResult } from "../core/index";
 import { safeList, walk } from "../core/io/fs";
+import { CHECK_IDS, FORENSIC_BANDS, PAYLOAD_WORDS } from "../core/privacy/schema";
+import { DIMENSION_IDS } from "../core/scoring/dimensions";
 import { ccTranscripts } from "../core/sources/claude-code";
 import { SHELL_TOOLS } from "../core/sources/codex/tools";
 
@@ -19,11 +21,13 @@ const BUDGET_RSS = 1024 * MiB;
 const MIN_EXTRACTED_SHARE = 0.9;
 /** The export's size bound, in bytes (pre-flight P19). */
 const MAX_EXPORT_BYTES = 300_000;
-/** The dimensions an analysis scores (spec §6.5). */
-const DIMENSIONS = 7;
-const BANDS: ReadonlySet<string> = new Set(["consistent", "consistent-with-notes", "inconsistent", "unverifiable"]);
-/** The forensic checks that always run, C1–C10 (the soft flags follow them). */
-const FORENSIC_CHECKS = ["C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10"];
+/** The dimensions an analysis scores, the integrity bands and the checks every analysis runs: core's own lists. */
+const DIMENSIONS = DIMENSION_IDS.length;
+const BANDS: ReadonlySet<string> = new Set(FORENSIC_BANDS);
+/** A scan with at least this many detail-window sessions with typed turns must score some dimension. */
+const MIN_SESSIONS_TO_SCORE = 20;
+/** A folder name shorter than this is too common a word to search the export for. */
+const MIN_FOLDER_NAME = 5;
 /** The first day of VS Code's journal format for chat sessions, as the spec's acceptance check names it. */
 const COPILOT_JOURNAL_SINCE = Date.UTC(2026, 1, 23);
 const DAY_MS = 86_400_000;
@@ -194,11 +198,54 @@ function rawPaths(r: ScanResult, home: string): string[] {
   return [...out];
 }
 
+/** The last segment of a path, lower-cased (either separator). */
+const lastSegment = (p: string): string => (p.replaceAll("\\", "/").replace(/\/+$/, "").split("/").at(-1) ?? "").toLowerCase();
+
+/**
+ * The shapes of the payload's own data strings (a month, an ISO week, a day, a project label, a keyed hash, a version,
+ * an MCP "custom #n" label): such a string is the payload's, whatever it contains.
+ */
+const DATA_SHAPES = [/^\d{4}-\d{2}$/, /^\d{4}-w\d{2}$/, /^\d{4}-\d{2}-\d{2}$/, /^p-[0-9a-f]{4,16}$/, /^[0-9a-f]{16}$/, /^\d+\.\d+\.\d+(?:[-+][0-9a-z.+-]+)?$/,
+  /^custom #\d+$/];
+
+/**
+ * The strings of an export text (its JSON string literals, keys included, lower-cased) that are neither a payload
+ * word (`PAYLOAD_WORDS`) nor in a data shape the payload declares: the only places a folder name could hide.
+ */
+function exportStrings(json: string): string[] {
+  const out: string[] = [];
+  for (const m of json.matchAll(/"((?:[^"\\]|\\.)*)"/g)) {
+    let s: string;
+    try { s = (JSON.parse(`"${m[1]}"`) as string).toLowerCase(); } catch { s = m[1]!.toLowerCase(); }
+    if (!PAYLOAD_WORDS.has(s) && !DATA_SHAPES.some((re) => re.test(s))) out.push(s);
+  }
+  return out;
+}
+
+/**
+ * The folder names an export must never hold: the last segment of each session folder and each repo root, lower-cased,
+ * of at least 5 characters and not a word the payload may hold by its schema (`PAYLOAD_WORDS`: "prompts", "github",
+ * "claude-code" never count).
+ */
+function folderNames(r: ScanResult): string[] {
+  const out = new Set<string>();
+  for (const p of [...r.cwds.values(), ...r.repos.roots.values()]) {
+    const name = lastSegment(p);
+    if (name.length >= MIN_FOLDER_NAME && !PAYLOAD_WORDS.has(name)) out.add(name);
+  }
+  return [...out];
+}
+
 const passFail = (ok: boolean): string => (ok ? "PASS" : "FAIL");
 
 /**
- * The analysis checks (Task 16), as lines of counts and PASS/FAIL, and the names of those that failed. A refused export
- * prints the count of the paths it named and fails both export checks.
+ * The analysis checks, as lines of counts and PASS/FAIL, and the names of those that failed. Each fails on a broken
+ * engine: `dimensions-scored` when nothing is scored although the scan holds 20 or more detail sessions with typed
+ * turns; `not-saturated` when a scored dimension lies outside 1 to 99, a 99 lacks the open-tail mark, or every scored
+ * dimension sits at 1 or 99; `export-no-raw-paths` when the export holds the home, a session folder or a repo root, or
+ * the name of one (its last segment, `folderNames`; `export-folder-names` prints how many); `forensics-ran` when the
+ * band is unknown, a check (soft flags included) is missing, or every check is n/a while Claude Code or Codex data is
+ * in scope. A refused export prints the count of the paths it named and fails both export checks.
  */
 export function analysisLines(r: ScanResult, a: Analysis, exported: Exported, home: string): { lines: string[]; failures: string[] } {
   const lines: string[] = [];
@@ -210,17 +257,30 @@ export function analysisLines(r: ScanResult, a: Analysis, exported: Exported, ho
   const scored = a.dimensions.filter((d) => d.status === "scored");
   lines.push(`dimensions scored=${scored.length}/${DIMENSIONS}`);
   if (a.dimensions.length !== DIMENSIONS) failures.push("dimension count");
-  // a score is clamped to [1, 99], and every displayed 99 carries the open-tail mark
-  check("not-saturated", a.dimensions.every((d) => d.score === null || (d.score <= 99 && (d.score < 99 || d.openTail))));
+  // a scan with enough typed sessions must score something
+  const typed = new Set<string>();
+  for (const p of r.store.all("prompt")) if (p.window === "detail" && p.origin === "human" && p.sessionId !== undefined) typed.add(p.sessionId);
+  check("dimensions-scored", scored.length > 0 || typed.size < MIN_SESSIONS_TO_SCORE);
+  // a score lies in [1, 99], every displayed 99 carries the open-tail mark, and the scored ones do not all sit at an edge
+  const inRange = (d: Analysis["dimensions"][number]): boolean => d.score !== null && Number.isInteger(d.score) && d.score >= 1 && d.score <= 99;
+  const atEdge = (d: Analysis["dimensions"][number]): boolean => d.score === 1 || d.score === 99;
+  check("not-saturated", scored.every(inRange) && !(scored.length > 0 && scored.every(atEdge))
+    && a.dimensions.every((d) => d.score === null || (d.score <= 99 && (d.score < 99 || d.openTail))));
   const m = metricMetaProblems(a);
   check("metrics-have-window-and-n", m.metrics > 0 && m.bad.length === 0);
   if (!exported.ok) lines.push(`export-violations=${exported.violations}`);
   const needles = rawPaths(r, home);
   const haystack = exported.ok ? exported.json.toLowerCase() : "";
-  check("export-no-raw-paths", exported.ok && !needles.some((p) => haystack.includes(p)));
+  const strings = exported.ok ? exportStrings(exported.json) : [];
+  const names = folderNames(r).filter((n) => strings.some((x) => x.includes(n))).length;
+  lines.push(`export-folder-names=${names}`);
+  check("export-no-raw-paths", exported.ok && !needles.some((p) => haystack.includes(p)) && names === 0);
   check("export-under-300kb", exported.ok && exported.bytes <= MAX_EXPORT_BYTES);
+  // every check ran (the soft flags too), and with Claude Code or Codex data in scope at least one check applied
   const ids = new Set<string>(a.forensics.checks.map((c) => c.id));
-  check("forensics-ran", BANDS.has(a.forensics.band) && FORENSIC_CHECKS.every((id) => ids.has(id)));
+  const anchored = a.coverage.rows.some((row) => (row.tool === "claude-code" || row.tool === "codex") && row.sessions + row.prompts > 0);
+  const allNa = a.forensics.checks.every((c) => c.status === "n/a");
+  check("forensics-ran", BANDS.has(a.forensics.band) && CHECK_IDS.every((id) => ids.has(id)) && !(anchored && allNa));
   lines.push(`repo-signals=${code(r.repos.status)} repos=${r.repos.repos.length}`);
   return { lines, failures };
 }

@@ -3,6 +3,9 @@ import pkg from "../package.json" with { type: "json" };
 export const VERSION: string = pkg.version;
 export { scan } from "./scan";
 export type { ScanOptions, ScanResult, Warning } from "./scan";
+// ScanOptions.env takes an Env: the machine's, or one built from overrides
+export { detectEnv } from "./env/env";
+export type { Env, Platform } from "./env/env";
 export { REPO_SIGNALS_DESCRIBE } from "./git/index";
 export type { AiTool, CheckFacts, CommitFact, HookFacts, InstructionFacts, InstructionKind, RepoFacts, RepoSignalOptions, RepoSignals } from "./git/index";
 export { registry } from "./sources/registry";

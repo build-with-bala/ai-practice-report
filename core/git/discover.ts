@@ -3,12 +3,14 @@ import path from "node:path";
 import { fileState, isDir } from "../io/fs";
 import { keyedHash, normalizePath } from "../text/hash";
 
-/** How many ancestors of a session folder are checked for `.git` (the folder itself included). */
+/** How many ancestors of a session folder are checked for `.git`, besides the folder itself (21 folders at most). */
 export const MAX_ANCESTORS = 20;
 
 /**
  * The folder holding the nearest `.git` (a folder, or a file: a worktree or submodule) at or above `dir`, checked by
- * stat only, at most MAX_ANCESTORS levels up to the file-system root; undefined when there is none.
+ * stat only, at most MAX_ANCESTORS levels up to the file-system root; undefined when there is none. A `.git` file is
+ * taken as git takes it: one that names another repository's git folder (its back-pointer is not checked) makes that
+ * repository's history read under this folder.
  */
 export function gitAncestor(dir: string): string | undefined {
   let at = path.resolve(dir);
@@ -27,14 +29,19 @@ export interface Candidate { dir: string; projectKeys: string[] }
 
 /**
  * The repo candidates of the recent session projects, never by crawling: each recent project's raw folder, when it is
- * a folder, and its nearest `.git` ancestor. Projects whose folder is gone count as `missing`, those with no `.git`
- * above them as `not-a-repo`; neither runs anything.
+ * a folder, and its nearest `.git` ancestor. Projects whose folder is not absolute count as `not-absolute`, those whose
+ * folder is gone as `missing`, those with no `.git` above them as `not-a-repo`; none of them runs anything.
  */
 export function candidates(cwds: ReadonlyMap<string, string>, recent: ReadonlySet<string>, skip: (reason: string) => void): Candidate[] {
   const byDir = new Map<string, string[]>();
   for (const key of recent) {
     const raw = cwds.get(key);
     if (raw === undefined) continue;
+    // a folder named relatively would be resolved against this process's folder, which no session ran in
+    if (!path.isAbsolute(raw)) {
+      skip("not-absolute");
+      continue;
+    }
     if (!isDir(raw)) {
       skip("missing");
       continue;
@@ -84,6 +91,9 @@ function identity(p: string): string {
   } catch { /* fall through */ }
   return normalizePath(p);
 }
+
+/** Whether two paths name the same folder, whatever their spelling (`identity`). */
+export const sameFolder = (a: string, b: string): boolean => identity(a) === identity(b);
 
 /**
  * The repo of each rev-parse answer: the linked worktrees of one repo share its common dir (resolved against the

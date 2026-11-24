@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { AIPROF2, KIND_SPECS, sanitize, violations, type FieldSpec } from "../../../core/privacy/schema";
+import { AIPROF2, KIND_SPECS, PAYLOAD_WORDS, sanitize, violations, type FieldSpec, type KeyTest } from "../../../core/privacy/schema";
+import { modelExportId } from "../../../core/privacy/allowlists";
 import { isValueOf, VALUE_KEYS, VALUE_KINDS, type ValueKind } from "../../../core/forensics/types";
 
 /** A field that may be absent. */
@@ -199,8 +200,8 @@ describe("AIPROF2", () => {
     "claude-opus-4-1-20250805", "gpt-other", "fine-tuned", "other", "restore-cluster", "Was this history restored from a backup then?",
     "matchShare", "claude-code/human/detail", "py", "data", "skill", "default", "never", "read-only", "subagents",
   ];
-  const patterns = (): Array<[string, RegExp]> => {
-    const out: Array<[string, RegExp]> = [];
+  const patterns = (): Array<[string, KeyTest]> => {
+    const out: Array<[string, KeyTest]> = [];
     const walk = (s: FieldSpec, at: string): void => {
       if (s.t === "string") out.push([at, s.pattern]);
       else if (s.t === "optional") walk(s.of, at);
@@ -222,7 +223,8 @@ describe("AIPROF2", () => {
     const list = patterns();
     expect(list.length).toBeGreaterThan(30);
     for (const [at, re] of list) {
-      expect(`${at} m:${re.multiline} g:${re.global} y:${re.sticky}`).toBe(`${at} m:false g:false y:false`);
+      // a pattern has no flag that loosens anchoring; a predicate key (the model ids) is held by the same samples below
+      if (re instanceof RegExp) expect(`${at} m:${re.multiline} g:${re.global} y:${re.sticky}`).toBe(`${at} m:false g:false y:false`);
       const valid = SAMPLES.filter((x) => re.test(x));
       expect(`${at} samples:${valid.length > 0}`).toBe(`${at} samples:true`);
       for (const x of valid) {
@@ -255,13 +257,20 @@ describe("AIPROF2", () => {
     expect(leaves(AIPROF2).filter(([, s]) => "s" in s && s.s === "revealed").map(([at]) => at)).toEqual(["$.projects[].name"]);
   });
 
-  test("the schema and questionFor read one kind table: each kind's spec accepts exactly what isValueOf accepts", () => {
+  test("the schema and questionFor read one kind table: each kind's spec accepts what isValueOf accepts, within its ceiling and decimals", () => {
     const samples: unknown[] = [0, 1, 2, 0.5, -0, -0.5, -1, -1.0001, 1.0001, 3.7, 1e9, 2 ** 53, -3, NaN, Infinity, -Infinity, "1", null, undefined, {}, [],
-      "2026-11-02", "2024-02-29", "2023-02-29", "2026-13-01", "1969-12-31", "2026-11-2", " 2026-11-02", "2026-11-02\n", true];
+      "2026-11-02", "2024-02-29", "2023-02-29", "2026-13-01", "1969-12-31", "2026-11-2", " 2026-11-02", "2026-11-02\n", true, 0.12345, 0.1234, 999.99,
+      1000, 1000.01, 0.125];
+    // the export keeps what core/forensics stores: shares and correlations to 4 decimals, a ratio to 2 and at most 1000
+    const stored: Record<ValueKind, (x: number) => boolean> = {
+      count: () => true, date: () => true, share: (x) => Math.round(x * 1e4) / 1e4 === x, corr: (x) => Math.round(x * 1e4) / 1e4 === x,
+      ratio: (x) => x <= 1000 && Math.round(x * 100) / 100 === x,
+    };
     for (const kind of ["count", "share", "corr", "ratio", "date"] as ValueKind[]) {
       for (const x of samples) {
         const label = `${kind} ${typeof x === "string" ? JSON.stringify(x) : String(x)}`;
-        expect(`${label} ${sanitize(x, KIND_SPECS[kind]) !== undefined}`).toBe(`${label} ${isValueOf(kind, x)}`);
+        const want = isValueOf(kind, x) && (typeof x !== "number" || stored[kind](x));
+        expect(`${label} ${sanitize(x, KIND_SPECS[kind]) !== undefined}`).toBe(`${label} ${want}`);
       }
     }
     expect(Object.keys(VALUE_KINDS).sort()).toEqual(Object.keys(VALUE_KEYS).sort());
@@ -282,5 +291,33 @@ describe("AIPROF2", () => {
   test("the payload never declares the private, diagnostics or meta parts of an analysis", () => {
     if (AIPROF2.t !== "object") throw new Error("AIPROF2 is an object spec");
     for (const k of ["private", "diagnostics", "meta"]) expect(Object.hasOwn(AIPROF2.fields, k)).toBe(false);
+  });
+});
+
+describe("AIPROF2: model keys", () => {
+  const fieldsOf = (f: FieldSpec | undefined): Readonly<Record<string, FieldSpec>> => (f as Extract<FieldSpec, { t: "object" }>).fields;
+  const models = fieldsOf(fieldsOf(AIPROF2).exposure).models!;
+
+  test("a key of exposure.models is accepted only when modelExportId maps it to itself, or is fine-tuned or other", () => {
+    for (const k of ["claude-opus-4-1-20250805", "gpt-4o-mini", "gpt-other", "claude-other", "other", "fine-tuned", "claude-fable-5", "gemini"]) {
+      expect(`${k} ${violations({ [k]: 1 }, models).length}`).toBe(`${k} 0`);
+    }
+    for (const k of ["claude-acme-payroll", "gpt-4o-contoso-prod", "anthropic.claude-3-haiku-20240307-v1:0", "claude-3-5-sonnet@20240620", "Claude-Opus-4",
+      "fine-tuned-acme", "acme"]) {
+      expect(modelExportId(k) === k).toBe(false);
+      expect(`${k} ${violations({ [k]: 1 }, models).join(",")}`).toBe(`${k} $.<key>`);
+    }
+  });
+});
+
+describe("PAYLOAD_WORDS", () => {
+  test("holds the schema's closed lists, the forensic vocabularies included, lower-cased", () => {
+    for (const w of ["techcategories", "weeksoutside", "claude-code", "detail", "soft:missing-ids", "soft:no-server-pass", "no-server-pass", "missing-ids",
+      "changed-after-write", "long-before-release", "offids", "changedfiles", "longbefore", "turns", "github", "playwright", "fable", "sonnet", "claude",
+      "acceptedits", "workspace-write", "subagents", "fine-tuned", "other", "custom", "consistent-with-notes", "leverage"]) {
+      expect(`${w} ${PAYLOAD_WORDS.has(w)}`).toBe(`${w} true`);
+    }
+    for (const w of ["bulk-change", "acme", "projb", "smoke-repo"]) expect(`${w} ${PAYLOAD_WORDS.has(w)}`).toBe(`${w} false`);
+    for (const w of PAYLOAD_WORDS) expect(w).toBe(w.toLowerCase());
   });
 });

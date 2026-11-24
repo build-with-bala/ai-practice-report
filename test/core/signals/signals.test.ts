@@ -244,7 +244,7 @@ const config = (kind: ConfigEv["kind"], name: string | undefined, over: Partial<
   if (name !== undefined) c.name = name;
   return c;
 };
-const commit = (ts: number, shaKey: string, files: string[], over: Partial<CommitFact> = {}): CommitFact => ({ ts, shaKey, files, owner: true, ...over });
+const commit = (ts: number, shaKey: string, files: string[], over: Partial<CommitFact> = {}): CommitFact => ({ ts, shaKey, files, owner: true, mine: true, ...over });
 const repo = (repoKey: string, projectKeys: string[], over: Partial<RepoFacts> = {}): RepoFacts => ({
   repoKey, projectKeys, identity: true, commits: [], commitsTruncated: false, fileLists: true,
   instructions: { files: [], namesChecks: [], touched: 0 }, hooks: { entries: 0, checks: [], disabled: false },

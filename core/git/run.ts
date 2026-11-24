@@ -7,6 +7,22 @@ import { accessSync, statSync } from "node:fs";
 import path from "node:path";
 import { STREAM_GC } from "../io/jsonl";
 
+/**
+ * The oldest git repo signals support: 2.13. Every argument core passes is one it accepts, or switches on the version:
+ *
+ * - before every subcommand (GIT_SAFE_ARGS): `--no-pager` and `-c key=value` are far older; a `-c` key an older git
+ *   does not know (`core.fsmonitor` 2.16, `protocol.allow` 2.12) is ignored, never refused.
+ * - `--version`; `rev-parse --show-toplevel` (1.7.0) `--git-common-dir` (2.5); `config --get <key>`.
+ * - `log`: `--no-use-mailmap` (the `--no-` form of `--use-mailmap`, 1.8.2; the shorter `--no-mailmap` needs 2.27),
+ *   `--exclude=<glob>` (1.9 or 2.0: release notes not confirmed, well before 2.13), `--all`, `--no-merges`,
+ *   `--no-renames`, `--since=<date>`, `--max-count=<n>` / `-n<n>`, `--name-only`, `-z`, `--format=` with `%x00`, `%H`,
+ *   `%ct`, `%ae`, `%n` and `%B` (1.7.2), the `:(literal)` pathspec magic (1.8); `--since-as-filter=<date>` only from 2.37
+ *   (`SINCE_AS_FILTER_SINCE`).
+ *
+ * The tests run every argument list against a fake git that refuses what 2.13 does not accept.
+ */
+export const OLDEST_GIT: readonly [number, number] = [2, 13];
+
 export interface GitResult { code: number | null; stdout: string; timedOut: boolean; truncated: boolean }
 /**
  * `git`: the absolute path of the git to run (`resolveGit`); found on PATH when left out. `onChunk`: stdout is handed
@@ -20,10 +36,11 @@ export type GitRunner = (args: readonly string[], o: { cwd: string; timeoutMs: n
 /**
  * Put before every subcommand: no pager; and repo config that would run a program, take a lock or change the output is
  * overridden — no fsmonitor hook, no signature check (`log.showSignature` would run `gpg.program`), paths unquoted,
- * no colour.
+ * no colour, no transport, and log output in UTF-8 (`i18n.logOutputEncoding` set to UTF-16 would make every record
+ * unreadable).
  */
 export const GIT_SAFE_ARGS: readonly string[] = ["--no-pager", "-c", "core.fsmonitor=false", "-c", "log.showSignature=false", "-c", "core.quotepath=off", "-c", "color.ui=never",
-  "-c", "protocol.allow=never"];
+  "-c", "protocol.allow=never", "-c", "i18n.logOutputEncoding=UTF-8"];
 
 /**
  * Set on every git child: no optional locks, no prompt, no lazy fetch of a partial clone, no transport at all (so even a
@@ -96,10 +113,6 @@ const REAP_MS = 1_000;
  * backing buffer, what it really allocated, so collections keep pace with git output as they do with file streams.
  */
 export const runGit: GitRunner = (args, o) => run(args, o, gitEnv(process.env));
-
-/** A runner whose child environment `adjust` changes (tests: the environment of a git older than GIT_NO_LAZY_FETCH). */
-export const gitRunnerWithEnv = (adjust: (env: Record<string, string>) => Record<string, string>): GitRunner =>
-  (args, o) => run(args, o, adjust(gitEnv(process.env)));
 
 async function run(args: readonly string[], o: Parameters<GitRunner>[1], env: Record<string, string>): Promise<GitResult> {
   if (o.signal.aborted) return { code: null, stdout: "", timedOut: false, truncated: false };

@@ -1,18 +1,21 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync } from "node:fs";
+import { Database } from "bun:sqlite";
+import { chmodSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { analyze, type Analysis } from "../../core/analyze";
 import type { ScanResult } from "../../core/scan";
 import type { CoverageEv } from "../../core/model/events";
+import { PAYLOAD_WORDS } from "../../core/privacy/schema";
 import { analysisLines, coverageLine, exportOf, metricMetaProblems } from "../../scripts/smoke-local";
-import { buildAntigravity, C as AG_C, I1, I2, K, P } from "../fixtures/antigravity";
-import { buildCcLifetime, buildCcTranscripts, CC_H1, CC_H2, CC_S1, CC_S2, CcTranscript, ccSid, fixtureStart, slug } from "../fixtures/claude-code";
-import { buildCodexIndex, buildCodexRollouts } from "../fixtures/codex";
-import { buildCopilot, S_J, S_L } from "../fixtures/copilot";
-import { A, B, buildAgentCli, buildCursor } from "../fixtures/cursor";
+import { C as AG_C, I1, I2, K, P } from "../fixtures/antigravity";
+import { CC_H1, CC_H2, CC_S1, CC_S2, CcTranscript, ccSid, fixtureStart, slug } from "../fixtures/claude-code";
+import { S_J, S_L } from "../fixtures/copilot";
+import { A, B } from "../fixtures/cursor";
 import { personaScan } from "../fixtures/personas";
 import { makeRepo } from "../fixtures/repos";
+import { buildAll } from "../kit/allsources";
 import { CANARY, expectNoCanaries } from "../kit/canary";
+import { scanResultOf } from "../kit/scanresult";
 import { fakeHome, type FakeHome } from "../kit/home";
 
 const SMOKE = path.join(import.meta.dir, "..", "..", "scripts", "smoke-local.ts");
@@ -31,7 +34,7 @@ const DAY = /\d{4}-\d{2}-\d{2}/;
 const EPOCH_MS_MIN = 1e12;
 const EPOCH_MS_MAX = 1e13;
 /** The analysis lines the smoke prints (Task 16), each a check that passes on a clean synthetic home. */
-const ANALYSIS_CHECKS = ["not-saturated", "metrics-have-window-and-n", "export-no-raw-paths", "export-under-300kb", "forensics-ran"];
+const ANALYSIS_CHECKS = ["dimensions-scored", "not-saturated", "metrics-have-window-and-n", "export-no-raw-paths", "export-under-300kb", "forensics-ran"];
 const skipChmod = process.platform === "win32" || process.getuid?.() === 0;
 
 interface Run { code: number | null; out: string; err: string }
@@ -40,16 +43,16 @@ let h: FakeHome;
 /** The fixtures' session ids, working directories and repo root: the smoke prints none of them. */
 let secrets: string[];
 
-/** Every Plan 1 fixture in the home; returns the session ids and working directories they hold. */
-function buildAll(): string[] {
-  buildCcTranscripts(h);
-  buildCcLifetime(h);
-  const rollouts = buildCodexRollouts(h);
-  const index = buildCodexIndex(h);
-  buildCopilot(h);
-  buildCursor(h);
-  buildAgentCli(h);
-  buildAntigravity(h);
+/** A UUID, as Codex names its threads and rollout files. */
+const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
+
+/**
+ * Every P0 source's fixtures (the shared kit's builder) and a git repo with a Claude Code session inside it; returns
+ * the session ids, working directories and repo root they hold. The Codex thread ids are read back from the fake home
+ * (rollout file names and the state index), since the kit's builder does not return them.
+ */
+function buildHome(): string[] {
+  const planted = buildAll(h);
   // a real git repo with a Claude Code session working inside it, so repo signals find one repo
   const root = makeRepo(path.join(h.env.home, "code", "smoke-repo"), [
     { files: { "CLAUDE.md": "Run `npm test`.\n", "src/a.ts": "export const a = 1;\n" }, message: "init", at: Date.now() - 3 * 86_400_000 },
@@ -57,15 +60,23 @@ function buildAll(): string[] {
   const sid = ccSid("SMOKE");
   h.writeJsonl(`.claude/projects/${slug(root)}/${sid}.jsonl`,
     new CcTranscript(sid, { cwd: root, start: fixtureStart(2) }).prompt("Fix the importer").tool("toolu_smoke", "Bash", { command: "npm test" }, { content: "ok" }).records);
+  const codex: string[] = [];
+  for (const f of readdirSync(path.join(h.env.home, ".codex", "sessions"), { recursive: true }) as string[]) codex.push(...(f.match(UUID) ?? []));
+  const db = new Database(path.join(h.env.home, ".codex", "state_5.sqlite"), { readonly: true });
+  try {
+    codex.push(...(db.query("SELECT id FROM threads").all() as Array<{ id: string }>).map((r) => r.id));
+  } finally {
+    db.close();
+  }
+  expect(codex.length).toBeGreaterThanOrEqual(8);
   return [
-    CC_S1, CC_S2, CC_H1, CC_H2, ...[rollouts.r1, rollouts.r2, rollouts.r3, rollouts.r4].map((r) => r.id), ...Object.values(index.ids),
-    S_J, S_L, A, B, P, AG_C, K, I1, I2, CANARY.path, "/work/projB", "/work/projC", sid, root,
+    CC_S1, CC_S2, CC_H1, CC_H2, ...codex, planted.rollout, planted.thread, S_J, S_L, A, B, P, AG_C, K, I1, I2, CANARY.path, "/work/projB", "/work/projC", sid, root,
   ];
 }
 
 beforeEach(() => {
   h = fakeHome();
-  secrets = buildAll();
+  secrets = buildHome();
 });
 afterEach(() => h.cleanup());
 
@@ -209,6 +220,86 @@ describe("the smoke's analysis lines (in process)", () => {
       return checkOf("not-saturated", raw, a);
     };
     expect([at(99, true), at(99, false), at(100, true), at(100, false), at(98, false)]).toEqual(["PASS", "FAIL", "FAIL", "FAIL", "PASS"]);
+  });
+
+  /** Detail-window sessions of a scan with at least one typed (human) prompt. */
+  const typedSessions = (raw: ScanResult): number => new Set(raw.store.all("prompt").filter((p) => p.window === "detail" && p.origin === "human" && p.sessionId !== undefined)
+    .map((p) => p.sessionId)).size;
+
+  test("dimensions-scored: no scored dimension fails on a scan of 20 or more typed detail sessions, and passes on a smaller one", () => {
+    const { raw, a } = fresh();
+    expect(typedSessions(raw)).toBeGreaterThanOrEqual(20);
+    expect(checkOf("dimensions-scored", raw, a)).toBe("PASS");
+    for (const d of a.dimensions) Object.assign(d, { status: "insufficient", score: null, interval: null });
+    expect(checkOf("dimensions-scored", raw, a)).toBe("FAIL");
+    const empty = scanResultOf([], { finishedAt: Date.UTC(2026, 10, 16) });
+    const none = analyze(empty, { timeZone: "UTC" });
+    expect(none.dimensions.filter((d) => d.status === "scored")).toEqual([]);
+    expect(checkOf("dimensions-scored", empty, none)).toBe("PASS");
+  });
+
+  test("not-saturated: a scored dimension outside 1 to 99, or every scored one at an edge, fails", () => {
+    const set = (scores: (i: number) => number) => {
+      const { raw, a } = fresh();
+      a.dimensions.filter((d) => d.status === "scored").forEach((d, i) => { d.score = scores(i); d.openTail = d.score === 99; });
+      return checkOf("not-saturated", raw, a);
+    };
+    expect([set(() => 99), set(() => 1), set((i) => (i % 2 === 0 ? 1 : 99)), set(() => 0), set(() => -3), set((i) => (i === 0 ? 50 : 99))])
+      .toEqual(["FAIL", "FAIL", "FAIL", "FAIL", "FAIL", "PASS"]);
+    const { raw, a } = fresh();
+    a.dimensions.find((d) => d.status === "scored")!.score = null;
+    expect(checkOf("not-saturated", raw, a)).toBe("FAIL");
+  });
+
+  test("forensics-ran: missing soft flags fail; so does every check n/a while Claude Code or Codex data is in scope", () => {
+    const { raw, a } = fresh();
+    expect(a.coverage.rows.some((r) => (r.tool === "claude-code" || r.tool === "codex") && r.sessions + r.prompts > 0)).toBe(true);
+    expect(checkOf("forensics-ran", raw, a)).toBe("PASS");
+    const noSoft = structuredClone(a);
+    noSoft.forensics.checks = noSoft.forensics.checks.filter((c) => !c.id.startsWith("soft:"));
+    expect(checkOf("forensics-ran", raw, noSoft)).toBe("FAIL");
+    const allNa = structuredClone(a);
+    for (const c of allNa.forensics.checks) c.status = "n/a";
+    expect(checkOf("forensics-ran", raw, allNa)).toBe("FAIL");
+    // with no Claude Code or Codex data, every check n/a is what an honest run gives
+    const other = structuredClone(allNa);
+    other.coverage.rows = other.coverage.rows.filter((r) => r.tool !== "claude-code" && r.tool !== "codex");
+    expect(checkOf("forensics-ran", raw, other)).toBe("PASS");
+  });
+
+  test("export-no-raw-paths: a session folder's or repo root's name in the export fails; a short name or a payload word does not; only counts print", () => {
+    const raw = personaScan("expert");
+    const a = analyze(raw, { timeZone: "UTC" });
+    const exported = exportOf(a);
+    if (!exported.ok) throw new Error("the persona's export must fit the schema");
+    const run = (json: string, r: ScanResult) => analysisLines(r, a, { ...exported, json }, home).lines;
+    const cwds = new Map([["k", "/home/dev/clients/AcmePayroll"], ["j", "C:\\work\\prompts"], ["s", "/srv/abcd"]]);
+    const roots = new Map([["r", "/srv/code/ledger-svc"]]);
+    const withPaths = { ...raw, cwds, repos: { ...raw.repos, roots } };
+    expect(valuesOf(run(exported.json, withPaths))["export-no-raw-paths"]).toBe("PASS");
+    const leaked = run(`${exported.json}"acmepayroll"`, withPaths);
+    expect(valuesOf(leaked)["export-no-raw-paths"]).toBe("FAIL");
+    expect(valuesOf(leaked)["export-folder-names"]).toBe("1");
+    expect(valuesOf(run(`${exported.json}"x/LEDGER-SVC"`, withPaths))["export-no-raw-paths"]).toBe("FAIL");
+    // "prompts" is a word of the payload itself, and "abcd" is under 5 characters: neither counts
+    expect(valuesOf(run(`${exported.json}abcd`, withPaths))).toMatchObject({ "export-no-raw-paths": "PASS", "export-folder-names": "0" });
+    for (const l of [...leaked, ...run(exported.json, withPaths)]) expect(l.toLowerCase()).not.toMatch(/acme|ledger|abcd/);
+    expect(leaked.flatMap(offGrammar)).toEqual([]);
+  });
+
+  test("export-no-raw-paths: a folder named like a public tool, name or payload word never counts, nor one inside a payload word", () => {
+    const raw = personaScan("expert");
+    const a = analyze(raw, { timeZone: "UTC" });
+    const exported = exportOf(a);
+    if (!exported.ok) throw new Error("the persona's export must fit the schema");
+    expect(PAYLOAD_WORDS.has("prompt")).toBe(false); // a part of the payload word "prompts", but no word of its own
+    const cwds = new Map(["github", "claude-code", "playwright", "sonnet", "fine-tuned", "subagents", "prompt", "techCategories"]
+      .map((n, i) => [`k${i}`, `/home/dev/${n}`]));
+    const r = { ...raw, cwds };
+    const json = `${exported.json}"github""claude-code""playwright""claude-sonnet-4-5""fine-tuned"`;
+    expect(json).toContain('"prompts"');
+    const v = valuesOf(analysisLines(r, a, { ...exported, json }, home).lines);
+    expect([v["export-no-raw-paths"], v["export-folder-names"]]).toEqual(["PASS", "0"]);
   });
 
   test("a missing dimension: the line still reads /7, and the analysis checks fail", () => {
