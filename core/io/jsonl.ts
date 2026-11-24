@@ -162,6 +162,8 @@ export interface JsonlOpts {
   headBytes?: number; // default 512
   maxLineBytes?: number; // default MAX_LINE_BYTES
   signal?: AbortSignal;
+  /** Told the size of each chunk read, so a caller can count the bytes it read. */
+  onBytes?: (n: number) => void;
 }
 
 /**
@@ -224,6 +226,7 @@ export async function* readJsonlStream(
       if (r.done) break;
       const chunk = r.value;
       STREAM_GC.add(chunk.length);
+      opts.onBytes?.(chunk.length);
       let pos = 0;
       while (pos < chunk.length) {
         if (opts.signal?.aborted) return;
