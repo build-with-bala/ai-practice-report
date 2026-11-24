@@ -36,6 +36,9 @@ import { roundDown, roundUp, toolsOf, type CheckResult, type CheckValues, type R
  *   ends (the pairs partition the sample), so a candidate through the genuine line exists; the closer pairs give one
  *   through a genuine block holding fewer, when its ids are contiguous in `v`. A crossing fabricated line can still win the start; the check then still fails,
  *   but the off share may understate the fabricated share;
+ * - a fitted line whose slope is not positive (ids that do not grow with time, say every time reversed): C1 is n/a
+ *   (`degenerate`), never a pass, so never server-backed; C2 still ranks the ids on that line (a reversal spanning a
+ *   day or more fails there);
  * - no line at all (every `v` equal), or the best line holds under 10% of the ids: n/a (`scheme-changed`). The line
  *   holding the most ids is the main encoding, even when it holds half or less: the ids off it are then judged one
  *   by one, as below;
@@ -267,7 +270,9 @@ function checkKind(anchors: readonly AnchorEv[], end: number): [CheckResult, Che
   if (!c1Fail && foreign > FOREIGN_SHARE * ps.length) return naPair(anchors.length, "foreign-ids", left, tools);
   const foreignNote = foreign >= FOREIGN_MIN && foreign > MALFORMED_SHARE * ps.length;
   const offRes = res.filter((r, i) => r <= OFF_MS || plausible(implied[i]!));
-  const c1: CheckResult = {
+  // ids that do not grow with time (a slope that is zero or negative) are no time line: C1 is not applicable, never a
+  // pass; C2 still ranks the ids on that line, so a reversal over a day or more fails there
+  const c1: CheckResult = !(line.b > 0) ? { id: "C1", status: "n/a", n: anchors.length, reason: "degenerate", values: { ...left }, tools: [...tools] } : {
     id: "C1", status: c1Fail ? "fail" : offOver || foreignNote || malformed ? "note" : "pass", n: ps.length,
     reason: offOver ? "off-time" : foreignNote ? "foreign-ids" : malformed ? "malformed-ids" : "ok",
     values: { offShare: roundUp(off), offIds, p99Seconds: Math.min(MAX_P99_S, Math.ceil(quantile(offRes, 0.99) / 1_000)), ...left }, tools: [...tools],

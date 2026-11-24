@@ -385,7 +385,7 @@ describe("wording: every reason and question the forensic checks produce", () =>
   test("the scenarios reach every question", () => {
     const asked = new Set(results.filter((c) => c.askAbout !== undefined).map((c) => `${c.id}:${c.reason}`));
     expect([...asked].sort()).toEqual([
-      "C1:malformed-ids", "C1:off-time", "C1:scheme-changed", "C1:unknown-marker", "C1:foreign-ids", "C2:foreign-ids", "C2:out-of-order", "C2:scheme-changed",
+      "C1:degenerate", "C1:malformed-ids", "C1:off-time", "C1:scheme-changed", "C1:unknown-marker", "C1:foreign-ids", "C2:foreign-ids", "C2:out-of-order", "C2:scheme-changed",
       "C2:unknown-marker", "C9:long-before-release", "soft:missing-ids:missing-ids", "C3:history-mismatch", "C3:missing-stats-days", "C4:no-match",
       "C4:several-accounts", "C5:changed-after-write", "C5:file-times", "C5:restore-cluster", "C6:missing-thread-rows", "C7:time-zone-change",
       "C7:uuid-after-name", "C8:ledger-contradictions", "C9:before-release", "soft:new-config:new-config",
@@ -440,11 +440,23 @@ describe("runForensics: server-backed and the band agree", () => {
     expect([f.band, f.serverBacked]).toEqual(["consistent-with-notes", 0]);
   });
 
-  test("a tool with a pass on one server check and a fail on another is not backed", () => {
+  test("a reversed history: its ids are no time line (C1 not applicable) and C2 fails; nothing is backed", () => {
     const times = anchors().map((e) => e.ts).reverse();
     const f = run(anchors().map((e, i) => ({ ...e, ts: times[i]! })), cc);
     expect(byId(f, "C2").status).toBe("fail");
     expect([f.band, f.serverBacked]).toEqual(["inconsistent", 0]);
+  });
+
+  test("one tool's typed turns, another tool's usage-limit readings that name no session: the share and the band agree", () => {
+    const ledger = Array.from({ length: 30 }, (_, i) => ({
+      k: "ratelimit", tool: "codex", source: "codex.rollouts", ts: T0 + i * MIN, window: "primary", windowMinutes: 300, usedPercent: i, resetsAt: T0 + 5 * HOUR,
+    }) as Ev);
+    const f = run([{ k: "session", tool: "claude-code", source: CC, id: "s", window: "detail", origin: "human", start: T0, end: T0 + HOUR, models: [] }, ...ledger], cc);
+    expect(byId(f, "C8").status).toBe("pass");
+    expect(f.anchorable).toContain("codex"); // its server check measured something
+    expect(f.serverBacked).toBe(0); // the backed tool has no typed turns here
+    expect(f.band).toBe("consistent-with-notes");
+    expect([byId(f, "soft:no-server-pass").status, byId(f, "soft:no-server-pass").reason]).toEqual(["note", "no-server-pass"]);
   });
 
   test("no history reads consistent with a backed share of 0 for its only anchorable tool", () => {
