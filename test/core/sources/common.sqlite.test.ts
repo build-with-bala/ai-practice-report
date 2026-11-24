@@ -225,6 +225,7 @@ describe("Pass: stores whose pages cannot advance end, with drift, in every read
     const now = Date.now();
     const ins = db.query("INSERT INTO steps (rowid, idx, step_type, status, metadata) VALUES (?, ?, 8, 3, ?)");
     for (let i = 1; i <= 40; i++) ins.run(big + BigInt(i), i, pbEncode([[1, pbEncode([[1, Math.floor((now - 3_600_000 + i * 1000) / 1000)], [2, 0]])]]));
+    ins.finalize();
     db.close();
     const r = await scan({ env: h.env, plugins: [agCli], repoSignals: false, handleSignals: false });
     const cov = r.coverage.find((c) => c.window === "detail")!;
@@ -237,12 +238,15 @@ describe("Pass: stores whose pages cannot advance end, with drift, in every read
   test("a Cursor store whose composer keys are not valid UTF-8", async () => {
     h = fakeHome();
     const db = new Database(h.sqlite(globalRel(h), ["CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)", "CREATE TABLE cursorDiskKV (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)"]));
-    const hex = (x: string) => Buffer.from(x, "utf8").toString("hex");
     const value = JSON.stringify({ createdAt: Date.now() - 60_000, lastUpdatedAt: Date.now() - 30_000 });
     const ROWS = PAGE + 100;
+    // one statement, finalized before the store is closed: Windows cannot remove a file a statement still holds
+    const ins = db.prepare("INSERT INTO cursorDiskKV (key, value) VALUES (CAST(? AS TEXT), ?)");
+    const prefix = Buffer.from("composerData:", "utf8");
     db.exec("BEGIN");
-    for (let i = 0; i < ROWS; i++) db.query(`INSERT INTO cursorDiskKV (key, value) VALUES (CAST(x'${hex("composerData:")}ff${hex(String(i).padStart(6, "0"))}' AS TEXT), ?)`).run(value);
+    for (let i = 0; i < ROWS; i++) ins.run(Buffer.concat([prefix, Buffer.from([0xff]), Buffer.from(String(i).padStart(6, "0"), "utf8")]), value);
     db.exec("COMMIT");
+    ins.finalize();
     db.close();
     const r = await scan({ env: h.env, plugins: [cuIde], repoSignals: false, handleSignals: false });
     const life = r.coverage.find((c) => c.window === "lifetime")!;
@@ -261,6 +265,7 @@ describe("Pass: stores whose pages cannot advance end, with drift, in every read
       db.exec("BEGIN");
       for (let i = 1; i <= ROWS; i++) ins.run(base + BigInt(i), `h${i}`, now - 86_400_000 + i);
       db.exec("COMMIT");
+      ins.finalize();
       db.close();
       const r = await scan({ env: h.env, plugins: [cuTracking], repoSignals: false, handleSignals: false });
       const cov = r.coverage[0]!;
