@@ -303,7 +303,8 @@ const ordinary: [string, CheckKind[], Toolchain?][] = [
 ];
 const notChecks = [
   "just deploy", "task serve", "turbo run dev", "nx serve app", "composer install", "python manage.py runserver", "rails server", "ng serve",
-  "docker compose up", "docker compose exec web sh", "bash -lc 'echo hi'", "python -c \"print('make')\"", "uv run --with pytest python app.py",
+  "docker compose up", "docker compose exec web sh", "cargo nextest list", "cargo nextest archive --archive-file a.tar.zst",
+  "cargo nextest show-config test-groups", "cargo nextest", "bash -lc 'echo hi'", "python -c \"print('make')\"", "uv run --with pytest python app.py",
 ];
 
 test("ordinary check commands are read as the checks they run", () => {

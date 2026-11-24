@@ -1,4 +1,4 @@
-import { constants, Database } from "bun:sqlite";
+import { constants, Database, type Statement } from "bun:sqlite";
 import { closeSync, copyFileSync, existsSync, lstatSync, openSync, readSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import type { TempDirs } from "../sources/types";
@@ -17,6 +17,11 @@ export interface RoDb {
   readonly copied: boolean;
   /** Opened with `immutable=1`: a WAL store without a `-wal` (its writer closed it), so there is no WAL content to miss. */
   readonly immutable: boolean;
+  /**
+   * A private copy made without the store's `-wal`, because that companion is a link (never followed): rows that live
+   * only in the WAL are missing from it. The caller counts it (skip `linked-wal`).
+   */
+  readonly walSkipped?: boolean;
 }
 
 let observer: ((sql: string) => void) | undefined;
@@ -67,18 +72,29 @@ function readOnly(sql: string): void {
 class Handle implements RoDb {
   /** The connection: a true private field, so no cast reaches it and every statement goes through `readOnly`. */
   readonly #db: Database;
-  constructor(db: Database, readonly copied: boolean, readonly immutable = false) {
+  /**
+   * Every statement this handle prepared, by its SQL text: all are finalized on `close`, whatever their number (the
+   * runtime's own cache finalizes only the few it still holds, and a live statement keeps the file open, which on
+   * Windows means it cannot be removed).
+   */
+  readonly #statements = new Map<string, Statement>();
+  constructor(db: Database, readonly copied: boolean, readonly immutable = false, readonly walSkipped = false) {
     this.#db = db;
+  }
+  #statement(sql: string): Statement {
+    let st = this.#statements.get(sql);
+    if (st === undefined) this.#statements.set(sql, (st = this.#db.prepare(sql)));
+    return st;
   }
   all<T>(sql: string, ...p: unknown[]): T[] {
     observer?.(sql);
     readOnly(sql);
-    return this.#db.query(sql).all(...(p as never[])) as T[];
+    return this.#statement(sql).all(...(p as never[])) as T[];
   }
   get<T>(sql: string, ...p: unknown[]): T | undefined {
     observer?.(sql);
     readOnly(sql);
-    return (this.#db.query(sql).get(...(p as never[])) ?? undefined) as T | undefined;
+    return (this.#statement(sql).get(...(p as never[])) ?? undefined) as T | undefined;
   }
   tables(): string[] {
     return this.all<{ name: string }>("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").map((r) => r.name);
@@ -87,6 +103,14 @@ class Handle implements RoDb {
     return this.all<{ name: string }>("SELECT name FROM pragma_table_info(?)", table).map((r) => r.name);
   }
   close(): void {
+    for (const st of this.#statements.values()) {
+      try {
+        st.finalize();
+      } catch {
+        /* already finalized */
+      }
+    }
+    this.#statements.clear();
     try {
       this.#db.close();
     } catch {
@@ -226,13 +250,17 @@ export function openRo(file: string, temp: TempDirs, opener: (uri: string) => Da
     if (storeBytes(store) > (o?.maxCopyBytes ?? MAX_COPY_BYTES)) return null;
     const dir = temp.dir();
     const dest = path.join(dir, path.basename(store));
+    let walSkipped = false;
     for (const suffix of ["", "-wal", "-shm"]) {
       if (!existsSync(store + suffix)) continue;
-      if (suffix !== "" && lstatSync(store + suffix).isSymbolicLink()) continue; // a linked companion is never followed
+      if (suffix !== "" && lstatSync(store + suffix).isSymbolicLink()) { // a linked companion is never followed
+        if (suffix === "-wal") walSkipped = true;
+        continue;
+      }
       noteOpen(store + suffix, "copy");
       copyFileSync(store + suffix, dest + suffix);
     }
-    return new Handle(tryOpen(dest, opener), true);
+    return new Handle(tryOpen(dest, opener), true, false, walSkipped);
   } catch {
     return null;
   }

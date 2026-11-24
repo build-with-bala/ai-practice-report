@@ -21,8 +21,11 @@ export type { CheckId, CheckResult, CheckStatus, CheckValues, ProvenanceKey, Rea
 /**
  * The integrity summary (spec §6.6). `band`: the verdict over every check (`bandOf`); `serverBacked`: the share of typed
  * turns from tools whose server-issued data checked out (display only: it never changes a score, an evidence minimum or
- * a confidence), null without typed turns. It is counted per tool: every typed turn of a tool whose server checks
- * passed counts, including turns of that tool's sessions that carry no server id themselves. `anchorable` /
+ * a confidence), null without typed turns. It is counted per tool: a tool is backed when at least one of its
+ * server-anchored checks (Claude Code: C1, C2; Codex: C8) gives a pass or a note, and none of them gives a fail or a
+ * warn; a check that is not applicable does not count against it (a note, such as the note for unverified ids,
+ * passes the ids that could be checked). Every typed turn of a backed tool counts, including turns of its sessions
+ * that carry no server id themselves. `anchorable` /
  * `notAnchorable`: the tools in scope that do or do not record server-issued data (neutral, never a penalty);
  * `checks`: C1–C10, then the soft flags, always in that order.
  */
@@ -135,7 +138,11 @@ export function runForensics(raw: ScanResult, t: SessionTable, stats: readonly S
   const tools = scope.tools();
 
   const status = new Map(checks.map((c) => [c.id, c.status]));
-  const backed = new Set(ANCHORS.filter((a) => a.server.every((id) => status.get(id) === "pass" || status.get(id) === "note")).map((a) => a.tool));
+  // backed: at least one server check passes or notes, and none fails or warns (a not-applicable check counts for nothing)
+  const backed = new Set(ANCHORS.filter((a) => {
+    const st = a.server.map((id) => status.get(id));
+    return st.some((x) => x === "pass" || x === "note") && !st.some((x) => x === "fail" || x === "warn");
+  }).map((a) => a.tool));
   let all = 0, server = 0;
   for (const st of stats) {
     all += st.turns;

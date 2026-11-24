@@ -11,7 +11,8 @@ probe. This file records names and value types only, never values.
 **Zero-yield.** A coverage window that read records, or found files whose lines it could not use (skipped `parse` or
 `oversize`), but yielded none of its reader's primary events is drift `zero-yield` (set by the scan), except records
 skipped as `copied` or `empty`, and coverage stamped `aborted`, so a renamed field or a changed container never passes
-as a quiet store; files with no lines at all stay `empty`. Primary events: `codex.rollouts` — a session, prompt or
+as a quiet store; files with no lines at all stay `empty`; so does a
+file whose only unusable line is its last line with no line end (skipped `partial`: a record still being written). Primary events: `codex.rollouts` — a session, prompt or
 tool call; `codex.threads` — a session, turn or spawn edge; `codex.history` — a prompt. `codex.config` is not guarded:
 its records are its own events, so it cannot read one without yielding one.
 
@@ -196,15 +197,17 @@ CLI's EventMsg tags (`exec_command_end`, `mcp_tool_call_end`, `collab_*`, `realt
   (or of the item id for nested calls).
 - **SessionEv** per rollout (origin rules in `origin.ts`, shared with the thread index reader so the two cannot
   diverge): origin from `source` — `exec` → scripted; `mcp` (Codex run through its MCP server,
-  driven by another client or agent) → peer; `{subagent: …}` → subagent (`parentId` from
+  driven by another client or agent) → peer; `internal` (the CLI's own work) → system; `{subagent: …}` → subagent (`parentId` from
   `thread_spawn.parent_thread_id`, else `parent_thread_id`; `spawnDepth` = `depth`; `agentType` = the role when
-  built in, else its keyed hash); another string the CLI writes, or no source → human; a string it is not known to
+  built in, else its keyed hash); an object with one key that is another source name (`{internal: …}`, `{custom: …}`)
+  → as that name, its data never read; another string the CLI writes, or no source → human; a string it is not known to
   write → system and drift `session_meta.source:(other)` (a future automated source never counts as typed prompts); `originator` exactly `Claude Code` → peer,
   whatever the string source (a subagent source wins: its subagents inherit the originator and stay subagents).
   `surface` = the source when the CLI writes it (`cli`, `vscode`, `exec`, `mcp`, `custom`, `internal`, `unknown`; CLI
   program), else `other`, or `subagent`; `version` = `cli_version`;
   `projectKey` from `cwd`; `inRepo` = `git` present; `models` = distinct `turn_context` models; `start`/`end` =
-  first/last own line time. A source object without `subagent` is drift `session_meta.source:shape`.
+  first/last own line time. Any other shape (an array, an object with another key or several, a number) is system and
+  drift `session_meta.source:shape`: nothing of unknown shape is ever a human.
 - **Copied history is skipped**: lines with `ordinal` below `subagent_history_start_ordinal` — whatever the source —
   yield nothing, so the parent's prompts, tools, turns and usage are not counted twice; the token totals and rate
   limits they reach are the baselines the thread's own `token_count`s are compared with, so the fork point's re-emitted
@@ -429,11 +432,12 @@ The SQL names only the columns below, validated against `pragma_table_info` firs
   count is drift `threads.tokens_used:shape`; null emits nothing.
 - **SessionEv** (window `lifetime`) per thread with a creation time (else skipped `no-ts`): `start` = created,
   `end` = updated (never before `start`); origin, `surface`, `parentId`, `spawnDepth`, `agentType` from `source` and
-  `originator` by the rollouts' rules (`origin.ts`: `exec` → scripted, `mcp` → peer, a subagent source → subagent,
+  `originator` by the rollouts' rules (`origin.ts`: `exec` → scripted, `mcp` → peer, `internal` → system, an object
+  keyed by one source name → as that name, a subagent source → subagent,
   `originator` exactly `Claude Code` → peer unless the source is a subagent one; a source string the CLI is not known
   to write → system and drift `threads.source:(other)`; else human). `source` text that starts
-  with `{`, `[` or `"` is parsed as JSON; JSON that does not parse, or a source that is neither a string nor a subagent
-  object, is drift `threads.source:shape` (surface `other`). `models` = [`model`] (model-id-shaped, else `other`);
+  with `{`, `[` or `"` is parsed as JSON; JSON that does not parse, or a source of any other shape, is system and drift
+  `threads.source:shape` (surface `other`). `models` = [`model`] (model-id-shaped, else `other`);
   `effort` = `reasoning_effort` by the CLI's levels (`effort.ts`, shared with the rollouts' turns: `none`, `minimal`,
   `low`, `medium`, `high`, `xhigh`, `max`, `ultra`; any other string → `other`; null → none);
   `version` = `cli_version` (version-shaped); `projectKey` from `cwd`; `inRepo` = any git column set; `approval` =

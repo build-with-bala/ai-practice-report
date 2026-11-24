@@ -630,7 +630,7 @@ describe("antigravity cli: transcript.jsonl", () => {
     const r = await run([agCli]);
     expect([r.store.all("prompt").length, r.store.all("usage").length]).toEqual([1, 1]);
     expect(r.store.session(sidOf(P))).toMatchObject({ window: "detail", origin: "human", surface: "cli", start: at, end: at + 1_000 });
-    expect(covOf(r, "antigravity.cli")).toMatchObject({ records: 2, skipped: { parse: 1 }, files: 1 });
+    expect(covOf(r, "antigravity.cli")).toMatchObject({ records: 2, skipped: { partial: 1 }, files: 1 }); // the cut-off last line
   });
 });
 
@@ -669,6 +669,21 @@ describe("antigravity history: history.jsonl (its own lifetime source)", () => {
     const cov = covOf(r, "antigravity.history");
     expect(cov).toMatchObject({ window: "lifetime", status: "drift", files: 1, records: 10, skipped: { empty: 1, "bad-ts": 1 } });
     expect(cov.unknownTypes).toEqual({ "history.type:(other)": 1, "history.display:missing": 1, "history.timestamp:missing": 1, "history:not-object": 1 });
+    expectNoCanaries([...allEvents(r), r.coverage]);
+  });
+
+  test("a history prompt carries the project key a session of the same folder carries, its workspace a path or a file URI; the folder itself never", async () => {
+    const at = fixtureStart();
+    writeSummaries(h, [{ id: P, input: at, modified: at + MIN }]); // its workspace: file://<the canary folder>
+    h.writeJsonl(historyRel, [
+      historyLine({ display: "Refactor the importer", timestamp: at }),
+      { ...historyLine({ display: "Add tests", timestamp: at + MIN }), workspace: `file://${CANARY.path}` },
+      { ...historyLine({ display: "No folder", timestamp: at + 2 * MIN }), workspace: undefined },
+    ]);
+    const r = await run([agCli, agHistory]);
+    const session = r.store.session(sidOf(P))!;
+    expect(session.projectKey).toBe(keyedHash(r.salt, normalizePath(CANARY.path)));
+    expect(byTime(r.store.all("prompt")).map((p) => p.projectKey)).toEqual([session.projectKey, session.projectKey, undefined]);
     expectNoCanaries([...allEvents(r), r.coverage]);
   });
 

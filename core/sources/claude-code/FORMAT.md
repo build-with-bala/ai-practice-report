@@ -12,7 +12,8 @@ This file records names and value types only, never values.
 **Zero-yield.** A coverage window that read records, or found files whose lines it could not use (skipped `parse` or
 `oversize`), but yielded none of its reader's primary events is drift `zero-yield` (set by the scan), except records
 skipped as `copied` or `empty`, and coverage stamped `aborted`, so a renamed field or a changed container never passes
-as a quiet store; files with no lines at all stay `empty`. Primary events: `claude-code.transcripts` — a session,
+as a quiet store; files with no lines at all stay `empty`; so does a
+file whose only unusable line is its last line with no line end (skipped `partial`: a record still being written). Primary events: `claude-code.transcripts` — a session,
 prompt or tool call; `claude-code.history` — a prompt; `claude-code.stats` — a day. `claude-code.config` is not
 guarded: its records are its own events, so it cannot read one without yielding one.
 
@@ -190,7 +191,9 @@ manual), preTokens, postTokens, durationMs, preservedSegment, …}`, `logicalPar
   says `interrupted: true`; such a call has no `ok` and no `exit`. Else `ok` = not `is_error`, and `exit` =
   `toolUseResult.exitCode`, else — for a failing Bash/PowerShell call — the `<n>` of its reply's leading `Exit code <n>`.
 - `UsageEv` and `AnchorEv` (`cc-msg`, `cc-req`) once per `message.id`, usage fields taking the maximum over the
-  message's block records; each `AnchorEv` names its session (`sessionId`).
+  message's block records; each `AnchorEv` names its session (`sessionId`). `idTail` = the id after `msg_` / `req_`,
+  only when it has a server id's shape (letters, digits, `_` and `-`, at most 128 characters); any other id gives no
+  anchor and is skipped `bad-anchor`.
 - `TurnEv` per `turn_duration` (`effort` outside `low|medium|high|xhigh|max` becomes `other`); `TotalsEv` from the
   last `cost-state` and from each workflow summary (`claude-code:wf:<workflowId>`); `IdentityEv` per distinct
   `session-owner.accountUuid`; `FileFactEv` per fully read transcript, naming its session (`sessionId`).

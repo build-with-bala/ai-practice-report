@@ -357,7 +357,10 @@ describe("wording: every reason and question the forensic checks produce", () =>
     ["m1", "m2", "m3"].map((id) => sess(id, "claude-code", T0, { models: ["model-x"] })),
     // ids from another provider: more than 10% without the service's marker
     anchors().map((e, i) => (i % 6 === 0 ? { ...e, idTail: `zz${e.idTail.slice(2)}` } : e)),
-    // ids that grow while every recorded time is the same: their order cannot be ranked
+    // a gateway minting its own ids for a third of the sessions: unverified ids
+    scrambled(anchors(), 9).filter((_, i) => i % 3 === 0).concat(anchors().filter((_, i) => i % 3 !== 0)),
+    // ids that grow while every recorded time is the same: they span less than a day, so C2 has too few to rank (C2's
+    // degenerate n/a stays as a guard: constant ranks cannot span a day)
     anchors().slice(0, 300).map((e) => ({ ...e, ts: T0 })),
     [
       sess("s", "claude-code", NOW - 3 * DAY, { end: NOW }), cov("claude-code", CC, "detail"),
@@ -382,7 +385,7 @@ describe("wording: every reason and question the forensic checks produce", () =>
   test("the scenarios reach every question", () => {
     const asked = new Set(results.filter((c) => c.askAbout !== undefined).map((c) => `${c.id}:${c.reason}`));
     expect([...asked].sort()).toEqual([
-      "C1:malformed-ids", "C1:off-time", "C1:scheme-changed", "C1:unknown-marker", "C2:degenerate", "C2:out-of-order", "C2:scheme-changed",
+      "C1:malformed-ids", "C1:off-time", "C1:scheme-changed", "C1:unknown-marker", "C1:foreign-ids", "C2:foreign-ids", "C2:out-of-order", "C2:scheme-changed",
       "C2:unknown-marker", "C9:long-before-release", "soft:missing-ids:missing-ids", "C3:history-mismatch", "C3:missing-stats-days", "C4:no-match",
       "C4:several-accounts", "C5:changed-after-write", "C5:file-times", "C5:restore-cluster", "C6:missing-thread-rows", "C7:time-zone-change",
       "C7:uuid-after-name", "C8:ledger-contradictions", "C9:before-release", "soft:new-config:new-config",
@@ -415,6 +418,39 @@ describe("runForensics: the closed vocabularies are guarded at run time", () => 
     for (const evs of [anchors(), anchors().slice(0, 30), scrambled(anchors(), 3)]) {
       const f = run(evs);
       expect(byId(f, "C1").tools === byId(f, "C2").tools).toBe(false);
+    }
+  });
+});
+
+describe("runForensics: server-backed and the band agree", () => {
+  const cc = statsOf([["claude-code", 100]]);
+  /** 200 ids in 25 minutes, written up to 4 min late: C1 passes, C2 is not applicable (they span under a day). */
+  const burst = (): AnchorEv[] => anchors().slice(0, 200).map((e, i) => ({ ...e, ts: T0 + i * 7_500 + (i % 5) * 40 * SEC,
+    idTail: `01${enc(3n * 58n ** 11n + BigInt(i * 7_500) * 1_000n, 12)}${e.idTail.slice(14)}` }));
+
+  test("a tool whose server checks are a pass and a not-applicable is backed: the burst reads consistent and fully backed", () => {
+    const f = run(burst(), cc);
+    expect([byId(f, "C1").status, byId(f, "C2").status]).toEqual(["pass", "n/a"]);
+    expect([f.band, f.serverBacked]).toEqual(["consistent", 1]);
+  });
+
+  test("a tool whose every server check is not applicable is not backed", () => {
+    const f = run([...anchors().slice(0, 30), ...claudeDays(10)], cc);
+    expect([byId(f, "C1").status, byId(f, "C2").status]).toEqual(["n/a", "n/a"]);
+    expect([f.band, f.serverBacked]).toEqual(["consistent-with-notes", 0]);
+  });
+
+  test("a tool with a pass on one server check and a fail on another is not backed", () => {
+    const times = anchors().map((e) => e.ts).reverse();
+    const f = run(anchors().map((e, i) => ({ ...e, ts: times[i]! })), cc);
+    expect(byId(f, "C2").status).toBe("fail");
+    expect([f.band, f.serverBacked]).toEqual(["inconsistent", 0]);
+  });
+
+  test("no history reads consistent with a backed share of 0 for its only anchorable tool", () => {
+    for (const evs of [burst(), anchors(), [...anchors().slice(0, 30), ...claudeDays(10)], claudeDays(10), edited(anchors())]) {
+      const f = run(evs, cc);
+      if (f.band === "consistent") expect(f.serverBacked).toBe(1);
     }
   });
 });

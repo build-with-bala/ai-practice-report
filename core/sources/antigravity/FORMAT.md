@@ -12,7 +12,8 @@ data. This file records names and value types only, never values.
 **Zero-yield.** A coverage window that read records, or found files whose lines it could not use (skipped `parse` or
 `oversize`), but yielded none of its reader's primary events is drift `zero-yield` (set by the scan), except records
 skipped as `copied` or `empty`, and coverage stamped `aborted`, so a renamed field or a changed container never passes
-as a quiet store; files with no lines at all stay `empty`. Primary events: `antigravity.cli` (`detail`) — a session,
+as a quiet store; files with no lines at all stay `empty`; so does a
+file whose only unusable line is its last line with no line end (skipped `partial`: a record still being written). Primary events: `antigravity.cli` (`detail`) — a session,
 prompt or tool call (its `lifetime` window is checked by its columns); `antigravity.history` — a prompt;
 `antigravity.ide` — a session. `antigravity.brain` is not guarded: its records are its own markers.
 
@@ -194,7 +195,8 @@ on every line), `workspace` (string), `type` (`slash_command` on slash commands,
 - **PromptEv** (source `antigravity.history`, window `lifetime`, origin `human`) per line, slash commands included (their
   intent is `command`): `sessionId` from `conversationId`; intent, features and `textHash` from `display` in memory;
   `isTaskStart` per conversation (first, or ≥ 30 min since its previous line), state for the 256 most recent conversations.
-  `workspace` is never kept.
+  `projectKey` = the keyed hash of `workspace` (a path, or a `file:` URI read as its path): the key a session of that
+  folder carries; the folder is never kept, nor registered for repo signals.
 - **DailyEv** (source `antigravity.history`, `zone: "local"`, `unit: "prompts"`) per local day, `count` = its
   prompts and slash commands.
 - Drift: `history:not-object`, `history.type:(other)` (the type is never kept), `history.display:missing`, `history.timestamp:missing`,

@@ -18,7 +18,7 @@ export interface StreamResult { read: boolean; size: number; stat?: Stats }
  * - A line the stream skips counts its reason (`parse`, `oversize`, `sniffed`). Each record counts toward `records`,
  *   then goes to `onRecord`: a throw counts `bad-record` and the next record goes on; returning `"stop"` ends the file.
  * - An I/O failure (a path that cannot be stat'ed, a read that fails) counts `io-error` and logs warn `o.ioLog`.
- * - Read to its end — not stopped, the scan not aborted — the file counts as one file of its size (`files`, `bytes`).
+ * - Read to its end — not stopped, the scan not aborted — the file counts as one file (`files`) of the bytes read (`bytes`).
  */
 export async function streamJsonlFile(file: string, ctx: ScanCtx, tally: Tally, onRecord: (v: unknown) => void | "stop",
   o: { sniffSkip?: (head: string) => boolean; ioLog?: string } = {}): Promise<StreamResult> {
@@ -39,8 +39,9 @@ export async function streamJsonlFile(file: string, ctx: ScanCtx, tally: Tally, 
   const { stat } = st;
   const size = stat.size;
   let stopped = false;
+  let read = 0;
   try {
-    for await (const item of readJsonl(file, { sniffSkip: o.sniffSkip, signal: ctx.signal })) {
+    for await (const item of readJsonl(file, { sniffSkip: o.sniffSkip, signal: ctx.signal, onBytes: (n) => { read += n; } })) {
       if ("skip" in item) {
         tally.skip(item.skip);
         continue;
@@ -66,6 +67,6 @@ export async function streamJsonlFile(file: string, ctx: ScanCtx, tally: Tally, 
   const end = statPath(file);
   const final = end.state === "file" ? end.stat : stat; // gone or replaced since: the times it had when it was opened
   tally.files++;
-  tally.bytes += final.size;
+  tally.bytes += read; // what was read, to the end the read reached
   return { read: true, size: final.size, stat: final };
 }

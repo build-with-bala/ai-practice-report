@@ -10,9 +10,12 @@ import { roundDown, roundUp, toolsOf, type CheckResult, type CheckValues, type R
  * the prefix) grow with time. The time line is fitted from the history's own ids (its slope and offset are not the
  * service's constants), so the checks catch sessions that do not fit the rest of the history: spliced in, shuffled, or
  * partly re-timed. They do not catch a history re-timed as a whole (stretched or moved, every id with it), nor ids
- * invented to grow with time: both fit a line of their own. Nor ids invented with another slope, or with values far
- * from the genuine ones, at the start or end of the history: they read as an older or newer encoding
- * (`scheme-changed`, a question, never `consistent`). C9 (release dates) is the check that bounds re-timing: it
+ * invented to grow with time: both fit a line of their own. Ids invented with another slope or with far-off values
+ * read as another encoding (`scheme-changed` or `foreign-ids`: a question, never `consistent`, never a fail). A real
+ * break in use of more than a year with one part moved in time reads the same way: the moved part's values imply times
+ * more than a year from the rest, which the rule cannot tell from another encoding. A new encoding whose values carry
+ * on from the old ones at another slope fails C1: its first ids imply plausible times, and the off verdict comes
+ * before foreign ids are considered. C9 (release dates) is the check that bounds re-timing: it
  * catches a history moved back more than 90 days before a model's release.
  *
  * Per anchor kind (`cc-msg`, `cc-req`):
@@ -25,24 +28,37 @@ import { roundDown, roundUp, toolsOf, type CheckResult, type CheckValues, type R
  * - fewer than 50 recognized anchors, and no malformed share over that rule: n/a (`too-few`);
  * - the decoded value `v`: the 12 base58 digits after the marker, less their minimum over the kind (BigInt);
  * - the fit of `ts` on `v`, over a stride sample of at most 5,000 (in time order). The start is the most-inliers line:
- *   of the lines through the pairs half the sample apart in `v` order, the one with the most sample points within
- *   10 min (the first among equals); then ordinary least squares over the sample points within 10 min of it. That is
- *   about 2,500 × 5,000 operations at most, and deterministic. Breakdown: whenever more than half of the sample is
- *   genuine, some pair half the sample apart is genuine at both ends (the pairs partition the sample), so a candidate
- *   through the genuine line exists. A crossing fabricated line can still win the start; the check then still fails,
- *   but the off share may understate the fabricated share. Fabricated or edited ids up to just under half the anchors
- *   therefore fail C1, and at half or more the median rule below makes it n/a;
- * - a median |residual| over 10 min: no line holds half of the anchors, n/a (`scheme-changed`);
- * - C1 fails when more than 1% of the anchors, and at least 3, are off their time by more than 10 min (`offIds`;
- *   `p99Seconds` rounded up, capped at a year); more than 1% with fewer than 3 off is a note (`off-time`);
- * - a change of encoding: when C1 or C2 would fail, and the time-ordered ids split at one point into two sides of at
- *   least 3 that each fit their own line without failing that rule, whose id values do not overlap, and that are no
- *   block moved in time (same slope, and the ids advanced no further than the time between them allows), both are n/a
- *   (`scheme-changed`), at any split ratio (`schemeSplit`). A minority of 1 or 2 ids is judged by the rule above;
+ *   of the lines through the pairs half the sample apart in `v` order (and an eighth and a sixty-fourth of that), the
+ *   one with the most sample points within 10 min (the first among equals); then ordinary least squares over the
+ *   sample points within 10 min of it. Each pair distance d gives n − d candidates, so the three distances give about
+ *   (2,500 + 4,690 + 4,960) × 5,000 ≈ 61 million operations at most, and deterministic.
+ *   Breakdown: whenever more than half of the sample is genuine, some pair half the sample apart is genuine at both
+ *   ends (the pairs partition the sample), so a candidate through the genuine line exists; the closer pairs give one
+ *   through a genuine block holding fewer, when its ids are contiguous in `v`. A crossing fabricated line can still win the start; the check then still fails,
+ *   but the off share may understate the fabricated share;
+ * - no line at all (every `v` equal), or the best line holds under 10% of the ids: n/a (`scheme-changed`). The line
+ *   holding the most ids is the main encoding, even when it holds half or less: the ids off it are then judged one
+ *   by one, as below;
+ * - an id is evidence about time only if the time the line implies for its value is plausible: not later than the
+ *   scan's end (plus 10 min) and within a year of the span of the ids on the line. An id off its time by more than
+ *   10 min whose implied time is plausible is this encoding at the wrong time: it is off, whatever the arrangement
+ *   (a block at either end, in the middle, moved across the rest or into a real break, or scattered), because a moved
+ *   genuine id keeps its value and the line maps it back next to the rest. An off id whose implied time is not
+ *   plausible is not this encoding (another encoding, a gateway minting its own ids, an invented id): never off, it
+ *   is counted in `foreign` and is unverified. At least 10 of them on a line of their own: n/a (`scheme-changed`), at
+ *   any share; else more than 10% of the recognized ids: n/a (`foreign-ids`); else at least 2 and more than 1%: a C1
+ *   note (`foreign-ids`);
+ * - C1 fails when more than 1% of this encoding's ids (the recognized ids less the foreign ones), and at least 3, are
+ *   off (`offIds`, `offShare`; `p99Seconds` over the ids that are not foreign, rounded up, capped at a year); more than
+ *   1% with fewer than 3 off is a note (`off-time`). The order of decisions: first this off-time verdict; only a kind
+ *   that does not fail may then be made unverified by its foreign ids (`scheme-changed` for 10 on a line of their own,
+ *   then `foreign-ids` above 10%), so foreign ids never hide a fail, and a failing kind still carries their count;
+ *   then the C1 note (off-time, then foreign-ids, then malformed-ids), else a pass;
  * - C2 is Spearman's rank correlation of `v` and `ts` over a stride sample of at most 20,000 of the ids on C1's line
  *   (those C1 counted off are judged by C1's own thresholds), and fails below 0.99;
  *   it needs at least 200 recognized anchors (else n/a `too-few`: one late record among a few dozen moves it below
- *   0.99), and is n/a wherever C1 is.
+ *   0.99), and ranked ids that span at least 24 hours (else n/a `too-few`: within one dense burst, records written
+ *   minutes late by parallel agents reorder ids that are minutes apart); it is n/a wherever C1 is n/a.
  *
  * The two kinds combine to the worse result, with `values.unverifiedKinds` (0, 1 or 2: the kinds that are n/a for a
  * reason other than `too-few`), where an n/a other than `too-few` outranks a pass: a kind that cannot be
@@ -62,6 +78,7 @@ const OFF_SHARE = 0.01;
 const MIN_RHO = 0.99;
 const OFF_MIN = 3;
 const MIN_RANKED = 200;
+const RANK_SPAN_MS = 86_400_000;
 const KINDS: readonly AnchorEv["kind"][] = ["cc-msg", "cc-req"];
 
 interface Point { v: number; ts: number }
@@ -99,10 +116,12 @@ interface Line { a: number; b: number }   // ts = a + b·v
  */
 function inlierLine(ps: readonly Point[]): Line | undefined {
   const s = [...ps].sort((x, y) => x.v - y.v || x.ts - y.ts);
-  const h = s.length >> 1;
+  const half = s.length >> 1;
   let best: Line | undefined;
   let bestCount = -1;
-  for (let i = 0; i + h < s.length; i++) {
+  // pairs half the sample apart, and an eighth and a sixty-fourth of that: a genuine block that is contiguous in `v`
+  // but holds half the ids or fewer still gives a candidate through two of its own ids
+  for (const h of [...new Set([half, Math.ceil(half / 8), Math.ceil(half / 64)])]) for (let i = 0; i + h < s.length; i++) {
     const p = s[i]!, q = s[i + h]!;
     if (q.v === p.v) continue;
     const b = (q.ts - p.ts) / (q.v - p.v);
@@ -172,166 +191,102 @@ function recognize(anchors: readonly AnchorEv[]): Recognized {
   return { points: ok.map((a, i) => ({ v: Number(raw[i]! - min), ts: a.ts })), ...out };
 }
 
-/** The ids the smaller side of a change point needs, the sample a side's line is fitted on, and the split grid per pass. */
-const SPLIT_MIN = 3;
-const SPLIT_FIT = 1_000;
-const SPLIT_GRID = 32;
-/** At most this many places where the whole history's line stops or starts fitting are tried as splits. */
-const MAX_FLIPS = 64;
-/** The smaller side's slope is judged only when it spans at least this long (ten times the time tolerance). */
-const SLOPE_SPAN_MS = 10 * OFF_MS;
+/** A line of its own needs this many ids not of the main encoding; the plausible reach of a line beyond its span. */
+const FOREIGN_LINE_MIN = 10;
+const FOREIGN_FIT = 1_000;
+const REACH_MS = 365 * 86_400_000;
+/** Above this share of the recognized ids, ids that are not this encoding leave the kind unverifiable. */
+const FOREIGN_SHARE = 0.1;
+/** The main line must hold at least this share of the recognized ids. */
+const MAIN_SHARE = 0.1;
 
 /** Whether `off` ids off the line among `n` fail C1: more than 1% of them, and at least 3. */
 const offFails = (off: number, n: number): boolean => off > OFF_SHARE * n && off >= OFF_MIN;
 
-interface Side { off: number; err: number; line: Line }
-
-/**
- * One side of a split: its own line (the start and fit C1 uses, over a stride sample of at most 1,000) and the ids off
- * it, or undefined when no line holds half of the side.
- */
-function sideFit(ps: readonly Point[]): Side | undefined {
-  const sample = stride(ps, SPLIT_FIT);
+/** Whether some ids fit a line of their own: a line holds at least half of them (over a stride sample of 1,000). */
+function ownLine(ps: readonly Point[]): boolean {
+  const sample = stride(ps, FOREIGN_FIT);
   const start = inlierLine(sample);
   const line = start ? ols(sample.filter((p) => Math.abs(p.ts - start.a - start.b * p.v) <= OFF_MS)) : undefined;
-  if (line === undefined) return undefined;
-  const res = ps.map((p) => Math.abs(p.ts - line.a - line.b * p.v));
-  if (median(res) > OFF_MS) return undefined;
-  let err = 0;
-  for (const r of res) err += Math.min(r, OFF_MS);
-  return { off: res.filter((r) => r > OFF_MS).length, err, line };
-}
-
-/** The lowest and highest id value of some points. */
-function range(xs: readonly Point[]): [number, number] {
-  let lo = Infinity, hi = -Infinity;
-  for (const p of xs) {
-    if (p.v < lo) lo = p.v;
-    if (p.v > hi) hi = p.v;
-  }
-  return [lo, hi];
-}
-
-/**
- * Whether the ids split at `k` (time order) are one encoding moved in time rather than two encodings. Genuine ids grow
- * along one line, so a block moved in time keeps its slope, and at the split more time has passed than the ids account
- * for. With the larger side's line (`ts = a + b·v`, b ms per id unit): the slopes agree (judged only when the smaller
- * side spans at least 100 min: |b_small − b_large| over the smaller side's id span moves a time by at most 10 min; on a
- * shorter span they count as agreeing), and the step in id value from the last id before the split to the first after
- * it lies between minus the tolerance (10 min in id units) and what the time between them explains plus the tolerance.
- * A slope that is not positive is no genuine line: it counts as moved, so the fail stands.
- */
-function movedInTime(ps: readonly Point[], k: number, before: Side, after: Side): boolean {
-  const [small, large, smallPs] = k <= ps.length - k ? [before, after, ps.slice(0, k)] : [after, before, ps.slice(k)];
-  const b = large.line.b;
-  if (!(b > 0)) return true;
-  const span = smallPs[smallPs.length - 1]!.ts - smallPs[0]!.ts;
-  const [v0, v1] = range(smallPs);
-  const agree = span < SLOPE_SPAN_MS || Math.abs(small.line.b - b) * (v1 - v0) <= OFF_MS;
-  const p = ps[k - 1]!, q = ps[k]!;
-  const jump = q.v - p.v, tol = OFF_MS / b;
-  return agree && jump >= -tol && jump <= (q.ts - p.ts) / b + tol;
-}
-
-/**
- * A change of encoding at one point in time: of the splits of the time-ordered ids with at least 3 on each side, the
- * one with the fewest ids off their side's own line, among equals the smallest sum of residuals (each capped at 10 min),
- * so the exact boundary beats a tilted line that absorbs a shift (a grid of 33 splits, narrowed around the best until
- * it is exact, together with the places where the whole history's line stops or starts fitting; deterministic), when neither side fails C1's rule on its own line, the two sides' id values do not overlap (more than
- * C1's rule allows: a block of re-timed ids keeps its values inside the other side's range), and the split is no block
- * moved in time (`movedInTime`): a real change of encoding changes the slope, or makes the values drop or leap.
- */
-function schemeSplit(ps: readonly Point[], off: readonly boolean[]): boolean {
-  const memo = new Map<number, [Side, Side] | undefined>();
-  const sides = (k: number): [Side, Side] | undefined => {
-    if (!memo.has(k)) {
-      const a = sideFit(ps.slice(0, k)), b = a === undefined ? undefined : sideFit(ps.slice(k));
-      memo.set(k, a === undefined || b === undefined ? undefined : [a, b]);
-    }
-    return memo.get(k);
-  };
-  let lo = SPLIT_MIN, hi = ps.length - SPLIT_MIN;
-  if (lo > hi) return false;
-  let best = -1, bestOff = Infinity, bestErr = Infinity;
-  const consider = (k: number): void => {
-    const x = sides(k);
-    if (x === undefined) return;
-    const o = x[0].off + x[1].off, err = x[0].err + x[1].err;
-    if (o < bestOff || (o === bestOff && err < bestErr)) {
-      bestOff = o;
-      bestErr = err;
-      best = k;
-    }
-  };
-  // the places where the whole history's line stops or starts fitting, in time order: a change point is one of them
-  const flips: number[] = [];
-  for (let k = lo; k <= hi; k++) if (off[k - 1] !== off[k]) flips.push(k);
-  if (flips.length <= MAX_FLIPS) for (const k of flips) consider(k);
-  for (;;) {
-    const step = Math.max(1, Math.ceil((hi - lo) / SPLIT_GRID));
-    for (let k = lo; k <= hi; k = k === hi ? hi + 1 : Math.min(hi, k + step)) consider(k);
-    if (best < 0 || step === 1) break;
-    lo = Math.max(SPLIT_MIN, best - step);
-    hi = Math.min(ps.length - SPLIT_MIN, best + step);
-  }
-  if (best < 0) return false;
-  const [a, b] = sides(best)!;
-  if (offFails(a.off, best) || offFails(b.off, ps.length - best)) return false;
-  const before = ps.slice(0, best), after = ps.slice(best);
-  const [b0, b1] = range(before), [a0, a1] = range(after);
-  const inside = after.filter((p) => p.v >= b0 && p.v <= b1).length + before.filter((p) => p.v >= a0 && p.v <= a1).length;
-  if (offFails(inside, ps.length)) return false;
-  return !movedInTime(ps, best, a, b);
+  return line !== undefined && median(ps.map((p) => Math.abs(p.ts - line.a - line.b * p.v))) <= OFF_MS;
 }
 
 const MAX_P99_S = 31_536_000;
 const MALFORMED_SHARE = 0.01;
 const MALFORMED_MIN = 2;
+const FOREIGN_MIN = 2;
 
 function naPair(n: number, reason: Reason, values: CheckValues, tools: CheckResult["tools"]): [CheckResult, CheckResult] {
   return [{ id: "C1", status: "n/a", n, reason, values: { ...values }, tools: [...tools] }, { id: "C2", status: "n/a", n, reason, values: { ...values }, tools: [...tools] }];
 }
 
-function checkKind(anchors: readonly AnchorEv[]): [CheckResult, CheckResult] {
+function checkKind(anchors: readonly AnchorEv[], end: number): [CheckResult, CheckResult] {
   const tools = toolsOf(anchors);
   const rec = recognize(anchors);
-  const left = { unrecognized: rec.unrecognized, malformed: rec.malformed } satisfies CheckValues;
-  if (anchors.length >= MIN_ANCHORS && rec.marked < MARKER_SHARE * anchors.length) return naPair(anchors.length, "unknown-marker", left, tools);
+  const counts = { unrecognized: rec.unrecognized, malformed: rec.malformed } satisfies CheckValues;
+  if (anchors.length >= MIN_ANCHORS && rec.marked < MARKER_SHARE * anchors.length) return naPair(anchors.length, "unknown-marker", counts, tools);
   const malformed = rec.malformed >= MALFORMED_MIN && rec.malformed > MALFORMED_SHARE * rec.marked;
   const ps = rec.points;
   if (ps.length < MIN_ANCHORS) {
-    const [c1, c2] = naPair(ps.length, "too-few", left, tools);
+    const [c1, c2] = naPair(ps.length, "too-few", counts, tools);
     if (!malformed) return [c1, c2];
-    return [{ id: "C1", status: "note", n: anchors.length, reason: "malformed-ids", values: { ...left }, tools }, c2];
+    return [{ id: "C1", status: "note", n: anchors.length, reason: "malformed-ids", values: { ...counts }, tools }, c2];
   }
   const sample = stride(ps, FIT_SAMPLE);
   const start = inlierLine(sample);
   const inliers = start ? sample.filter((p) => Math.abs(p.ts - start.a - start.b * p.v) <= OFF_MS) : [];
   const line = ols(inliers);
-  if (line === undefined) return naPair(anchors.length, "scheme-changed", left, tools);
-  const res = ps.map((p) => Math.abs(p.ts - line.a - line.b * p.v));
-  if (median(res) > OFF_MS) return naPair(anchors.length, "scheme-changed", left, tools);
+  if (line === undefined) return naPair(anchors.length, "scheme-changed", counts, tools);
+  const implied = ps.map((p) => line.a + line.b * p.v);
+  const res = ps.map((p, i) => Math.abs(p.ts - implied[i]!));
+  // a line holding few ids is no time line at all: every other id would look plausible and off
+  if (res.filter((r) => r <= OFF_MS).length < MAIN_SHARE * ps.length) return naPair(anchors.length, "scheme-changed", counts, tools);
 
-  const offIds = res.filter((r) => r > OFF_MS).length;
-  const off = offIds / ps.length;
-  // more than 1% off fails only with at least 3 ids off: one late record among few ids is no evidence of editing
+  // the main encoding's span: its ids on the line; an id is evidence about time only where its implied time is plausible
+  let from = Infinity, to = -Infinity;
+  for (let i = 0; i < ps.length; i++) {
+    if (res[i]! > OFF_MS) continue;
+    if (ps[i]!.ts < from) from = ps[i]!.ts;
+    if (ps[i]!.ts > to) to = ps[i]!.ts;
+  }
+  const plausible = (t: number): boolean => t <= end + OFF_MS && t >= from - REACH_MS && t <= to + REACH_MS;
+  const foreignPs = ps.filter((_, i) => res[i]! > OFF_MS && !plausible(implied[i]!));
+  const foreign = foreignPs.length;
+  const left = { ...counts, foreign } satisfies CheckValues;
+
+  // first the off-time verdict, over this encoding's ids alone (foreign ids can neither dilute nor hide it); more than
+  // 1% off fails only with at least 3 ids off: one late record among few ids is no evidence of editing
+  const own = ps.length - foreign;
+  const offIds = res.filter((r, i) => r > OFF_MS && plausible(implied[i]!)).length;
+  const off = offIds / own;
   const offOver = off > OFF_SHARE;
-  const c1Fail = offFails(offIds, ps.length);
-  // C2 ranks only the ids on C1's line: the ids off it are C1's business, under C1's thresholds
-  const onLine = ps.filter((_, i) => res[i]! <= OFF_MS);
-  const rankSample = stride(onLine, RANK_SAMPLE);
-  const rho = ps.length < MIN_RANKED ? undefined : spearman(rankSample);
-  const c2Fail = rho !== undefined && rho < MIN_RHO;
-  // ids that fit one line before a point in time and another after it: the encoding changed, which fails no one
-  if ((c1Fail || c2Fail) && schemeSplit(ps, res.map((r) => r > OFF_MS))) return naPair(anchors.length, "scheme-changed", left, tools);
+  const c1Fail = offFails(offIds, own);
+  // only a kind that does not fail may be made unverified by ids that are not this encoding: on a line of their own
+  // (another encoding, at any share), or above their share
+  if (!c1Fail && foreign >= FOREIGN_LINE_MIN && ownLine(foreignPs)) return naPair(anchors.length, "scheme-changed", left, tools);
+  if (!c1Fail && foreign > FOREIGN_SHARE * ps.length) return naPair(anchors.length, "foreign-ids", left, tools);
+  const foreignNote = foreign >= FOREIGN_MIN && foreign > MALFORMED_SHARE * ps.length;
+  const offRes = res.filter((r, i) => r <= OFF_MS || plausible(implied[i]!));
   const c1: CheckResult = {
-    id: "C1", status: c1Fail || offOver || malformed ? (c1Fail ? "fail" : "note") : "pass", n: ps.length,
-    reason: offOver ? "off-time" : malformed ? "malformed-ids" : "ok",
-    values: { offShare: roundUp(off), offIds, p99Seconds: Math.min(MAX_P99_S, Math.ceil(quantile(res, 0.99) / 1_000)), ...left }, tools: [...tools],
+    id: "C1", status: c1Fail ? "fail" : offOver || foreignNote || malformed ? "note" : "pass", n: ps.length,
+    reason: offOver ? "off-time" : foreignNote ? "foreign-ids" : malformed ? "malformed-ids" : "ok",
+    values: { offShare: roundUp(off), offIds, p99Seconds: Math.min(MAX_P99_S, Math.ceil(quantile(offRes, 0.99) / 1_000)), ...left }, tools: [...tools],
   };
 
+  // C2 ranks only the ids on C1's line: the ids off it are C1's business, under C1's thresholds
   if (ps.length < MIN_RANKED) return [c1, { id: "C2", status: "n/a", n: ps.length, reason: "too-few", values: { ...left }, tools: [...tools] }];
+  const rankSample = stride(ps.filter((_, i) => res[i]! <= OFF_MS), RANK_SAMPLE);
+  // the order of ids whose times lie within minutes of each other says nothing (records land minutes late): C2 ranks
+  // only ids that span at least a day
+  let r0 = Infinity, r1 = -Infinity;
+  for (const p of rankSample) {
+    if (p.ts < r0) r0 = p.ts;
+    if (p.ts > r1) r1 = p.ts;
+  }
+  if (!(r1 - r0 >= RANK_SPAN_MS)) return [c1, { id: "C2", status: "n/a", n: rankSample.length, reason: "too-few", values: { ...left }, tools: [...tools] }];
+  const rho = spearman(rankSample);
   if (rho === undefined) return [c1, { id: "C2", status: "n/a", n: rankSample.length, reason: "degenerate", values: { ...left }, tools: [...tools] }];
+  const c2Fail = rho < MIN_RHO;
   const c2: CheckResult = { id: "C2", status: c2Fail ? "fail" : "pass", n: rankSample.length, reason: c2Fail ? "out-of-order" : "ok",
     values: { rho: roundDown(rho), ...left } satisfies CheckValues, tools: [...tools] };
   return [c1, c2];
@@ -353,6 +308,6 @@ function combine(rs: readonly CheckResult[]): CheckResult {
  */
 export function checkAnchors(raw: ScanResult, t: SessionTable, s: ForensicScope = forensicScope(raw, t)): [CheckResult, CheckResult] {
   const all = s.anchors();
-  const perKind = KINDS.map((k) => checkKind(all.filter((a) => a.kind === k)));
+  const perKind = KINDS.map((k) => checkKind(all.filter((a) => a.kind === k), raw.finishedAt));
   return [asked(combine(perKind.map((p) => p[0]))), asked(combine(perKind.map((p) => p[1])))];
 }

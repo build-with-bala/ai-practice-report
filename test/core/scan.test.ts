@@ -367,6 +367,18 @@ describe("zero-yield guard", () => {
       }
       expect(r.warnings.filter((w) => w.code === "drift").length).toBeGreaterThanOrEqual(4);
 
+      // a last line with no line end that does not parse is a record being written: alone, no drift; beside a bad line, drift
+      for (const [text, status] of [['{"display": "Fix the imp', "empty"], ['not json\n{"display": "Fix the imp', "drift"]] as const) {
+        const h3 = fakeHome();
+        try {
+          h3.write(path.join(".claude", "history.jsonl"), text);
+          const r3 = await scan({ env: h3.env, plugins: [ccHistory], repoSignals: false, handleSignals: false });
+          expect([text, r3.coverage[0]!.status, r3.coverage[0]!.skipped.partial]).toEqual([text, status, 1]);
+        } finally {
+          h3.cleanup();
+        }
+      }
+
       const h2 = fakeHome();
       try {
         h2.write(path.join(".claude", "history.jsonl"), "");

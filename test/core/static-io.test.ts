@@ -119,8 +119,10 @@ const PROCESS_USE = new RegExp([
   String.raw`\.\.\.\s*process\b`,
   String.raw`(?:=>|\breturn\b|\byield\b)\s*process\b${NOT_MEMBER}`,
   // the ordinary TypeScript forms around a member access: a cast (`(process as any).x`) and a non-null assertion (`process!.x`)
-  String.raw`\bprocess\s+as\b`,
-  String.raw`\bprocess\s*!(?!=)`,
+  // (what follows `as` must look like a type, and `!` must be followed by a member, a call or the end of an expression,
+  // so English in comments — "the process as a whole", "the process!" — is no use)
+  String.raw`\bprocess\s+as\s+(?:any|unknown|never|object|typeof\b|keyof\b|[A-Z][\w$]*|\{|\()`,
+  String.raw`\bprocess\s*!(?=\s*(?:\?\.|\.|\[|\(|\)|,|;))`,
 ].join("|"));
 
 /** A Bun member, written with `.` or `?.` and any spacing. */
@@ -233,6 +235,7 @@ describe("static I/O rule: deny by default", () => {
       ['import j from "./x.json" with { type: "json", other: "x" };', "import-attribute"],
       // process through the ordinary TypeScript forms
       ['(process as any).getBuiltinModule("node:fs")', "process"], ["process!.binding('fs')", "process"], ["const p = process as unknown;", "process"],
+      ["(process as NodeJS.Process).dlopen(m, p)", "process"], ["f(process!)", "process"],
     ];
     const missed = caught.filter(([text, rule]) => !violations("core/sources/x.ts", text).some((v) => v.startsWith(`core/sources/x.ts: ${rule}: `)));
     expect(missed).toEqual([]);
@@ -245,6 +248,7 @@ describe("static I/O rule: deny by default", () => {
       'import { view } from "./view.jsx";', 'import data from "./table.json" with { type: \'json\' };', 'if (process !== undefined) f();',
       "const dir = import.meta.dir;", "const e = process.env;", 'const home = process.env.HOME;', 'if (process.platform === "win32") f();',
       "// one DailyEv per local day (process time zone), as the scanning process's zone counts it; the process ends.",
+      "// it ends the process as a whole, and the process as it was; stop the process! Then go on.",
     ];
     expect(allowed.flatMap((text) => violations("core/sources/x.ts", text))).toEqual([]);
   });

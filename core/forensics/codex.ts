@@ -10,12 +10,13 @@ import { toolsOf, type CheckResult, type CheckValues } from "./types";
  * C6–C8: Codex's own records agree with each other. The CLI enters every thread it starts in its thread index, names
  * each rollout file after the local time it began, mints the thread id as a UUIDv7 carrying that same moment, and logs
  * the account's usage-limit readings, which only rise within one limit window. A rollout copied in from elsewhere has no
- * index row, a renamed one no longer fits its id, and two accounts' traces spliced together make the readings fall.
+ * index row, a renamed one no longer fits its id, and two accounts' traces spliced together can make the readings fall.
  *
  * Known limits: rollouts whose start (id time, else name time) is within 10 minutes of the scan, or after it, are not
  * checked by C6 (the CLI may not have written their row yet), so a copied rollout given such a start passes. Two
- * accounts' ledgers spliced together pass C8 when their reset times differ by more than a minute: each account's
- * readings then form windows of their own, which only rise.
+ * accounts' ledgers spliced together pass C8 when their reset times differ by more than a minute (each account's
+ * readings then form windows of their own, which only rise), and when their readings sit within ten minutes of each
+ * other (that is read as two sessions of one account interleaving). C8 never fails; it warns.
  */
 
 const RECENT_MS = 10 * 60_000;
@@ -163,7 +164,8 @@ function ledgerPairs(snaps: RateLimitEv[]): { pairs: number; contradictions: num
 /**
  * C8, the usage-limit ledger only rises within one reset window, per (bucket, window) ledger (`ledgerPairs`). `values`:
  * `pairs`, `contradictions` (the counted drops). n/a under 20 pairs; at least max(3, 1% of the readings) counted drops →
- * fail; fewer, but at least 1 → note (a reset on the service's side, or a second machine). `n`: the pairs.
+ * warn; fewer, but at least 1 → note. Never a fail: a reading that goes down inside one window can happen honestly (the
+ * service resets the limit), so it asks, naming that and a second account or machine. `n`: the pairs.
  */
 function checkLedger(s: ForensicScope): CheckResult {
   const all = s.rateLimits();
@@ -184,7 +186,8 @@ function checkLedger(s: ForensicScope): CheckResult {
   }
   const base = { id: "C8" as const, n: pairs, values: { pairs, contradictions } satisfies CheckValues, tools };
   if (pairs < MIN_PAIRS) return { ...base, status: "n/a", reason: "too-few" };
-  if (contradictions >= Math.max(FAIL_MIN, FAIL_SHARE * readings)) return { ...base, status: "fail", reason: "ledger-contradictions" };
+  // never a fail: the service can reset a limit inside a window (an incident, a change to the limits)
+  if (contradictions >= Math.max(FAIL_MIN, FAIL_SHARE * readings)) return { ...base, status: "warn", reason: "ledger-contradictions" };
   if (contradictions > 0) return { ...base, status: "note", reason: "ledger-contradictions" };
   return { ...base, status: "pass", reason: "ok" };
 }

@@ -228,14 +228,14 @@ describe("checkRollouts: C8, the rate-limit ledger only rises within a window", 
     expect(c8.n).toBe(42);
   });
 
-  test("spliced ledgers: two accounts' snapshots interleaved in one window fail, asking about more than one account", () => {
+  test("spliced ledgers: two accounts' snapshots interleaved in one window warn (never fail), asking about more than one account", () => {
     const a = ledger(T0, 0);
     const b = ledger(T0 + 10 * MIN, 50).map((e) => ({ ...e, resetsAt: e.resetsAt! - 10 * MIN + 10 * SEC }));
     const [, , c8] = run([...a, ...b]);
-    expect(c8.status).toBe("fail");
+    expect(c8.status).toBe("warn");
     expect(c8.reason).toBe("ledger-contradictions");
     expect(c8.values.contradictions as number).toBeGreaterThanOrEqual(3);
-    expect(c8.askAbout).toContain("more than one machine or account");
+    expect(c8.askAbout).toContain("more than one account or machine");
   });
 
   test("a drop of 2 points is no contradiction; a reset starts a new window", () => {
@@ -248,15 +248,15 @@ describe("checkRollouts: C8, the rate-limit ledger only rises within a window", 
   /** `ledger()` with the readings at the given indexes 8 points lower: each a drop of more than 2 points. */
   const dropped = (evs: RateLimitEv[], at: number[]) => evs.map((e, i) => (at.includes(i) ? { ...e, usedPercent: e.usedPercent - 8 } : e));
 
-  test("one drop in each of four windows counts each: 4 of 48 readings fail", () => {
+  test("one drop in each of four windows counts each: 4 of 48 readings warn", () => {
     const [, , c8] = run(dropped(ledger(), [3, 11, 19, 27]));
-    expect([c8.values.contradictions, c8.status]).toEqual([4, "fail"]);
+    expect([c8.values.contradictions, c8.status]).toEqual([4, "warn"]);
   });
 
-  test("4 counted drops among 48 readings fail; 2 are a note", () => {
+  test("4 counted drops among 48 readings warn; 2 are a note", () => {
     const [, , c8] = run(dropped(ledger(), [3, 5, 11, 13]));
     expect(c8.values.contradictions).toBe(4);
-    expect(c8.status).toBe("fail");
+    expect(c8.status).toBe("warn");
     const two = run(dropped(ledger(), [3, 5]))[2];
     expect([two.values.contradictions, two.status]).toEqual([2, "note"]);
   });
@@ -344,14 +344,14 @@ describe("checkRollouts: C8 readings out of order", () => {
     }
   });
 
-  test("a real splice (drops of many points, hours apart, several) still fails", () => {
+  test("a real splice (drops of many points, hours apart, several) warns, never fails", () => {
     const evs: RateLimitEv[] = [];
     for (let i = 0; i < 10; i++) {
       evs.push(snap(T0 + i * 2 * HOUR, 60 + i, T0 + 30 * HOUR), snap(T0 + i * 2 * HOUR + HOUR, 10 + i, T0 + 30 * HOUR));
     }
     for (let i = 0; i < 20; i++) evs.push(snap(T0 + 40 * HOUR + i * 10 * MIN, i, T0 + 45 * HOUR));
     const [, , c8] = run(evs);
-    expect([c8.status, c8.reason]).toEqual(["fail", "ledger-contradictions"]);
+    expect([c8.status, c8.reason]).toEqual(["warn", "ledger-contradictions"]);
     expect(c8.values.contradictions as number).toBeGreaterThanOrEqual(3);
   });
 
@@ -359,7 +359,7 @@ describe("checkRollouts: C8 readings out of order", () => {
     for (const at of [[3], [3, 13]]) {
       const [, , c8] = run(dropped(ledger(), at));
       expect([at.length, c8.status, c8.reason, c8.values.contradictions]).toEqual([at.length, "note", "ledger-contradictions", at.length]);
-      expect(c8.askAbout).toContain("more than one machine or account");
+      expect(c8.askAbout).toBe(`The usage-limit readings fell ${at.length} ${at.length === 1 ? "time" : "times"} within one limit window, where they only rise. Were traces from more than one account or machine combined here, or did the service reset the limit?`);
     }
   });
 });

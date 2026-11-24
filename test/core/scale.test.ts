@@ -12,8 +12,12 @@ const CHILD = path.join(import.meta.dir, "..", "kit", "scale-child.ts");
 
 interface Reading { store: number; retained: number; ms: number; bytes: number }
 
-async function measure(events: number): Promise<Reading> {
-  const child = Bun.spawn([process.execPath, CHILD, String(events)], { stdout: "pipe", stderr: "inherit" });
+/**
+ * The reading of a child process; the child is killed `killAfter` ms after it starts, just inside the test's own
+ * timeout, so a test that times out never leaves it running.
+ */
+async function measure(events: number, killAfter: number): Promise<Reading> {
+  const child = Bun.spawn([process.execPath, CHILD, String(events)], { stdout: "pipe", stderr: "inherit", timeout: killAfter, killSignal: "SIGKILL" });
   const out = await new Response(child.stdout).text();
   expect(await child.exited).toBe(0);
   return JSON.parse(out.trim().split("\n").at(-1)!) as Reading;
@@ -36,7 +40,7 @@ function sane(m: Reading, events: number): void {
 
 describe("scale", () => {
   test("300,000 events: analyze keeps at most 25% of the store's heap, ends within the runaway guard, exports at most 300 KB", async () => {
-    const m = await measure(300_000);
+    const m = await measure(300_000, 115_000);
     sane(m, 300_000);
     expect(m.retained / m.store).toBeLessThanOrEqual(0.25);
     expect(m.ms).toBeLessThanOrEqual(RUNAWAY_MS);
@@ -44,7 +48,7 @@ describe("scale", () => {
   }, 120_000);
 
   test.skipIf(process.env.SLOW !== "1")("SLOW=1, 3,000,000 events: the same 25%, within 30 s", async () => {
-    const m = await measure(3_000_000);
+    const m = await measure(3_000_000, 595_000);
     sane(m, 3_000_000);
     expect(m.retained / m.store).toBeLessThanOrEqual(0.25);
     expect(m.ms).toBeLessThanOrEqual(RUNAWAY_MS);

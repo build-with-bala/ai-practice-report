@@ -3,6 +3,8 @@ import { toEpochMs } from "../../io/time";
 import { Tally, typeKey } from "../common/coverage";
 import { isObj, str } from "../common/guards";
 import { PromptLog } from "../common/history";
+import { projectKeyOf } from "../common/project";
+import { uriToPath } from "../common/uri";
 import { streamJsonlFile } from "../common/stream";
 import type { Candidate, ScanCtx } from "../types";
 import { agSessionId, TOOL } from "./ids";
@@ -21,7 +23,18 @@ function line(v: unknown, ctx: ScanCtx, tally: Tally, log: PromptLog): void {
   if (ts === undefined) return tally.badTime(v.timestamp, "history.timestamp"); // reshaped: drift; implausible: bad-ts
   if (text.trim() === "") return tally.skip("empty");
   const raw = str(v.conversationId);
-  log.add({ text, ts, sessionId: raw === undefined ? undefined : agSessionId(raw, ctx) });
+  const folder = workspaceFolder(v.workspace, ctx);
+  log.add({ text, ts, sessionId: raw === undefined ? undefined : agSessionId(raw, ctx), projectKey: folder === undefined ? undefined : projectKeyOf(ctx, folder) });
+}
+
+/**
+ * The folder a line names in `workspace`: a path as is, or a `file:` URI as its path (as the summaries' `workspace_uris`
+ * are read), so a prompt carries the key a session of that folder carries. Kept only as that key, never raw.
+ */
+function workspaceFolder(v: unknown, ctx: ScanCtx): string | undefined {
+  const w = str(v);
+  if (w === undefined || w === "") return undefined;
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(w) ? uriToPath(w, ctx.env.platform) : w;
 }
 
 /**
