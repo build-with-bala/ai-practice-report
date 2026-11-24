@@ -1,7 +1,8 @@
 import { dayEnd, dayStart, isoWeek } from "../analysis/activity";
 import { artifactUse } from "../analysis/artifacts";
 import { analysisScope } from "../analysis/scope";
-import { PR_LINK_TOOLS, SWITCH_TOOLS, type Metric, type SessionTable } from "../analysis/types";
+import { CONFIG_SOURCES, PR_LINK_TOOLS, SWITCH_TOOLS, type Metric, type SessionTable } from "../analysis/types";
+import type { CoverageEv } from "../model/events";
 import type { SessionStats } from "../analysis/walk";
 import type { CommitFact, RepoFacts } from "../git/types";
 import { BUCKET_MS, DELIVERY_WINDOW_MS, REWORK_WINDOW_MS } from "../model/constants";
@@ -14,6 +15,8 @@ const DAY_MS = 86_400_000;
 /** Rework counts own commits from this long before the detail window's start: their fixes can land inside it. */
 const REWORK_LEAD_MS = 3 * DAY_MS;
 const weight = (p: ConfigEv["provenance"]): number => (p === "authored" ? 1 : 0.3);
+/** Coverage statuses of a source that was read (`empty`: read, nothing there). */
+const READ: ReadonlySet<CoverageEv["status"]> = new Set<CoverageEv["status"]>(["ok", "empty", "drift"]);
 const ratio = (num: number, den: number): number | null => (den > 0 ? num / den : null);
 const mean = (v: readonly number[]): number | null => (v.length > 0 ? v.reduce((a, b) => a + b, 0) / v.length : null);
 
@@ -43,6 +46,10 @@ function toolDays(t: SessionTable, tools: ReadonlySet<ToolId>, window: "detailDa
  *   share) read the repos of kept detail-window rows (no host copy), so a repo only an excluded project or tool, or
  *   only lifetime-window sessions, used never counts; the artifacts' child types and MCP calls read the same rows.
  *   Whole-report totals count owner commits only; per-repo matching (a commit after a session, a later fix) takes any.
+ * - **Artifacts** (`artifacts`): the provenance-weighted count of distinct artifacts in use, `n` = those artifacts (0
+ *   when none is in use: a state count, measured on the inventory, not a sample). Measured whenever a config source of a kept tool was read (its coverage is ok, empty or
+ *   drift, or it supplied an entry): none in use is a measured 0. Null (`not-captured`) only when no config source was
+ *   read.
  * - **Per-week rates** divide by the active weeks of the tools that emit their markers (pre-flight P10): null when none
  *   of them has a week, never 0.
  */
@@ -180,11 +187,18 @@ export function computeGlobals(t: SessionTable, stats: readonly SessionStats[], 
     }
   }
 
-  // used artifacts, provenance-weighted: the distinct config entries in use (`artifactUse`, which documents the rule)
+  // used artifacts, provenance-weighted: the distinct config entries in use (`artifactUse`, which documents the rule). A
+  // measured state whenever a config source was read (none in use is a measured 0); null only when none was read
   const used = artifactUse(raw, t, scope).filter((a) => a.used);
-  const artifactSpan = new Span(); // sources only: a state count has no from/to
+  const configRead = new Set<string>();
+  for (const c of raw.coverage) if (!excluded.has(c.tool) && CONFIG_SOURCES.has(c.source) && READ.has(c.status)) configRead.add(c.source);
+  for (const c of configs) configRead.add(c.source);
   let artifactWeight = 0;
-  for (const u of used) { artifactWeight += weight(u.provenance); for (const src of u.sources) artifactSpan.addSource(src); }
+  const artifactSources = new Set(used.length > 0 ? [] : configRead); // sources only: a state count has no from/to
+  for (const u of used) { artifactWeight += weight(u.provenance); for (const src of u.sources) artifactSources.add(src); }
+  const artifacts: Metric = configRead.size > 0
+    ? { window: "lifetime", sources: [...artifactSources].sort(), n: used.length, value: artifactWeight }
+    : fixedMetric("lifetime", [], 0, null, "not-captured");
 
   const memoryFiles = configs.filter((c) => c.kind === "memory-file").length;
   const commitSpan = { from: detailFrom, to: hi };
@@ -196,7 +210,7 @@ export function computeGlobals(t: SessionTable, stats: readonly SessionStats[], 
     guardrails: repoMetric(activeRepos, mean(guards), gitSpan),
     maintainedShare: repoMetric(activeRepos, ratio(maintained, activeRepos), gitSpan),
     // config is read by lifetime-window readers (`uses` are the tools' own lifetime counters): a lifetime metric
-    artifacts: artifactSpan.metric("lifetime", used.length, used.length > 0 ? artifactWeight : null),
+    artifacts,
     memoryFiles,
     switchesPerWeek: switchSpan.metric("lifetime", switchWeeks, ratio(switches, switchWeeks), switchWeeks === 0 ? "not-captured" : "no-data"),
     reworkShare: repoMetric(reworkDen, ratio(reworked, reworkDen), { from: reworkFrom, to: hi }),

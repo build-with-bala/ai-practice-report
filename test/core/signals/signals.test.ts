@@ -409,8 +409,10 @@ describe("computeGlobals", () => {
       sess("k", { parentId: "a", origin: "subagent", agentType: keyedHash(new Uint8Array(32), "my-agent"), start: T0 - 10 * HOUR, end: T0 + MIN }),
       tool("k", childTs), config("agent", "my-agent"),
     ];
-    expect(globalsOf(evs(T0 - 10 * HOUR + SEC), { exclude: { from: T0 } }).g.artifacts.n).toBe(0);
-    expect(globalsOf(evs(T0 + 30 * SEC), { exclude: { from: T0 } }).g.artifacts.n).toBe(1);
+    const cut = globalsOf(evs(T0 - 10 * HOUR + SEC), { exclude: { from: T0 } }).g;
+    expect([cut.artifacts.value, cut.evidence.artifacts]).toEqual([0, 0]);
+    const kept = globalsOf(evs(T0 + 30 * SEC), { exclude: { from: T0 } }).g;
+    expect([kept.artifacts.value, kept.evidence.artifacts]).toEqual([1, 1]);
   });
 
   test("artifacts: an undated uses counter still counts under a date range, from its config source, with no span", () => {
@@ -430,6 +432,19 @@ describe("computeGlobals", () => {
       sess("a"), prompt("a", T0), prompt(undefined, T0, { source: HIST, window: "lifetime" }),
       { k: "daily", tool: "claude-code", source: "claude-code.stats", day: "2026-10-01", zone: "local", unit: "prompts", count: 4 },
     ]).g.switchesPerWeek.sources).toEqual([HIST, "claude-code.stats"]);
+  });
+
+  test("artifacts: with a config source read, none in use is a measured 0; with none read, null (not-captured)", () => {
+    const read = { ...cov("claude-code", "claude-code.config", "lifetime"), status: "empty" as const };
+    const none = globalsOf([sess("a"), prompt("a", T0), read]).g.artifacts;
+    expect([none.value, none.n, none.reason, none.sources]).toEqual([0, 0, undefined, ["claude-code.config"]]);
+    const unused = globalsOf([sess("a"), prompt("a", T0), config("skill", "s1")]).g.artifacts;
+    expect([unused.value, unused.n, unused.reason]).toEqual([0, 0, undefined]);
+    const absent = { ...read, status: "absent" as const };
+    const notRead = globalsOf([sess("a"), prompt("a", T0), absent]).g.artifacts;
+    expect([notRead.value, notRead.reason]).toEqual([null, "not-captured"]);
+    const excluded = globalsOf([sess("a"), prompt("a", T0), read, { ...read, tool: "codex", source: "codex.config", status: "ok" }], { exclude: { tools: ["claude-code"] } }).g.artifacts;
+    expect([excluded.value, excluded.sources]).toEqual([0, ["codex.config"]]);
   });
 
   test("an empty scan gives null metrics and finite values", () => {

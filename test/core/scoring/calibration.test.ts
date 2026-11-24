@@ -13,6 +13,7 @@ import { computeGlobals } from "../../../core/signals/globals";
 import type { Signals } from "../../../core/signals/types";
 import { personaScan } from "../../fixtures/personas";
 import { CANARY, findCanaries } from "../../kit/canary";
+import { scanResultOf } from "../../kit/scanresult";
 
 type Kind = "novice" | "intermediate" | "expert";
 const KINDS: readonly Kind[] = ["novice", "intermediate", "expert"];
@@ -52,8 +53,9 @@ describe("persona calibration", () => {
         comps++;
         expect({ id: a.id, lower: a.x < b.x }).toEqual({ id: a.id, lower: true });
       }
-      // the novice is insufficient on 3 dimensions and has no background share or artifacts; the others score everything
-      expect([dims, comps]).toEqual(lo === "novice" ? [4, 20] : [7, 22]);
+      // the novice is insufficient on 3 dimensions and has no background share (its 0 artifacts are a measured 0); the
+      // others score everything
+      expect([dims, comps]).toEqual(lo === "novice" ? [4, 21] : [7, 22]);
     }
   });
 
@@ -180,5 +182,21 @@ describe("persona fixtures", () => {
     expect(findCanaries(personaScan("expert"))).toEqual([]);
     const scored = score(raw);
     expect(scored.dims.map((d) => [d.score, d.interval])).toEqual(P.expert.dims.map((d) => [d.score, d.interval]));
+  });
+});
+
+describe("artifacts in use", () => {
+  /** The intermediate persona with its config entries replaced by `configs` (the config source is still read). */
+  const withConfigs = (configs: Ev[]): ScanResult => {
+    const raw = personaScan("intermediate");
+    const kinds = ["coverage", "session", "prompt", "tool", "marker", "turn", "usage", "totals", "daily", "edge"] as const;
+    const evs: Ev[] = [...kinds.flatMap((k) => [...raw.store.all(k)]), ...configs];
+    return scanResultOf(evs, { repos: raw.repos, cwds: raw.cwds, salt: raw.salt, finishedAt: raw.finishedAt });
+  };
+  const context = (raw: ScanResult): number => score(raw).dims.find((d) => d.id === "context")!.score!;
+  test("the same person scores no higher on Context with no artifact than with one", () => {
+    const one: Ev = { k: "config", tool: "claude-code", source: "claude-code.config", kind: "plugin", name: "p", provenance: "installed", uses: 3 };
+    expect(context(withConfigs([]))).toBeLessThanOrEqual(context(withConfigs([one])));
+    expect(score(withConfigs([])).signals.artifacts.value).toBe(0);
   });
 });

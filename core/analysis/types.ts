@@ -77,3 +77,5 @@ export interface SessionTable {
 export const PR_LINK_TOOLS: ReadonlySet<ToolId> = new Set<ToolId>(["claude-code"]);
 /** Tools whose readers emit `model-switch` and `effort-switch` markers. */
 export const SWITCH_TOOLS: ReadonlySet<ToolId> = new Set<ToolId>(["claude-code"]);
+/** The sources that read a tool's configuration (skills, commands, agents, plugins, MCP servers, hooks). */
+export const CONFIG_SOURCES: ReadonlySet<string> = new Set<string>(["claude-code.config", "codex.config"]);
