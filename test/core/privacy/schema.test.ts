@@ -249,8 +249,9 @@ describe("AIPROF2", () => {
 
   test("the core version takes semantic versions only", () => {
     const core = (AIPROF2 as Extract<FieldSpec, { t: "object" }>).fields.core as Extract<FieldSpec, { t: "string" }>;
-    for (const ok of ["1.0.0", "1.0.0-dev", "10.2.33-rc.1", "1.0.0+build.5"]) expect(`${ok} ${core.pattern.test(ok)}`).toBe(`${ok} true`);
-    for (const bad of ["1.0", "01.0.0", "1.0.0-", "1.0.0-dev..x", "v1.0.0", "1.0.0 ", "1.0.0-a b"]) expect(`${bad} ${core.pattern.test(bad)}`).toBe(`${bad} false`);
+    for (const ok of ["1.0.0", "1.0.0-dev", "10.2.33-rc.1", "2.1.0-alpha", "2.1.0-beta.3", "1.0.0-dev.0"]) expect(`${ok} ${core.pattern.test(ok)}`).toBe(`${ok} true`);
+    for (const bad of ["1.0", "01.0.0", "1.0.0-", "1.0.0-dev..x", "v1.0.0", "1.0.0 ", "1.0.0-a b", "1.0.0-acmepayroll", "1.0.0+build.5", "1.0.0-dev.x",
+      "1.0.0-rc.1.2", "1.0.0-RC.1", "1.0.0-dev-acme", "1.0.0-dev.01"]) expect(`${bad} ${core.pattern.test(bad)}`).toBe(`${bad} false`);
   });
 
   test("only `projects[].name` is revealed, and nothing else holds a free-form name", () => {

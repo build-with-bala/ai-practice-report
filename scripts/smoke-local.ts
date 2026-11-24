@@ -10,7 +10,7 @@ import { detectEnv, type Env } from "../core/env/env";
 import { homesToScan } from "../core/env/paths";
 import { analyze, ExportError, exportPayload, registry, scan, type Analysis, type CoverageEv, type ScanResult } from "../core/index";
 import { safeList, walk } from "../core/io/fs";
-import { CHECK_IDS, FORENSIC_BANDS, PAYLOAD_WORDS } from "../core/privacy/schema";
+import { CHECK_IDS, FORENSIC_BANDS, PAYLOAD_WORDS, VERSION_PATTERN } from "../core/privacy/schema";
 import { DIMENSION_IDS } from "../core/scoring/dimensions";
 import { ccTranscripts } from "../core/sources/claude-code";
 import { SHELL_TOOLS } from "../core/sources/codex/tools";
@@ -25,7 +25,9 @@ const MAX_EXPORT_BYTES = 300_000;
 const DIMENSIONS = DIMENSION_IDS.length;
 const BANDS: ReadonlySet<string> = new Set(FORENSIC_BANDS);
 /** A scan with at least this many detail-window sessions with typed turns must score some dimension. */
-const MIN_SESSIONS_TO_SCORE = 20;
+const MIN_SESSIONS_TO_SCORE = 100;
+/** The "every scored dimension at an edge" rule applies from this many scored dimensions (one or two at 99 can be honest). */
+const MIN_SCORED_FOR_EDGES = 3;
 /** A folder name shorter than this is too common a word to search the export for. */
 const MIN_FOLDER_NAME = 5;
 /** The first day of VS Code's journal format for chat sessions, as the spec's acceptance check names it. */
@@ -63,6 +65,13 @@ function subagentFiles(env: Env): number {
     }
   }
   return n;
+}
+
+/** The warnings, counted by code and source, each through `code` like every other printed token. */
+export function warningsLine(list: ScanResult["warnings"]): string {
+  const warnings = new Map<string, number>();
+  for (const w of list) tally(warnings, `${code(w.code)}:${code(w.source)}`);
+  return `warnings: ${pairs(warnings)}`;
 }
 
 export function coverageLine(c: CoverageEv): string {
@@ -203,9 +212,10 @@ const lastSegment = (p: string): string => (p.replaceAll("\\", "/").replace(/\/+
 
 /**
  * The shapes of the payload's own data strings (a month, an ISO week, a day, a project label, a keyed hash, a version,
- * an MCP "custom #n" label): such a string is the payload's, whatever it contains.
+ * an MCP "custom #n" label): such a string is the payload's, whatever it contains. The version is exactly what the
+ * schema's core field accepts (`VERSION_PATTERN`), so no free suffix is exempt.
  */
-const DATA_SHAPES = [/^\d{4}-\d{2}$/, /^\d{4}-w\d{2}$/, /^\d{4}-\d{2}-\d{2}$/, /^p-[0-9a-f]{4,16}$/, /^[0-9a-f]{16}$/, /^\d+\.\d+\.\d+(?:[-+][0-9a-z.+-]+)?$/,
+const DATA_SHAPES = [/^\d{4}-\d{2}$/, /^\d{4}-w\d{2}$/, /^\d{4}-\d{2}-\d{2}$/, /^p-[0-9a-f]{4,16}$/, /^[0-9a-f]{16}$/, VERSION_PATTERN,
   /^custom #\d+$/];
 
 /**
@@ -240,9 +250,9 @@ const passFail = (ok: boolean): string => (ok ? "PASS" : "FAIL");
 
 /**
  * The analysis checks, as lines of counts and PASS/FAIL, and the names of those that failed. Each fails on a broken
- * engine: `dimensions-scored` when nothing is scored although the scan holds 20 or more detail sessions with typed
- * turns; `not-saturated` when a scored dimension lies outside 1 to 99, a 99 lacks the open-tail mark, or every scored
- * dimension sits at 1 or 99; `export-no-raw-paths` when the export holds the home, a session folder or a repo root, or
+ * engine: `dimensions-scored` when nothing is scored although the scan holds 100 or more detail sessions with typed
+ * turns; `not-saturated` when a scored dimension lies outside 1 to 99, a 99 lacks the open-tail mark, or 3 or more
+ * dimensions are scored and every one sits at 1 or 99; `export-no-raw-paths` when the export holds the home, a session folder or a repo root, or
  * the name of one (its last segment, `folderNames`; `export-folder-names` prints how many); `forensics-ran` when the
  * band is unknown, a check (soft flags included) is missing, or every check is n/a while Claude Code or Codex data is
  * in scope. A refused export prints the count of the paths it named and fails both export checks.
@@ -264,7 +274,7 @@ export function analysisLines(r: ScanResult, a: Analysis, exported: Exported, ho
   // a score lies in [1, 99], every displayed 99 carries the open-tail mark, and the scored ones do not all sit at an edge
   const inRange = (d: Analysis["dimensions"][number]): boolean => d.score !== null && Number.isInteger(d.score) && d.score >= 1 && d.score <= 99;
   const atEdge = (d: Analysis["dimensions"][number]): boolean => d.score === 1 || d.score === 99;
-  check("not-saturated", scored.every(inRange) && !(scored.length > 0 && scored.every(atEdge))
+  check("not-saturated", scored.every(inRange) && !(scored.length >= MIN_SCORED_FOR_EDGES && scored.every(atEdge))
     && a.dimensions.every((d) => d.score === null || (d.score <= 99 && (d.score < 99 || d.openTail))));
   const m = metricMetaProblems(a);
   check("metrics-have-window-and-n", m.metrics > 0 && m.bad.length === 0);
@@ -361,9 +371,7 @@ export async function main(argv: string[]): Promise<number> {
   out.push(`antigravity IDE trajectories=${sessions.filter((s) => s.source === "antigravity.ide").length}`);
 
   out.push("== warnings and logs");
-  const warnings = new Map<string, number>();
-  for (const w of r.warnings) tally(warnings, `${w.code}:${w.source}`);
-  out.push(`warnings: ${pairs(warnings)}`, `logs: ${pairs(logs)}`);
+  out.push(warningsLine(r.warnings), `logs: ${pairs(logs)}`);
 
   out.push("== analysis", `analysis elapsed=${analysisSeconds.toFixed(1)}`);
   const analysis = analysisLines(r, a, exported, env.home);

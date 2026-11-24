@@ -65,6 +65,8 @@ export const VERSION_SUFFIXES: ReadonlySet<string> = new Set(["o", "b"]);
  * suffix "b" ("70b", "405b", "0.5b"). No other letter (`VERSION_SUFFIXES`).
  */
 const VERSION = /^(?:(?:0|[1-9]\d?)(?:\.\d)?o?|(?:0|[1-9]\d{0,2})(?:\.\d)?b)$/;
+/** A public revision token: "v" and 1 or 2 digits, no leading zero ("claude-3-5-sonnet-v2"); at most one per id. */
+const REVISION = /^v[1-9]\d?$/;
 /** At most this many tokens after the family, and at most this many versions among them. */
 const MAX_MODEL_TOKENS = 6;
 const MAX_VERSIONS = 2;
@@ -79,7 +81,7 @@ const realMonthDay = (m: number, d: number): boolean => realDate(2000, m, d);
 
 /**
  * True when the tokens after a family are a public model id's: at most 6 of them, each a word of `MODEL_WORDS`, one of
- * at most 2 versions (`VERSION`), or part of the one date the id may hold, in a public form — one "YYYYMMDD" token,
+ * at most 2 versions (`VERSION`), the one revision token the id may hold (`REVISION`, "v2"), or part of the one date the id may hold, in a public form — one "YYYYMMDD" token,
  * the three tokens "YYYY", "MM", "DD" in a row, or one "MMDD" token (its leading zero kept: "0613") — with real month
  * and day ranges.
  */
@@ -87,10 +89,15 @@ function publicTokens(tokens: readonly string[]): boolean {
   if (tokens.length > MAX_MODEL_TOKENS) return false;
   let dates = 0;
   let versions = 0;
+  let revisions = 0;
   for (let i = 0; i < tokens.length; i++) {
     const t = tokens[i]!;
     if (VERSION.test(t)) {
       if (++versions > MAX_VERSIONS) return false;
+      continue;
+    }
+    if (REVISION.test(t)) {
+      if (++revisions > 1) return false;
       continue;
     }
     if (MODEL_WORDS.has(t)) continue;

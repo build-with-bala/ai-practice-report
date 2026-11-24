@@ -4,9 +4,9 @@ import { chmodSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { analyze, type Analysis } from "../../core/analyze";
 import type { ScanResult } from "../../core/scan";
-import type { CoverageEv } from "../../core/model/events";
+import type { CoverageEv, Ev } from "../../core/model/events";
 import { PAYLOAD_WORDS } from "../../core/privacy/schema";
-import { analysisLines, coverageLine, exportOf, metricMetaProblems } from "../../scripts/smoke-local";
+import { analysisLines, coverageLine, exportOf, metricMetaProblems, warningsLine } from "../../scripts/smoke-local";
 import { C as AG_C, I1, I2, K, P } from "../fixtures/antigravity";
 import { CC_H1, CC_H2, CC_S1, CC_S2, CcTranscript, ccSid, fixtureStart, slug } from "../fixtures/claude-code";
 import { S_J, S_L } from "../fixtures/copilot";
@@ -226,26 +226,45 @@ describe("the smoke's analysis lines (in process)", () => {
   const typedSessions = (raw: ScanResult): number => new Set(raw.store.all("prompt").filter((p) => p.window === "detail" && p.origin === "human" && p.sessionId !== undefined)
     .map((p) => p.sessionId)).size;
 
-  test("dimensions-scored: no scored dimension fails on a scan of 20 or more typed detail sessions, and passes on a smaller one", () => {
+  /** A thin home: `n` detail sessions of one typed prompt each, too little for any dimension to score. */
+  const thin = (n: number): ScanResult => {
+    const t0 = Date.UTC(2026, 9, 1);
+    const evs: Ev[] = [];
+    for (let i = 0; i < n; i++) {
+      const at = t0 + i * 3_600_000;
+      evs.push({ k: "session", tool: "codex", source: "codex.rollouts", id: `codex:t${i}`, window: "detail", origin: "human", start: at, end: at + 60_000, models: [] });
+      evs.push({ k: "prompt", tool: "codex", source: "codex.rollouts", ts: at + 1_000, sessionId: `codex:t${i}`, window: "detail", origin: "human", intent: "spec",
+        textHash: `h${i}`, features: { words: 8, lenBucket: 1, hasContext: false, fileRefs: 0, listLines: 0, constraintTerms: 0, isTaskStart: true, techCats: {} } });
+    }
+    return scanResultOf(evs, { finishedAt: t0 + n * 3_600_000 });
+  };
+
+  test("dimensions-scored: none scored fails from 100 typed detail sessions, and passes on a thinner home", () => {
     const { raw, a } = fresh();
-    expect(typedSessions(raw)).toBeGreaterThanOrEqual(20);
     expect(checkOf("dimensions-scored", raw, a)).toBe("PASS");
-    for (const d of a.dimensions) Object.assign(d, { status: "insufficient", score: null, interval: null });
-    expect(checkOf("dimensions-scored", raw, a)).toBe("FAIL");
-    const empty = scanResultOf([], { finishedAt: Date.UTC(2026, 10, 16) });
-    const none = analyze(empty, { timeZone: "UTC" });
-    expect(none.dimensions.filter((d) => d.status === "scored")).toEqual([]);
-    expect(checkOf("dimensions-scored", empty, none)).toBe("PASS");
+    for (const [n, want] of [[0, "PASS"], [99, "PASS"], [100, "FAIL"]] as const) {
+      const r = thin(n);
+      const b = analyze(r, { timeZone: "UTC" });
+      expect(typedSessions(r)).toBe(n);
+      for (const d of b.dimensions) Object.assign(d, { status: "insufficient", score: null, interval: null }); // nothing scored, whatever the data
+      expect(`${n} ${checkOf("dimensions-scored", r, b)}`).toBe(`${n} ${want}`);
+    }
   });
 
-  test("not-saturated: a scored dimension outside 1 to 99, or every scored one at an edge, fails", () => {
-    const set = (scores: (i: number) => number) => {
+  test("not-saturated: a scored dimension outside 1 to 99 fails; so does every scored one at an edge, once 3 or more are scored", () => {
+    /** The expert's analysis with only the first `scored` dimensions scored, at the scores given. */
+    const set = (scores: (i: number) => number, scored = 7) => {
       const { raw, a } = fresh();
-      a.dimensions.filter((d) => d.status === "scored").forEach((d, i) => { d.score = scores(i); d.openTail = d.score === 99; });
+      a.dimensions.forEach((d, i) => {
+        if (i < scored) Object.assign(d, { status: "scored", score: scores(i), openTail: scores(i) === 99 });
+        else Object.assign(d, { status: "insufficient", score: null, interval: null, openTail: false });
+      });
       return checkOf("not-saturated", raw, a);
     };
     expect([set(() => 99), set(() => 1), set((i) => (i % 2 === 0 ? 1 : 99)), set(() => 0), set(() => -3), set((i) => (i === 0 ? 50 : 99))])
       .toEqual(["FAIL", "FAIL", "FAIL", "FAIL", "FAIL", "PASS"]);
+    // one or two dimensions at an edge can be an honest thin home; three cannot
+    expect([set(() => 99, 1), set(() => 1, 2), set(() => 99, 3), set(() => 0, 1)]).toEqual(["PASS", "PASS", "FAIL", "FAIL"]);
     const { raw, a } = fresh();
     a.dimensions.find((d) => d.status === "scored")!.score = null;
     expect(checkOf("not-saturated", raw, a)).toBe("FAIL");
@@ -367,5 +386,17 @@ describe("the smoke's coverage line", () => {
     expect(lines[0]).toContain("skipped: io-error=1 other=2");
     expectNoCanaries(lines);
     expect(lines.flatMap(offGrammar)).toEqual([]);
+  });
+});
+
+describe("the smoke's warnings line", () => {
+  test("a warning's code and source print only as codes: anything else is other", () => {
+    const line = warningsLine([
+      { tool: "codex", source: "codex.rollouts", code: "parse-error" }, { tool: "codex", source: CANARY.path, code: CANARY.prompt },
+      { tool: "codex", source: "codex.rollouts", code: `${CANARY.slug} /x` },
+    ] as unknown as ScanResult["warnings"]);
+    expect(line).toBe("warnings: other:codex.rollouts=1 other:other=1 parse-error:codex.rollouts=1");
+    expectNoCanaries(line);
+    expect(offGrammar(line)).toEqual([]);
   });
 });

@@ -165,6 +165,15 @@ describe("exportPayload: raw channels", () => {
     expect((parsed(a).exposure as Json).models).toEqual({ "claude-3-5-sonnet-20241022": 6 });
   });
 
+  test("a public revision token (v and one or two digits) is allowed once per id, and adds nothing else", () => {
+    for (const [id, out] of [
+      ["claude-3-5-sonnet-v2@20241022", "claude-3-5-sonnet-v2"], ["claude-3-5-sonnet-v2", "claude-3-5-sonnet-v2"], ["claude-v2", "claude-v2"],
+      ["gpt-4o-v12", "gpt-4o-v12"], ["anthropic.claude-3-5-sonnet-v2-v1:0", "claude-3-5-sonnet-v2"],
+      ["claude-v2-v3", "claude-other"], ["claude-v123", "claude-other"], ["claude-v0", "claude-other"], ["claude-v02", "claude-other"], ["claude-vx", "claude-other"],
+      ["claude-v", "claude-other"], ["claude-v2a", "claude-other"], ["gpt-4o-v2-acme", "gpt-other"], ["claude-v2-4-5-6", "claude-other"],
+    ] as const) expect(`${id} → ${modelExportId(id)}`).toBe(`${id} → ${out}`);
+  });
+
   test("150 model ids give 64 keys: the 63 most used and other with the summed rest", () => {
     const a = analyze(personaScan("expert"), UTC);
     const raw: Record<string, number> = { "acme-model": 5 };
@@ -254,17 +263,50 @@ describe("exportPayload: projects and reveal", () => {
     expect((out.projects as Json[])[0]!.name).toBe("second");
   });
 
-  test("a revealed name may be written in any script: combining marks and the zero-width (non-)joiner inside a name", () => {
+  test("a revealed name may be written in any script: combining marks and the zero-width (non-)joiner inside a word", () => {
     const label = a.projects[0]!.label;
-    const ok = (name: string): boolean => {
-      try { return (parsed(a, { ...OPTS, reveal: [{ label, name }] }).projects as Json[])[0]!.name === name; } catch { return false; }
+    /** The exported name, or undefined when the export refuses it. */
+    const out = (name: string): unknown => {
+      try { return (parsed(a, { ...OPTS, reveal: [{ label, name }] }).projects as Json[])[0]!.name; } catch { return undefined; }
     };
     const accepted = ["\u0939\u093f\u0902\u0926\u0940", "\u0ba4\u0bae\u0bbf\u0bb4\u0bcd", "\u0645\u064e\u0643\u0652\u062a\u064e\u0628\u064e\u0629",
-      "cafe\u0301", "cafe\u0301 lib", "\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645", "\u0915\u094d\u200d\u0937", "my-lib_2.0"];
-    const refused = ["a/b", "a\\b", "x\n", "<script>", " lead", "trail ", "\u0301abc", "abc\u200d", "\u200dabc", "\u200c", "a\u0000b", "a:b", "x".repeat(65),
-      "a\u202eb"];
-    expect(accepted.map((n) => `${JSON.stringify(n)} ${ok(n)}`)).toEqual(accepted.map((n) => `${JSON.stringify(n)} true`));
-    expect(refused.map((n) => `${JSON.stringify(n)} ${ok(n)}`)).toEqual(refused.map((n) => `${JSON.stringify(n)} false`));
+      "cafe\u0301", "cafe\u0301 lib", "my-lib_2.0",
+      "\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645", // Persian, a zero-width non-joiner inside the word
+      "\u0915\u094d\u200d\u0937", // a Devanagari conjunct with a joiner
+      "\u0d15\u0d3e\u0d30\u0d4d\u200d\u0d24\u0d4d\u0d24\u0d3f\u0d15", // Malayalam, a joiner after the virama inside the word
+      "\u0dc1\u0dca\u200d\u0dbb\u0dd3", // Sinhala, a conjunct with a joiner
+    ];
+    // each exports as its NFC form: one name, one byte form
+    expect(accepted.map((n) => `${JSON.stringify(n)} ${out(n) === n.normalize("NFC")}`)).toEqual(accepted.map((n) => `${JSON.stringify(n)} true`));
+    expect(out("cafe\u0301")).toBe("caf\u00e9");
+    expect(out("cafe\u0301")).not.toBe("cafe\u0301");
+  });
+
+  test("a revealed name carries no invisible channel and no look-alike of a separator", () => {
+    const label = a.projects[0]!.label;
+    const refusedBy = (name: string): boolean => {
+      try { exportPayload(a, { ...OPTS, reveal: [{ label, name }] }); return false; } catch (e) { return e instanceof ExportError; }
+    };
+    const vs = (b: number): string => String.fromCodePoint(b < 16 ? 0xfe00 + b : 0xe0100 + b - 16);
+    const hostileNames: Record<string, string> = {
+      "bytes in variation selectors": `a${[...new TextEncoder().encode("acme-payroll/secret")].map(vs).join("")}b`,
+      "one variation selector": "a\ufe0fb", "a supplementary variation selector": "a\u{e0100}b",
+      "62 joiners in a row": `a${"\u200d".repeat(62)}b`, "two joiners in a row": "a\u200d\u200db",
+      "a joiner and non-joiner bit string": `a${[..."101100111000"].map((c) => (c === "1" ? "\u200d" : "\u200c")).join("")}b`,
+      "63 combining marks in a row": `a${"\u0301".repeat(63)}`, "5 combining marks in a row": `x${"\u0301".repeat(5)}`, // x has no composed form: NFC leaves all five
+      "a combining long solidus overlay": "a\u0338b", "a short stroke overlay": "a\u0335b", "a combining reverse solidus overlay": "a\u20e5b",
+      "a long vertical line overlay": "a\u20d2b", "an enclosing circle": "a\u20dd", "the combining grapheme joiner": "a\u034fb",
+      "tag characters": "a\u{e0061}\u{e0063}b", "a right-to-left override": "a\u202eb", "a left-to-right mark": "a\u200eb",
+      "a Hangul filler": "a\u3164b", "a soft hyphen": "a\u00adb", "a mark after a space": "a \u0301b", "a mark after a dash": "a-\u0301b",
+      "a joiner after a digit": "a1\u200db", "a joiner before a space": "a\u200d b", "a joiner first": "\u200dab", "a joiner last": "ab\u200d",
+      "a mark first": "\u0301ab", "a slash": "a/b", "a backslash": "a\\b", "a newline": "x\n", "markup": "<script>", "a colon": "a:b", "a NUL": "a\u0000b",
+      "a leading space": " lead", "a trailing space": "trail ", "65 code points": "x".repeat(65), "only a non-joiner": "\u200c",
+    };
+    expect(Object.entries(hostileNames).filter(([, n]) => !refusedBy(n)).map(([what]) => what)).toEqual([]);
+    // the bound counts code points after normalisation: 64 composed letters pass, though decomposed they are 128
+    expect(refusedBy("e\u0301".repeat(64))).toBe(false);
+    expect(refusedBy("\u{1d41a}".repeat(64))).toBe(false);
+    expect(refusedBy(`x${"\u0301".repeat(4)}`)).toBe(false); // 4 marks in a row are allowed
   });
 
   test("labels are P- and 4, 6, 8 … 16 upper-case hex; reveal matches one label exactly, never a prefix", () => {
