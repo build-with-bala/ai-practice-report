@@ -350,3 +350,24 @@ describe("the date range at analyze level", () => {
     expect(all.exclusions.sessions).toBe(6);
   });
 });
+
+describe("a person whose prompts the opener lexicon does not fit", () => {
+  test("300 prompts with no correction, redirect, continuation or ack: the corrected-brief rate is not captured; Steering scores from interrupts", () => {
+    const T = Date.UTC(2026, 9, 5, 9);
+    const evs: Ev[] = [covEv(CC, "detail")];
+    for (let d = 0; d < 30; d++) {
+      const id = `claude-code:s${d}`;
+      const start = T + d * DAY;
+      evs.push(sessEv(id, start));
+      for (let j = 0; j < 10; j++) {
+        evs.push(promptEv(id, start + j * 60_000, d * 10 + j), toolEv(id, start + j * 60_000 + 5_000));
+        if (j === 2) evs.push({ k: "marker", tool: "claude-code", source: CC, ts: start + j * 60_000 + 10_000, sessionId: id, kind: "interrupt", detail: "user" });
+      }
+    }
+    const a = analyze(scanResultOf(evs), UTC);
+    expect([a.signals.correctionRate.value, a.signals.correctionRate.reason]).toEqual([null, "not-captured"]);
+    const st = a.dimensions.find((d) => d.id === "steering")!;
+    expect(st.status).toBe("scored");
+    expect(st.components.filter((c) => c.status === "ok").map((c) => c.id)).toEqual(["ste.interrupts"]);
+  });
+});

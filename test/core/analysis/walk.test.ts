@@ -405,6 +405,12 @@ describe("walk: interrupts and briefs (rules 10–11)", () => {
   };
   const perWork = (st: SessionStats): number => st.turnsPerWorkSum / st.workEpisodes;
 
+  test("human prompts and those with an opener the classifier knows (correction, redirect, continuation, ack)", () => {
+    const s = one([sess("s"), prompt("s", T0), tool("s", T0 + SEC), prompt("s", T0 + MIN, { intent: "continuation" }), tool("s", T0 + MIN + SEC),
+      prompt("s", T0 + 2 * MIN, { intent: "ack" }), tool("s", T0 + 2 * MIN + SEC), prompt("s", T0 + 3 * MIN, { intent: "question" }), tool("s", T0 + 3 * MIN + SEC)]);
+    expect([s.humanPrompts, s.openerPrompts]).toEqual([4, 2]);
+  });
+
   // turns per work is shown unscored: these state what it reads
   test("turns per work follows the length of a sitting when the follow-ups are short continue turns", () => {
     // one brief, then "continue" turns (classified as continuations): one instruction holding every turn

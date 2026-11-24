@@ -25,6 +25,8 @@ export type Hist = Record<number, number>;
  *   those of them in which a command ran after the last edit that the command classifier gave no check kind (an action
  *   of category shell, package or container with no checks).
  * - Closure (rule 9): `failingChecks`, `closedChecks`, `fixCycles` (the failures each closing pass closed, capped at 50).
+ * - `humanPrompts`: the row's human prompts in scope; `openerPrompts`: those whose intent the classifier read from
+ *   opening words (correction, redirect, continuation, ack).
  * - Steering (rules 10–12): `followUps` = typed turns that start no episode; `briefs`, `correctedBriefs`,
  *   `briefScoreSum`; `interrupts` (the person's, not proxy-timed) and `healthyInterrupts`; `workEpisodes` (the
  *   instructions with an action, rule 12: `turnsPerWork`) and `turnsPerWorkSum`; `queued` = `queue` markers.
@@ -52,6 +54,7 @@ export interface SessionStats {
   days: string[];
   turns: number; stickySum: number; actions: number; successRuns: Hist;
   gatedVae: boolean; editTurns: number; editWeight: number; verifiedWeight: number; uncheckedEditTurns: number; uncheckedCommandTurns: number;
+  humanPrompts: number; openerPrompts: number;
   failingChecks: number; closedChecks: number; fixCycles: Hist;
   episodes: number; followUps: number; briefs: number; correctedBriefs: number; briefScoreSum: number;
   interrupts: number; healthyInterrupts: number; workEpisodes: number; turnsPerWorkSum: number; queued: number;
@@ -78,6 +81,8 @@ const HEALTHY_INTENTS: ReadonlySet<Intent> = new Set<Intent>(["spec", "redirect"
 const HEALTHY_MIN_WORDS = 4;
 const HEALTHY_MAX_SIM = 0.6;
 const BRIEF_INTENTS: ReadonlySet<Intent> = new Set<Intent>(["spec", "question"]);
+/** The intents the classifier recognises by a prompt's opening words (English): the corrected-brief rate rests on them. */
+const OPENER_INTENTS: ReadonlySet<Intent> = new Set<Intent>(["correction", "redirect", "continuation", "ack"]);
 
 /** Walk rule 2: a tool call that does work on the task — not `meta`, and neither denied nor cancelled. */
 export function isAction(e: ToolEv): boolean {
@@ -266,7 +271,7 @@ function walkRow(row: SessionRow, t: SessionTable, store: EventStore, cx: WalkCt
   const s: SessionStats = {
     id: row.id, tool: row.tool, source: row.source, origin: row.origin, start, end, scripted,
     days: [], turns: 0, stickySum: 0, actions: actPrefix[n]!, successRuns: {},
-    gatedVae: cx.gated.has(row.tool), editTurns: 0, editWeight: 0, verifiedWeight: 0, uncheckedEditTurns: 0, uncheckedCommandTurns: 0,
+    gatedVae: cx.gated.has(row.tool), editTurns: 0, editWeight: 0, verifiedWeight: 0, uncheckedEditTurns: 0, uncheckedCommandTurns: 0, humanPrompts: 0, openerPrompts: 0,
     failingChecks: 0, closedChecks: 0, fixCycles: {},
     episodes: 0, followUps: 0, briefs: 0, correctedBriefs: 0, briefScoreSum: 0,
     interrupts: 0, healthyInterrupts: 0, workEpisodes: 0, turnsPerWorkSum: 0, queued: 0,
@@ -375,7 +380,10 @@ function walkRow(row: SessionRow, t: SessionTable, store: EventStore, cx: WalkCt
   const starts: number[] = [];
   for (let i = 0; i < n; i++) {
     const e = seq[i]!;
-    if (e.k === "prompt" && t.isHuman(e)) starts.push(i);
+    if (e.k !== "prompt" || !t.isHuman(e)) continue;
+    starts.push(i);
+    s.humanPrompts++;
+    if (OPENER_INTENTS.has(e.intent)) s.openerPrompts++;
   }
   const turns: Turn[] = [];
   for (let j = 0; j < starts.length; j++) {

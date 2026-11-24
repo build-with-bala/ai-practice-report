@@ -85,6 +85,15 @@ const ratio = (num: number, den: number): number | null => (den > 0 ? num / den 
  * (one commit after many sittings reads as a high cost), so a handful of commits says too little.
  */
 export const MIN_LANDED = 5;
+/**
+ * The corrected-brief rate rests on the intent classifier, which knows corrections, redirects, continuations and
+ * acknowledgements by English opening words. Under 1% of at least 200 human prompts carrying one says its lexicon does
+ * not fit the person (another language): the rate is then not captured, never a perfect 0. Below 200 prompts the guard
+ * does not apply.
+ */
+export const LEXICON_MIN_PROMPTS = 200;
+export const LEXICON_MIN_SHARE = 0.01;
+const lexiconFits = (prompts: number, openers: number): boolean => prompts < LEXICON_MIN_PROMPTS || openers >= LEXICON_MIN_SHARE * prompts;
 /** A metric under its minimum n: null with `no-data` (the data could hold it, there is too little of it). */
 const minimum = (m: Metric, min: number): Metric => {
   if (m.n >= min || m.value === null) return m;
@@ -119,7 +128,7 @@ export function computeSignals(sample: readonly SessionStats[], g: Globals): Sig
   let turns = 0, sticky = 0, actions = 0, sessions = 0;
   let editTurns = 0, editWeight = 0, verifiedWeight = 0, gatedRows = 0, uncheckedTurns = 0, uncheckedCommands = 0;
   let failing = 0, closed = 0;
-  let episodes = 0, followUps = 0, briefs = 0, corrected = 0, briefSum = 0;
+  let episodes = 0, followUps = 0, briefs = 0, corrected = 0, briefSum = 0, humanPrompts = 0, openerPrompts = 0;
   let interrupts = 0, healthy = 0, workEpisodes = 0, perWork = 0;
   let queueTurns = 0, queued = 0, queueRows = 0;
   let children = 0, finished = 0, bgKnown = 0, bgChildren = 0, workflows = 0, maxDepth = 0;
@@ -158,6 +167,8 @@ export function computeSignals(sample: readonly SessionStats[], g: Globals): Sig
       episodeSpan.add(r);
     }
     followUps += r.followUps;
+    humanPrompts += r.humanPrompts;
+    openerPrompts += r.openerPrompts;
     if (r.briefs > 0) { briefs += r.briefs; corrected += r.correctedBriefs; briefSum += r.briefScoreSum; briefSpan.add(r); }
     if (r.interrupts > 0) { interrupts += r.interrupts; healthy += r.healthyInterrupts; interruptSpan.add(r); }
     if (r.workEpisodes > 0) { workEpisodes += r.workEpisodes; perWork += r.turnsPerWorkSum; workSpan.add(r); }
@@ -213,7 +224,8 @@ export function computeSignals(sample: readonly SessionStats[], g: Globals): Sig
     childTypes,
     workflowRunsPerEpisode: d(episodeSpan, episodes, ratio(workflows, episodes)),
     maxDepth,
-    correctionRate: d(briefSpan, briefs, ratio(corrected, briefs)),
+    correctionRate: lexiconFits(humanPrompts, openerPrompts) ? d(briefSpan, briefs, ratio(corrected, briefs))
+      : { ...d(briefSpan, briefs, null), value: null, reason: "not-captured" },
     healthyInterruptShare: d(interruptSpan, interrupts, ratio(healthy, interrupts)),
     turnsPerWork: d(workSpan, workEpisodes, ratio(perWork, workEpisodes)),
     queuePerTurn: d(queueSpan, queueTurns, ratio(queued, queueTurns), captured(turns === 0 || queueRows > 0)),

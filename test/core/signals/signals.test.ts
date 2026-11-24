@@ -24,7 +24,7 @@ const HIST = "claude-code.history";
 
 const stat = (id: string, over: Partial<SessionStats> = {}): SessionStats => ({
   id, tool: "claude-code", source: CC, origin: "human", start: T0, end: T0 + HOUR, scripted: false, days: [],
-  turns: 0, stickySum: 0, actions: 0, successRuns: {}, gatedVae: true, editTurns: 0, editWeight: 0, verifiedWeight: 0, uncheckedEditTurns: 0, uncheckedCommandTurns: 0,
+  turns: 0, stickySum: 0, actions: 0, successRuns: {}, gatedVae: true, editTurns: 0, editWeight: 0, verifiedWeight: 0, uncheckedEditTurns: 0, uncheckedCommandTurns: 0, humanPrompts: 0, openerPrompts: 0,
   failingChecks: 0, closedChecks: 0, fixCycles: {}, episodes: 0, followUps: 0, briefs: 0, correctedBriefs: 0, briefScoreSum: 0,
   interrupts: 0, healthyInterrupts: 0, workEpisodes: 0, turnsPerWorkSum: 0, queued: 0,
   children: 0, finishedChildren: 0, bgKnown: 0, bgChildren: 0, childTypes: {}, workflowRuns: 0, maxDepth: 0,
@@ -82,6 +82,16 @@ describe("computeSignals: the sample formulas", () => {
     expect(five.tokensPerLanded.sources).toEqual([CC, CX, "git"]);
     const off = computeSignals([{ ...a, landed: 5 }, b], globals({ repoSignals: "off" }));
     expect(off.tokensPerLanded.sources).toEqual([CC, CX]);
+  });
+
+  test("corrected-brief rate: not captured when under 1% of at least 200 human prompts carry an opener the classifier knows", () => {
+    const row = (humanPrompts: number, openerPrompts: number) => stat("r", { turns: humanPrompts, humanPrompts, openerPrompts, episodes: 50, briefs: 50,
+      correctedBriefs: 5, interrupts: 20, healthyInterrupts: 10 });
+    const none = computeSignals([row(300, 0)], globals()).correctionRate;
+    expect([none.value, none.reason, none.n]).toEqual([null, "not-captured", 50]);
+    expect(computeSignals([row(300, 2)], globals()).correctionRate.reason).toBe("not-captured"); // 0.67%
+    expect(computeSignals([row(300, 3)], globals()).correctionRate.value).toBe(0.1); // 1%
+    expect(computeSignals([row(199, 0)], globals()).correctionRate.value).toBe(0.1); // under 200 prompts the guard does not apply
   });
 
   test("unchecked-command share: over the unchecked edit turns of gated rows, with their rows' sources and span", () => {

@@ -244,6 +244,12 @@ describe("degenerate input (Review Focus 2)", () => {
     expect(j.zRaw!).toBeCloseTo(zs.reduce((a, c) => a + c.weight * c.z!, 0), 12);
     expect(j.z!).toBeCloseTo(j.zRaw! * 10 / 11, 12);
   });
+  test("with the corrected-brief rate not captured, Steering is scored from the interrupts alone", () => {
+    const s = signalsAt("p90", { correctionRate: metric(null, { n: 300, reason: "not-captured" }) });
+    const st = dim(scoreDimensions(s, ref), "steering");
+    expect(st.status).toBe("scored");
+    expect(st.components.map((c) => [c.id, c.status, c.weight])).toEqual([["ste.correction", "not-measurable", 0], ["ste.interrupts", "ok", 1]]);
+  });
   test("one signal cannot set a whole dimension: a component's z is limited to [-3, 3]", () => {
     const e = ref.components["lev.sticky"]!;
     const at = (zWanted: number) => dim(scoreDimensions(signalsAt("p50", { stickyMean: metric(e.p50 + zWanted * (e.p90 - e.p50) / 1.2816) }), ref), "leverage");

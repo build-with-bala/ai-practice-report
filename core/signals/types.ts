@@ -25,6 +25,11 @@ export interface Signals {
   stickyMean: Metric; p90Run: Metric; actionsPerTurn: Metric;
   parallelShare: Metric; peakConcurrency: number; backgroundShare: Metric;
   fanoutPerEpisode: Metric; childTypes: Record<ChildType, number>; workflowRunsPerEpisode: Metric; maxDepth: number;
+  /**
+   * Corrected briefs per brief. Null (`not-captured`) when fewer than 1% of at least 200 human detail prompts in scope
+   * are classified as a correction, redirect, continuation or acknowledgement: the classifier reads those from English
+   * opening words, so a person who writes in another language would otherwise read as a perfect 0.
+   */
   correctionRate: Metric; healthyInterruptShare: Metric;
   /**
    * Unscored. Typed turns per instruction, discounted by the work the instruction set off: per instruction (an episode's
