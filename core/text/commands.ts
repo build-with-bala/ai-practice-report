@@ -143,11 +143,10 @@ interface Command { name: string; args: string[]; python: boolean }
 /** A token's command name: its last path part, without a Windows program extension. */
 const baseName = (token: string): string => token.split(/[\\/]/).pop()!.replace(/\.(exe|bat|cmd)$/i, "");
 
-/** The tokens after a leading run of flags; a flag in `valued` takes the token after it as its value. */
-function afterFlags(t: string[], valued: ReadonlySet<string>): string[] {
-  let i = 0;
+/** The index after a run of flags starting at `i`; a flag in `valued` takes the token after it as its value. */
+function skipFlags(t: readonly string[], i: number, valued: ReadonlySet<string>): number {
   while (t[i]?.startsWith("-")) i += valued.has(t[i]!) ? 2 : 1;
-  return t.slice(i);
+  return i;
 }
 
 /** The verbs that run a package script by name. */
@@ -155,13 +154,13 @@ const SCRIPT_VERBS = new Set(["run", "run-script"]);
 
 /**
  * Where a JS package runner names a tool of the toolchain table — after `workspace <name>` and one of `run`,
- * `run-script`, `exec`, `x` — the index of that tool among the runner's tokens (`t[0]`), else -1: `pnpm vitest run`,
+ * `run-script`, `exec`, `x` — the index of that tool among the tokens after the runner (`t[from]`), else -1: `pnpm vitest run`,
  * `npm exec eslint .`, `bun x tsc`, and a package script named like the tool (`npm run eslint`), which runs as that tool.
  * A script reached through `run`/`run-script` whose name `scriptCheck` already reads keeps that reading (`npm run tsc`
  * is the project's typecheck script), so it is no tool here.
  */
-function runnerTool(t: string[]): number {
-  const at = positionalIndexes(t).filter((i) => i > 0);
+function runnerTool(t: readonly string[], from: number): number {
+  const at = positionalIndexes(t, from + 1);
   let k = t[at[0] ?? -1] === "workspace" ? 2 : 0;
   const verb = t[at[k] ?? -1] ?? "";
   if (RUNNER_VERBS.has(verb)) k++;
@@ -170,33 +169,37 @@ function runnerTool(t: string[]): number {
   return SCRIPT_VERBS.has(verb) && scriptCheck(t[i]!).length > 0 ? -1 : i;
 }
 
-/** Strip env assignments, wrappers (with their flags) and runners; `python -m <x>` is read as x. */
+/**
+ * Strip env assignments, wrappers (with their flags) and runners; `python -m <x>` is read as x. The leading words are
+ * walked by index, so a line of many wrappers costs linear time.
+ */
 function commandOf(tokens: string[]): Command {
-  let t = tokens.map((x) => x.replace(/^[({]+/, "")).filter(Boolean);
+  const t = tokens.map((x) => x.replace(/^[({]+/, "")).filter(Boolean);
+  let i = 0;
   for (;;) {
-    const h = t[0];
+    const h = t[i];
     if (h === undefined) return { name: "", args: [], python: false };
-    if (/^[A-Za-z_]\w*=/.test(h)) { t = t.slice(1); continue; }
+    if (/^[A-Za-z_]\w*=/.test(h)) { i++; continue; }
     const valued = WRAPPERS.get(h);
-    if (valued) { t = afterFlags(t.slice(1), valued); continue; }
-    if (h === "timeout") { t = afterFlags(t.slice(1), TIMEOUT_VALUES).slice(1); continue; } // its flags, then the duration
-    if (RUNNER_PREFIXES.has(`${h} ${t[1] ?? ""}`)) { t = t.slice(2); continue; }
+    if (valued) { i = skipFlags(t, i + 1, valued); continue; }
+    if (h === "timeout") { i = skipFlags(t, i + 1, TIMEOUT_VALUES) + 1; continue; } // its flags, then the duration
+    if (RUNNER_PREFIXES.has(`${h} ${t[i + 1] ?? ""}`)) { i += 2; continue; }
     if (JS_RUNNERS.has(baseName(h))) {
-      const tool = runnerTool(t);
-      if (tool > 0) { t = t.slice(tool); continue; }
+      const tool = runnerTool(t, i);
+      if (tool > i) { i = tool; continue; }
     }
     break;
   }
-  const name = baseName(t[0]!);
-  const args = t.slice(1);
+  const name = baseName(t[i]!);
+  const args = t.slice(i + 1);
   if ((name === "python" || name === "python3") && args[0] === "-m" && args[1]) return { name: args[1], args: args.slice(2), python: true };
   return { name, args, python: false };
 }
 
-/** The indexes of the positional tokens (not flags, nor the values of FLAGS_WITH_VALUE). */
-function positionalIndexes(args: string[]): number[] {
+/** The indexes, from `from` on, of the positional tokens (not flags, nor the values of FLAGS_WITH_VALUE). */
+function positionalIndexes(args: readonly string[], from = 0): number[] {
   const out: number[] = [];
-  for (let i = 0; i < args.length; i++) {
+  for (let i = from; i < args.length; i++) {
     const a = args[i]!;
     if (FLAGS_WITH_VALUE.has(a)) i++;
     else if (!a.startsWith("-")) out.push(i);

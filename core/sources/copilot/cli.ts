@@ -64,10 +64,33 @@ const PATH_TOOLS = new Set(["edit", "str_replace", "insert", "create", "str_repl
 const EXIT_TAIL = /<exited with exit code (\d{1,3})>\s*$/;
 const PATCH_FILE = /^\*\*\* (?:Add|Update|Delete) File: (.+)$/m;
 /** Context blocks the CLI wraps into a user message's content (what the VS Code extension strips before showing it). */
-const INJECTED = [/<reminder>[\s\S]*?<\/reminder>\s*/g, /<attachments>[\s\S]*?<\/attachments>\s*/g, /<userRequest>[\s\S]*?<\/userRequest>\s*/g,
-  /<user_query>[\s\S]*?<\/user_query>\s*/g, /<context>[\s\S]*?<\/context>\s*/g, /<current_datetime>[\s\S]*?<\/current_datetime>\s*/g,
-  /<pr_metadata[^>]*\/?>\s*/g];
-const userText = (content: string): string => INJECTED.reduce((t, re) => t.replace(re, ""), content).trim();
+const INJECTED: readonly [string, string][] = [["<reminder>", "</reminder>"], ["<attachments>", "</attachments>"], ["<userRequest>", "</userRequest>"],
+  ["<user_query>", "</user_query>"], ["<context>", "</context>"], ["<current_datetime>", "</current_datetime>"], ["<pr_metadata", ">"]];
+const SPACE = /\s/;
+
+/**
+ * `t` without each `open`…`close` block (the first `close` after its `open`, left to right) and the spaces after it. Found
+ * by position, never by a backtracking pattern, so text of any length costs linear time: once an `open` has no `close`
+ * after it, no later one has either.
+ */
+function stripBlocks(t: string, open: string, close: string): string {
+  let out = "";
+  let pos = 0;
+  for (;;) {
+    const a = t.indexOf(open, pos);
+    if (a < 0) break;
+    const b = t.indexOf(close, a + open.length);
+    if (b < 0) break;
+    let end = b + close.length;
+    while (end < t.length && SPACE.test(t[end]!)) end++;
+    out += t.slice(pos, a);
+    pos = end;
+  }
+  return pos === 0 ? t : out + t.slice(pos);
+}
+
+/** The person's text of a user message: the context blocks the CLI wraps into it removed, trimmed. */
+export const userText = (content: string): string => INJECTED.reduce((t, [open, close]) => stripBlocks(t, open, close), content).trim();
 /** Bounded per-file state: tool calls awaiting their completion. */
 const PENDING_TOOLS = 4096;
 

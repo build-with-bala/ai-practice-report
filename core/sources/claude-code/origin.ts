@@ -52,6 +52,36 @@ export function isInterrupt(text: string): boolean {
 }
 
 /**
+ * The text between the first `open` and the first `close` after it; undefined without both. Found by position, never by
+ * a backtracking pattern, so a line of any length costs linear time.
+ */
+function between(t: string, open: string, close: string): string | undefined {
+  const a = t.indexOf(open);
+  if (a < 0) return undefined;
+  const b = t.indexOf(close, a + open.length);
+  return b < 0 ? undefined : t.slice(a + open.length, b);
+}
+
+/**
+ * The slash command's name: the text of the first `<command-name>…</command-name>` holding no `<`, without the spaces
+ * around it and one leading `/`. In linear time, as `between`.
+ */
+function commandName(t: string): string | undefined {
+  const OPEN = "<command-name>";
+  const CLOSE = "</command-name>";
+  for (let a = t.indexOf(OPEN); a >= 0; a = t.indexOf(OPEN, a + 1)) {
+    const from = a + OPEN.length;
+    const lt = t.indexOf("<", from);
+    if (lt < 0) return undefined; // no closing tag after any later opening either
+    if (!t.startsWith(CLOSE, lt)) continue; // a "<" inside: no name here (the next opening is at or after it)
+    let inner = t.slice(from, lt).trimStart();
+    if (inner.startsWith("/")) inner = inner.slice(1);
+    return inner.trimEnd();
+  }
+  return undefined;
+}
+
+/**
  * What the person typed, recovered from the CLI's wrappers: a skill/custom slash command is stored as
  * `<command-message>…</command-message><command-name>/x</command-name><command-args>a</command-args>` → "/x a",
  * bash mode as `<bash-input>c</bash-input>` → "!c". Anything else is returned unchanged.
@@ -59,9 +89,9 @@ export function isInterrupt(text: string): boolean {
 export function typedText(raw: string): string {
   const t = raw.trimStart();
   if (t.startsWith("<command-")) {
-    const name = /<command-name>\s*\/?([^<]*?)\s*<\/command-name>/.exec(t)?.[1];
+    const name = commandName(t);
     if (name) {
-      const args = /<command-args>([\s\S]*?)<\/command-args>/.exec(t)?.[1]?.trim();
+      const args = between(t, "<command-args>", "</command-args>")?.trim();
       return args ? `/${name} ${args}` : `/${name}`;
     }
   }
