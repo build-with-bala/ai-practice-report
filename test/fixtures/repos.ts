@@ -1,7 +1,6 @@
 // Synthetic git repositories for the repo-signal tests, built with the real `git` (present on every CI runner).
 import { mkdirSync, writeFileSync } from "node:fs";
 import { GIT_SAFE_ARGS, gitEnv as engineGitEnv, resolveGit, type GitRunner } from "../../core/git/run";
-import os from "node:os";
 import path from "node:path";
 
 export interface FixtureCommit {
@@ -18,9 +17,10 @@ export const FIXTURE_EMAIL = "dev@fixture.test";
 
 /**
  * The null device as the global config file: git reads it as empty (so no hook or signing setting of the machine
- * applies), and nothing anyone writes in the shared temp folder can stand in for it.
+ * applies), and nothing anyone writes in the shared temp folder can stand in for it. Spelled `/dev/null` on every
+ * platform: Git for Windows maps that name to its null device itself, and cannot open Windows's own `\\.\nul`.
  */
-const NO_GLOBAL = os.devNull;
+const NO_GLOBAL = "/dev/null";
 
 /** The environment a fixture's git runs in: no inherited GIT_* variable, no system or global config, no prompt. */
 function gitEnv(extra: Record<string, string> = {}): Record<string, string> {
