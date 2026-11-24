@@ -383,10 +383,47 @@ describe("walk: interrupts and briefs (rules 10–11)", () => {
     expect(s.briefScoreSum).toBeCloseTo(0.6, 12);
   });
 
-  test("work per turn: typed turns over log2(2 + actions), for episodes with actions", () => {
-    const s = one([sess("s"), prompt("s", T0), ...reads("s", T0 + SEC, 6), prompt("s", T0 + MIN), prompt("s", T0 + 2 * HOUR - MIN)]);
+  test("turns per work: per instruction with actions, its typed turns over log2(2 + its actions)", () => {
+    // one instruction (a brief and one follow-up) with 6 actions; a later brief with no action counts nowhere
+    const s = one([sess("s"), prompt("s", T0), ...reads("s", T0 + SEC, 6), prompt("s", T0 + MIN, { intent: "continuation" }),
+      prompt("s", T0 + 2 * MIN, { intent: "question" })]);
     expect(s.workEpisodes).toBe(1);
     expect(s.turnsPerWorkSum).toBeCloseTo(2 / 3, 12);
+  });
+
+  /** A sitting of `n` typed turns 2 min apart, each with `actions` actions; turn i is a follow-up when `followUp(i)`, else a new brief. */
+  const sitting = (n: number, actions: number, followUp: (i: number) => boolean = () => false, clearEvery = 0): Ev[] => {
+    const evs: Ev[] = [sess("s", { end: T0 + (2 * n + 1) * MIN })];
+    for (let i = 0; i < n; i++) {
+      const t = T0 + 2 * i * MIN;
+      if (clearEvery > 0 && i > 0 && i % clearEvery === 0) evs.push(marker("s", t - SEC, "clear"));
+      evs.push(prompt("s", t, { intent: i > 0 && followUp(i) ? "continuation" : "spec" }), ...reads("s", t + SEC, actions));
+    }
+    return evs;
+  };
+  const perWork = (st: SessionStats): number => st.turnsPerWorkSum / st.workEpisodes;
+
+  test("turns per work measures steering, not the length of a sitting: equal for sittings of 3 to 40 turns", () => {
+    const want = 1 / Math.log2(12);
+    for (const n of [3, 6, 12, 25, 40]) expect([n, perWork(one(sitting(n, 10)))]).toEqual([n, expect.closeTo(want, 12) as unknown as number]);
+    // one follow-up turn after every brief: the same at every length too
+    const pairs = 2 / Math.log2(22);
+    for (const n of [6, 12, 40]) expect(perWork(one(sitting(n, 10, (i) => i % 2 === 1)))).toBeCloseTo(pairs, 12);
+  });
+
+  test("clearing the context every 5 turns does not change it; follow-up turns raise it", () => {
+    const base = perWork(one(sitting(25, 10)));
+    expect(perWork(one(sitting(25, 10, () => false, 5)))).toBeCloseTo(base, 12);
+    const some = perWork(one(sitting(25, 10, (i) => i % 4 === 1)));
+    const more = perWork(one(sitting(25, 10, (i) => i % 4 !== 0)));
+    expect(base).toBeLessThan(some);
+    expect(some).toBeLessThan(more);
+  });
+
+  test("slash-command turns are no turns of their instruction; their actions are its work", () => {
+    const s = one([sess("s"), prompt("s", T0), ...reads("s", T0 + SEC, 6), prompt("s", T0 + MIN, { intent: "command" }), ...reads("s", T0 + MIN + SEC, 8)]);
+    expect([s.turns, s.workEpisodes]).toEqual([2, 1]);
+    expect(s.turnsPerWorkSum).toBeCloseTo(1 / Math.log2(16), 12);
   });
 });
 

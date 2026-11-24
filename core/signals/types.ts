@@ -6,8 +6,8 @@ import type { ToolId, Window } from "../model/ids";
 /**
  * The evidence the dimensions' minimums read (spec §6.5). From the sample: `typedTurns`, `sessions` (rows with at
  * least one typed turn), `days` and `weeks` (distinct local days with a typed turn, and their ISO weeks), `episodes`,
- * `editTurns` (gated rows), `followUps`, `briefs`, `failingChecks`, `interrupts`, `workEpisodes`, `tierEpisodes`
- * (episodes with a known tier and effort), `editEpisodesInRepo`, `landed`, `bgKnown`. Global: `repos` (active repos
+ * `editTurns` (gated rows), `followUps`, `briefs`, `failingChecks`, `interrupts`, `workEpisodes` (the instructions with
+ * an action: the unit of turns per work, under its older name), `tierEpisodes` (episodes with a known tier and effort), `editEpisodesInRepo`, `landed`, `bgKnown`. Global: `repos` (active repos
  * with repo facts), `buckets` (active buckets), `artifacts` (distinct used artifacts), `lifetimeWeeks`, `ownCommits`
  * (owner commits in the detail span).
  */

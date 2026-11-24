@@ -37,6 +37,14 @@ describe("reference v0", () => {
     expect(ref.components["ctx.hygiene"]!.p90).toBe(logit(2 / 3));
     expect(ref.components["ver.guardrails"]!.p50).toBe(logit(1 / 3));
   });
+  test("turns per work: anchors from their rationale (a follow-up turn sets off as many actions again), stored as -ln(1 + value)", () => {
+    const p50 = 0.7 / Math.log2(10) + 0.3 * 2 / Math.log2(18); // 8 actions, 3 in 10 instructions take one follow-up
+    const p90 = 0.9 / Math.log2(26) + 0.1 * 2 / Math.log2(50); // 24 actions, 1 in 10
+    const stored = (v: number): number => Math.round(-Math.log1p(v) * 1e4) / 1e4;
+    expect(ref.components["ste.turnsPerWork"]!.p50).toBe(stored(p50));
+    expect(ref.components["ste.turnsPerWork"]!.p90).toBe(stored(p90));
+    expect([stored(p50), stored(p90)]).toEqual([-0.3035, -0.2045]);
+  });
   test("the table is frozen", () => {
     expect(Object.isFrozen(ref.components["lev.run"])).toBe(true);
   });

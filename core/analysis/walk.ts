@@ -25,8 +25,8 @@ export type Hist = Record<number, number>;
  *   of category shell, package or container with no checks).
  * - Closure (rule 9): `failingChecks`, `closedChecks`, `fixCycles` (the failures each closing pass closed, capped at 50).
  * - Steering (rules 10–12): `followUps` = typed turns that start no episode; `briefs`, `correctedBriefs`,
- *   `briefScoreSum`; `interrupts` (the person's, not proxy-timed) and `healthyInterrupts`; `workEpisodes` (episodes with
- *   an action) and `turnsPerWorkSum`; `queued` = `queue` markers.
+ *   `briefScoreSum`; `interrupts` (the person's, not proxy-timed) and `healthyInterrupts`; `workEpisodes` (the
+ *   instructions with an action, rule 12: `turnsPerWork`) and `turnsPerWorkSum`; `queued` = `queue` markers.
  * - Children (rule 13): fan-out — `children` and `finishedChildren` — counts the row's direct children only; deeper
  *   descendants feed `maxDepth` (0 without children) and A_t, never fan-out. `bgKnown` (background known), `bgChildren`
  *   (background), `childTypes` and `workflowRuns` (distinct workflow ids) take every descendant.
@@ -536,7 +536,7 @@ function walkRow(row: SessionRow, t: SessionTable, store: EventStore, cx: WalkCt
     s.healthyInterrupts++;
   }
 
-  // per episode: briefs (11), work per turn (12), closure (9), hygiene (14), tiers (15), delivery (17)
+  // per episode: briefs (11), turns per work over its instructions (12), closure (9), hygiene (14), tiers (15), delivery (17)
   const single = row.models.length === 1 ? row.models[0] : undefined;
   const repo = row.repoKey === undefined ? undefined : cx.repoIndex.get(row.repoKey);
   const inRepo = repo?.identity === true;
@@ -568,10 +568,7 @@ function walkRow(row: SessionRow, t: SessionTable, store: EventStore, cx: WalkCt
     }
     best ??= tierValue(single, row.effort); // TurnEvs that give no tier and effort: the row's single model and its effort
     if (best !== undefined) s.tierPairs.push(best, Math.log2(1 + actions));
-    if (actions > 0) {
-      s.workEpisodes++;
-      s.turnsPerWorkSum += (ep.to - ep.from) / Math.log2(2 + actions);
-    }
+    turnsPerWork(turns, ep, s);
     closure(work.sort(byTs), s);
     if (!isEdit) continue;
     s.editEpisodes++;
@@ -585,6 +582,28 @@ function walkRow(row: SessionRow, t: SessionTable, store: EventStore, cx: WalkCt
     if (inWindow(repo!.commitTs) || inWindow(deliveryTs)) s.landedEpisodes++;
   }
   return s;
+}
+
+/**
+ * Rule 12, per instruction: within an episode, an instruction starts at its first typed turn and at each later typed
+ * turn whose intent is a brief intent (spec, question); the typed turns after it, up to the next instruction, are its
+ * follow-ups. Slash-command turns are no turns of it (their actions are its work). Each instruction with an action and
+ * a turn adds turns / log2(2 + actions): the steering an instruction needed for the work it set off, whatever the
+ * length of the sitting. `workEpisodes` counts those instructions.
+ */
+function turnsPerWork(turns: readonly Turn[], ep: { from: number; to: number }, s: SessionStats): void {
+  let n = 0;
+  let actions = 0;
+  const close = (): void => {
+    if (n > 0 && actions > 0) { s.workEpisodes++; s.turnsPerWorkSum += n / Math.log2(2 + actions); }
+  };
+  for (let i = ep.from; i < ep.to; i++) {
+    const tu = turns[i]!;
+    if (i === ep.from || BRIEF_INTENTS.has(tu.p.intent)) { close(); n = 0; actions = 0; }
+    if (tu.p.intent !== "command") n++;
+    actions += tu.a;
+  }
+  close();
 }
 
 /** 10·tier + effort rank, when both are known. */
