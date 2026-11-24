@@ -13,7 +13,9 @@ import { roundDown, roundUp, toolsOf, type CheckResult, type CheckValues, type R
  * invented to grow with time: both fit a line of their own. Ids invented with another slope or with far-off values
  * read as another encoding (`scheme-changed` or `foreign-ids`: a question, never `consistent`, never a fail). A real
  * break in use of more than a year with one part moved in time reads the same way: the moved part's values imply times
- * more than a year from the rest, which the rule cannot tell from another encoding. C9 (release dates) is the check that bounds re-timing: it
+ * more than a year from the rest, which the rule cannot tell from another encoding. A new encoding whose values carry
+ * on from the old ones at another slope fails C1: its first ids imply plausible times, and the off verdict comes
+ * before foreign ids are considered. C9 (release dates) is the check that bounds re-timing: it
  * catches a history moved back more than 90 days before a model's release.
  *
  * Per anchor kind (`cc-msg`, `cc-req`):
@@ -28,7 +30,8 @@ import { roundDown, roundUp, toolsOf, type CheckResult, type CheckValues, type R
  * - the fit of `ts` on `v`, over a stride sample of at most 5,000 (in time order). The start is the most-inliers line:
  *   of the lines through the pairs half the sample apart in `v` order (and an eighth and a sixty-fourth of that), the
  *   one with the most sample points within 10 min (the first among equals); then ordinary least squares over the
- *   sample points within 10 min of it. That is about 3 × 2,500 × 5,000 operations at most, and deterministic.
+ *   sample points within 10 min of it. Each pair distance d gives n − d candidates, so the three distances give about
+ *   (2,500 + 4,690 + 4,960) × 5,000 ≈ 61 million operations at most, and deterministic.
  *   Breakdown: whenever more than half of the sample is genuine, some pair half the sample apart is genuine at both
  *   ends (the pairs partition the sample), so a candidate through the genuine line exists; the closer pairs give one
  *   through a genuine block holding fewer, when its ids are contiguous in `v`. A crossing fabricated line can still win the start; the check then still fails,
@@ -45,12 +48,17 @@ import { roundDown, roundUp, toolsOf, type CheckResult, type CheckValues, type R
  *   is counted in `foreign` and is unverified. At least 10 of them on a line of their own: n/a (`scheme-changed`), at
  *   any share; else more than 10% of the recognized ids: n/a (`foreign-ids`); else at least 2 and more than 1%: a C1
  *   note (`foreign-ids`);
- * - C1 fails when more than 1% of the anchors, and at least 3, are off (`offIds`; `p99Seconds` over the ids that are
- *   not foreign, rounded up, capped at a year); more than 1% with fewer than 3 off is a note (`off-time`);
+ * - C1 fails when more than 1% of this encoding's ids (the recognized ids less the foreign ones), and at least 3, are
+ *   off (`offIds`, `offShare`; `p99Seconds` over the ids that are not foreign, rounded up, capped at a year); more than
+ *   1% with fewer than 3 off is a note (`off-time`). The order of decisions: first this off-time verdict; only a kind
+ *   that does not fail may then be made unverified by its foreign ids (`scheme-changed` for 10 on a line of their own,
+ *   then `foreign-ids` above 10%), so foreign ids never hide a fail, and a failing kind still carries their count;
+ *   then the C1 note (off-time, then foreign-ids, then malformed-ids), else a pass;
  * - C2 is Spearman's rank correlation of `v` and `ts` over a stride sample of at most 20,000 of the ids on C1's line
  *   (those C1 counted off are judged by C1's own thresholds), and fails below 0.99;
  *   it needs at least 200 recognized anchors (else n/a `too-few`: one late record among a few dozen moves it below
- *   0.99), and is n/a wherever C1 is.
+ *   0.99), and ranked ids that span at least 24 hours (else n/a `too-few`: within one dense burst, records written
+ *   minutes late by parallel agents reorder ids that are minutes apart); it is n/a wherever C1 is n/a.
  *
  * The two kinds combine to the worse result, with `values.unverifiedKinds` (0, 1 or 2: the kinds that are n/a for a
  * reason other than `too-few`), where an n/a other than `too-few` outranks a pass: a kind that cannot be
@@ -70,6 +78,7 @@ const OFF_SHARE = 0.01;
 const MIN_RHO = 0.99;
 const OFF_MIN = 3;
 const MIN_RANKED = 200;
+const RANK_SPAN_MS = 86_400_000;
 const KINDS: readonly AnchorEv["kind"][] = ["cc-msg", "cc-req"];
 
 interface Point { v: number; ts: number }
@@ -244,16 +253,19 @@ function checkKind(anchors: readonly AnchorEv[], end: number): [CheckResult, Che
   const foreignPs = ps.filter((_, i) => res[i]! > OFF_MS && !plausible(implied[i]!));
   const foreign = foreignPs.length;
   const left = { ...counts, foreign } satisfies CheckValues;
-  // ids that are not this encoding and fit a line of their own: another encoding, at any share
-  if (foreign >= FOREIGN_LINE_MIN && ownLine(foreignPs)) return naPair(anchors.length, "scheme-changed", left, tools);
-  if (foreign > FOREIGN_SHARE * ps.length) return naPair(anchors.length, "foreign-ids", left, tools);
-  const foreignNote = foreign >= FOREIGN_MIN && foreign > MALFORMED_SHARE * ps.length;
 
+  // first the off-time verdict, over this encoding's ids alone (foreign ids can neither dilute nor hide it); more than
+  // 1% off fails only with at least 3 ids off: one late record among few ids is no evidence of editing
+  const own = ps.length - foreign;
   const offIds = res.filter((r, i) => r > OFF_MS && plausible(implied[i]!)).length;
-  const off = offIds / ps.length;
-  // more than 1% off fails only with at least 3 ids off: one late record among few ids is no evidence of editing
+  const off = offIds / own;
   const offOver = off > OFF_SHARE;
-  const c1Fail = offFails(offIds, ps.length);
+  const c1Fail = offFails(offIds, own);
+  // only a kind that does not fail may be made unverified by ids that are not this encoding: on a line of their own
+  // (another encoding, at any share), or above their share
+  if (!c1Fail && foreign >= FOREIGN_LINE_MIN && ownLine(foreignPs)) return naPair(anchors.length, "scheme-changed", left, tools);
+  if (!c1Fail && foreign > FOREIGN_SHARE * ps.length) return naPair(anchors.length, "foreign-ids", left, tools);
+  const foreignNote = foreign >= FOREIGN_MIN && foreign > MALFORMED_SHARE * ps.length;
   const offRes = res.filter((r, i) => r <= OFF_MS || plausible(implied[i]!));
   const c1: CheckResult = {
     id: "C1", status: c1Fail ? "fail" : offOver || foreignNote || malformed ? "note" : "pass", n: ps.length,
@@ -264,6 +276,14 @@ function checkKind(anchors: readonly AnchorEv[], end: number): [CheckResult, Che
   // C2 ranks only the ids on C1's line: the ids off it are C1's business, under C1's thresholds
   if (ps.length < MIN_RANKED) return [c1, { id: "C2", status: "n/a", n: ps.length, reason: "too-few", values: { ...left }, tools: [...tools] }];
   const rankSample = stride(ps.filter((_, i) => res[i]! <= OFF_MS), RANK_SAMPLE);
+  // the order of ids whose times lie within minutes of each other says nothing (records land minutes late): C2 ranks
+  // only ids that span at least a day
+  let r0 = Infinity, r1 = -Infinity;
+  for (const p of rankSample) {
+    if (p.ts < r0) r0 = p.ts;
+    if (p.ts > r1) r1 = p.ts;
+  }
+  if (!(r1 - r0 >= RANK_SPAN_MS)) return [c1, { id: "C2", status: "n/a", n: rankSample.length, reason: "too-few", values: { ...left }, tools: [...tools] }];
   const rho = spearman(rankSample);
   if (rho === undefined) return [c1, { id: "C2", status: "n/a", n: rankSample.length, reason: "degenerate", values: { ...left }, tools: [...tools] }];
   const c2Fail = rho < MIN_RHO;
