@@ -98,3 +98,31 @@ describe("artifactUse", () => {
     expect(out.map((a) => `${a.kind}:${a.name}`)).toEqual(["agent:z", "skill:a", "skill:b"]);
   });
 });
+
+describe("a configured MCP server counts once, whatever the number of scopes", () => {
+  const T = Date.UTC(2026, 10, 2, 9);
+  const mcp = (name: string, projectKey?: string): Ev => ({ k: "config", tool: "claude-code", source: "claude-code.config", kind: "mcp-server", name, provenance: "installed", uses: 2,
+    ...(projectKey ? { projectKey } : {}) });
+  const evs = (): Ev[] => [
+    { k: "session", tool: "claude-code", source: "claude-code.transcripts", id: "a", window: "detail", origin: "human", start: T, end: T + 60_000, models: [], projectKey: "kA" },
+    { k: "session", tool: "claude-code", source: "claude-code.transcripts", id: "b", window: "detail", origin: "human", start: T, end: T + 60_000, models: [], projectKey: "kB" },
+    mcp("github"), mcp("github", "kA"), mcp("github", "kB"), mcp("stripe", "kB"),
+  ];
+  test("a server configured globally and per project is one artifact, one config entry and one exported name", async () => {
+    const { analyze } = await import("../../../core/analyze");
+    const { exportPayload } = await import("../../../core/privacy/export");
+    const a = analyze(scanResultOf(evs()), { timeZone: "UTC" });
+    expect(a.config.byKind["mcp-server"]).toEqual({ authored: 0, installed: 2, other: 0, used: 2 });
+    expect(a.private.config.filter((c) => c.name === "github")).toHaveLength(1);
+    const out = JSON.parse(exportPayload(a, { schema: "aiprof/2" }).json) as { config: { mcpServers: string[] } };
+    expect(out.config.mcpServers).toEqual(["github", "stripe"]);
+  });
+  test("a server only an excluded project configures is gone; one another scope configures stays", async () => {
+    const { analyze } = await import("../../../core/analyze");
+    const { exportPayload } = await import("../../../core/privacy/export");
+    const a = analyze(scanResultOf(evs()), { timeZone: "UTC", exclude: { projects: ["kB"] } });
+    expect(a.private.config.map((c) => c.name)).toEqual(["github"]);
+    const out = JSON.parse(exportPayload(a, { schema: "aiprof/2" }).json) as { config: { mcpServers: string[] } };
+    expect(out.config.mcpServers).toEqual(["github"]);
+  });
+});
