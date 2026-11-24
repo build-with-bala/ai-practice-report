@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, readFileSync, statSync, symlinkSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, statSync, symlinkSync, utimesSync } from "node:fs";
 import path from "node:path";
 import type { CoverageEv, Ev, ToolEv } from "../../../core/model/events";
 import { scan } from "../../../core/scan";
@@ -434,7 +434,8 @@ describe("claude-code transcripts: record mapping", () => {
     t.write(h, topFile("P11"));
     const r = await run();
     const tools = r.store.all("tool");
-    expect(tools.map(x => [x.callId, x.ok, x.linesAdded])).toEqual([["toolu_d1", true, undefined], ["toolu_d2", true, undefined], ["toolu_d3", false, undefined]]);
+    const k = (id: string) => keyedHash(r.salt, id);
+    expect(tools.map(x => [x.callId, x.ok, x.linesAdded])).toEqual([[k("toolu_d1"), true, undefined], [k("toolu_d2"), true, undefined], [k("toolu_d3"), false, undefined]]);
   });
 
   test("usage stays one per message beyond the in-memory message window", async () => {
@@ -798,5 +799,57 @@ describe("ccToolCategory", () => {
     expect(mapped.filter((name) => !CC_BUILTIN_TOOLS.has(name))).toEqual([]);
     const doc = readFileSync(path.join(import.meta.dir, "..", "..", "..", "core", "sources", "claude-code", "FORMAT.md"), "utf8");
     expect([...CC_BUILTIN_TOOLS, ...BUILTIN_AGENTS].filter((name) => !doc.includes(`\`${name}\``))).toEqual([]);
+  });
+});
+
+describe("claude-code transcripts: one session in two project folders", () => {
+  const build = () => top("D").prompt("Fix the importer").tool("toolu_01D", "Bash", { command: "bun test" }).text("Done.");
+  const counts = (r: Awaited<ReturnType<typeof run>>) => {
+    const c = r.store.count();
+    return { session: c.session, prompt: c.prompt, tool: c.tool, usage: c.usage, anchor: c.anchor, file: c.file };
+  };
+
+  test("a copy and a link of one transcript: read once, the other counted duplicate", async () => {
+    const once = build();
+    const first = once.write(h, topFile("D"));
+    const single = counts(await run());
+    expect(single).toEqual({ session: 1, prompt: 1, tool: 1, usage: 2, anchor: 4, file: 1 });
+
+    // a copy, modified later: it is the one read
+    const copyRel = `${proj("/work/moved")}/${ccSid("D")}.jsonl`;
+    const copy = once.write(h, copyRel);
+    const later = new Date(statSync(first).mtimeMs + 60_000);
+    utimesSync(copy, later, later);
+    let r = await run();
+    expect(counts(r)).toEqual(single);
+    expect(r.coverage[0]!.skipped.duplicate).toBe(1);
+    expect(r.store.all("file")[0]!.pathHash).toBe(keyedHash(r.salt, path.join(h.env.home, copyRel)));
+
+    // a link to the first file: the same file twice, read once
+    h.cleanup();
+    h = fakeHome();
+    const target = build().write(h, topFile("D"));
+    const link = path.join(h.env.home, `${proj("/work/linked")}/${ccSid("D")}.jsonl`);
+    mkdirSync(path.dirname(link), { recursive: true });
+    try {
+      symlinkSync(target, link);
+    } catch (e) {
+      if (process.platform !== "win32") throw e;
+      return; // where no link can be made there is no linked copy
+    }
+    r = await run();
+    expect(counts(r)).toEqual(single);
+    expect(r.coverage[0]!.skipped.duplicate).toBe(1);
+  });
+});
+
+describe("claude-code transcripts: tool call ids", () => {
+  test("a tool_use id is kept only as a keyed hash: a path or a token in it never reaches an event", async () => {
+    const id = `toolu_${CANARY.path}_${CANARY.secret}`;
+    top("K").prompt("Run the tests").tool(id, "Bash", { command: "bun test" }).write(h, topFile("K"));
+    const r = await run();
+    const tool = r.store.all("tool")[0]!;
+    expect(tool.callId).toBe(keyedHash(r.salt, id));
+    expectNoCanaries([...allEvents(r), r.coverage, r.warnings]);
   });
 });

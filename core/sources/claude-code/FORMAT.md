@@ -166,7 +166,7 @@ manual), preTokens, postTokens, durationMs, preservedSegment, …}`, `logicalPar
   `turnOrigin:<other>` / `promptSource:<other>` (the value itself is never kept); the text is
   consulted only when both fields are absent. Slash-command and bash-mode markup is turned back into `/name args` /
   `!command` before intent, features and the text hash.
-- `ToolEv` per `tool_use` (deduplicated by id), closed by its `tool_result`; `name` = the tool's name when it is a
+- `ToolEv` per `tool_use` (deduplicated by id; `callId` = the id's keyed hash, never the id), closed by its `tool_result`; `name` = the tool's name when it is a
   built-in (below), `mcp` for MCP tools (the server in `mcpServer`), else `other`, so a name the person chose never
   leaves as a tool name; Agent/Task tools get `delegateTo` via meta `toolUseId`; `AskUserQuestion` and `ToolSearch` are
   `meta`.
@@ -208,6 +208,10 @@ manual), preTokens, postTokens, durationMs, preservedSegment, …}`, `logicalPar
   never also `no-ts`: its prompt, reply and turn duration are dropped; its tool calls and markers take the file's
   clock, else are dropped with it), `no-ts` (a prompt, reply, tool call or turn duration whose record has no time,
   absent or shapeless; the markers of a file that never gives one).
+- **One session, one file.** A session id whose top-level transcript appears in more than one project folder (a copy,
+  a link) is read from one of them only: the one modified last (tie: the larger, then the first by path), with the
+  session folder beside it. Each other top-level file is skipped `duplicate`, and the session folder beside it is not
+  read.
 - Drift, beyond unknown record types: `timestamp:shape` (a `user`, `assistant` or `system` record whose `timestamp` is
   absent or not a time), `user.content:shape` (`message.content` neither a string nor an array),
   `assistant.message:shape`, `assistant.content:shape`, `tool_use:shape` (a call without `id` or `name`),
