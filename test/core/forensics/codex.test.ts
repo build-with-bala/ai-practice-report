@@ -91,6 +91,23 @@ describe("checkRollouts: C6, every rollout has a thread row", () => {
     expect(c6.status).toBe("fail");
   });
 
+  test("a rollout whose own row was created a few ms after its id's time is not before the index", () => {
+    const evs: Ev[] = [threadsCov()];
+    for (let i = 0; i < 5; i++) {
+      const at = T0 + i * DAY;
+      evs.push(rollout(i, { fileTs: Math.floor(at / SEC) * SEC, uuidTs: at }), { ...row(i), createdAt: at + 50 });
+    }
+    const [c6] = run(evs);
+    expect([c6.status, c6.n, c6.values.beforeIndex]).toEqual(["pass", 5, 0]);
+  });
+
+  test("a zone-shifted file gets the same lag after its id as an unshifted one (up to a minute)", () => {
+    const shifted = (lag: number) => run([rollout(0, { uuidTs: T0 + 3 * HOUR, fileTs: T0 + lag })])[1];
+    expect([shifted(5 * SEC).reason, shifted(59 * SEC).reason]).toEqual(["time-zone-change", "time-zone-change"]);
+    expect(shifted(2 * MIN).reason).toBe("uuid-after-name");
+    expect(run([rollout(0, { uuidTs: T0, fileTs: T0 + 5 * SEC }), ...[1, 2, 3, 4].map((i) => rollout(i))])[1].status).toBe("pass");
+  });
+
   test("every rollout before the index is n/a, with its own reason", () => {
     const dated = (i: number): ThreadRowEv => ({ ...row(i), createdAt: T0 + 10 * HOUR });
     const [c6] = run([threadsCov(), dated(0), rollout(0), rollout(1, { uuidTs: undefined })]);

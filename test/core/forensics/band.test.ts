@@ -280,7 +280,8 @@ describe("provenance (C10)", () => {
     const f = run([sess("s"), prompt("s", T0 + MIN), prompt("s", T0 + 2 * MIN), history(T0 + 3 * MIN, "a"),
       prompt("s", T0 + 4 * MIN, "claude-code", { origin: "scripted" }), sess("c", "cursor"), prompt("c", T0 + MIN, "cursor")]);
     const c = byId(f, "C10");
-    expect([c.status, c.reason, c.n]).toEqual(["info", "classify-only", 5]);
+    // n: the prompts of each tool's one window (Claude Code's detail window here), never both windows summed
+    expect([c.status, c.reason, c.n]).toEqual(["info", "classify-only", 4]);
     expect(c.values).toEqual({ "claude-code/human/detail": 2, "claude-code/human/lifetime": 1, "claude-code/scripted/detail": 1, "cursor/human/detail": 1 });
     expect(c.tools).toEqual(["claude-code", "cursor"]);
     expect(byId(run([]), "C10").status).toBe("n/a");
@@ -356,6 +357,8 @@ describe("wording: every reason and question the forensic checks produce", () =>
       sess("s", "claude-code", NOW - 3 * DAY, { end: NOW }), cov("claude-code", CC, "detail"),
       ...Array.from({ length: 61 }, (_, i) => prompt("s", NOW - 3 * DAY + i * MIN, "claude-code",
         { textHash: i < 5 ? "x" : `u${i}`, features: { ...features, chars: 300 } })),
+      ...["r2", "r3", "r4", "r5"].flatMap((id): Ev[] => [sess(id, "claude-code", NOW - 3 * DAY, { end: NOW }),
+        ...Array.from({ length: 61 }, (_, i) => prompt(id, NOW - 3 * DAY + i * MIN))]),
       ...[80, 1, 2, 3].map((d) => history(NOW - d * DAY, `l${d}`)),
       ...Array.from({ length: 10 }, (_, i): ToolEv => ({ k: "tool", tool: "claude-code", source: CC, ts: NOW - DAY + i, sessionId: "s", name: "Read", category: "read" })),
       ...["a", "b", "c"].map((name): ConfigEv => ({ k: "config", tool: "claude-code", source: "claude-code.config", kind: "skill", name, provenance: "authored", uses: 1, firstSeen: NOW - DAY })),

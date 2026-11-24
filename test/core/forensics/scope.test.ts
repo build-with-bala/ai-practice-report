@@ -66,7 +66,8 @@ describe("analyze: forensics under exclusions", () => {
 
     const before = forensicsOf(raw, UTC), after = forensicsOf(raw, { ...UTC, exclude: { projects: [busiest] } });
     const c10a = byId(before, "C10"), c10b = byId(after, "C10");
-    expect(c10a.n - c10b.n).toBe(droppedPrompts);
+    const sum = (c: CheckResult) => Object.values(c.values).reduce<number>((a, x) => a + (x as number), 0);
+    expect(sum(c10a) - sum(c10b)).toBe(droppedPrompts);
     for (const key of Object.keys(c10a.values) as ProvenanceKey[]) expect([key, c10a.values[key]! - (c10b.values[key] ?? 0)]).toEqual([key, expected.get(key) ?? 0]);
     expect(byId(before, "soft:unclosed-tools").n - byId(after, "soft:unclosed-tools").n).toBe(droppedCalls);
   });

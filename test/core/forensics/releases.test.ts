@@ -110,6 +110,8 @@ describe("checkReleases (C9)", () => {
       expect(e.source).toMatch(/^https:\/\/[a-z0-9.-]+\.[a-z]{2,}\//);
     }
     for (const m of RELEASES.models) expect(() => new RegExp(m.match)).not.toThrow();
+    // anchored at both ends: a pattern never matches inside a longer, other model id
+    for (const m of RELEASES.models) expect([m.match, m.match.startsWith("^") && m.match.endsWith("$")]).toEqual([m.match, true]);
   });
 
   test("the result names no model: counts only", () => {

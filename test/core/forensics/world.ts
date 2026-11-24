@@ -147,9 +147,10 @@ export function world(): Tagged[] {
       // Codex: a session with prompts and tool calls, its rollout and its thread row
       const cid = `codex:${project}${period}`;
       const cstart = base + (project === "A" ? DAY : 3 * DAY);
-      add({ k: "session", tool: "codex", source: CX, id: cid, window: "detail", origin: "human", start: cstart, end: cstart + 2 * HOUR, models: ["model-w"],
+      add({ k: "session", tool: "codex", source: CX, id: cid, window: "detail", origin: "human", start: cstart, end: cstart + 10 * HOUR, models: ["model-w"],
         projectKey: `k${project}` }, "codex", period, project);
-      for (let i = 0; i < 5; i++) {
+      // 55 prompts: enough gaps for the rhythm flag to measure the session
+      for (let i = 0; i < 55; i++) {
         add({ k: "prompt", tool: "codex", source: CX, ts: cstart + i * 10 * MIN, sessionId: cid, window: "detail", origin: "human", intent: "spec",
           textHash: `cx-${project}${period}-${i}`, features }, "codex", period, project);
       }

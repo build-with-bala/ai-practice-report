@@ -26,6 +26,7 @@ const MIN_PASS = 5;
 const ID_TOL_MS = 1_000;
 const QUARTER_MS = 15 * 60_000;
 const ZONE_TOL_MS = 2_000;
+const ZONE_LAG_MS = 60_000;
 const ZONE_MAX_QUARTERS = 104;   // 26 h: two real zones can differ by up to 26 h
 const RESET_TOL_MS = 60_000;
 const DROP_POINTS = 2;
@@ -39,7 +40,7 @@ const FAIL_SHARE = 0.005;
  * kept tool's `codex.threads`, `ok` or `drift` with records), or without rollouts. Rollouts missing their row: at least
  * max(2, 1% of the rollouts checked) → fail; fewer, but at least 1 → note with the same question (a genuine machine can
  * hold a stray one). The index cannot vouch for sessions older than itself: when a row carries `createdAt`, rollouts
- * that began before the earliest one are not checked (`beforeIndex`; without any `createdAt` every rollout is).
+ * that began more than 1 s before the earliest one are not checked (a row is created a few ms after its id's time) (`beforeIndex`; without any `createdAt` every rollout is).
  * `createdAt` is an absolute time and a file name a local one, so a rollout's start — for the 10-min rule too — is read
  * on one clock: its id's time (`uuidTs`) where it has one, else its file name's (`fileTs`). When every rollout began
  * before the index: n/a, reason `before-index`. A pass needs at least 5 rollouts checked; fewer, none missing: n/a
@@ -59,9 +60,10 @@ function checkThreadRows(s: ForensicScope, now: number): CheckResult {
   let since = Infinity;
   for (const r of rows) if (r.createdAt !== undefined && r.createdAt < since) since = r.createdAt;
   if (since === Infinity) since = -Infinity; // no row carries a creation time: every rollout is checked
+  // the index's first row may be created a few ms after its own rollout's id time: allow the second the names keep
   const checked = rollouts.filter((r) => {
     const began = r.uuidTs ?? r.fileTs;
-    return began === undefined || began >= since;
+    return began === undefined || began >= since - ID_TOL_MS;
   });
   const beforeIndex = rollouts.length - checked.length;
   if (checked.length === 0) return { id: "C6", status: "n/a", n: 0, reason: "before-index", values: { beforeIndex }, tools };
@@ -73,10 +75,16 @@ function checkThreadRows(s: ForensicScope, now: number): CheckResult {
   return { ...base, status: fail ? "fail" : "note", reason: "missing-thread-rows" };
 }
 
-/** A positive offset that is a whole number of quarter hours (1 to 104, up to 26 h, within 2 s): the zone changed since the file was named. */
+/**
+ * A positive offset that is a whole number of quarter hours (1 to 104, up to 26 h): the zone changed since the file was
+ * named. The rest may be up to 2 s above the quarter hour, and up to a minute below it: a file named some seconds after
+ * its id's time passes unshifted, so it does shifted too. (Unshifted, a name after the id has no bound at all; a shift
+ * needs one to be told from an id simply later than its name.)
+ */
 function isZoneShift(d: number): boolean {
-  const q = Math.round(d / QUARTER_MS);
-  return q >= 1 && q <= ZONE_MAX_QUARTERS && Math.abs(d - q * QUARTER_MS) <= ZONE_TOL_MS;
+  const q = Math.ceil((d - ZONE_TOL_MS) / QUARTER_MS);
+  const rest = d - q * QUARTER_MS;
+  return q >= 1 && q <= ZONE_MAX_QUARTERS && rest <= ZONE_TOL_MS && rest >= -ZONE_LAG_MS;
 }
 
 /**

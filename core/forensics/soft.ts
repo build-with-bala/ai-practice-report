@@ -18,6 +18,7 @@ const DAY_MS = 86_400_000;
 const RHYTHM_GAP_MS = 30 * MIN;
 const RHYTHM_MIN_GAPS = 50;
 const RHYTHM_MAX_CV = 0.6;
+const RHYTHM_MIN_SESSIONS = 5;
 const LONG_CHARS = 200;
 const LONG_REPEATS = 5;
 const BURST_DAYS = 14;
@@ -43,7 +44,7 @@ function humanPrompts(raw: ScanResult, t: SessionTable, s: ForensicScope): Promp
  * rhythm: per session, the gaps under 30 min between consecutive human prompts; a session with at least 50 such gaps is
  * measured by their coefficient of variation (population sd / mean). Gaps cut off at 30 min have a CV near 1 in ordinary
  * human work, so a single session says little: raised when the median CV over the measured sessions is below 0.6. n/a
- * when no session can be measured. `n` and `values.sessions`: the sessions measured; `values.medianCv` (2 decimals).
+ * when no session can be measured (`no-data`), or fewer than 5 (`too-few`: the median of so few is one session). `n` and `values.sessions`: the sessions measured; `values.medianCv` (2 decimals).
  */
 function rhythm(prompts: readonly PromptEv[]): CheckResult {
   const bySession = new Map<string, number[]>();
@@ -68,6 +69,7 @@ function rhythm(prompts: readonly PromptEv[]): CheckResult {
   }
   const tools = toolsOf(prompts.filter((p) => p.sessionId !== undefined));
   if (cvs.length === 0) return na("soft:rhythm", tools);
+  if (cvs.length < RHYTHM_MIN_SESSIONS) return { id: "soft:rhythm", status: "n/a", n: cvs.length, reason: "too-few", values: {}, tools };
   cvs.sort((a, b) => a - b);
   const m = cvs.length >> 1;
   const median = cvs.length % 2 === 1 ? cvs[m]! : (cvs[m - 1]! + cvs[m]!) / 2;

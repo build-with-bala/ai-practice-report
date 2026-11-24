@@ -89,7 +89,8 @@ describe("forensics over in-scope data only", () => {
   test("orphans: tool calls, detail prompts, session accounts, ids, file facts and limit readings are out; lifetime prompts, rollouts and thread rows stay", () => {
     const bare = run(scanOf(all.filter((x) => x.case !== "orphan")));
     for (const id of ["C1", "C2", "C4", "C5", "C8", "soft:unclosed-tools"] as const) expect([id, byId(full, id)]).toEqual([id, byId(bare, id)]);
-    expect(byId(full, "C10").n - byId(bare, "C10").n).toBe(1);
+    const counted = (f: Forensics) => Object.values(byId(f, "C10").values).reduce<number>((x, v) => x + (v as number), 0);
+    expect(counted(full) - counted(bare)).toBe(1);
     expect(byId(full, "C10").values["claude-code/human/lifetime"]! - byId(bare, "C10").values["claude-code/human/lifetime"]!).toBe(1);
     expect([byId(full, "C6").values.rollouts! - byId(bare, "C6").values.rollouts!, byId(full, "C6").values.missing]).toEqual([1, byId(bare, "C6").values.missing]);
     expect(byId(full, "C7").n - byId(bare, "C7").n).toBe(1);
