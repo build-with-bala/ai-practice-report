@@ -80,6 +80,17 @@ function spearman(flat: readonly number[]): number | null {
 }
 
 const ratio = (num: number, den: number): number | null => (den > 0 ? num / den : null);
+/**
+ * Fresh tokens per landed unit need at least this many landed units: the measure follows how often a person commits
+ * (one commit after many sittings reads as a high cost), so a handful of commits says too little.
+ */
+export const MIN_LANDED = 5;
+/** A metric under its minimum n: null with `no-data` (the data could hold it, there is too little of it). */
+const minimum = (m: Metric, min: number): Metric => {
+  if (m.n >= min || m.value === null) return m;
+  const { value: _value, reason: _reason, ...meta } = m;
+  return { ...meta, value: null, reason: "no-data" };
+};
 
 /**
  * The signals of one sample of detail-window top-level rows (the point estimate, or one bootstrap replicate), with the
@@ -206,7 +217,7 @@ export function computeSignals(sample: readonly SessionStats[], g: Globals): Sig
     hygiene: d(hygieneSpan, compactions + episodes, hygiene),
     switchesPerWeek: g.switchesPerWeek,
     rho: d(rhoSpan, pairs.length >> 1, spearman(pairs), captured(episodes === 0 || pairs.length > 0)),
-    tokensPerLanded: d(tokenSpan, tokenLanded, ratio(tokens, tokenLanded), captured(tokenRows > 0)),
+    tokensPerLanded: minimum(d(tokenSpan, tokenLanded, ratio(tokens, tokenLanded), captured(tokenRows > 0)), MIN_LANDED),
     usdPerLanded: d(usdSpan, usdLanded, ratio(usd, usdLanded), captured(usdRows > 0)),
     landedShare,
     reworkShare: g.reworkShare, prsPerWeek: g.prsPerWeek, aiCoauthoredShare: g.aiCoauthoredShare, commitAfterSession: g.commitAfterSession,

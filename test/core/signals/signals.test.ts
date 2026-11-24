@@ -87,9 +87,13 @@ describe("computeSignals: the sample formulas", () => {
     // tiers 21, 33, 22 against sizes 1, 3, 2: the same order, rho 1
     expect(s.rho.value).toBeCloseTo(1, 12);
     expect(s.rho.n).toBe(3);
-    expect([s.tokensPerLanded.value, s.tokensPerLanded.n]).toEqual([750, 2]);
+    // 2 landed units are under the minimum of 5: cost per landed unit follows how often a person commits
+    expect([s.tokensPerLanded.value, s.tokensPerLanded.n, s.tokensPerLanded.reason]).toEqual([null, 2, "no-data"]);
+    const five = computeSignals([{ ...a, landed: 5 }, b], globals()).tokensPerLanded;
+    expect([five.value, five.n, five.reason]).toEqual([300, 5, undefined]);
     // every known row in either sum is in the span: b adds tokens, though it landed nothing
-    expect([s.tokensPerLanded.sources, s.tokensPerLanded.from, s.tokensPerLanded.to]).toEqual([[CC, CX], T0, T0 + DAY + HOUR]);
+    expect([five.sources, five.from, five.to]).toEqual([[CC, CX], T0, T0 + DAY + HOUR]);
+    expect(computeSignals([{ ...a, landed: 4 }, b], globals()).tokensPerLanded.value).toBeNull();
     expect([s.usdPerLanded.value, s.usdPerLanded.n, s.usdPerLanded.sources]).toEqual([1, 2, [CC]]);
   });
 
@@ -329,6 +333,18 @@ describe("computeGlobals", () => {
     expect([g.commitAfterSession.value, g.commitAfterSession.n]).toEqual([2 / 3, 3]);
   });
 
+  test("rework: not captured when no commit by anyone in the window is marked as rework; another author's mark is enough", () => {
+    const plain = REPOS();
+    for (const c of plain.repos[0]!.commits) delete c.rework;
+    const none = globalsOf(WORLD, { repos: plain, now: T0 + 15 * DAY }).g.reworkShare;
+    expect([none.value, none.reason, none.n]).toEqual([null, "not-captured", 3]); // c4 is no revert now: it joins c1, c2
+    const other = REPOS();
+    other.repos[0]!.commits = other.repos[0]!.commits.filter((c) => c.shaKey !== "c2" && c.shaKey !== "c4");
+    other.repos[0]!.commits.push(commit(T0 + 20 * DAY, "c6", ["f7"], { owner: false, rework: "fixup" }));
+    const marked = globalsOf(WORLD, { repos: other, now: T0 + 25 * DAY }).g.reworkShare;
+    expect([marked.value, marked.reason]).toEqual([0, undefined]);
+  });
+
   test("used artifacts, weighted by provenance; memory files shown", () => {
     const { g } = globalsOf([
       ...WORLD,
@@ -358,8 +374,8 @@ describe("computeGlobals", () => {
 
   test("the date range clips commits and switches as well as sessions", () => {
     const { g } = globalsOf(WORLD, { repos: REPOS(), exclude: { to: T0 + 4 * HOUR + 30 * MIN }, now: T0 + 15 * DAY });
-    // only c1 is left: c2 (a fix, 5 h) and c4 lie after the range's end
-    expect([g.reworkShare.value, g.reworkShare.n, g.aiCoauthoredShare.n]).toEqual([0, 1, 1]);
+    // only c1 is left: c2 (a fix, 5 h) and c4 lie after the range's end, so no commit in the window is marked as rework
+    expect([g.reworkShare.value, g.reworkShare.n, g.reworkShare.reason, g.aiCoauthoredShare.n]).toEqual([null, 1, "not-captured", 1]);
     expect(g.switchesPerWeek.value).toBe(1); // one switch with a detail in range, over Claude Code's one lifetime week in range
   });
 

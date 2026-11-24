@@ -53,9 +53,9 @@ describe("persona calibration", () => {
         comps++;
         expect({ id: a.id, lower: a.x < b.x }).toEqual({ id: a.id, lower: true });
       }
-      // the novice is insufficient on 3 dimensions and has no background share (its 0 artifacts are a measured 0); the
-      // others score everything
-      expect([dims, comps]).toEqual(lo === "novice" ? [4, 21] : [7, 22]);
+      // the novice is insufficient on 3 dimensions, has no background share, and lands under 5 units (no cost per landed
+      // unit); its 0 artifacts are a measured 0. The others score everything
+      expect([dims, comps]).toEqual(lo === "novice" ? [4, 20] : [7, 22]);
     }
   });
 
@@ -129,7 +129,7 @@ describe("persona fixtures", () => {
   const KNOBS: Record<Kind, Partial<Record<keyof Signals, number>>> = {
     novice: {
       parallelShare: 0.02, fanoutPerEpisode: 0, headlessPerWeek: 0, vae: 0.15, closure: 0.4, guardrails: 0, correctionRate: 0.3,
-      healthyInterruptShare: 0.25, maintainedShare: 0, briefScore: 0.2, switchesPerWeek: 0.2, rho: 0, tokensPerLanded: 1_500_000,
+      healthyInterruptShare: 0.25, maintainedShare: 0, briefScore: 0.2, switchesPerWeek: 0.2, rho: 0,
       landedShare: 0.2, reworkShare: 0.25, prsPerWeek: 0.1,
     },
     intermediate: {
@@ -143,6 +143,10 @@ describe("persona fixtures", () => {
       tokensPerLanded: 250_000, landedShare: 0.8, reworkShare: 0.05, prsPerWeek: 5,
     },
   };
+  test("novice: under 5 landed units, cost per landed unit is not measured", () => {
+    expect([P.novice.signals.tokensPerLanded.value, P.novice.signals.tokensPerLanded.reason]).toEqual([null, "no-data"]);
+    expect(P.novice.signals.tokensPerLanded.n).toBeLessThan(5);
+  });
   for (const k of KINDS) {
     test(`${k}: the walk reads the knobs back`, () => {
       const s = P[k].signals;

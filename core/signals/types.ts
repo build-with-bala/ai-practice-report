@@ -30,6 +30,12 @@ export interface Signals {
   switchesPerWeek: Metric; rho: Metric; tokensPerLanded: Metric; usdPerLanded: Metric;
   landedShare: Metric; reworkShare: Metric; prsPerWeek: Metric; aiCoauthoredShare: Metric; commitAfterSession: Metric;
   guardrails: Metric; headlessPerWeek: Metric;
+  /*
+   * Two signals read commit habits. `tokensPerLanded` follows how often a person commits (a commit after many sittings
+   * reads as a high cost): null (`no-data`) under 5 landed units. `reworkShare` reads commit-message conventions (revert,
+   * fixup!, fix:): null (`not-captured`) when no commit by anyone in the kept repositories' window is marked as rework,
+   * since such a history does not use them.
+   */
   /**
    * Among the code-edit turns that count as not checked, the share in which a shell command ran after the last edit
    * that the command classifier did not recognise as a check; unscored.

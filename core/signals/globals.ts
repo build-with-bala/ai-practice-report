@@ -47,6 +47,9 @@ function toolDays(t: SessionTable, tools: ReadonlySet<ToolId>, window: "detailDa
  *   share) read the repos of kept detail-window rows (no host copy), so a repo only an excluded project or tool, or
  *   only lifetime-window sessions, used never counts; the artifacts' child types and MCP calls read the same rows.
  *   Whole-report totals count owner commits only; per-repo matching (a commit after a session, a later fix) takes any.
+ * - **Rework** (`reworkShare`) reads commit-message conventions (revert, fixup!, fix:): when no commit by anyone in the
+ *   kept repositories' window is marked as rework, the history does not use them, and the share is null
+ *   (`not-captured`), not a measured 0.
  * - **Artifacts** (`artifacts`): the provenance-weighted count of distinct artifacts in use, `n` = those artifacts (0
  *   when none is in use: a state count, measured on the inventory, not a sample). Measured whenever a config source of a kept tool was read (its coverage is ok, empty or
  *   drift, or it supplied an entry): none in use is a measured 0. Null (`not-captured`) only when no config source was
@@ -155,6 +158,7 @@ export function computeGlobals(t: SessionTable, stats: readonly SessionStats[], 
   const reworkFrom = detailFrom === undefined ? undefined : Math.max(t.scope.from, detailFrom - REWORK_LEAD_MS);
   let reworkDen = 0;
   let reworked = 0;
+  let reworkMarked = false; // any commit of the window, by anyone, marked as rework: the history uses the conventions
   let own = 0;
   let ai = 0;
   for (const key of [...keptRepos].sort()) {
@@ -168,6 +172,7 @@ export function computeGlobals(t: SessionTable, stats: readonly SessionStats[], 
     }
     if (!r.fileLists) continue;
     const later = commits.filter((c) => c.rework !== undefined);
+    if (later.length > 0) reworkMarked = true;
     for (const c of commits) {
       if (!c.owner || c.rework === "revert" || c.ts < reworkFrom!) continue;
       reworkDen++;
@@ -216,7 +221,8 @@ export function computeGlobals(t: SessionTable, stats: readonly SessionStats[], 
     artifacts,
     memoryFiles,
     switchesPerWeek: switchSpan.metric("lifetime", switchWeeks, ratio(switches, switchWeeks), switchWeeks === 0 ? "not-captured" : "no-data"),
-    reworkShare: repoMetric(reworkDen, ratio(reworked, reworkDen), { from: reworkFrom, to: hi }),
+    reworkShare: repoOff || reworkMarked ? repoMetric(reworkDen, ratio(reworked, reworkDen), { from: reworkFrom, to: hi })
+      : fixedMetric("detail", ["git"], reworkDen, null, "not-captured", { from: reworkFrom, to: hi }),
     prsPerWeek: prSpan.metric("detail", prWeeks, ratio(prs.size, prWeeks), prWeeks === 0 ? "not-captured" : "no-data"),
     aiCoauthoredShare: repoMetric(own, ratio(ai, own), commitSpan),
     commitAfterSession: repoMetric(afterDen, ratio(afterNum, afterDen), afterSpan.range()),

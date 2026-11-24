@@ -14,7 +14,7 @@ export const isTopLevel = (r: { parentId?: string; origin: Origin }): boolean =>
 export interface MetricMeta { window: Window; sources: string[]; from?: number; to?: number; n: number }
 /**
  * A measured value; `null` = not measurable (never a default 0), and `reason` says why: `no-data` (the data could hold it,
- * but n = 0), `not-captured` (no tool in the data records the fields it needs), `repo-signals-off` (it needs repo
+ * but n = 0, or n is under the metric's own minimum), `not-captured` (no tool in the data records the fields it needs), `repo-signals-off` (it needs repo
  * signals, and they are off or git is missing), `degenerate` (n > 0, but the value is undefined on that evidence: a
  * correlation with a constant side or under 3 pairs).
  */
