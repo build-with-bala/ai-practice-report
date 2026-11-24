@@ -1,4 +1,4 @@
-import type { ConfigEv, PromptEv } from "../model/events";
+import type { ConfigEv, CoverageEv, PromptEv } from "../model/events";
 import type { ToolId } from "../model/ids";
 import type { ScanResult } from "../scan";
 import type { SessionRow, SessionTable } from "./types";
@@ -44,6 +44,25 @@ export interface AnalysisScope {
   detailSources: ReadonlySet<string>; detailRows: readonly SessionRow[]; configs: readonly ConfigEv[];
 }
 
+/** The sources that report a detail coverage (their markers are the walk's). */
+export function detailSourcesOf(coverage: readonly CoverageEv[]): Set<string> {
+  return new Set(coverage.filter((c) => c.window === "detail").map((c) => c.source));
+}
+
+/**
+ * The distinct identity hashes in scope, sorted: of kept tools, and for a session-scope hash that names a session, only
+ * when that session is a kept row that is no host copy (not excluded by project or date).
+ */
+export function identityHashes(raw: ScanResult, t: SessionTable): string[] {
+  const kept = (id: string): boolean => t.rows.has(id) && !t.hosts.has(id);
+  const hashes = new Set<string>();
+  for (const e of raw.store.all("identity")) {
+    if (t.scope.tools.has(e.tool) || (e.scope === "session" && e.sessionId !== undefined && !kept(e.sessionId))) continue;
+    hashes.add(e.hash);
+  }
+  return [...hashes].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+}
+
 export function analysisScope(raw: ScanResult, t: SessionTable): AnalysisScope {
   const { from, to, tools: excluded, projects } = t.scope;
   const inRange = (ts: number): boolean => ts >= from && ts <= to;
@@ -55,7 +74,7 @@ export function analysisScope(raw: ScanResult, t: SessionTable): AnalysisScope {
     kept,
     clip: (r) => ({ start: Math.max(r.start, from), end: Math.min(r.end, to) }),
     human: (p) => t.isHuman(p) && promptInScope(p, ps),
-    detailSources: new Set(raw.coverage.filter((c) => c.window === "detail").map((c) => c.source)),
+    detailSources: detailSourcesOf(raw.coverage),
     detailRows: [...t.rows.values()].filter((r) => r.window === "detail" && !t.hosts.has(r.id)),
     configs: raw.store.all("config").filter((c) => !excluded.has(c.tool) && (c.projectKey === undefined || !projects.has(c.projectKey))),
   };

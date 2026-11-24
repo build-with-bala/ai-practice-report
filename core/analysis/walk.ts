@@ -5,6 +5,7 @@ import type { Intent, Origin, Toolchain, ToolId } from "../model/ids";
 import type { EventStore } from "../model/store";
 import { langOfExt, toolchainMatches } from "../text/langs";
 import { dayKey } from "./activity";
+import { detailSourcesOf } from "./scope";
 import { childType, effortRank, modelTier, type ChildType } from "./tiers";
 import type { SessionRow, SessionTable } from "./types";
 
@@ -164,8 +165,7 @@ interface RepoIndex { identity: boolean; commitTs: number[] }
  * Markers come only from sources that report a detail coverage, except `clear` markers (rule 7), whatever their source.
  */
 export function buildSessionStats(t: SessionTable, store: EventStore, repos: RepoSignals, o: { timeZone: string }): SessionStats[] {
-  const detailSources = new Set<string>();
-  for (const c of store.all("coverage")) if (c.window === "detail") detailSources.add(c.source);
+  const detailSources = detailSourcesOf(store.all("coverage"));
   const gated = new Set<ToolId>(t.capabilities.outcomes);
   const { from, to } = t.scope;
   const inRange = (ts: number): boolean => ts >= from && ts <= to;

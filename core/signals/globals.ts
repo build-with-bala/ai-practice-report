@@ -54,6 +54,8 @@ function toolDays(t: SessionTable, tools: ReadonlySet<ToolId>, window: "detailDa
  *   when none is in use: a state count, measured on the inventory, not a sample). Measured whenever a config source of a kept tool was read (its coverage is ok, empty or
  *   drift, or it supplied an entry): none in use is a measured 0. Null (`not-captured`) only when no config source was
  *   read.
+ * - **Switches** (`switchesPerWeek`) count typed model and effort commands only (`/model <name>`, `/effort <level>`): a
+ *   switch made through a picker is not seen, so a picker user reads as a measured 0.
  * - **Per-week rates** divide by the active weeks of the tools that emit their markers (pre-flight P10): null when none
  *   of them has a week, never 0.
  */
@@ -134,8 +136,8 @@ export function computeGlobals(t: SessionTable, stats: readonly SessionStats[], 
   const gitSpan = activeSpan.range();
 
   // config (kept tools only)
-  const userHook = configs.some((c) => c.kind === "hook" && (c.checks?.length ?? 0) > 0)
-    && !configs.some((c) => c.kind === "feature" && c.name === "hooks-disabled");
+  const hookEntries = configs.filter((c) => c.kind === "hook" && (c.checks?.length ?? 0) > 0);
+  const userHook = hookEntries.length > 0 && !configs.some((c) => c.kind === "feature" && c.name === "hooks-disabled");
   const guards: number[] = [];
   let maintained = 0;
   for (const key of activeRows.keys()) {
@@ -147,8 +149,10 @@ export function computeGlobals(t: SessionTable, stats: readonly SessionStats[], 
     if (r.instructions.files.length > 0 && r.instructions.touched >= 1) maintained++;
   }
   const activeRepos = activeRows.size;
-  const repoMetric = (n: number, value: number | null, span?: { from?: number; to?: number }): Metric =>
-    repoOff ? fixedMetric("detail", ["git"], 0, null, "repo-signals-off") : fixedMetric("detail", ["git"], n, value, "no-data", span);
+  const repoMetric = (n: number, value: number | null, span?: { from?: number; to?: number }, sources = ["git"]): Metric =>
+    repoOff ? fixedMetric("detail", ["git"], 0, null, "repo-signals-off") : fixedMetric("detail", sources, n, value, "no-data", span);
+  // a user-level hook with checks counts for every repo: its config source is a source of guardrails too
+  const guardSources = [...new Set(["git", ...(userHook && activeRows.size > 0 ? hookEntries.map((c) => c.source) : [])])].sort();
 
   // commits: the repos of kept rows, inside the date range
   const keptRepos = new Set<string>();
@@ -215,7 +219,7 @@ export function computeGlobals(t: SessionTable, stats: readonly SessionStats[], 
     parallelShare: bucketSpan.metric("detail", perBucket.size, ratio(parallel, perBucket.size)),
     peakConcurrency: peak,
     headlessPerWeek: allSpan.metric("detail", detailWeeks, ratio(scripted, detailWeeks)),
-    guardrails: repoMetric(activeRepos, mean(guards), gitSpan),
+    guardrails: repoMetric(activeRepos, mean(guards), gitSpan, guardSources),
     maintainedShare: repoMetric(activeRepos, ratio(maintained, activeRepos), gitSpan),
     // config is read by lifetime-window readers (`uses` are the tools' own lifetime counters): a lifetime metric
     artifacts,

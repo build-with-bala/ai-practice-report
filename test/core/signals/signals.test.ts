@@ -76,6 +76,14 @@ describe("computeSignals: the sample formulas", () => {
     expect([s.landedShare.value, s.landedShare.n]).toEqual([0.75, 4]);
   });
 
+  test("the signals that read repo facts list git among their sources whenever repo signals ran", () => {
+    expect(s.landedShare.sources).toEqual([CC, CX, "git"]);
+    const five = computeSignals([{ ...a, landed: 5 }, b], globals());
+    expect(five.tokensPerLanded.sources).toEqual([CC, CX, "git"]);
+    const off = computeSignals([{ ...a, landed: 5 }, b], globals({ repoSignals: "off" }));
+    expect(off.tokensPerLanded.sources).toEqual([CC, CX]);
+  });
+
   test("unchecked-command share: over the unchecked edit turns of gated rows, with their rows' sources and span", () => {
     const u = computeSignals([{ ...a, uncheckedEditTurns: 4, uncheckedCommandTurns: 1 }, { ...b, uncheckedEditTurns: 0 }], globals()).uncheckedCommandShare;
     expect(u).toEqual({ window: "detail", sources: [CC], from: T0, to: T0 + HOUR, n: 4, value: 0.25 });
@@ -101,7 +109,7 @@ describe("computeSignals: the sample formulas", () => {
     const five = computeSignals([{ ...a, landed: 5 }, b], globals()).tokensPerLanded;
     expect([five.value, five.n, five.reason]).toEqual([300, 5, undefined]);
     // every known row in either sum is in the span: b adds tokens, though it landed nothing
-    expect([five.sources, five.from, five.to]).toEqual([[CC, CX], T0, T0 + DAY + HOUR]);
+    expect([five.sources, five.from, five.to]).toEqual([[CC, CX, "git"], T0, T0 + DAY + HOUR]);
     expect(computeSignals([{ ...a, landed: 4 }, b], globals()).tokensPerLanded.value).toBeNull();
     expect([s.usdPerLanded.value, s.usdPerLanded.n, s.usdPerLanded.sources]).toEqual([1, 2, [CC]]);
   });
@@ -324,6 +332,7 @@ describe("computeGlobals", () => {
     // a user-level hook with checks counts for every repo, unless hooks are disabled
     const hook = config("hook", "PreToolUse", { checks: ["test"] });
     expect(globalsOf([...WORLD, hook], { repos: REPOS() }).g.guardrails.value).toBeCloseTo(2 / 3, 12);
+    expect(globalsOf([...WORLD, hook], { repos: REPOS() }).g.guardrails.sources).toEqual(["claude-code.config", "git"]); // the user-level hook decided too
     expect(globalsOf([...WORLD, hook, config("feature", "hooks-disabled")], { repos: REPOS() }).g.guardrails.value).toBe(0.5);
     // a repo whose hooks are disabled has no hook guardrail
     const off = REPOS();

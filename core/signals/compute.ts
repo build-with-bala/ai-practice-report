@@ -188,6 +188,9 @@ export function computeSignals(sample: readonly SessionStats[], g: Globals): Sig
   const hygiene = parts.length > 0 ? parts.reduce((a, b) => a + b, 0) / parts.length : null;
   const run = percentile(runs, 0.9);
   const repoOff = g.repoSignals === "off" || g.repoSignals === "git-missing";
+  // landed episodes and landed units read repo commits: git is among their sources whenever repo facts were read for them
+  if (!repoOff && editInRepo > 0) landedSpan.addSource("git");
+  if (!repoOff && tokenLanded > 0) tokenSpan.addSource("git");
   const landedShare = repoOff ? landedSpan.metric("detail", 0, null, "repo-signals-off") : d(landedSpan, editInRepo, ratio(landedEpisodes, editInRepo));
 
   const evidence: Evidence = {

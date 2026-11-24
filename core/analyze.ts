@@ -3,7 +3,7 @@ import { exposure, type Exposure } from "./analysis/exposure";
 import { projectLabels, projects, type ProjectSummary } from "./analysis/labels";
 import { panels, type ConfigPanel, type CoveragePanel, type DayParts, type RiskPosture, type Stack } from "./analysis/panels";
 import { checkExclusions, ExclusionError } from "./analysis/exclusions";
-import { analysisScope } from "./analysis/scope";
+import { identityHashes } from "./analysis/scope";
 import { buildSessionTable } from "./analysis/sessions";
 import { buildSessionStats } from "./analysis/walk";
 import { runForensics, type Forensics, type ReleaseTable } from "./forensics/index";
@@ -127,18 +127,13 @@ export function analyze(raw: ScanResult, o: AnalyzeOptions = {}): Analysis {
   const projectList = projects(t, labels);
   const personas = roles(dimensions, p.stack);
   const forensics = runForensics(raw, t, stats, { now, timeZone, ...(o.releases ? { releases: o.releases } : {}) });
-  const { kept } = analysisScope(raw, t);
-  const hashes = new Set<string>();
-  for (const e of raw.store.all("identity")) {
-    if (t.scope.tools.has(e.tool) || (e.scope === "session" && e.sessionId !== undefined && !kept(e.sessionId))) continue;
-    hashes.add(e.hash);
-  }
+  const hashes = identityHashes(raw, t);
 
   return {
     meta: { core: pkg.version, reference, bootstrap: boot.B, seed, now, timeZone, repoSignals: raw.repos.status },
     coverage: p.coverage, signals, dimensions, overall: total, personas,
     exposure: exp, stack: p.stack, risk: p.risk, config: p.config, projects: projectList, forensics,
-    identity: { accounts: hashes.size, hashes: [...hashes].sort(cmp) },
+    identity: { accounts: hashes.length, hashes },
     exclusions: { ...t.exclusions },
     diagnostics: { orphans: { ...t.orphans }, dedupe: { ...t.dedupe }, warnings: raw.warnings.filter((w) => w.tool === "scan" || !t.scope.tools.has(w.tool)).map((w) => ({ ...w })),
       orphanPrompts: { ...t.orphanPrompts }, dailyRowsLeftOut: t.dailyRowsLeftOut },
