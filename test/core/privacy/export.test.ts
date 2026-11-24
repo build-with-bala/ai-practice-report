@@ -647,6 +647,55 @@ describe("exportPayload: the preview contract and deny by default", () => {
   });
 });
 
+describe("exportPayload: the numeric ranges the schema holds", () => {
+  const base = analyze(personaScan("expert"), UTC);
+  const rhythm = base.forensics.checks.findIndex((c) => c.id === "soft:rhythm");
+  const scored = base.dimensions.findIndex((d) => d.status === "scored" && d.components.some((c) => c.z !== null));
+  const comp = base.dimensions[scored]!.components.findIndex((c) => c.z !== null);
+  const pathOf = (mutate: (a: Analysis) => void): string[] => {
+    const a = structuredClone(base);
+    mutate(a);
+    try { exportPayload(a, OPTS); } catch (e) { return [...(e as ExportError).paths]; }
+    return [];
+  };
+
+  test("out of range: a keyed hash not of 16 hex digits, a score or interval end outside 1 to 99, activeDays over 7, |z| over 3", () => {
+    const cases: Array<[(a: Analysis) => void, string]> = [
+      [(a) => { a.identity.hashes = ["0123456789abcdef0123456789abcdef"]; }, "$.identity.bindings[0]"],
+      [(a) => { a.identity.hashes = ["01234567"]; }, "$.identity.bindings[0]"],
+      [(a) => { a.overall.score = 0; }, "$.overall.score"],
+      [(a) => { a.overall.score = 100; }, "$.overall.score"],
+      [(a) => { a.dimensions[scored]!.score = 100; }, `$.dimensions[${scored}].score`],
+      [(a) => { a.dimensions[scored]!.interval = [0, 50]; }, `$.dimensions[${scored}].interval[0]`],
+      [(a) => { a.overall.interval = [50, 100]; }, "$.overall.interval[1]"],
+      [(a) => { a.exposure.weekly[0]!.activeDays = 8; }, "$.exposure.weekly[0].activeDays"],
+      [(a) => { a.dimensions[scored]!.components[comp]!.z = 3.0001; }, `$.dimensions[${scored}].components[${comp}].z`],
+      [(a) => { a.dimensions[scored]!.components[comp]!.z = -3.5; }, `$.dimensions[${scored}].components[${comp}].z`],
+    ];
+    for (const [mutate, path] of cases) expect(`${path} ${pathOf(mutate).join(",")}`).toBe(`${path} ${path}`);
+  });
+
+  test("forensic values: a ratio over 1000, or any value with more decimals than its kind keeps, fails", () => {
+    const at = `$.forensics.checks[${rhythm}].values`;
+    const set = (v: Record<string, number>) => (a: Analysis) => { a.forensics.checks[rhythm]!.values = hostile({ ...a.forensics.checks[rhythm]!.values, ...v }); };
+    for (const [v, key] of [[{ medianCv: 1000.01 }, "medianCv"], [{ medianCv: 0.123 }, "medianCv"], [{ share: 0.12345 }, "share"], [{ rho: 0.12345 }, "rho"],
+      [{ days: 1.5 }, "days"]] as const) {
+      expect(`${key} ${pathOf(set(v)).join(",")}`).toBe(`${key} ${at}.${key}`);
+    }
+  });
+
+  test("the edges are inside: z of ±3, scores 1 and 99, activeDays 7, a ratio of 1000, 4-decimal shares and correlations", () => {
+    expect(pathOf((a) => {
+      a.dimensions[scored]!.components[comp]!.z = -3;
+      a.overall.score = 1;
+      a.overall.interval = [1, 99];
+      a.dimensions[scored]!.score = 99;
+      a.exposure.weekly[0]!.activeDays = 7;
+      a.forensics.checks[rhythm]!.values = hostile({ ...a.forensics.checks[rhythm]!.values, medianCv: 1000, share: 0.1234, rho: -0.9999 });
+    })).toEqual([]);
+  });
+});
+
 describe("exportPayload: nothing is left out silently", () => {
   const NONE = { coverage: 0, weeks: 0, tools: 0, mcpServers: 0, bindings: 0, promptArcs: 0, durationArcs: 0, languages: 0, toolchains: 0,
     techCategories: 0, configKinds: 0, features: 0 };

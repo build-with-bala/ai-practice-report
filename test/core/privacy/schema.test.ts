@@ -255,13 +255,20 @@ describe("AIPROF2", () => {
     expect(leaves(AIPROF2).filter(([, s]) => "s" in s && s.s === "revealed").map(([at]) => at)).toEqual(["$.projects[].name"]);
   });
 
-  test("the schema and questionFor read one kind table: each kind's spec accepts exactly what isValueOf accepts", () => {
+  test("the schema and questionFor read one kind table: each kind's spec accepts what isValueOf accepts, within its ceiling and decimals", () => {
     const samples: unknown[] = [0, 1, 2, 0.5, -0, -0.5, -1, -1.0001, 1.0001, 3.7, 1e9, 2 ** 53, -3, NaN, Infinity, -Infinity, "1", null, undefined, {}, [],
-      "2026-11-02", "2024-02-29", "2023-02-29", "2026-13-01", "1969-12-31", "2026-11-2", " 2026-11-02", "2026-11-02\n", true];
+      "2026-11-02", "2024-02-29", "2023-02-29", "2026-13-01", "1969-12-31", "2026-11-2", " 2026-11-02", "2026-11-02\n", true, 0.12345, 0.1234, 999.99,
+      1000, 1000.01, 0.125];
+    // the export keeps what core/forensics stores: shares and correlations to 4 decimals, a ratio to 2 and at most 1000
+    const stored: Record<ValueKind, (x: number) => boolean> = {
+      count: () => true, date: () => true, share: (x) => Math.round(x * 1e4) / 1e4 === x, corr: (x) => Math.round(x * 1e4) / 1e4 === x,
+      ratio: (x) => x <= 1000 && Math.round(x * 100) / 100 === x,
+    };
     for (const kind of ["count", "share", "corr", "ratio", "date"] as ValueKind[]) {
       for (const x of samples) {
         const label = `${kind} ${typeof x === "string" ? JSON.stringify(x) : String(x)}`;
-        expect(`${label} ${sanitize(x, KIND_SPECS[kind]) !== undefined}`).toBe(`${label} ${isValueOf(kind, x)}`);
+        const want = isValueOf(kind, x) && (typeof x !== "number" || stored[kind](x));
+        expect(`${label} ${sanitize(x, KIND_SPECS[kind]) !== undefined}`).toBe(`${label} ${want}`);
       }
     }
     expect(Object.keys(VALUE_KINDS).sort()).toEqual(Object.keys(VALUE_KEYS).sort());

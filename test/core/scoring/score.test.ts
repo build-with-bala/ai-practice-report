@@ -244,14 +244,14 @@ describe("degenerate input (Review Focus 2)", () => {
     expect(j.zRaw!).toBeCloseTo(zs.reduce((a, c) => a + c.weight * c.z!, 0), 12);
     expect(j.z!).toBeCloseTo(j.zRaw! * 10 / 11, 12);
   });
-  test("overflowing inputs stay finite (R1): component z is guarded to [-8, 8] and shrinkage cannot overflow", () => {
+  test("overflowing inputs stay finite (R1): component z is guarded to [-3, 3] and shrinkage cannot overflow", () => {
     const hi = dim(scoreDimensions(signalsAt("p50", { stickyMean: metric(1e308) }), ref), "leverage");
-    expect(hi.components[0]!.z).toBe(8);
+    expect(hi.components[0]!.z).toBe(3);
     expect(hi.status).toBe("scored");
     expect(Number.isFinite(hi.z!)).toBe(true);
     const lo = dim(scoreDimensions(signalsAt("p50", { stickyMean: metric(-1e308) }), ref), "leverage");
-    expect(lo.components[0]!.z).toBe(-8);
-    expect(lo.score).toBe(1);
+    expect(lo.components[0]!.z).toBe(-3);
+    expect(lo.score).toBe(5);
     const big = 1e300;
     const ev = evidence(1, 6, { typedTurns: big, sessions: big, days: big, episodes: big, editTurns: big, followUps: big,
       tierEpisodes: big, editEpisodesInRepo: big, repos: big });
