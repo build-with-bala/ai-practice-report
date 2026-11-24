@@ -315,3 +315,21 @@ describe("checkAnchors: a change of id encoding never fails anyone", () => {
     expect(anchorsOf(scanResultOf(block))[0].status).toBe("fail");
   });
 });
+
+describe("checkAnchors: known limits (a later improvement changes these on purpose)", () => {
+  test("known limit: a genuine history re-timed as a whole (stretched 3 times, moved 90 days back) passes C1 and C2", () => {
+    const evs = genuine().map((e) => ({ ...e, ts: T0 - 90 * 86_400_000 + (e.ts - T0) * 3 }));
+    const [c1, c2] = anchorsOf(scanResultOf(evs));
+    expect([c1.status, c2.status]).toEqual(["pass", "pass"]);
+  });
+
+  test("known limit: ids invented to grow with time pass C1 and C2", () => {
+    const r = rng(21);
+    const evs = Array.from({ length: 500 }, (_, i) => {
+      const ts = T0 + i * 37 * MIN;
+      return anchor(ts, `01${enc(7n * 58n ** 11n + BigInt(ts - T0) * 77n, 12)}${randomB58(r, 10)}`);
+    });
+    const [c1, c2] = anchorsOf(scanResultOf(evs));
+    expect([c1.status, c2.status]).toEqual(["pass", "pass"]);
+  });
+});

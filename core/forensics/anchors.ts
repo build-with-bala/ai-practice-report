@@ -7,8 +7,10 @@ import { roundDown, roundUp, toolsOf, type CheckResult, type CheckValues, type R
 
 /*
  * C1 and C2: Claude Code's server-issued message and request ids (`msg_…`, `req_…`; `AnchorEv.idTail` is what follows
- * the prefix) grow with time. An id the server minted cannot be made to fit a time it was not minted at, so ids that are
- * off their time line show edited times, and ids that fit no line at all show fabrication.
+ * the prefix) grow with time. The time line is fitted from the history's own ids (its slope and offset are not the
+ * service's constants), so the checks catch sessions that do not fit the rest of the history: spliced in, shuffled, or
+ * partly re-timed. They do not catch a history re-timed as a whole (stretched or moved, every id with it), nor ids
+ * invented to grow with time: both fit a line of their own. C9 (release dates) is the check that bounds re-timing.
  *
  * Per anchor kind (`cc-msg`, `cc-req`):
  * - recognized scheme: the tail starts with the marker `01`, which at least 90% of the kind's anchors share (else n/a

@@ -298,3 +298,18 @@ describe("checkRollouts: C7 never fails on one file", () => {
     expect(run(late(300, 3))[1].status).toBe("fail");
   });
 });
+
+describe("checkRollouts: known limits (a later improvement changes these on purpose)", () => {
+  test("known limit: two accounts' ledgers whose reset times differ by 7 minutes pass C8", () => {
+    const a = ledger(T0, 0);
+    const b = ledger(T0 + 10 * MIN, 50).map((e) => ({ ...e, resetsAt: e.resetsAt! - 3 * MIN }));
+    const [, , c8] = run([...a, ...b]);
+    expect([c8.status, c8.values.contradictions]).toEqual(["pass", 0]);
+  });
+
+  test("known limit: rollouts without a row whose start is within 10 minutes of the scan, or after it, are not checked by C6", () => {
+    const unindexed = [NOW - 5 * MIN, NOW + DAY, NOW + 2 * DAY].map((ts, i) => rollout(100 + i, { fileTs: ts, uuidTs: ts }));
+    const [c6] = run([...indexed(5), ...unindexed]);
+    expect([c6.status, c6.values.missing, c6.n]).toEqual(["pass", 0, 5]);
+  });
+});

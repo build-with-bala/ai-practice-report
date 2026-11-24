@@ -11,6 +11,11 @@ import { toolsOf, type CheckResult, type CheckValues } from "./types";
  * each rollout file after the local time it began, mints the thread id as a UUIDv7 carrying that same moment, and logs
  * the account's usage-limit readings, which only rise within one limit window. A rollout copied in from elsewhere has no
  * index row, a renamed one no longer fits its id, and two accounts' traces spliced together make the readings fall.
+ *
+ * Known limits: rollouts whose start (id time, else name time) is within 10 minutes of the scan, or after it, are not
+ * checked by C6 (the CLI may not have written their row yet), so a copied rollout given such a start passes. Two
+ * accounts' ledgers spliced together pass C8 when their reset times differ by more than a minute: each account's
+ * readings then form windows of their own, which only rise.
  */
 
 const RECENT_MS = 10 * 60_000;
