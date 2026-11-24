@@ -15,7 +15,7 @@ import { buildCcLifetime, buildCcTranscripts } from "../fixtures/claude-code";
 import { buildCodexIndex, buildCodexRollouts } from "../fixtures/codex";
 import { buildCopilot, jetbrainsRel } from "../fixtures/copilot";
 import { buildAgentCli, buildCursor } from "../fixtures/cursor";
-import { makeRepo } from "../fixtures/repos";
+import { isolateGitHome, makeRepo } from "../fixtures/repos";
 import { CANARY } from "../kit/canary";
 import { fakeHome, type FakeHome } from "../kit/home";
 
@@ -32,10 +32,14 @@ const CREDENTIAL_TABLE = /account|credential|auth|token|oauth|secret/i;
 interface Open { path: string; how: OpenHow }
 
 let h: FakeHome;
+let restoreHome: () => void = () => {};
+// the engine's git inherits this process's environment: HOME points into the fake home, so it reads no developer config
 beforeEach(() => {
   h = fakeHome();
+  restoreHome = isolateGitHome(path.join(h.root, "git-home"));
 });
 afterEach(() => {
+  restoreHome();
   __observeOpens(undefined);
   __observeQueries(undefined);
   h.cleanup();
