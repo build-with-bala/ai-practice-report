@@ -1,17 +1,18 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync } from "node:fs";
+import { Database } from "bun:sqlite";
+import { chmodSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { analyze, type Analysis } from "../../core/analyze";
 import type { ScanResult } from "../../core/scan";
 import type { CoverageEv } from "../../core/model/events";
 import { analysisLines, coverageLine, exportOf, metricMetaProblems } from "../../scripts/smoke-local";
-import { buildAntigravity, C as AG_C, I1, I2, K, P } from "../fixtures/antigravity";
-import { buildCcLifetime, buildCcTranscripts, CC_H1, CC_H2, CC_S1, CC_S2, CcTranscript, ccSid, fixtureStart, slug } from "../fixtures/claude-code";
-import { buildCodexIndex, buildCodexRollouts } from "../fixtures/codex";
-import { buildCopilot, S_J, S_L } from "../fixtures/copilot";
-import { A, B, buildAgentCli, buildCursor } from "../fixtures/cursor";
+import { C as AG_C, I1, I2, K, P } from "../fixtures/antigravity";
+import { CC_H1, CC_H2, CC_S1, CC_S2, CcTranscript, ccSid, fixtureStart, slug } from "../fixtures/claude-code";
+import { S_J, S_L } from "../fixtures/copilot";
+import { A, B } from "../fixtures/cursor";
 import { personaScan } from "../fixtures/personas";
 import { makeRepo } from "../fixtures/repos";
+import { buildAll } from "../kit/allsources";
 import { CANARY, expectNoCanaries } from "../kit/canary";
 import { scanResultOf } from "../kit/scanresult";
 import { fakeHome, type FakeHome } from "../kit/home";
@@ -41,16 +42,16 @@ let h: FakeHome;
 /** The fixtures' session ids, working directories and repo root: the smoke prints none of them. */
 let secrets: string[];
 
-/** Every Plan 1 fixture in the home; returns the session ids and working directories they hold. */
-function buildAll(): string[] {
-  buildCcTranscripts(h);
-  buildCcLifetime(h);
-  const rollouts = buildCodexRollouts(h);
-  const index = buildCodexIndex(h);
-  buildCopilot(h);
-  buildCursor(h);
-  buildAgentCli(h);
-  buildAntigravity(h);
+/** A UUID, as Codex names its threads and rollout files. */
+const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
+
+/**
+ * Every P0 source's fixtures (the shared kit's builder) and a git repo with a Claude Code session inside it; returns
+ * the session ids, working directories and repo root they hold. The Codex thread ids are read back from the fake home
+ * (rollout file names and the state index), since the kit's builder does not return them.
+ */
+function buildHome(): string[] {
+  const planted = buildAll(h);
   // a real git repo with a Claude Code session working inside it, so repo signals find one repo
   const root = makeRepo(path.join(h.env.home, "code", "smoke-repo"), [
     { files: { "CLAUDE.md": "Run `npm test`.\n", "src/a.ts": "export const a = 1;\n" }, message: "init", at: Date.now() - 3 * 86_400_000 },
@@ -58,15 +59,23 @@ function buildAll(): string[] {
   const sid = ccSid("SMOKE");
   h.writeJsonl(`.claude/projects/${slug(root)}/${sid}.jsonl`,
     new CcTranscript(sid, { cwd: root, start: fixtureStart(2) }).prompt("Fix the importer").tool("toolu_smoke", "Bash", { command: "npm test" }, { content: "ok" }).records);
+  const codex: string[] = [];
+  for (const f of readdirSync(path.join(h.env.home, ".codex", "sessions"), { recursive: true }) as string[]) codex.push(...(f.match(UUID) ?? []));
+  const db = new Database(path.join(h.env.home, ".codex", "state_5.sqlite"), { readonly: true });
+  try {
+    codex.push(...(db.query("SELECT id FROM threads").all() as Array<{ id: string }>).map((r) => r.id));
+  } finally {
+    db.close();
+  }
+  expect(codex.length).toBeGreaterThanOrEqual(8);
   return [
-    CC_S1, CC_S2, CC_H1, CC_H2, ...[rollouts.r1, rollouts.r2, rollouts.r3, rollouts.r4].map((r) => r.id), ...Object.values(index.ids),
-    S_J, S_L, A, B, P, AG_C, K, I1, I2, CANARY.path, "/work/projB", "/work/projC", sid, root,
+    CC_S1, CC_S2, CC_H1, CC_H2, ...codex, planted.rollout, planted.thread, S_J, S_L, A, B, P, AG_C, K, I1, I2, CANARY.path, "/work/projB", "/work/projC", sid, root,
   ];
 }
 
 beforeEach(() => {
   h = fakeHome();
-  secrets = buildAll();
+  secrets = buildHome();
 });
 afterEach(() => h.cleanup());
 
