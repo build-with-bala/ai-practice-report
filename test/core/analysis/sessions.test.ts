@@ -126,18 +126,18 @@ describe("buildSessionTable: exclusions", () => {
   test("a tool exclusion drops that tool's rows; tools without rows are not counted", () => {
     const t = buildSessionTable(scanResultOf(evs()), { ...opts, exclude: { tools: ["codex", "cursor"] } });
     expect([...t.rows.keys()].sort()).toEqual(["cc1", "cc1/sub", "cc2"]);
-    expect(t.exclusions).toEqual({ tools: 1, projects: 0, sessions: 2 });
+    expect(t.exclusions).toEqual({ tools: 1, projects: 0, sessions: 2, dateRange: false, weeksOutside: 0 });
   });
 
   test("a project exclusion drops that project's rows with their descendants", () => {
     const t = buildSessionTable(scanResultOf(evs()), { ...opts, exclude: { projects: ["P1", "P9"] } });
     expect([...t.rows.keys()].sort()).toEqual(["cc2", "cx1", "cx2"]);
-    expect(t.exclusions).toEqual({ tools: 0, projects: 1, sessions: 2 });
+    expect(t.exclusions).toEqual({ tools: 0, projects: 1, sessions: 2, dateRange: false, weeksOutside: 0 });
   });
 
-  test("scope.projects holds the keys the project exclusion drops sessions of; empty without one", () => {
+  test("scope.projects holds every excluded key given; empty without one", () => {
     const t = buildSessionTable(scanResultOf(evs()), { ...opts, exclude: { projects: ["P1", "P9"] } });
-    expect([...t.scope.projects]).toEqual(["P1"]);
+    expect([...t.scope.projects]).toEqual(["P1", "P9"]);
     const u = buildSessionTable(scanResultOf(evs()), { ...opts, exclude: { tools: ["codex"] } });
     expect(u.scope.projects.size).toBe(0);
   });
@@ -148,7 +148,7 @@ describe("buildSessionTable: exclusions", () => {
     expect(t.exclusions.sessions).toBe(4);
     const u = buildSessionTable(scanResultOf(evs()), { ...opts, exclude: { to: T0 + 10 * DAY } });
     expect([...u.rows.keys()].sort()).toEqual(["cc1", "cc1/sub", "cc2", "cx1"]);
-    expect(u.exclusions).toEqual({ tools: 0, projects: 0, sessions: 1 });
+    expect(u.exclusions).toEqual({ tools: 0, projects: 0, sessions: 1, dateRange: true, weeksOutside: 0 }); // the session it drops has no prompt
   });
 
   test("excluded rows are neither in detailTop nor orphans, and their events are not orphan events", () => {
@@ -219,5 +219,30 @@ describe("buildSessionTable: capabilities", () => {
   test("the marker tool sets", () => {
     expect([...PR_LINK_TOOLS]).toEqual(["claude-code"]);
     expect([...SWITCH_TOOLS]).toEqual(["claude-code"]);
+  });
+});
+
+describe("buildSessionTable: detail prompts that name no session", () => {
+  test("are counted per tool, in orphans.prompt too, and only inside the date range", () => {
+    const evs: Ev[] = [sess("s")];
+    for (let i = 0; i < 20; i++) evs.push(prompt(undefined, T0 + i * DAY, { tool: "cursor", source: "cursor.legacy" }));
+    evs.push(prompt("missing", T0, { tool: "codex", source: "codex.rollouts" }));
+    evs.push(prompt(undefined, T0, { window: "lifetime" })); // a lifetime prompt with no session is no orphan
+    const t = buildSessionTable(scanResultOf(evs), opts);
+    expect(t.orphanPrompts).toEqual({ codex: 1, cursor: 20 });
+    expect(t.orphans.prompt).toBe(21);
+    const u = buildSessionTable(scanResultOf(evs), { ...opts, exclude: { from: T0 + 10 * DAY } });
+    expect(u.orphanPrompts).toEqual({ cursor: 10 });
+    expect(u.orphans.prompt).toBe(10);
+    const v = buildSessionTable(scanResultOf(evs), { ...opts, exclude: { tools: ["cursor"] } });
+    expect(v.orphanPrompts).toEqual({ codex: 1 });
+  });
+});
+
+describe("buildSessionTable: a session whose times are not finite", () => {
+  test("gets no row, so nothing downstream sees a non-finite start; its events are orphans", () => {
+    const t = buildSessionTable(scanResultOf([sess("ok"), sess("bad", { start: Number.NaN }), sess("worse", { end: Infinity }), prompt("bad", T0)]), opts);
+    expect([...t.rows.keys()]).toEqual(["ok"]);
+    expect(t.orphans.prompt).toBe(1);
   });
 });

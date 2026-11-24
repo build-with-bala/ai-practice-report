@@ -92,9 +92,10 @@ describe("analysis integration: scan → analyze → export, end to end", () => 
     const compOf = (dimId: string, id: string) => dimOf(dimId).components.find((c) => c.id === id)!;
     expect(dimOf("delivery").status).not.toBe("not-measured");
     // both repos name test commands in their instruction files and run them in CI: each share is 2 of 2
-    for (const [dimId, id] of [["verification", "ver.guardrails"], ["context", "ctx.instructions"]] as const) {
+    // guardrails also name the config source: a user-level hook with checks decided them too
+    for (const [dimId, id, sources] of [["verification", "ver.guardrails", ["claude-code.config", "git"]], ["context", "ctx.instructions", ["git"]]] as const) {
       const c = compOf(dimId, id);
-      expect([id, c.status, c.n, c.raw, c.meta.sources]).toEqual([id, "ok", 2, 1, ["git"]]);
+      expect([id, c.status, c.n, c.raw, c.meta.sources]).toEqual([id, "ok", 2, 1, [...sources]]);
     }
     expect(impurities(a)).toEqual([]);
 

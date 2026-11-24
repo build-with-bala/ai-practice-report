@@ -8,11 +8,11 @@ export type ChildType = "explore" | "plan" | "review" | "implement" | "custom" |
 
 const TIER_1 = new Set(["haiku", "mini", "nano", "small"]);
 const TIER_2 = new Set(["sonnet", "flash", "standard", "codex"]);
-const TIER_3 = new Set(["opus", "max", "pro", "ultra", "large"]);
+const TIER_3 = new Set(["opus", "max", "pro", "ultra", "large", "fable", "mythos"]);
 
 /**
  * A model's tier, from the words of its id (split on anything that is not a letter or digit, so `gemini` is no `mini`):
- * 1 = haiku, mini, nano, flash-lite, small; 3 = opus, max, pro, ultra, large; 2 = sonnet, flash, standard, `gpt-<N>`
+ * 1 = haiku, mini, nano, flash-lite, small; 3 = opus, max, pro, ultra, large, fable, mythos; 2 = sonnet, flash, standard, `gpt-<N>`
  * and `codex` without a tier-1 or tier-3 word. Tier 1 is tested first (`codex-mini` is 1), then tier 3 (`codex-max`
  * is 3). Undefined for a model none of these name.
  */

@@ -1,7 +1,8 @@
 import { dayEnd, dayStart, isoWeek } from "../analysis/activity";
 import { artifactUse } from "../analysis/artifacts";
 import { analysisScope } from "../analysis/scope";
-import { PR_LINK_TOOLS, SWITCH_TOOLS, type Metric, type SessionTable } from "../analysis/types";
+import { CONFIG_SOURCES, PR_LINK_TOOLS, STARTED_ORIGINS, SWITCH_TOOLS, type Metric, type SessionTable } from "../analysis/types";
+import type { CoverageEv } from "../model/events";
 import type { SessionStats } from "../analysis/walk";
 import type { CommitFact, RepoFacts } from "../git/types";
 import { BUCKET_MS, DELIVERY_WINDOW_MS, REWORK_WINDOW_MS } from "../model/constants";
@@ -14,6 +15,8 @@ const DAY_MS = 86_400_000;
 /** Rework counts own commits from this long before the detail window's start: their fixes can land inside it. */
 const REWORK_LEAD_MS = 3 * DAY_MS;
 const weight = (p: ConfigEv["provenance"]): number => (p === "authored" ? 1 : 0.3);
+/** Coverage statuses of a source that was read (`empty`: read, nothing there). */
+const READ: ReadonlySet<CoverageEv["status"]> = new Set<CoverageEv["status"]>(["ok", "empty", "drift"]);
 const ratio = (num: number, den: number): number | null => (den > 0 ? num / den : null);
 const mean = (v: readonly number[]): number | null => (v.length > 0 ? v.reduce((a, b) => a + b, 0) / v.length : null);
 
@@ -38,11 +41,21 @@ function toolDays(t: SessionTable, tools: ReadonlySet<ToolId>, window: "detailDa
  * date range never count, and nothing of an excluded tool counts.
  *
  * - **Buckets.** An active bucket holds an action of at least one `detailTop` row (scripted rows too); a parallel one,
- *   of at least 2 rows. `firstParallelBucket` is the start of the earliest parallel bucket (pre-flight P14).
+ *   of at least 2 rows someone started (a person, a script or a schedule: delegated work — another tool's agent, a
+ *   subagent row whose parent link is missing — never makes a bucket parallel); `peakConcurrency` counts those rows too. `firstParallelBucket` is the start of the earliest parallel bucket (pre-flight P14).
  * - **Repos.** An active repo is the `repoKey` of at least one `detailTop` row; repo-wide totals (rework, co-authored
  *   share) read the repos of kept detail-window rows (no host copy), so a repo only an excluded project or tool, or
  *   only lifetime-window sessions, used never counts; the artifacts' child types and MCP calls read the same rows.
  *   Whole-report totals count owner commits only; per-repo matching (a commit after a session, a later fix) takes any.
+ * - **Rework** (`reworkShare`) reads commit-message conventions (revert, fixup!, fix:): when no commit by anyone in the
+ *   kept repositories' window is marked as rework, the history does not use them, and the share is null
+ *   (`not-captured`), not a measured 0.
+ * - **Artifacts** (`artifacts`): the provenance-weighted count of distinct artifacts in use, `n` = those artifacts (0
+ *   when none is in use: a state count, measured on the inventory, not a sample). Measured whenever a config source of a kept tool was read (its coverage is ok, empty or
+ *   drift, or it supplied an entry): none in use is a measured 0. Null (`not-captured`) only when no config source was
+ *   read.
+ * - **Switches** (`switchesPerWeek`) count typed model and effort commands only (`/model <name>`, `/effort <level>`): a
+ *   switch made through a picker is not seen, so a picker user reads as a measured 0.
  * - **Per-week rates** divide by the active weeks of the tools that emit their markers (pre-flight P10): null when none
  *   of them has a week, never 0.
  */
@@ -53,12 +66,14 @@ export function computeGlobals(t: SessionTable, stats: readonly SessionStats[], 
   const repoOff = repoStatus === "off" || repoStatus === "git-missing";
 
   // buckets (§6.4 parallelism)
+  // every row's work makes a bucket active; only sessions someone started (`STARTED_ORIGINS`) make it parallel
   const perBucket = new Map<number, number>();
   const bucketSpan = new Span();
   for (const s of stats) {
     if (s.buckets.length === 0) continue;
     bucketSpan.add(s);
-    for (const b of s.buckets) perBucket.set(b, (perBucket.get(b) ?? 0) + 1);
+    const started = STARTED_ORIGINS.has(s.origin) ? 1 : 0;
+    for (const b of s.buckets) perBucket.set(b, (perBucket.get(b) ?? 0) + started);
   }
   let parallel = 0;
   let peak = 0;
@@ -121,8 +136,8 @@ export function computeGlobals(t: SessionTable, stats: readonly SessionStats[], 
   const gitSpan = activeSpan.range();
 
   // config (kept tools only)
-  const userHook = configs.some((c) => c.kind === "hook" && (c.checks?.length ?? 0) > 0)
-    && !configs.some((c) => c.kind === "feature" && c.name === "hooks-disabled");
+  const hookEntries = configs.filter((c) => c.kind === "hook" && (c.checks?.length ?? 0) > 0);
+  const userHook = hookEntries.length > 0 && !configs.some((c) => c.kind === "feature" && c.name === "hooks-disabled");
   const guards: number[] = [];
   let maintained = 0;
   for (const key of activeRows.keys()) {
@@ -134,8 +149,10 @@ export function computeGlobals(t: SessionTable, stats: readonly SessionStats[], 
     if (r.instructions.files.length > 0 && r.instructions.touched >= 1) maintained++;
   }
   const activeRepos = activeRows.size;
-  const repoMetric = (n: number, value: number | null, span?: { from?: number; to?: number }): Metric =>
-    repoOff ? fixedMetric("detail", ["git"], 0, null, "repo-signals-off") : fixedMetric("detail", ["git"], n, value, "no-data", span);
+  const repoMetric = (n: number, value: number | null, span?: { from?: number; to?: number }, sources = ["git"]): Metric =>
+    repoOff ? fixedMetric("detail", ["git"], 0, null, "repo-signals-off") : fixedMetric("detail", sources, n, value, "no-data", span);
+  // a user-level hook with checks counts for every repo: its config source is a source of guardrails too
+  const guardSources = [...new Set(["git", ...(userHook && activeRows.size > 0 ? hookEntries.map((c) => c.source) : [])])].sort();
 
   // commits: the repos of kept rows, inside the date range
   const keptRepos = new Set<string>();
@@ -145,6 +162,7 @@ export function computeGlobals(t: SessionTable, stats: readonly SessionStats[], 
   const reworkFrom = detailFrom === undefined ? undefined : Math.max(t.scope.from, detailFrom - REWORK_LEAD_MS);
   let reworkDen = 0;
   let reworked = 0;
+  let reworkMarked = false; // any commit of the window, by anyone, marked as rework: the history uses the conventions
   let own = 0;
   let ai = 0;
   for (const key of [...keptRepos].sort()) {
@@ -158,6 +176,7 @@ export function computeGlobals(t: SessionTable, stats: readonly SessionStats[], 
     }
     if (!r.fileLists) continue;
     const later = commits.filter((c) => c.rework !== undefined);
+    if (later.length > 0) reworkMarked = true;
     for (const c of commits) {
       if (!c.owner || c.rework === "revert" || c.ts < reworkFrom!) continue;
       reworkDen++;
@@ -180,11 +199,18 @@ export function computeGlobals(t: SessionTable, stats: readonly SessionStats[], 
     }
   }
 
-  // used artifacts, provenance-weighted: the distinct config entries in use (`artifactUse`, which documents the rule)
+  // used artifacts, provenance-weighted: the distinct config entries in use (`artifactUse`, which documents the rule). A
+  // measured state whenever a config source was read (none in use is a measured 0); null only when none was read
   const used = artifactUse(raw, t, scope).filter((a) => a.used);
-  const artifactSpan = new Span(); // sources only: a state count has no from/to
+  const configRead = new Set<string>();
+  for (const c of raw.coverage) if (!excluded.has(c.tool) && CONFIG_SOURCES.has(c.source) && READ.has(c.status)) configRead.add(c.source);
+  for (const c of configs) configRead.add(c.source);
   let artifactWeight = 0;
-  for (const u of used) { artifactWeight += weight(u.provenance); for (const src of u.sources) artifactSpan.addSource(src); }
+  const artifactSources = new Set(used.length > 0 ? [] : configRead); // sources only: a state count has no from/to
+  for (const u of used) { artifactWeight += weight(u.provenance); for (const src of u.sources) artifactSources.add(src); }
+  const artifacts: Metric = configRead.size > 0
+    ? { window: "lifetime", sources: [...artifactSources].sort(), n: used.length, value: artifactWeight }
+    : fixedMetric("lifetime", [], 0, null, "not-captured");
 
   const memoryFiles = configs.filter((c) => c.kind === "memory-file").length;
   const commitSpan = { from: detailFrom, to: hi };
@@ -193,13 +219,14 @@ export function computeGlobals(t: SessionTable, stats: readonly SessionStats[], 
     parallelShare: bucketSpan.metric("detail", perBucket.size, ratio(parallel, perBucket.size)),
     peakConcurrency: peak,
     headlessPerWeek: allSpan.metric("detail", detailWeeks, ratio(scripted, detailWeeks)),
-    guardrails: repoMetric(activeRepos, mean(guards), gitSpan),
+    guardrails: repoMetric(activeRepos, mean(guards), gitSpan, guardSources),
     maintainedShare: repoMetric(activeRepos, ratio(maintained, activeRepos), gitSpan),
     // config is read by lifetime-window readers (`uses` are the tools' own lifetime counters): a lifetime metric
-    artifacts: artifactSpan.metric("lifetime", used.length, used.length > 0 ? artifactWeight : null),
+    artifacts,
     memoryFiles,
     switchesPerWeek: switchSpan.metric("lifetime", switchWeeks, ratio(switches, switchWeeks), switchWeeks === 0 ? "not-captured" : "no-data"),
-    reworkShare: repoMetric(reworkDen, ratio(reworked, reworkDen), { from: reworkFrom, to: hi }),
+    reworkShare: repoOff || reworkMarked ? repoMetric(reworkDen, ratio(reworked, reworkDen), { from: reworkFrom, to: hi })
+      : fixedMetric("detail", ["git"], reworkDen, null, "not-captured", { from: reworkFrom, to: hi }),
     prsPerWeek: prSpan.metric("detail", prWeeks, ratio(prs.size, prWeeks), prWeeks === 0 ? "not-captured" : "no-data"),
     aiCoauthoredShare: repoMetric(own, ratio(ai, own), commitSpan),
     commitAfterSession: repoMetric(afterDen, ratio(afterNum, afterDen), afterSpan.range()),

@@ -21,6 +21,8 @@ import { scanResultOf } from "../kit/scanresult";
  * - A typed turn is a human detail prompt, its main actions (8 s apart), and on the episode's last turn the finished
  *   children (subagents, delegated by the first main actions). The last turn is never made non-sticky, so every child
  *   turn is sticky.
+ * - A later turn is a follow-up (a correction, the turn after an interrupt, or a plain continuation by the `followUps`
+ *   knob) or a new brief, which starts a new instruction (turns per work, walk rule 12).
  * - Non-sticky turns have exactly one cause each: a corrected brief (turn 0, the next prompt is a correction), an
  *   interrupt (turn 1; the next prompt is a substantive redirect when healthy, a continuation when not), or a later
  *   correction (turns 1 to L−2) filling the rest of the share.
@@ -67,6 +69,12 @@ interface Knobs {
   turns: number; actions(local: number, e: number): number; children: number; childActions: number; background: number;
   nonSticky: number; edit: number; verified: number; ext: string; lang: Toolchain; closed: number;
   corrected: number; interrupts: number; healthy: number; parallel: number; headlessPerWeek: number;
+  /**
+   * The share of plain later turns (no correction, no turn after an interrupt) that are follow-ups of the turn before;
+   * the rest are new briefs (a new instruction). Turns per work reads it, with the corrections and redirects, which are
+   * always follow-ups.
+   */
+  followUps: number;
   /** The structure marks of episode e's brief. */
   brief(e: number): Partial<PromptFeatures>;
   compaction(g: number): MarkerKind | undefined;
@@ -81,7 +89,7 @@ const KNOBS: Record<PersonaKind, Knobs> = {
     // 2 actions per turn on average; turn 2 takes 1 or 3 by episode, so episode sizes vary and rho is defined
     turns: 4, actions: (local, e) => (local === 2 ? (e % 2 === 0 ? 1 : 3) : 2), children: 0, childActions: 0, background: 0,
     nonSticky: 0.35, edit: 0.5, verified: 0.15, ext: "sh", lang: "shell", closed: 0.4,
-    corrected: 0.3, interrupts: 0.25, healthy: 0.25, parallel: 0.02, headlessPerWeek: 0,
+    corrected: 0.3, interrupts: 0.25, healthy: 0.25, parallel: 0.02, headlessPerWeek: 0, followUps: 1,
     brief: () => ({ fileRefs: 1 }),
     compaction: () => "compact-auto",
     switchesPerWeek: 0.2, rho: 0, tokensPerLanded: 1_500_000,
@@ -92,7 +100,7 @@ const KNOBS: Record<PersonaKind, Knobs> = {
     episodes: (g, s) => Array<number>(spread(g, 3 / 8) ? 2 : 1).fill(Math.floor((s * 4) / 8)),
     turns: 4, actions: () => 7, children: 0.5, childActions: 8, background: 0.1,
     nonSticky: 0.2, edit: 0.6, verified: 0.4, ext: "tsx", lang: "js", closed: 0.65,
-    corrected: 0.15, interrupts: 0.25, healthy: 0.5, parallel: 0.1, headlessPerWeek: 1,
+    corrected: 0.15, interrupts: 0.25, healthy: 0.5, parallel: 0.1, headlessPerWeek: 1, followUps: 0,
     brief: () => ({ fileRefs: 1, lenBucket: 2 }),
     compaction: (g) => (spread(g, 0.5) ? "compact-auto" : undefined),
     switchesPerWeek: 1, rho: 0.15, tokensPerLanded: 600_000,
@@ -103,7 +111,7 @@ const KNOBS: Record<PersonaKind, Knobs> = {
     weeks: 20, weekdays: [0, 1, 2, 3, 4], sessionsPerWeek: 24, episodes: (_g, s) => [Math.floor((s * 5) / 24)],
     turns: 3, actions: () => 12, children: 2.5, childActions: 15, background: 0.45,
     nonSticky: 0.1, edit: 0.6, verified: 0.75, ext: "go", lang: "go", closed: 0.85,
-    corrected: 0.06, interrupts: 0.2, healthy: 0.75, parallel: 0.35, headlessPerWeek: 12,
+    corrected: 0.06, interrupts: 0.2, healthy: 0.75, parallel: 0.35, headlessPerWeek: 12, followUps: 0,
     brief: (e) => ({ hasContext: true, fileRefs: 2, lenBucket: 3, ...(spread(e, 0.25) ? { constraintTerms: 2 } : {}) }),
     compaction: (g) => (spread(g, 0.3) ? "compact-manual" : "compact-auto"),
     switchesPerWeek: 4, rho: 0.45, tokensPerLanded: 250_000,
@@ -267,6 +275,7 @@ export function personaScan(kind: PersonaKind, o: { now?: number; hourUtc?: numb
 
   let children = 0;
   let files = 0;
+  let plainTurns = 0;
   for (const session of sessions) {
     const sessionEvs: Ev[] = [];
     const models = new Set<string>();
@@ -281,7 +290,7 @@ export function personaScan(kind: PersonaKind, o: { now?: number; hourUtc?: numb
         const intent: Intent = turn.local === 0 ? "spec"
           : (turn.local === 1 && ep.corrected) || prev?.filler ? "correction"
           : turn.local === 2 && ep.interrupted ? (ep.healthy ? "redirect" : "continuation")
-          : "continuation";
+          : spread(plainTurns++, k.followUps) ? "continuation" : "spec";
         const f = turn.local === 0 ? features({ words: 40, isTaskStart: true, ...k.brief(ep.e) }) : features({ words: intent === "correction" ? 7 : 9 });
         const textHash = hash(`${session.id}#${turn.i}`);
         sessionEvs.push(prompt(session.id, t, "detail", intent, f, textHash));

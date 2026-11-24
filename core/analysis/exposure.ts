@@ -4,8 +4,8 @@ import { fixedMetric, Span } from "../signals/types";
 import { dayEnd, dayKey, dayStart, isoWeek } from "./activity";
 import { promptWindowByTool } from "./promptwindow";
 import { analysisScope, type AnalysisScope } from "./scope";
-import type { Metric, SessionTable } from "./types";
-import { isAction } from "./walk";
+import { isTopLevel, type Metric, type SessionTable } from "./types";
+import { atRealTime, isAction } from "./walk";
 
 export type Feature = "subagents" | "workflows" | "background-agents" | "plan-mode" | "skills" | "mcp" | "headless" | "parallel-sessions"
   | "model-switching" | "manual-compaction";
@@ -19,12 +19,14 @@ export type DurationArc = "<10m" | "10-60m" | "1-4h" | ">4h";
  *   when earlier), inclusive, from the lifetime days whenever there are any, else from the detail days (window
  *   `detail`, with the detail sources); `n` = those active days; `to` = the end the value counts to. `activeWeeks`:
  *   each window's active ISO weeks, `n` = its active days. Both read `Activity` only: days with a human prompt (§6.2).
- * - `weekly`: the 52 ISO weeks ending at now's week, oldest first. `activeDays` = the distinct days of the week in the
+ * - `weekly`: the 52 ISO weeks ending at now's week, oldest first, less the weeks that lie wholly outside the date
+ *   range (before the week of its start, after the week of its end). `activeDays` = the distinct days of the week in the
  *   union over tools of each tool's active days in its prompt window (`promptWindowByTool`; a tool with no prompts,
  *   only daily totals, its lifetime days): a union of day sets, never a sum of windows, and no tool gives both.
  *   `detailPrompts` and `lifetimePrompts` = human prompts in scope of the tools whose prompt window is that window, so
  *   no prompt counts in both columns.
- * - `tools`: per tool and window (sorted), the top-level sessions (kept rows with no parent, no host copy), the human
+ * - `tools`: per tool and window (sorted), the top-level sessions (kept rows with no parent, no host copy, started by a
+ *   person, a script or a schedule: `isTopLevel`; delegated rows count as subagent work), the human
  *   prompts in scope and the actions (walk rule 2) of every kept row, inside the date range; `from`/`to` span the
  *   sessions (clipped to the range) and the prompts.
  * - `rotation`: tools with an active day (either window) among the 90 day keys ending at now's day, and with any.
@@ -91,7 +93,10 @@ export function exposure(t: SessionTable, raw: ScanResult, o: { now: number; tim
   for (const v of Object.values(a.byTool)) for (const s of v?.lifetimeSources ?? []) lifetimeSources.add(s);
   const detailSources = new Set<string>();
   const windowOf = promptWindowByTool(raw, t);
-  const weekKeys = lastWeeks(nowDay);
+  // the weeks of the date range only: a week wholly outside it is no week of the report, not a week of zeros
+  const firstWeek = Number.isFinite(t.scope.from) ? isoWeek(dayKey(t.scope.from, tz)) : undefined;
+  const lastWeek = Number.isFinite(t.scope.to) ? isoWeek(dayKey(t.scope.to, tz)) : undefined;
+  const weekKeys = lastWeeks(nowDay).filter((w) => (firstWeek === undefined || w >= firstWeek) && (lastWeek === undefined || w <= lastWeek));
   const weekAt = new Map(weekKeys.map((w, i) => [w, i]));
   const weekly = weekKeys.map((week) => ({ week, activeDays: 0, detailPrompts: 0, lifetimePrompts: 0 }));
   const weeklyDays = new Set<string>();
@@ -128,7 +133,7 @@ export function exposure(t: SessionTable, raw: ScanResult, o: { now: number; tim
   for (const r of t.rows.values()) {
     if (t.hosts.has(r.id)) continue;
     const acc = accOf(r.tool, r.window);
-    if (r.parentId === undefined) {
+    if (isTopLevel(r)) {
       acc.sessions++;
       const c = clip(r);
       acc.span.addTs(c.start);
@@ -217,13 +222,13 @@ function firstSeen(t: SessionTable, raw: ScanResult, scope: AnalysisScope, first
     for (const e of raw.store.forSession(id, "usage")) take(e.ts);
     for (const e of raw.store.forSession(id, "prompt")) take(e.ts);
     for (const e of raw.store.forSession(id, "turn")) take(e.ts);
-    for (const e of raw.store.forSession(id, "marker")) if (e.proxyTs !== true) take(e.ts);
+    for (const e of raw.store.forSession(id, "marker")) if (atRealTime(e)) take(e.ts);
     return first;
   };
   for (const r of t.rows.values()) {
     if (t.hosts.has(r.id)) continue;
     const features: Feature[] = [];
-    if (r.parentId !== undefined || r.origin === "subagent") features.push("subagents");
+    if (!isTopLevel(r)) features.push("subagents"); // a child, or delegated work with no parent link
     if (r.workflowId !== undefined) features.push("workflows");
     if (r.background === true) features.push("background-agents");
     if (r.parentId === undefined && (r.origin === "scripted" || r.origin === "scheduled")) features.push("headless");
@@ -239,14 +244,12 @@ function firstSeen(t: SessionTable, raw: ScanResult, scope: AnalysisScope, first
     if (e.category === "mcp" || e.mcpServer !== undefined) see("mcp", e.ts);
   }
   for (const m of raw.store.all("marker")) {
-    if (excluded.has(m.tool) || m.proxyTs === true || !counted(m.sessionId)) continue;
+    if (excluded.has(m.tool) || !atRealTime(m) || !counted(m.sessionId)) continue;
     if (m.kind === "plan-enter" || m.kind === "plan-exit" || m.kind === "plan-artifact") see("plan-mode", m.ts);
     else if (m.kind === "model-switch") see("model-switching", m.ts);
     else if (m.kind === "compact-manual") see("manual-compaction", m.ts);
   }
-  for (const c of raw.store.all("config")) {
-    if (c.kind === "skill" && !excluded.has(c.tool) && c.firstSeen !== undefined) see("skills", c.firstSeen);
-  }
+  for (const c of scope.configs) if (c.kind === "skill" && c.firstSeen !== undefined) see("skills", c.firstSeen);
   if (firstParallelBucket !== undefined) see("parallel-sessions", firstParallelBucket);
-  return out;
+  return Object.fromEntries(Object.entries(out).sort(([a], [b]) => cmp(a, b)));
 }

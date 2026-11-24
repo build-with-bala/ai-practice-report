@@ -6,8 +6,8 @@ import type { ToolId, Window } from "../model/ids";
 /**
  * The evidence the dimensions' minimums read (spec §6.5). From the sample: `typedTurns`, `sessions` (rows with at
  * least one typed turn), `days` and `weeks` (distinct local days with a typed turn, and their ISO weeks), `episodes`,
- * `editTurns` (gated rows), `followUps`, `briefs`, `failingChecks`, `interrupts`, `workEpisodes`, `tierEpisodes`
- * (episodes with a known tier and effort), `editEpisodesInRepo`, `landed`, `bgKnown`. Global: `repos` (active repos
+ * `editTurns` (gated rows), `followUps`, `briefs`, `failingChecks`, `interrupts`, `workEpisodes` (the instructions with
+ * an action: the unit of turns per work, under its older name), `tierEpisodes` (episodes with a known tier and effort), `editEpisodesInRepo`, `landed`, `bgKnown`. Global: `repos` (active repos
  * with repo facts), `buckets` (active buckets), `artifacts` (distinct used artifacts), `lifetimeWeeks`, `ownCommits`
  * (owner commits in the detail span).
  */
@@ -30,9 +30,16 @@ export interface Signals {
   switchesPerWeek: Metric; rho: Metric; tokensPerLanded: Metric; usdPerLanded: Metric;
   landedShare: Metric; reworkShare: Metric; prsPerWeek: Metric; aiCoauthoredShare: Metric; commitAfterSession: Metric;
   guardrails: Metric; headlessPerWeek: Metric;
+  /*
+   * Two signals read commit habits. `tokensPerLanded` follows how often a person commits (a commit after many sittings
+   * reads as a high cost): null (`no-data`) under 5 landed units. `reworkShare` reads commit-message conventions (revert,
+   * fixup!, fix:): null (`not-captured`) when no commit by anyone in the kept repositories' window is marked as rework,
+   * since such a history does not use them.
+   */
   /**
-   * Among the code-edit turns that count as not checked, the share in which a shell command ran after the last edit
-   * that the command classifier did not recognise as a check; unscored.
+   * Among the code-edit turns that count as not checked (gated rows only, as VAE), the share in which a command ran
+   * after the last edit that the command classifier gave no check kind; `n` = those unchecked edit turns. Unscored: it
+   * says how much of a low Verification may be checks the classifier does not know.
    */
   uncheckedCommandShare: Metric;
   evidence: Evidence; repoSignals: RepoSignals["status"];

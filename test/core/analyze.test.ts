@@ -102,10 +102,29 @@ describe("analyze()", () => {
     expect(expert.personas.length).toBeGreaterThan(0);
   });
 
-  test("the seed and the replicate count reach the bootstrap; the point scores do not move", () => {
+  test("the seed and the replicate count reach the bootstrap: the intervals change, the point scores do not", () => {
     const other = analyze(personaScan("expert"), { ...UTC, seed: 7, bootstrap: 50 });
     expect(other.meta).toMatchObject({ seed: 7, bootstrap: 50 });
     expect(other.dimensions.map((d) => [d.id, d.status, d.z, d.score])).toEqual(expert.dimensions.map((d) => [d.id, d.status, d.z, d.score]));
+    const seeded = analyze(personaScan("expert"), { ...UTC, seed: 7 });
+    expect(seeded.dimensions.map((d) => d.interval)).not.toEqual(expert.dimensions.map((d) => d.interval));
+  });
+
+  test("meta.seed is the seed the generator uses: truncated, as an unsigned 32-bit integer", () => {
+    const raw = scanResultOf([]);
+    expect(analyze(raw, { ...UTC, seed: 7.9 }).meta.seed).toBe(7);
+    expect(analyze(raw, { ...UTC, seed: -1 }).meta.seed).toBe(4294967295);
+    expect(analyze(raw, { ...UTC, seed: 2 ** 32 + 5 }).meta.seed).toBe(5);
+    expect(() => analyze(raw, { ...UTC, seed: Number.NaN })).toThrow(RangeError);
+  });
+
+  test("an unknown reference and a now no date can hold are clear RangeErrors", () => {
+    const raw = scanResultOf([]);
+    expect(() => analyze(raw, { ...UTC, reference: "v9" as never })).toThrow(/reference/);
+    expect(() => analyze(raw, { ...UTC, reference: "v9" as never })).toThrow(RangeError);
+    expect(() => analyze(raw, { ...UTC, now: 9e15 })).toThrow(/now/);
+    expect(() => analyze(raw, { ...UTC, now: 9e15 })).toThrow(RangeError);
+    expect(() => analyze(raw, { ...UTC, now: 8.64e15 })).not.toThrow();
   });
 
   test("a forensic result never changes a score", () => {
@@ -129,7 +148,7 @@ describe("analyze()", () => {
   test("project keys and labels are keyed hashes, never raw names", () => {
     for (const p of expert.projects) {
       expect(p.key).toMatch(/^[0-9a-f]+$/);
-      expect(p.label).toMatch(/^P-[0-9A-F]{4,6}$/);
+      expect(p.label).toMatch(/^P-(?:[0-9A-F]{2}){2,8}$/);
     }
   });
 

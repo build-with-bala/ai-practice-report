@@ -13,6 +13,8 @@ const SEC = 1_000;
 const MIN = 60 * SEC;
 const HOUR = 60 * MIN;
 const CC = "claude-code.transcripts";
+/** A bound that only a runaway cost exceeds, whatever the load on the machine. */
+const RUNAWAY_MS = 30_000;
 
 const cov = (tool: ToolId, source: string, window: Window): CoverageEv => ({
   k: "coverage", tool, source, window, status: "ok", beta: false, files: 1, bytes: 1, records: 1, skipped: {}, unknownTypes: {}, versions: [],
@@ -72,7 +74,7 @@ describe("tiers", () => {
       ["claude-haiku-4-5", 1], ["gpt-5.1-codex-mini", 1], ["gpt-4.1-nano", 1], ["gemini-2.5-flash-lite", 1], ["mistral-small", 1], ["o4-mini", 1],
       ["claude-sonnet-4-5", 2], ["gemini-2.5-flash", 2], ["gpt-5", 2], ["gpt-5.1", 2], ["gpt-5-codex", 2], ["standard", 2],
       ["claude-opus-4-1", 3], ["gpt-5.1-codex-max", 3], ["gemini-2.5-pro", 3], ["gpt-5-pro", 3], ["kimi-ultra", 3], ["mistral-large", 3],
-      ["fable", undefined], ["", undefined], ["o3", undefined],
+      ["claude-fable-5", 3], ["fable", 3], ["claude-mythos-1", 3], ["fabled", undefined], ["", undefined], ["o3", undefined],
     ];
     for (const [m, want] of cases) expect([m, modelTier(m)]).toEqual([m, want]);
   });
@@ -284,6 +286,22 @@ describe("walk: VAE (rule 8)", () => {
     expect(s.verifiedWeight).toBeCloseTo(w6, 12);
   });
 
+  test("unchecked edit turns, and those where a command the classifier did not know ran after the last edit", () => {
+    const shell = (ts: number, over: Partial<ToolEv> = {}): ToolEv => tool("s", ts, { name: "Bash", category: "shell", ok: true, ...over });
+    const s = one([
+      sess("s"), outcomesFor("s", T0 - SEC),
+      prompt("s", T0), edit("s", T0 + SEC, "ts", 3), shell(T0 + 2 * SEC), // unchecked, an unknown command after the edit
+      prompt("s", T0 + MIN), shell(T0 + MIN + SEC), edit("s", T0 + MIN + 2 * SEC, "ts", 3), // unchecked, the command came before
+      prompt("s", T0 + 2 * MIN), edit("s", T0 + 2 * MIN + SEC, "ts", 3), check("s", T0 + 2 * MIN + 2 * SEC, true), // checked
+      prompt("s", T0 + 3 * MIN), edit("s", T0 + 3 * MIN + SEC, "ts", 3), shell(T0 + 3 * MIN + 2 * SEC, { ok: undefined, outcome: "denied" }), // denied: never ran
+      prompt("s", T0 + 4 * MIN), edit("s", T0 + 4 * MIN + SEC, "ts", 3), tool("s", T0 + 4 * MIN + 2 * SEC, { name: "Bash", category: "container", ok: true }),
+    ]);
+    expect([s.editTurns, s.uncheckedEditTurns, s.uncheckedCommandTurns]).toEqual([5, 4, 2]);
+    const ungated = one([sess("s", { tool: "cursor" }), prompt("s", T0, { tool: "cursor" }), edit("s", T0 + SEC, "ts", 3, 0, { tool: "cursor" }),
+      tool("s", T0 + 2 * SEC, { tool: "cursor", category: "shell" })]);
+    expect([ungated.uncheckedEditTurns, ungated.uncheckedCommandTurns]).toEqual([0, 0]);
+  });
+
   test(".md-only edits make no edit turn", () => {
     const s = one([sess("s"), prompt("s", T0), edit("s", T0 + SEC, "md", 40), edit("s", T0 + 2 * SEC, "json", 4), edit("s", T0 + 3 * SEC, undefined as never, 4), check("s", T0 + 4 * SEC, true)]);
     expect([s.editTurns, s.editWeight, s.editEpisodes]).toEqual([0, 0, 0]);
@@ -367,10 +385,47 @@ describe("walk: interrupts and briefs (rules 10–11)", () => {
     expect(s.briefScoreSum).toBeCloseTo(0.6, 12);
   });
 
-  test("work per turn: typed turns over log2(2 + actions), for episodes with actions", () => {
-    const s = one([sess("s"), prompt("s", T0), ...reads("s", T0 + SEC, 6), prompt("s", T0 + MIN), prompt("s", T0 + 2 * HOUR - MIN)]);
+  test("turns per work: per instruction with actions, its typed turns over log2(2 + its actions)", () => {
+    // one instruction (a brief and one follow-up) with 6 actions; a later brief with no action counts nowhere
+    const s = one([sess("s"), prompt("s", T0), ...reads("s", T0 + SEC, 6), prompt("s", T0 + MIN, { intent: "continuation" }),
+      prompt("s", T0 + 2 * MIN, { intent: "question" })]);
     expect(s.workEpisodes).toBe(1);
     expect(s.turnsPerWorkSum).toBeCloseTo(2 / 3, 12);
+  });
+
+  /** A sitting of `n` typed turns 2 min apart, each with `actions` actions; turn i is a follow-up when `followUp(i)`, else a new brief. */
+  const sitting = (n: number, actions: number, followUp: (i: number) => boolean = () => false, clearEvery = 0): Ev[] => {
+    const evs: Ev[] = [sess("s", { end: T0 + (2 * n + 1) * MIN })];
+    for (let i = 0; i < n; i++) {
+      const t = T0 + 2 * i * MIN;
+      if (clearEvery > 0 && i > 0 && i % clearEvery === 0) evs.push(marker("s", t - SEC, "clear"));
+      evs.push(prompt("s", t, { intent: i > 0 && followUp(i) ? "continuation" : "spec" }), ...reads("s", t + SEC, actions));
+    }
+    return evs;
+  };
+  const perWork = (st: SessionStats): number => st.turnsPerWorkSum / st.workEpisodes;
+
+  test("turns per work measures steering, not the length of a sitting: equal for sittings of 3 to 40 turns", () => {
+    const want = 1 / Math.log2(12);
+    for (const n of [3, 6, 12, 25, 40]) expect([n, perWork(one(sitting(n, 10)))]).toEqual([n, expect.closeTo(want, 12) as unknown as number]);
+    // one follow-up turn after every brief: the same at every length too
+    const pairs = 2 / Math.log2(22);
+    for (const n of [6, 12, 40]) expect(perWork(one(sitting(n, 10, (i) => i % 2 === 1)))).toBeCloseTo(pairs, 12);
+  });
+
+  test("clearing the context every 5 turns does not change it; follow-up turns raise it", () => {
+    const base = perWork(one(sitting(25, 10)));
+    expect(perWork(one(sitting(25, 10, () => false, 5)))).toBeCloseTo(base, 12);
+    const some = perWork(one(sitting(25, 10, (i) => i % 4 === 1)));
+    const more = perWork(one(sitting(25, 10, (i) => i % 4 !== 0)));
+    expect(base).toBeLessThan(some);
+    expect(some).toBeLessThan(more);
+  });
+
+  test("slash-command turns are no turns of their instruction; their actions are its work", () => {
+    const s = one([sess("s"), prompt("s", T0), ...reads("s", T0 + SEC, 6), prompt("s", T0 + MIN, { intent: "command" }), ...reads("s", T0 + MIN + SEC, 8)]);
+    expect([s.turns, s.workEpisodes]).toEqual([2, 1]);
+    expect(s.turnsPerWorkSum).toBeCloseTo(1 / Math.log2(16), 12);
   });
 });
 
@@ -408,6 +463,12 @@ describe("walk: tiers and tokens (rules 15–16)", () => {
     expect(two.tierPairs).toEqual([]);
     const none = one([sess("s", { ...at, models: ["gpt-5-codex"] }), prompt("s", T0, at)]);
     expect(none.tierPairs).toEqual([]);
+  });
+
+  test("cost is the largest running total, whatever the order the totals arrive in", () => {
+    const tot = (usd: number): Ev => ({ k: "totals", tool: "claude-code", source: CC, sessionId: "s", usd });
+    expect(one([sess("s"), prompt("s", T0), tot(2), tot(5), tot(3)]).usd).toBe(5);
+    expect(one([sess("s"), prompt("s", T0), tot(5), tot(2)]).usd).toBe(5);
   });
 
   test("tokens roll up from children; cost comes from the row's totals", () => {
@@ -539,6 +600,16 @@ describe("walk: date range, cross-row keys, fan-out, children's ends and markers
     expect([inside.children, inside.finishedChildren, inside.bgKnown, inside.workflowRuns, inside.maxDepth, inside.actions]).toEqual([1, 1, 1, 1, 2, 6]);
   });
 
+  test("a proxy-timed marker never puts a cut child in scope: its time is a stand-in", () => {
+    const evs: Ev[] = [
+      sess("s", { start: T0 - 11 * HOUR, end: T0 + HOUR }), prompt("s", T0), tool("s", T0 + SEC),
+      sess("c", { parentId: "s", origin: "subagent", start: T0 - 10 * HOUR, end: T0 + MIN, background: true }),
+      ...reads("c", T0 - 10 * HOUR + SEC, 3), marker("c", T0 + 30 * SEC, "interrupt", { detail: "stopped-by-user", proxyTs: true }),
+    ];
+    const out = one(evs, "s", { exclude: { from: T0 } });
+    expect([out.children, out.bgKnown]).toEqual([0, 0]);
+  });
+
   test("a cut direct child with no event in range still groups an in-range grandchild: fan-out 1, its own attributes not counted", () => {
     const s = one([
       sess("s", { start: T0 - 11 * HOUR, end: T0 + HOUR }), prompt("s", T0), tool("s", T0 + SEC),
@@ -605,7 +676,7 @@ describe("walk: date range, cross-row keys, fan-out, children's ends and markers
 });
 
 describe("walk: budget", () => {
-  test("a row with 200,000 tool events finishes in under 2 s, and its stats are plain data", () => {
+  test("a row with 200,000 tool events ends inside the runaway guard, and its stats are plain data", () => {
     const evs: Ev[] = [sess("s", { end: T0 + 10 * HOUR })];
     for (let i = 0; i < 200; i++) evs.push(prompt("s", T0 + i * 3 * MIN));
     for (let i = 0; i < 200_000; i++) {
@@ -617,7 +688,7 @@ describe("walk: budget", () => {
     raw.store.forSession("s", "tool"); // the store's index is built by the first lookup: not the walk's cost
     const t0 = performance.now();
     const stats = buildSessionStats(t, raw.store, raw.repos, { timeZone: "UTC" });
-    expect(performance.now() - t0).toBeLessThan(2_000);
+    expect(performance.now() - t0).toBeLessThan(RUNAWAY_MS); // a runaway guard, not a benchmark
     expect(stats).toHaveLength(1);
     expect(stats[0]!.turns).toBe(200);
     expect(JSON.parse(JSON.stringify(stats))).toEqual(stats);
@@ -625,5 +696,5 @@ describe("walk: budget", () => {
       || (Array.isArray(v) && v.every(plain)) || (typeof v === "object" && Object.getPrototypeOf(v) === Object.prototype && Object.values(v as object).every(plain));
     expect(plain(stats)).toBe(true);
     expect(JSON.stringify(stats)).not.toMatch(/NaN|Infinity|null/);
-  });
+  }, 60_000);
 });

@@ -860,8 +860,10 @@ describe("exportPayload: provenance", () => {
 describe("exportPayload: what was excluded", () => {
   test("exclusions is exactly tools, projects, sessions, dateRange and weeksOutside; no date leaves", () => {
     const a = analyze(personaScan("expert"), UTC);
-    delete a.exclusions.dateRange;
-    delete a.exclusions.weeksOutside;
+    // both are required on Analysis now; an older or hand-made analysis without them still exports the defaults
+    const loose = a.exclusions as Partial<Analysis["exclusions"]>;
+    delete loose.dateRange;
+    delete loose.weeksOutside;
     expect(parsed(a).exclusions).toEqual({ tools: 0, projects: 0, sessions: 0, dateRange: false, weeksOutside: 0 }); // the defaults when absent
     a.exclusions = { tools: 1, projects: 2, sessions: 3, dateRange: true, weeksOutside: 4 };
     (a.exclusions as Json).from = Date.UTC(2026, 9, 1);

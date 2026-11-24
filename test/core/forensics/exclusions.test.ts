@@ -28,7 +28,8 @@ interface Case { name: string; exclude: Exclusions; drop: (x: Tagged) => boolean
 const CASES: Case[] = [
   { name: "an excluded tool (Codex)", exclude: { tools: ["codex"] }, drop: (x) => x.tool === "codex",
     changes: ["C6", "C7", "C8", "C9", "C10", "soft:rhythm", "soft:new-config"] },
-  { name: "an excluded tool (Claude Code)", exclude: { tools: ["claude-code"] }, drop: (x) => x.tool === "claude-code",
+  // the Copilot host copy mirrors a Claude Code session: it is decided before the exclusion and stays out with it
+  { name: "an excluded tool (Claude Code)", exclude: { tools: ["claude-code"] }, drop: (x) => x.tool === "claude-code" || x.case === "host",
     changes: ["C1", "C2", "C3", "C4", "C5", "C9", "C10", "soft:rhythm", "soft:repeated-long", "soft:recent-burst", "soft:unclosed-tools", "soft:new-config"] },
   { name: "an excluded project", exclude: { projects: ["kB"] }, drop: (x) => x.project === "B",
     // the history keeps its sessionless echoes of project B's prompts, so B's days stay active: recent-burst stays; the

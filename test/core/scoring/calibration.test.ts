@@ -13,6 +13,7 @@ import { computeGlobals } from "../../../core/signals/globals";
 import type { Signals } from "../../../core/signals/types";
 import { personaScan } from "../../fixtures/personas";
 import { CANARY, findCanaries } from "../../kit/canary";
+import { scanResultOf } from "../../kit/scanresult";
 
 type Kind = "novice" | "intermediate" | "expert";
 const KINDS: readonly Kind[] = ["novice", "intermediate", "expert"];
@@ -21,7 +22,7 @@ interface Scored { signals: Signals; dims: DimensionResult[]; overall: Overall }
 /** The pipeline by hand (no `analyze()` yet): session table → walk → globals and signals → dimensions → bootstrap → overall. */
 function score(raw: ScanResult, timeZone = "UTC"): Scored {
   const now = raw.finishedAt;
-  const t = buildSessionTable(raw, { now, timeZone });
+  const t = buildSessionTable(raw, { timeZone });
   const stats = buildSessionStats(t, raw.store, raw.repos, { timeZone });
   const g = computeGlobals(t, stats, raw, { now });
   const signals = computeSignals(stats, g);
@@ -52,7 +53,8 @@ describe("persona calibration", () => {
         comps++;
         expect({ id: a.id, lower: a.x < b.x }).toEqual({ id: a.id, lower: true });
       }
-      // the novice is insufficient on 3 dimensions and has no background share or artifacts; the others score everything
+      // the novice is insufficient on 3 dimensions, has no background share, and lands under 5 units (no cost per landed
+      // unit); its 0 artifacts are a measured 0. The others score everything
       expect([dims, comps]).toEqual(lo === "novice" ? [4, 20] : [7, 22]);
     }
   });
@@ -100,14 +102,14 @@ describe("persona golden output", () => {
   const GOLDEN: Record<"intermediate" | "expert", { dims: Record<DimensionId, [number, [number, number]]>; overall: Pick<Overall, "score" | "interval" | "band" | "coverage"> }> = {
     intermediate: {
       dims: {
-        leverage: [50, [49, 52]], orchestration: [50, [47, 52]], verification: [50, [46, 53]], steering: [50, [41, 63]],
+        leverage: [50, [49, 52]], orchestration: [50, [47, 52]], verification: [50, [46, 53]], steering: [50, [40, 64]],
         context: [50, [49, 50]], judgment: [50, [43, 62]], delivery: [49, [44, 55]],
       },
       overall: { score: 50, interval: [48, 52], band: "developing", coverage: "7/7" },
     },
     expert: {
       dims: {
-        leverage: [87, [87, 87]], orchestration: [85, [84, 85]], verification: [87, [85, 90]], steering: [88, [84, 92]],
+        leverage: [87, [87, 87]], orchestration: [85, [84, 85]], verification: [87, [85, 90]], steering: [87, [83, 92]],
         context: [86, [86, 86]], judgment: [87, [83, 90]], delivery: [89, [88, 91]],
       },
       overall: { score: 87, interval: [86, 88], band: "exceptional", coverage: "7/7" },
@@ -127,7 +129,7 @@ describe("persona fixtures", () => {
   const KNOBS: Record<Kind, Partial<Record<keyof Signals, number>>> = {
     novice: {
       parallelShare: 0.02, fanoutPerEpisode: 0, headlessPerWeek: 0, vae: 0.15, closure: 0.4, guardrails: 0, correctionRate: 0.3,
-      healthyInterruptShare: 0.25, maintainedShare: 0, briefScore: 0.2, switchesPerWeek: 0.2, rho: 0, tokensPerLanded: 1_500_000,
+      healthyInterruptShare: 0.25, maintainedShare: 0, briefScore: 0.2, switchesPerWeek: 0.2, rho: 0,
       landedShare: 0.2, reworkShare: 0.25, prsPerWeek: 0.1,
     },
     intermediate: {
@@ -141,6 +143,10 @@ describe("persona fixtures", () => {
       tokensPerLanded: 250_000, landedShare: 0.8, reworkShare: 0.05, prsPerWeek: 5,
     },
   };
+  test("novice: under 5 landed units, cost per landed unit is not measured", () => {
+    expect([P.novice.signals.tokensPerLanded.value, P.novice.signals.tokensPerLanded.reason]).toEqual([null, "no-data"]);
+    expect(P.novice.signals.tokensPerLanded.n).toBeLessThan(5);
+  });
   for (const k of KINDS) {
     test(`${k}: the walk reads the knobs back`, () => {
       const s = P[k].signals;
@@ -180,5 +186,21 @@ describe("persona fixtures", () => {
     expect(findCanaries(personaScan("expert"))).toEqual([]);
     const scored = score(raw);
     expect(scored.dims.map((d) => [d.score, d.interval])).toEqual(P.expert.dims.map((d) => [d.score, d.interval]));
+  });
+});
+
+describe("artifacts in use", () => {
+  /** The intermediate persona with its config entries replaced by `configs` (the config source is still read). */
+  const withConfigs = (configs: Ev[]): ScanResult => {
+    const raw = personaScan("intermediate");
+    const kinds = ["coverage", "session", "prompt", "tool", "marker", "turn", "usage", "totals", "daily", "edge"] as const;
+    const evs: Ev[] = [...kinds.flatMap((k) => [...raw.store.all(k)]), ...configs];
+    return scanResultOf(evs, { repos: raw.repos, cwds: raw.cwds, salt: raw.salt, finishedAt: raw.finishedAt });
+  };
+  const context = (raw: ScanResult): number => score(raw).dims.find((d) => d.id === "context")!.score!;
+  test("the same person scores no higher on Context with no artifact than with one", () => {
+    const one: Ev = { k: "config", tool: "claude-code", source: "claude-code.config", kind: "plugin", name: "p", provenance: "installed", uses: 3 };
+    expect(context(withConfigs([]))).toBeLessThanOrEqual(context(withConfigs([one])));
+    expect(score(withConfigs([])).signals.artifacts.value).toBe(0);
   });
 });

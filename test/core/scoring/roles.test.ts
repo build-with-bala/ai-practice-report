@@ -14,7 +14,7 @@ import { personaScan, type PersonaKind } from "../../fixtures/personas";
 /** The pipeline by hand, as far as roles need: dimensions and the stack panel. */
 function rolesOf(raw: ScanResult): { dims: DimensionResult[]; stack: Stack; roles: string[] } {
   const now = raw.finishedAt;
-  const t = buildSessionTable(raw, { now, timeZone: "UTC" });
+  const t = buildSessionTable(raw, { timeZone: "UTC" });
   const stats = buildSessionStats(t, raw.store, raw.repos, { timeZone: "UTC" });
   const dims = scoreDimensions(computeSignals(stats, computeGlobals(t, stats, raw, { now })), loadReference());
   const stack = panels(t, raw, { timeZone: "UTC" }).stack;

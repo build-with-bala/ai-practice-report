@@ -12,7 +12,7 @@
     "ver.guardrails": { "p50": -0.6931, "p90": 1.3863, "transform": "logit", "rationale": "one of three guardrails per active repo; most of them" },
     "ste.correction": { "p50": 1.7346, "p90": 2.7515, "transform": "logit", "rationale": "15% of briefs need a correction next; 6%" },
     "ste.interrupts": { "p50": 0, "p90": 1.2657, "transform": "logit", "rationale": "half of interrupts are early, substantive redirects; nearly 4 in 5" },
-    "ste.turnsPerWork": { "p50": -0.5878, "p90": -0.3716, "transform": "log1p", "rationale": "0.8 typed turns per doubling of work; 0.45" },
+    "ste.turnsPerWork": { "p50": -0.3035, "p90": -0.2045, "transform": "log1p", "rationale": "an instruction sets off about 8 actions and 3 in 10 take one follow-up turn; about 24 actions and 1 in 10" },
     "ctx.instructions": { "p50": -0.4055, "p90": 1.7346, "transform": "logit", "rationale": "4 in 10 active repos keep a maintained instruction file; 85%" },
     "ctx.artifacts": { "p50": 1.3863, "p90": 2.3979, "transform": "log1p", "rationale": "three provenance-weighted artifacts in use (two own skills plus a few installed); ten" },
     "ctx.hygiene": { "p50": -0.6931, "p90": 0.6931, "transform": "logit", "rationale": "a third of compactions and episode starts are deliberate; two thirds" },

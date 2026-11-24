@@ -80,6 +80,17 @@ function spearman(flat: readonly number[]): number | null {
 }
 
 const ratio = (num: number, den: number): number | null => (den > 0 ? num / den : null);
+/**
+ * Fresh tokens per landed unit need at least this many landed units: the measure follows how often a person commits
+ * (one commit after many sittings reads as a high cost), so a handful of commits says too little.
+ */
+export const MIN_LANDED = 5;
+/** A metric under its minimum n: null with `no-data` (the data could hold it, there is too little of it). */
+const minimum = (m: Metric, min: number): Metric => {
+  if (m.n >= min || m.value === null) return m;
+  const { value: _value, reason: _reason, ...meta } = m;
+  return { ...meta, value: null, reason: "no-data" };
+};
 
 /**
  * The signals of one sample of detail-window top-level rows (the point estimate, or one bootstrap replicate), with the
@@ -90,6 +101,7 @@ const ratio = (num: number, den: number): number | null => (den > 0 ? num / den 
 export function computeSignals(sample: readonly SessionStats[], g: Globals): Signals {
   const turnsSpan = new Span();
   const vaeSpan = new Span();
+  const uncheckedSpan = new Span();
   const closureSpan = new Span();
   const runSpan = new Span();
   const bgSpan = new Span();
@@ -105,7 +117,7 @@ export function computeSignals(sample: readonly SessionStats[], g: Globals): Sig
   const landedSpan = new Span();
 
   let turns = 0, sticky = 0, actions = 0, sessions = 0;
-  let editTurns = 0, editWeight = 0, verifiedWeight = 0, gatedRows = 0;
+  let editTurns = 0, editWeight = 0, verifiedWeight = 0, gatedRows = 0, uncheckedTurns = 0, uncheckedCommands = 0;
   let failing = 0, closed = 0;
   let episodes = 0, followUps = 0, briefs = 0, corrected = 0, briefSum = 0;
   let interrupts = 0, healthy = 0, workEpisodes = 0, perWork = 0;
@@ -133,6 +145,7 @@ export function computeSignals(sample: readonly SessionStats[], g: Globals): Sig
     if (r.gatedVae) {
       gatedRows++;
       if (r.editTurns > 0) { editTurns += r.editTurns; editWeight += r.editWeight; verifiedWeight += r.verifiedWeight; vaeSpan.add(r); }
+      if (r.uncheckedEditTurns > 0) { uncheckedTurns += r.uncheckedEditTurns; uncheckedCommands += r.uncheckedCommandTurns; uncheckedSpan.add(r); }
     }
     if (r.failingChecks > 0) { failing += r.failingChecks; closed += r.closedChecks; closureSpan.add(r); }
     if (merge(runs, r.successRuns)) runSpan.add(r);
@@ -175,6 +188,9 @@ export function computeSignals(sample: readonly SessionStats[], g: Globals): Sig
   const hygiene = parts.length > 0 ? parts.reduce((a, b) => a + b, 0) / parts.length : null;
   const run = percentile(runs, 0.9);
   const repoOff = g.repoSignals === "off" || g.repoSignals === "git-missing";
+  // landed episodes and landed units read repo commits: git is among their sources whenever repo facts were read for them
+  if (!repoOff && editInRepo > 0) landedSpan.addSource("git");
+  if (!repoOff && tokenLanded > 0) tokenSpan.addSource("git");
   const landedShare = repoOff ? landedSpan.metric("detail", 0, null, "repo-signals-off") : d(landedSpan, editInRepo, ratio(landedEpisodes, editInRepo));
 
   const evidence: Evidence = {
@@ -206,12 +222,12 @@ export function computeSignals(sample: readonly SessionStats[], g: Globals): Sig
     hygiene: d(hygieneSpan, compactions + episodes, hygiene),
     switchesPerWeek: g.switchesPerWeek,
     rho: d(rhoSpan, pairs.length >> 1, spearman(pairs), captured(episodes === 0 || pairs.length > 0)),
-    tokensPerLanded: d(tokenSpan, tokenLanded, ratio(tokens, tokenLanded), captured(tokenRows > 0)),
+    tokensPerLanded: minimum(d(tokenSpan, tokenLanded, ratio(tokens, tokenLanded), captured(tokenRows > 0)), MIN_LANDED),
     usdPerLanded: d(usdSpan, usdLanded, ratio(usd, usdLanded), captured(usdRows > 0)),
     landedShare,
     reworkShare: g.reworkShare, prsPerWeek: g.prsPerWeek, aiCoauthoredShare: g.aiCoauthoredShare, commitAfterSession: g.commitAfterSession,
     guardrails: g.guardrails, headlessPerWeek: g.headlessPerWeek,
-    uncheckedCommandShare: d(new Span(), 0, null), // not computed yet: a null detail metric
+    uncheckedCommandShare: d(uncheckedSpan, uncheckedTurns, ratio(uncheckedCommands, uncheckedTurns), captured(gatedRows > 0)),
     evidence, repoSignals: g.repoSignals,
   };
 }

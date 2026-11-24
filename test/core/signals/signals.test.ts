@@ -24,7 +24,7 @@ const HIST = "claude-code.history";
 
 const stat = (id: string, over: Partial<SessionStats> = {}): SessionStats => ({
   id, tool: "claude-code", source: CC, origin: "human", start: T0, end: T0 + HOUR, scripted: false, days: [],
-  turns: 0, stickySum: 0, actions: 0, successRuns: {}, gatedVae: true, editTurns: 0, editWeight: 0, verifiedWeight: 0,
+  turns: 0, stickySum: 0, actions: 0, successRuns: {}, gatedVae: true, editTurns: 0, editWeight: 0, verifiedWeight: 0, uncheckedEditTurns: 0, uncheckedCommandTurns: 0,
   failingChecks: 0, closedChecks: 0, fixCycles: {}, episodes: 0, followUps: 0, briefs: 0, correctedBriefs: 0, briefScoreSum: 0,
   interrupts: 0, healthyInterrupts: 0, workEpisodes: 0, turnsPerWorkSum: 0, queued: 0,
   children: 0, finishedChildren: 0, bgKnown: 0, bgChildren: 0, childTypes: {}, workflowRuns: 0, maxDepth: 0,
@@ -76,6 +76,23 @@ describe("computeSignals: the sample formulas", () => {
     expect([s.landedShare.value, s.landedShare.n]).toEqual([0.75, 4]);
   });
 
+  test("the signals that read repo facts list git among their sources whenever repo signals ran", () => {
+    expect(s.landedShare.sources).toEqual([CC, CX, "git"]);
+    const five = computeSignals([{ ...a, landed: 5 }, b], globals());
+    expect(five.tokensPerLanded.sources).toEqual([CC, CX, "git"]);
+    const off = computeSignals([{ ...a, landed: 5 }, b], globals({ repoSignals: "off" }));
+    expect(off.tokensPerLanded.sources).toEqual([CC, CX]);
+  });
+
+  test("unchecked-command share: over the unchecked edit turns of gated rows, with their rows' sources and span", () => {
+    const u = computeSignals([{ ...a, uncheckedEditTurns: 4, uncheckedCommandTurns: 1 }, { ...b, uncheckedEditTurns: 0 }], globals()).uncheckedCommandShare;
+    expect(u).toEqual({ window: "detail", sources: [CC], from: T0, to: T0 + HOUR, n: 4, value: 0.25 });
+    const none = computeSignals([a, b], globals()).uncheckedCommandShare;
+    expect([none.value, none.n, none.reason]).toEqual([null, 0, "no-data"]);
+    const ungated = computeSignals([{ ...b }], globals()).uncheckedCommandShare;
+    expect(ungated.reason).toBe("not-captured");
+  });
+
   test("percentiles, the fix-cycle median, hygiene, rho and cost per landed unit", () => {
     // runs 3, 3, 5, 7, 10: nearest rank ceil(0.9 · 5) = 5 → 10
     expect([s.p90Run.value, s.p90Run.n]).toEqual([10, 5]);
@@ -87,9 +104,13 @@ describe("computeSignals: the sample formulas", () => {
     // tiers 21, 33, 22 against sizes 1, 3, 2: the same order, rho 1
     expect(s.rho.value).toBeCloseTo(1, 12);
     expect(s.rho.n).toBe(3);
-    expect([s.tokensPerLanded.value, s.tokensPerLanded.n]).toEqual([750, 2]);
+    // 2 landed units are under the minimum of 5: cost per landed unit follows how often a person commits
+    expect([s.tokensPerLanded.value, s.tokensPerLanded.n, s.tokensPerLanded.reason]).toEqual([null, 2, "no-data"]);
+    const five = computeSignals([{ ...a, landed: 5 }, b], globals()).tokensPerLanded;
+    expect([five.value, five.n, five.reason]).toEqual([300, 5, undefined]);
     // every known row in either sum is in the span: b adds tokens, though it landed nothing
-    expect([s.tokensPerLanded.sources, s.tokensPerLanded.from, s.tokensPerLanded.to]).toEqual([[CC, CX], T0, T0 + DAY + HOUR]);
+    expect([five.sources, five.from, five.to]).toEqual([[CC, CX, "git"], T0, T0 + DAY + HOUR]);
+    expect(computeSignals([{ ...a, landed: 4 }, b], globals()).tokensPerLanded.value).toBeNull();
     expect([s.usdPerLanded.value, s.usdPerLanded.n, s.usdPerLanded.sources]).toEqual([1, 2, [CC]]);
   });
 
@@ -180,14 +201,14 @@ describe("computeSignals: purity and budget", () => {
   });
 
   // a guard against a runaway cost, not a benchmark: the bound leaves room for slow CI runners
-  test("a 5,000-row sample, computed 200 times, takes under 10 s", () => {
+  test("a 5,000-row sample, computed 200 times, ends inside the 30 s runaway guard", () => {
     const rows = sample(5_000);
     const g = globals();
     computeSignals(rows, g);
     const t0 = performance.now();
     for (let i = 0; i < 200; i++) computeSignals(rows, g);
-    expect(performance.now() - t0).toBeLessThan(10_000);
-  });
+    expect(performance.now() - t0).toBeLessThan(30_000);
+  }, 60_000);
 });
 
 // ---------- the globals, from a scan result ----------
@@ -311,6 +332,7 @@ describe("computeGlobals", () => {
     // a user-level hook with checks counts for every repo, unless hooks are disabled
     const hook = config("hook", "PreToolUse", { checks: ["test"] });
     expect(globalsOf([...WORLD, hook], { repos: REPOS() }).g.guardrails.value).toBeCloseTo(2 / 3, 12);
+    expect(globalsOf([...WORLD, hook], { repos: REPOS() }).g.guardrails.sources).toEqual(["claude-code.config", "git"]); // the user-level hook decided too
     expect(globalsOf([...WORLD, hook, config("feature", "hooks-disabled")], { repos: REPOS() }).g.guardrails.value).toBe(0.5);
     // a repo whose hooks are disabled has no hook guardrail
     const off = REPOS();
@@ -327,6 +349,18 @@ describe("computeGlobals", () => {
     expect([g.aiCoauthoredShare.value, g.aiCoauthoredShare.n, g.evidence.ownCommits]).toEqual([1 / 3, 3, 3]);
     // rows in identity repos: a and b each have a commit within a day after their end (c2, c5); e has none
     expect([g.commitAfterSession.value, g.commitAfterSession.n]).toEqual([2 / 3, 3]);
+  });
+
+  test("rework: not captured when no commit by anyone in the window is marked as rework; another author's mark is enough", () => {
+    const plain = REPOS();
+    for (const c of plain.repos[0]!.commits) delete c.rework;
+    const none = globalsOf(WORLD, { repos: plain, now: T0 + 15 * DAY }).g.reworkShare;
+    expect([none.value, none.reason, none.n]).toEqual([null, "not-captured", 3]); // c4 is no revert now: it joins c1, c2
+    const other = REPOS();
+    other.repos[0]!.commits = other.repos[0]!.commits.filter((c) => c.shaKey !== "c2" && c.shaKey !== "c4");
+    other.repos[0]!.commits.push(commit(T0 + 20 * DAY, "c6", ["f7"], { owner: false, rework: "fixup" }));
+    const marked = globalsOf(WORLD, { repos: other, now: T0 + 25 * DAY }).g.reworkShare;
+    expect([marked.value, marked.reason]).toEqual([0, undefined]);
   });
 
   test("used artifacts, weighted by provenance; memory files shown", () => {
@@ -358,8 +392,8 @@ describe("computeGlobals", () => {
 
   test("the date range clips commits and switches as well as sessions", () => {
     const { g } = globalsOf(WORLD, { repos: REPOS(), exclude: { to: T0 + 4 * HOUR + 30 * MIN }, now: T0 + 15 * DAY });
-    // only c1 is left: c2 (a fix, 5 h) and c4 lie after the range's end
-    expect([g.reworkShare.value, g.reworkShare.n, g.aiCoauthoredShare.n]).toEqual([0, 1, 1]);
+    // only c1 is left: c2 (a fix, 5 h) and c4 lie after the range's end, so no commit in the window is marked as rework
+    expect([g.reworkShare.value, g.reworkShare.n, g.reworkShare.reason, g.aiCoauthoredShare.n]).toEqual([null, 1, "not-captured", 1]);
     expect(g.switchesPerWeek.value).toBe(1); // one switch with a detail in range, over Claude Code's one lifetime week in range
   });
 
@@ -409,8 +443,10 @@ describe("computeGlobals", () => {
       sess("k", { parentId: "a", origin: "subagent", agentType: keyedHash(new Uint8Array(32), "my-agent"), start: T0 - 10 * HOUR, end: T0 + MIN }),
       tool("k", childTs), config("agent", "my-agent"),
     ];
-    expect(globalsOf(evs(T0 - 10 * HOUR + SEC), { exclude: { from: T0 } }).g.artifacts.n).toBe(0);
-    expect(globalsOf(evs(T0 + 30 * SEC), { exclude: { from: T0 } }).g.artifacts.n).toBe(1);
+    const cut = globalsOf(evs(T0 - 10 * HOUR + SEC), { exclude: { from: T0 } }).g;
+    expect([cut.artifacts.value, cut.evidence.artifacts]).toEqual([0, 0]);
+    const kept = globalsOf(evs(T0 + 30 * SEC), { exclude: { from: T0 } }).g;
+    expect([kept.artifacts.value, kept.evidence.artifacts]).toEqual([1, 1]);
   });
 
   test("artifacts: an undated uses counter still counts under a date range, from its config source, with no span", () => {
@@ -430,6 +466,19 @@ describe("computeGlobals", () => {
       sess("a"), prompt("a", T0), prompt(undefined, T0, { source: HIST, window: "lifetime" }),
       { k: "daily", tool: "claude-code", source: "claude-code.stats", day: "2026-10-01", zone: "local", unit: "prompts", count: 4 },
     ]).g.switchesPerWeek.sources).toEqual([HIST, "claude-code.stats"]);
+  });
+
+  test("artifacts: with a config source read, none in use is a measured 0; with none read, null (not-captured)", () => {
+    const read = { ...cov("claude-code", "claude-code.config", "lifetime"), status: "empty" as const };
+    const none = globalsOf([sess("a"), prompt("a", T0), read]).g.artifacts;
+    expect([none.value, none.n, none.reason, none.sources]).toEqual([0, 0, undefined, ["claude-code.config"]]);
+    const unused = globalsOf([sess("a"), prompt("a", T0), config("skill", "s1")]).g.artifacts;
+    expect([unused.value, unused.n, unused.reason]).toEqual([0, 0, undefined]);
+    const absent = { ...read, status: "absent" as const };
+    const notRead = globalsOf([sess("a"), prompt("a", T0), absent]).g.artifacts;
+    expect([notRead.value, notRead.reason]).toEqual([null, "not-captured"]);
+    const excluded = globalsOf([sess("a"), prompt("a", T0), read, { ...read, tool: "codex", source: "codex.config", status: "ok" }], { exclude: { tools: ["claude-code"] } }).g.artifacts;
+    expect([excluded.value, excluded.sources]).toEqual([0, ["codex.config"]]);
   });
 
   test("an empty scan gives null metrics and finite values", () => {

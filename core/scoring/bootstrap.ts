@@ -71,7 +71,6 @@ export function bootstrap(stats: readonly SessionStats[], g: Globals, ref: Refer
   if (!Number.isFinite(seed)) throw new RangeError("bootstrap: seed must be a finite number");
   const rng = mulberry32(seed);
 
-  // The point estimate's shrink factor r/(r+1), for the dimensions it scores.
   // The point estimate's shrink factor r/(r+1), z′ and displayed score, for the dimensions it scores.
   const shrink = new Map<DimensionId, number>();
   const pointZ = new Map<DimensionId, number>();

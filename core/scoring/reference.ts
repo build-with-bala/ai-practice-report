@@ -19,7 +19,8 @@ const deepFreeze = <T>(v: T): T => {
 // A JSON import, so a compiled binary carries the table (P3 pre-flight F17); frozen, since every caller shares it.
 const TABLES: Readonly<Record<ReferenceTable["version"], ReferenceTable>> = { v0: deepFreeze(V0 as ReferenceTable) };
 
-/** The pinned reference table (v0 is the only one). */
+/** The pinned reference table (v0 is the only one); an unknown version is a RangeError. */
 export function loadReference(v: ReferenceTable["version"] = "v0"): ReferenceTable {
+  if (!Object.hasOwn(TABLES, v)) throw new RangeError("loadReference: unknown reference table (the only one is v0)");
   return TABLES[v];
 }

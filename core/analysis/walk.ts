@@ -5,6 +5,7 @@ import type { Intent, Origin, Toolchain, ToolId } from "../model/ids";
 import type { EventStore } from "../model/store";
 import { langOfExt, toolchainMatches } from "../text/langs";
 import { dayKey } from "./activity";
+import { detailSourcesOf } from "./scope";
 import { childType, effortRank, modelTier, type ChildType } from "./tiers";
 import type { SessionRow, SessionTable } from "./types";
 
@@ -20,11 +21,13 @@ export type Hist = Record<number, number>;
  * - `turns`: typed turns (walk rule 3); `stickySum` = Σ s_t·log2(1 + A_t); `actions`: every action of the row and its
  *   descendants; `successRuns`: A_t of the turns with s_t = 1, capped at 1,000.
  * - VAE (rule 8): `gatedVae` = the row's tool reports check outcomes; `editTurns`, `editWeight` and `verifiedWeight` are
- *   0 when it does not.
+ *   0 when it does not. `uncheckedEditTurns`: the gated edit turns no recognised check verified; `uncheckedCommandTurns`:
+ *   those of them in which a command ran after the last edit that the command classifier gave no check kind (an action
+ *   of category shell, package or container with no checks).
  * - Closure (rule 9): `failingChecks`, `closedChecks`, `fixCycles` (the failures each closing pass closed, capped at 50).
  * - Steering (rules 10–12): `followUps` = typed turns that start no episode; `briefs`, `correctedBriefs`,
- *   `briefScoreSum`; `interrupts` (the person's, not proxy-timed) and `healthyInterrupts`; `workEpisodes` (episodes with
- *   an action) and `turnsPerWorkSum`; `queued` = `queue` markers.
+ *   `briefScoreSum`; `interrupts` (the person's, not proxy-timed) and `healthyInterrupts`; `workEpisodes` (the
+ *   instructions with an action, rule 12: `turnsPerWork`) and `turnsPerWorkSum`; `queued` = `queue` markers.
  * - Children (rule 13): fan-out — `children` and `finishedChildren` — counts the row's direct children only; deeper
  *   descendants feed `maxDepth` (0 without children) and A_t, never fan-out. `bgKnown` (background known), `bgChildren`
  *   (background), `childTypes` and `workflowRuns` (distinct workflow ids) take every descendant.
@@ -48,7 +51,7 @@ export interface SessionStats {
   id: string; tool: ToolId; source: string; origin: Origin; start: number; end: number; repoKey?: string; scripted: boolean;
   days: string[];
   turns: number; stickySum: number; actions: number; successRuns: Hist;
-  gatedVae: boolean; editTurns: number; editWeight: number; verifiedWeight: number;
+  gatedVae: boolean; editTurns: number; editWeight: number; verifiedWeight: number; uncheckedEditTurns: number; uncheckedCommandTurns: number;
   failingChecks: number; closedChecks: number; fixCycles: Hist;
   episodes: number; followUps: number; briefs: number; correctedBriefs: number; briefScoreSum: number;
   interrupts: number; healthyInterrupts: number; workEpisodes: number; turnsPerWorkSum: number; queued: number;
@@ -91,8 +94,14 @@ export function briefScore(f: PromptFeatures): number {
 }
 
 /**
+ * The one rule for a marker's time: a proxy-timed marker (`proxyTs`: a stand-in time, such as a file's modification
+ * time) places the marker, but never counts as activity or puts a row in scope.
+ */
+export const atRealTime = (m: MarkerEv): boolean => m.proxyTs !== true;
+
+/**
  * Whether a session row is in scope of the date range: it lies wholly inside the range, or it has an event inside it
- * (a tool call, usage, a marker of `markersOf`, a prompt or a turn). A row the range cuts with no event inside it is
+ * (a tool call, usage, a marker of `markersOf` at a real time, a prompt or a turn). A row the range cuts with no event inside it is
  * part of the excluded period and counts nowhere — in the walk's children, nor as artifact evidence.
  */
 export function inScope(r: SessionRow, t: SessionTable, store: EventStore, markersOf: (id: string) => readonly MarkerEv[]): boolean {
@@ -100,7 +109,7 @@ export function inScope(r: SessionRow, t: SessionTable, store: EventStore, marke
   if (r.start >= from && r.end <= to) return true;
   const inRange = (ts: number): boolean => ts >= from && ts <= to;
   return store.forSession(r.id, "tool").some((e) => inRange(e.ts)) || store.forSession(r.id, "usage").some((e) => inRange(e.ts))
-    || markersOf(r.id).length > 0 || store.forSession(r.id, "prompt").some((e) => inRange(e.ts))
+    || markersOf(r.id).some(atRealTime) || store.forSession(r.id, "prompt").some((e) => inRange(e.ts))
     || store.forSession(r.id, "turn").some((e) => inRange(e.ts));
 }
 
@@ -109,6 +118,10 @@ const ranCheck = (e: ToolEv): boolean => isAction(e) && e.checks !== undefined &
 /** A person's interrupt (detail `user`, `replaced` or none) at a real time. */
 const personInterrupt = (m: MarkerEv): boolean =>
   m.kind === "interrupt" && m.proxyTs === undefined && (m.detail === undefined || m.detail === "user" || m.detail === "replaced");
+/** Categories of a command line run in a shell, a package manager or a container. */
+const COMMAND_CATEGORIES: ReadonlySet<ToolEv["category"]> = new Set<ToolEv["category"]>(["shell", "package", "container"]);
+/** A command that ran and that the classifier gave no check kind. */
+const unrecognisedCommand = (e: ToolEv): boolean => isAction(e) && COMMAND_CATEGORIES.has(e.category) && (e.checks === undefined || e.checks.length === 0);
 /** Two checks' toolchains match when either is unknown or `any`, or they are equal. */
 const chainsMatch = (a: Toolchain | undefined, b: Toolchain | undefined): boolean => a === undefined || b === undefined || a === "any" || b === "any" || a === b;
 const linesOf = (e: ToolEv): number => (e.linesAdded ?? 0) + (e.linesRemoved ?? 0);
@@ -152,8 +165,7 @@ interface RepoIndex { identity: boolean; commitTs: number[] }
  * Markers come only from sources that report a detail coverage, except `clear` markers (rule 7), whatever their source.
  */
 export function buildSessionStats(t: SessionTable, store: EventStore, repos: RepoSignals, o: { timeZone: string }): SessionStats[] {
-  const detailSources = new Set<string>();
-  for (const c of store.all("coverage")) if (c.window === "detail") detailSources.add(c.source);
+  const detailSources = detailSourcesOf(store.all("coverage"));
   const gated = new Set<ToolId>(t.capabilities.outcomes);
   const { from, to } = t.scope;
   const inRange = (ts: number): boolean => ts >= from && ts <= to;
@@ -254,7 +266,7 @@ function walkRow(row: SessionRow, t: SessionTable, store: EventStore, cx: WalkCt
   const s: SessionStats = {
     id: row.id, tool: row.tool, source: row.source, origin: row.origin, start, end, scripted,
     days: [], turns: 0, stickySum: 0, actions: actPrefix[n]!, successRuns: {},
-    gatedVae: cx.gated.has(row.tool), editTurns: 0, editWeight: 0, verifiedWeight: 0,
+    gatedVae: cx.gated.has(row.tool), editTurns: 0, editWeight: 0, verifiedWeight: 0, uncheckedEditTurns: 0, uncheckedCommandTurns: 0,
     failingChecks: 0, closedChecks: 0, fixCycles: {},
     episodes: 0, followUps: 0, briefs: 0, correctedBriefs: 0, briefScoreSum: 0,
     interrupts: 0, healthyInterrupts: 0, workEpisodes: 0, turnsPerWorkSum: 0, queued: 0,
@@ -287,7 +299,8 @@ function walkRow(row: SessionRow, t: SessionTable, store: EventStore, cx: WalkCt
   // totals carry no time: a row the date range cuts gives no cost, rather than the cost of its excluded part too
   const whole = row.start >= t.scope.from && row.end <= t.scope.to;
   for (const tot of whole ? store.forSession(row.id, "totals") : []) {
-    if (tot.usd !== undefined && !s.usdKnown) { s.usd = tot.usd; s.usdKnown = true; }
+    // a running total: the largest is the session's, whatever order the reports arrived in
+    if (tot.usd !== undefined && Number.isFinite(tot.usd) && (!s.usdKnown || tot.usd > s.usd)) { s.usd = tot.usd; s.usdKnown = true; }
   }
   const buckets = new Set<number>();
   for (const e of seq) {
@@ -312,7 +325,7 @@ function walkRow(row: SessionRow, t: SessionTable, store: EventStore, cx: WalkCt
       const own = store.forSession(id, "tool").filter((e) => inRange(e.ts));
       const usage = store.forSession(id, "usage").filter((u) => inRange(u.ts));
       const marks = cx.markersOf(id);
-      const active = own.length > 0 || usage.length > 0 || marks.length > 0 || inScope(c, t, store, cx.markersOf);
+      const active = own.length > 0 || usage.length > 0 || marks.some(atRealTime) || inScope(c, t, store, cx.markersOf);
       nodes.push({ c, own, usage, marks, active });
       for (const g of c.children) stack.push(g);
     }
@@ -480,9 +493,17 @@ function walkRow(row: SessionRow, t: SessionTable, store: EventStore, cx: WalkCt
     const weight = Math.log2(2 + lines);
     s.editTurns++;
     s.editWeight += weight;
+    let verified = false;
+    let unknownCommand = false;
     for (let k = lastEdit + 1; k < work.length; k++) {
       const e = work[k]!;
-      if (ranCheck(e) && toolchainMatches(e.toolchain, langs)) { s.verifiedWeight += weight; break; }
+      if (ranCheck(e) && toolchainMatches(e.toolchain, langs)) { verified = true; break; }
+      if (unrecognisedCommand(e)) unknownCommand = true;
+    }
+    if (verified) s.verifiedWeight += weight;
+    else {
+      s.uncheckedEditTurns++;
+      if (unknownCommand) s.uncheckedCommandTurns++;
     }
   }
 
@@ -522,7 +543,7 @@ function walkRow(row: SessionRow, t: SessionTable, store: EventStore, cx: WalkCt
     s.healthyInterrupts++;
   }
 
-  // per episode: briefs (11), work per turn (12), closure (9), hygiene (14), tiers (15), delivery (17)
+  // per episode: briefs (11), turns per work over its instructions (12), closure (9), hygiene (14), tiers (15), delivery (17)
   const single = row.models.length === 1 ? row.models[0] : undefined;
   const repo = row.repoKey === undefined ? undefined : cx.repoIndex.get(row.repoKey);
   const inRepo = repo?.identity === true;
@@ -554,10 +575,7 @@ function walkRow(row: SessionRow, t: SessionTable, store: EventStore, cx: WalkCt
     }
     best ??= tierValue(single, row.effort); // TurnEvs that give no tier and effort: the row's single model and its effort
     if (best !== undefined) s.tierPairs.push(best, Math.log2(1 + actions));
-    if (actions > 0) {
-      s.workEpisodes++;
-      s.turnsPerWorkSum += (ep.to - ep.from) / Math.log2(2 + actions);
-    }
+    turnsPerWork(turns, ep, s);
     closure(work.sort(byTs), s);
     if (!isEdit) continue;
     s.editEpisodes++;
@@ -571,6 +589,28 @@ function walkRow(row: SessionRow, t: SessionTable, store: EventStore, cx: WalkCt
     if (inWindow(repo!.commitTs) || inWindow(deliveryTs)) s.landedEpisodes++;
   }
   return s;
+}
+
+/**
+ * Rule 12, per instruction: within an episode, an instruction starts at its first typed turn and at each later typed
+ * turn whose intent is a brief intent (spec, question); the typed turns after it, up to the next instruction, are its
+ * follow-ups. Slash-command turns are no turns of it (their actions are its work). Each instruction with an action and
+ * a turn adds turns / log2(2 + actions): the steering an instruction needed for the work it set off, whatever the
+ * length of the sitting. `workEpisodes` counts those instructions.
+ */
+function turnsPerWork(turns: readonly Turn[], ep: { from: number; to: number }, s: SessionStats): void {
+  let n = 0;
+  let actions = 0;
+  const close = (): void => {
+    if (n > 0 && actions > 0) { s.workEpisodes++; s.turnsPerWorkSum += n / Math.log2(2 + actions); }
+  };
+  for (let i = ep.from; i < ep.to; i++) {
+    const tu = turns[i]!;
+    if (i === ep.from || BRIEF_INTENTS.has(tu.p.intent)) { close(); n = 0; actions = 0; }
+    if (tu.p.intent !== "command") n++;
+    actions += tu.a;
+  }
+  close();
 }
 
 /** 10·tier + effort rank, when both are known. */
