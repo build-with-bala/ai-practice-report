@@ -82,6 +82,11 @@ const unverifiedIds: { readonly [R in Reason]?: Ask } = {
       : `${digits(u)} server-issued ${plural(u, "id does", "ids do")} not start the way the service's ids do, so the ids could not be checked against their times. Were some sessions run through another provider or a gateway?`;
   },
   "scheme-changed": () => "The server-issued ids do not follow one line in time: their encoding seems to have changed, so they could not be checked against their times. Did the tool, the provider or a gateway change during this history?",
+  "foreign-ids": (v) => {
+    const f = num(v, "foreign");
+    return f === undefined ? undefined
+      : `${digits(f)} server-issued ${plural(f, "id carries a value that fits", "ids carry values that fit")} no plausible time on the service's time line, so ${plural(f, "it", "they")} could not be checked against ${plural(f, "its time", "their times")}. Were some sessions run through another provider or a gateway that issues its own ids?`;
+  },
   degenerate: () => "All server-issued ids, or all their recorded times, are the same, so their order could not be checked. Were these ids or times copied or rewritten?",
 };
 

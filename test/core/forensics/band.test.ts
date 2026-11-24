@@ -357,6 +357,8 @@ describe("wording: every reason and question the forensic checks produce", () =>
     ["m1", "m2", "m3"].map((id) => sess(id, "claude-code", T0, { models: ["model-x"] })),
     // ids from another provider: more than 10% without the service's marker
     anchors().map((e, i) => (i % 6 === 0 ? { ...e, idTail: `zz${e.idTail.slice(2)}` } : e)),
+    // a gateway minting its own ids for a third of the sessions: unverified ids
+    scrambled(anchors(), 9).filter((_, i) => i % 3 === 0).concat(anchors().filter((_, i) => i % 3 !== 0)),
     // ids that grow while every recorded time is the same: their order cannot be ranked
     anchors().slice(0, 300).map((e) => ({ ...e, ts: T0 })),
     [
@@ -382,7 +384,7 @@ describe("wording: every reason and question the forensic checks produce", () =>
   test("the scenarios reach every question", () => {
     const asked = new Set(results.filter((c) => c.askAbout !== undefined).map((c) => `${c.id}:${c.reason}`));
     expect([...asked].sort()).toEqual([
-      "C1:malformed-ids", "C1:off-time", "C1:scheme-changed", "C1:unknown-marker", "C2:degenerate", "C2:out-of-order", "C2:scheme-changed",
+      "C1:malformed-ids", "C1:off-time", "C1:scheme-changed", "C1:unknown-marker", "C1:foreign-ids", "C2:degenerate", "C2:foreign-ids", "C2:out-of-order", "C2:scheme-changed",
       "C2:unknown-marker", "C9:long-before-release", "soft:missing-ids:missing-ids", "C3:history-mismatch", "C3:missing-stats-days", "C4:no-match",
       "C4:several-accounts", "C5:changed-after-write", "C5:file-times", "C5:restore-cluster", "C6:missing-thread-rows", "C7:time-zone-change",
       "C7:uuid-after-name", "C8:ledger-contradictions", "C9:before-release", "soft:new-config:new-config",
