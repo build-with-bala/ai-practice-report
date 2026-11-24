@@ -289,9 +289,9 @@ class TranscriptReader {
     let p = id === undefined ? undefined : this.messages.get(id);
     if (!p) {
       p = { ts, model, inTok: 0, outTok: 0, cacheR: 0, cacheW: 0, seen: false };
-      if (id?.startsWith("msg_") && id.length > 4) this.out({ k: "anchor", tool: TOOL, source: TRANSCRIPTS_SOURCE, kind: "cc-msg", ts, idTail: id.slice(4) });
+      if (id?.startsWith("msg_") && id.length > 4) this.out({ k: "anchor", tool: TOOL, source: TRANSCRIPTS_SOURCE, kind: "cc-msg", ts, idTail: id.slice(4), sessionId: this.spec.sessionId });
       const req = str(v.requestId);
-      if (req?.startsWith("req_") && req.length > 4) this.out({ k: "anchor", tool: TOOL, source: TRANSCRIPTS_SOURCE, kind: "cc-req", ts, idTail: req.slice(4) });
+      if (req?.startsWith("req_") && req.length > 4) this.out({ k: "anchor", tool: TOOL, source: TRANSCRIPTS_SOURCE, kind: "cc-req", ts, idTail: req.slice(4), sessionId: this.spec.sessionId });
       if (id !== undefined) {
         this.messages.set(id, p);
         if (this.messages.size > MESSAGE_WINDOW) {
@@ -475,7 +475,8 @@ class TranscriptReader {
       this.tally.span(this.end);
     }
     if (stat) {
-      const f: FileFactEv = { k: "file", tool: TOOL, source: TRANSCRIPTS_SOURCE, pathHash: this.ctx.hash(this.spec.file), bytes: stat.size, mtime: Math.floor(stat.mtimeMs) };
+      const f: FileFactEv = { k: "file", tool: TOOL, source: TRANSCRIPTS_SOURCE, pathHash: this.ctx.hash(this.spec.file), bytes: stat.size,
+        mtime: Math.floor(stat.mtimeMs), sessionId: this.spec.sessionId };
       if (stat.birthtimeMs > 0) f.birth = Math.floor(stat.birthtimeMs);
       if (stat.ctimeMs > 0) f.ctime = Math.floor(stat.ctimeMs);
       if (this.start !== undefined) f.firstTs = this.start;

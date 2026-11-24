@@ -7,6 +7,7 @@ import type { ConfigEv, IdentityEv, MarkerEv } from "../../model/events";
 import { listDir, readSidecar, Tally } from "../common/coverage";
 import { isObj, num, type Obj } from "../common/guards";
 import { parseHooks } from "../common/hooks";
+import { projectKeyOf } from "../common/project";
 import type { Candidate, ScanCtx } from "../types";
 
 export const CONFIG_SOURCE = "claude-code.config";
@@ -17,7 +18,12 @@ const GLOBAL_CONFIG_MAX = 64 * 1024 * 1024;
 type Out = (ev: ConfigEv | MarkerEv | IdentityEv) => void;
 interface Usage { uses: number; lastUsed?: number }
 /** The allowlisted usage tables of the global config. */
-interface GlobalUsage { skills: Map<string, Usage>; plugins: Map<string, number>; mcpServers: Set<string>; firstStart?: number }
+/**
+ * `mcpServers`: the user-level server names; `projectServers`: per project key (the keyed hash of the project's folder,
+ * the key its sessions carry), the names that project's entry lists.
+ */
+interface GlobalUsage { skills: Map<string, Usage>; plugins: Map<string, number>; mcpServers: Set<string>;
+  projectServers: Map<string, Set<string>>; firstStart?: number }
 
 const isNum = (x: unknown): x is number => typeof x === "number" && Number.isFinite(x);
 const isStr = (x: unknown): x is string => typeof x === "string";
@@ -81,7 +87,8 @@ function usageTable(table: Obj | undefined, label: string, tally: Tally, ctx: Sc
 /**
  * The global config is a mixed file (account, MCP definitions with secrets, project paths): it is parsed in memory and
  * only these fields are read — oauthAccount.accountUuid, promptQueueUseCount, lastPlanModeUse, firstStartTime,
- * skillUsage, pluginUsage, and MCP server names (the keys of `mcpServers`, globally and per project).
+ * skillUsage, pluginUsage, and MCP server names (the keys of `mcpServers`, globally and per project; a project's
+ * entries carry its project key, the project's path itself is never kept).
  */
 function readGlobalConfig(file: string, ctx: ScanCtx, tally: Tally, out: Out): GlobalUsage | undefined {
   const r = readJsonSmallResult(file, GLOBAL_CONFIG_MAX);
@@ -114,11 +121,18 @@ function readGlobalConfig(file: string, ctx: ScanCtx, tally: Tally, out: Out): G
   const plugins = new Map<string, number>();
   for (const [id, u] of usageTable(field(v, "pluginUsage", isObj, tally), "pluginUsage", tally, ctx)) plugins.set(id, u.uses);
   const mcpServers = new Set(Object.keys(field(v, "mcpServers", isObj, tally) ?? {}));
-  for (const project of Object.values(field(v, "projects", isObj, tally) ?? {})) { // project paths (the keys) are never read
+  const projectServers = new Map<string, Set<string>>();
+  // a project's path (its key in `projects`) is read in memory only, to give its entries the project's key; it is never kept
+  for (const [folder, project] of Object.entries(field(v, "projects", isObj, tally) ?? {})) {
     if (!isObj(project)) continue;
-    for (const name of Object.keys(field(project, "mcpServers", isObj, tally, "projects.mcpServers") ?? {})) mcpServers.add(name);
+    const names = Object.keys(field(project, "mcpServers", isObj, tally, "projects.mcpServers") ?? {});
+    if (names.length === 0 || folder === "") continue;
+    const key = projectKeyOf(ctx, folder);
+    const set = projectServers.get(key) ?? new Set<string>();
+    for (const name of names) set.add(name);
+    projectServers.set(key, set);
   }
-  const g: GlobalUsage = { skills: usageTable(field(v, "skillUsage", isObj, tally), "skillUsage", tally, ctx), plugins, mcpServers };
+  const g: GlobalUsage = { skills: usageTable(field(v, "skillUsage", isObj, tally), "skillUsage", tally, ctx), plugins, mcpServers, projectServers };
   const first = toEpochMs(field(v, "firstStartTime", isStr, tally), ctx.now);
   if (first !== undefined) g.firstStart = first;
   return g;
@@ -236,6 +250,13 @@ export async function scanConfig(c: Candidate, ctx: ScanCtx): Promise<void> {
   artifacts(c, usage, tally, out, ctx.now);
   plugins(c, usage, tally, out, ctx.now);
   for (const name of [...(usage?.mcpServers ?? [])].sort(byName)) out(cfg("mcp-server", "unknown", name));
+  for (const [key, names] of [...(usage?.projectServers ?? [])].sort(([a], [b]) => byName(a, b))) {
+    for (const name of [...names].sort(byName)) {
+      const ev = cfg("mcp-server", "unknown", name);
+      ev.projectKey = key;
+      out(ev);
+    }
+  }
   memoryFiles(c.root, tally, out);
   const cov = tally.coverage();
   if (usage?.firstStart !== undefined) cov.from = usage.firstStart;

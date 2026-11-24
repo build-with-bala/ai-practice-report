@@ -260,13 +260,14 @@ CLI's EventMsg tags (`exec_command_end`, `mcp_tool_call_end`, `collab_*`, `realt
 - **RateLimitEv** per window (`primary`, `secondary`) present with a numeric `used_percent`: `windowMinutes`,
   `resetsAt` (`resets_at` in s or ms, else line time + `resets_in_seconds`), `bucket` = the keyed hash of `limit_id`
   (a server-issued id, never kept raw; absent without one); a snapshot equal to the previous one of its bucket and
-  window in the same rollout is not repeated. Rate limits belong to the account: the event has no session.
+  window in the same rollout is not repeated. Rate limits belong to the account, but the reading names the rollout it
+  came from (`sessionId`), so a session left out of the analysis takes its readings with it.
 - **MarkerEv**: `interrupt` per `turn_aborted`, `detail` by its `reason` — the person's: `interrupted` → `user`,
   `replaced` → `replaced` (new input replaced the turn); the tool's own: `review_ended` → `review-ended`,
   `budget_limited` → `budget-limited`; any other reason, or none → `other`. `denial` per declined item.
   `compact-auto` per `compacted` line.
 - **RolloutFactEv** per fully read rollout: `threadId` = the session id, `uuidTs` = the thread id's UUIDv7 time,
-  `fileTs` = the file name's local time; **FileFactEv** likewise.
+  `fileTs` = the file name's local time; **FileFactEv** likewise, naming its session (`sessionId`).
 - **CoverageEv**: `files`/`bytes` of fully read rollouts, `records` = parsed lines; skipped `sniffed`, `oversize`,
   `parse`, `io-error`, `duplicate`, `foreign-item`, `exec-interaction`, `bad-record` (also logged once per root as
   `warn cx.bad-record`), `bad-ts` (a line whose time is well-formed but outside the plausible range, counted once and

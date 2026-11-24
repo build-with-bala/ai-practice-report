@@ -190,10 +190,10 @@ manual), preTokens, postTokens, durationMs, preservedSegment, …}`, `logicalPar
   says `interrupted: true`; such a call has no `ok` and no `exit`. Else `ok` = not `is_error`, and `exit` =
   `toolUseResult.exitCode`, else — for a failing Bash/PowerShell call — the `<n>` of its reply's leading `Exit code <n>`.
 - `UsageEv` and `AnchorEv` (`cc-msg`, `cc-req`) once per `message.id`, usage fields taking the maximum over the
-  message's block records.
+  message's block records; each `AnchorEv` names its session (`sessionId`).
 - `TurnEv` per `turn_duration` (`effort` outside `low|medium|high|xhigh|max` becomes `other`); `TotalsEv` from the
   last `cost-state` and from each workflow summary (`claude-code:wf:<workflowId>`); `IdentityEv` per distinct
-  `session-owner.accountUuid`; `FileFactEv` per fully read transcript.
+  `session-owner.accountUuid`; `FileFactEv` per fully read transcript, naming its session (`sessionId`).
 - `MarkerEv`: `interrupt` (`detail` `user` for the interrupt text; `stopped-by-user` for meta `stoppedByUser`, at the
   session's last record with `proxyTs: true` — the meta says that the person stopped the subagent, not when),
   `compact-auto`/`compact-manual`, `permission-mode` (changes only), `pr-link` (one per PR, `detail` = keyed hash of the
@@ -266,12 +266,14 @@ referenced from it and kept in `pastedContents`), `pastedContents` (object keyed
 ms), `project` (string — the working directory), `sessionId` (string; optional in the CLI's schema, so older lines may
 lack it). Local commands (`/model …`, `/effort …`, `/compact`) are recorded like any other prompt.
 
-Read: `display` (in memory only), `timestamp`, `sessionId`; `pastedContents` is only tested for having entries.
-Never read: the values inside `pastedContents`, `project`.
+Read: `display` (in memory only), `timestamp`, `sessionId`, `project` (in memory only, for its project key);
+`pastedContents` is only tested for having entries. Never read: the values inside `pastedContents`.
 
 - `PromptEv` per line: window `lifetime`, origin `human`, `sessionId` = `claude-code:<id>` (the id verbatim when
   UUID-shaped, else its keyed hash; omitted when absent or empty), intent and features from the text, `textHash` = keyed
-  hash of the trimmed text, `hasPaste` = `pastedContents` has entries. `isTaskStart` = first prompt of the session, or
+  hash of the trimmed text, `hasPaste` = `pastedContents` has entries, `projectKey` = the keyed hash of `project`
+  (the key a transcript session of that folder carries in `SessionEv.projectKey`; the folder is not registered for
+  repo signals, which are read only for session folders; absent without `project`). `isTaskStart` = first prompt of the session, or
   ≥ 30 min after that session's previous prompt; `simToPrev` compares with that session's previous prompt (lines of
   concurrent sessions interleave; state is kept for the 256 most recent sessions).
 - `MarkerEv` for local commands, with the prompt's `ts` and `sessionId` (argument text is never kept):
@@ -335,8 +337,8 @@ the parse tree:
 - `pluginUsage` {`<plugin id>`: {`usageCount`, `lastUsedAt`, `lastUsedNumStartups`}} — entries start at
   `usageCount` 0 when a plugin is installed, and `lastUsedAt` is also refreshed without use, so only `usageCount` is read.
 - `mcpServers` {`<name>`: {…}} and `projects` {`<path>`: {`mcpServers` {`<name>`: {…}}, `allowedTools`, …}} — only
-  the server names (the keys) are read; never the definitions (`type`, `command`, `args`, `env`, `url`, `headers`) and
-  never the project paths.
+  the server names (the keys) are read; never the definitions (`type`, `command`, `args`, `env`, `url`, `headers`); a
+  project's path is read in memory only, for its project key, and never kept.
 
 Drift: an allowlisted field present with another JSON type → `<field>:type` (`promptQueueUseCount`, `lastPlanModeUse`,
 `firstStartTime`, `oauthAccount`, `skillUsage`, `pluginUsage`, `mcpServers`, `projects`, `projects.mcpServers`); a
@@ -371,7 +373,10 @@ allowlist; it is never exported raw.
   plugin cache is there: `<root>/plugins/cache/<marketplace>/<plugin>/` for the id `<plugin>@<marketplace>`, each part
   a single path segment (the CLI installs a plugin's versions below it; the layout is not confirmed with the probe,
   which reads files, not folders). None on usage-only names.
-- `mcp-server`: each distinct server name, global or per project, `unknown`.
+- `mcp-server`: each distinct server name, `unknown`: once for the global table, and once per project whose entry
+  lists it, with that project's `projectKey` (the keyed hash of the project's path, the key its sessions carry; the
+  path is read in memory only). A memory file has no project key: its folder's name is derived from the project's
+  path and cannot be turned back into it.
 - `feature` `hooks-disabled`, `authored`, when settings.json has `disableAllHooks: true`: then no `hook` events, and
   each hook entry left out is skipped `hooks-disabled`.
 - `hook`: one per hook entry, `authored`; `name` = the event key when it is shaped like a CLI event name

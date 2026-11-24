@@ -8,7 +8,7 @@ import { ccConfig, ccHistory, ccStats } from "../../../core/sources/claude-code"
 import { commandMarker } from "../../../core/sources/claude-code/history";
 import { registry } from "../../../core/sources/registry";
 import type { SourcePlugin } from "../../../core/sources/types";
-import { keyedHash } from "../../../core/text/hash";
+import { keyedHash, normalizePath } from "../../../core/text/hash";
 import { CANARY, expectNoCanaries } from "../../kit/canary";
 import { fakeHome, type FakeHome } from "../../kit/home";
 import { buildCcLifetime, CC_H1, CC_H2, CC_HAIKU, CC_OPUS, ccHistoryLine, ccSid, nzdt } from "../../fixtures/claude-code";
@@ -415,7 +415,7 @@ describe("claude-code config: mapping", () => {
     ]);
   });
 
-  test("MCP server names come from the global table and every project; definitions and project paths are never read", async () => {
+  test("MCP server names come from the global table and every project, a project's with its project key; definitions and project paths are never read", async () => {
     mkdirSync(path.join(h.env.home, ".claude"), { recursive: true });
     claudeJson({
       mcpServers: { [CANARY.mcp]: { command: CANARY.path, args: [CANARY.secret], env: { TOKEN: CANARY.token } } },
@@ -427,7 +427,8 @@ describe("claude-code config: mapping", () => {
       oauthAccount: { emailAddress: CANARY.email, organizationUuid: "org-1" },
     });
     const r = await run([ccConfig]);
-    expect(configs(r, "mcp-server").map((c) => c.name)).toEqual([CANARY.mcp, "proj-only"]);
+    const key = keyedHash(r.salt, normalizePath(CANARY.path));
+    expect(configs(r, "mcp-server").map((c) => [c.name, c.projectKey])).toEqual([[CANARY.mcp, undefined], [CANARY.mcp, key], ["proj-only", key]]);
     expect(r.store.all("identity")).toEqual([]);                        // no accountUuid: nothing else in oauthAccount is used
     expectNoCanaries([r.store, r.coverage], { allow: ["mcp"] });
   });
@@ -619,5 +620,27 @@ describe("claude-code lifetime: plugins and coverage", () => {
     expect(r.coverage.map((c) => [c.source, c.status])).toEqual([
       ["claude-code.history", "absent"], ["claude-code.stats", "absent"], ["claude-code.config", "absent"],
     ]);
+  });
+});
+
+describe("claude-code: events say which project or session they belong to", () => {
+  test("a history prompt carries the project key a session of the same folder carries; the folder itself never", async () => {
+    const { CcTranscript, slug } = await import("../../fixtures/claude-code");
+    const { ccTranscripts } = await import("../../../core/sources/claude-code");
+    const sid = ccSid("PK");
+    new CcTranscript(sid, { cwd: CANARY.path }).prompt("Fix the importer").text("Done.").write(h, `.claude/projects/${slug(CANARY.path)}/${sid}.jsonl`);
+    h.writeJsonl(".claude/history.jsonl", [ccHistoryLine("Fix the importer", Date.now() - 60_000, sid), { display: "No folder", timestamp: Date.now() - 30_000 }]);
+    const r = await run([ccHistory, ccTranscripts]);
+    const session = r.store.all("session")[0]!;
+    const prompts = r.store.all("prompt").filter((p) => p.source === ccHistory.id);
+    expect(session.projectKey).toBeDefined();
+    expect(prompts.map((p) => p.projectKey)).toEqual([session.projectKey, undefined]);
+    expect(session.projectKey).toBe(keyedHash(r.salt, normalizePath(CANARY.path)));
+    // anchors and file facts name their session
+    const anchors = r.store.all("anchor");
+    expect(anchors.length).toBeGreaterThan(0);
+    expect(new Set(anchors.map((a) => a.sessionId))).toEqual(new Set([session.id]));
+    expect(r.store.all("file").map((f) => f.sessionId)).toEqual([session.id]);
+    expectNoCanaries([r.store, r.coverage], { allow: [] });
   });
 });

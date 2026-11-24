@@ -44,11 +44,11 @@ export const ccHistory: SourcePlugin = {
   windows: ["lifetime"],
   primary: { lifetime: ["prompt"] },
   describe: {
-    reads: ["<claude>/history.jsonl — one line per prompt typed at the CLI prompt, kept for months: display, timestamp, sessionId"],
+    reads: ["<claude>/history.jsonl — one line per prompt typed at the CLI prompt, kept for months: display, timestamp, sessionId, and project only as its keyed hash (the project key)"],
     neverReads: [
       "prompt text (display) is parsed in memory for intent, features and a keyed hash, and never kept",
       "pastedContents is only tested for having entries; pasted text, images and their hashes are never read",
-      "project (the working directory of each prompt)",
+      "project (the working directory of each prompt) is never kept: only its keyed hash, the key its sessions carry",
     ],
   },
   locate: claudeRoots,
@@ -87,7 +87,7 @@ export const ccConfig: SourcePlugin = {
     ],
     neverReads: [
       "~/.claude.json is parsed in memory; everything outside the fields above is dropped, including oauthAccount.emailAddress and the other account fields",
-      "MCP server definitions (command, args, env, url, headers) and project paths",
+      "MCP server definitions (command, args, env, url, headers); project paths are never kept, only their keyed hashes on per-project servers",
       "hook command text, skill, command, agent and memory file contents",
     ],
   },

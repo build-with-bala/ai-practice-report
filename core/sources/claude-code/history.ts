@@ -5,6 +5,7 @@ import { sid, type MarkerKind } from "../../model/ids";
 import { Tally } from "../common/coverage";
 import { idPart, isObj, UUID } from "../common/guards";
 import { PromptLog } from "../common/history";
+import { projectKeyOf } from "../common/project";
 import { streamJsonlFile } from "../common/stream";
 import type { Candidate, ScanCtx } from "../types";
 
@@ -42,7 +43,8 @@ export function commandMarker(text: string): { kind: MarkerKind; detail?: string
 }
 
 /**
- * One line: `display`, `timestamp`, `sessionId`, and whether `pastedContents` has entries (its values are never read) →
+ * One line: `display`, `timestamp`, `sessionId`, `project` (as its project key only), and whether `pastedContents` has
+ * entries (its values are never read) →
  * a prompt (the prompt log), and a marker when it is a local command.
  */
 function line(v: unknown, ctx: ScanCtx, tally: Tally, log: PromptLog): void {
@@ -55,7 +57,9 @@ function line(v: unknown, ctx: ScanCtx, tally: Tally, log: PromptLog): void {
   if (text.trim() === "") return tally.skip("empty");
   const sessionId = typeof v.sessionId === "string" && v.sessionId !== "" ? sid(TOOL, idPart(v.sessionId, UUID, ctx)) : undefined;
   const hasPaste = isObj(v.pastedContents) && Object.keys(v.pastedContents).length > 0;
-  log.add({ text, ts, sessionId, hasPaste });
+  // the folder the prompt was typed in, kept only as its project key (the key its sessions carry), never raw
+  const projectKey = typeof v.project === "string" && v.project !== "" ? projectKeyOf(ctx, v.project) : undefined;
+  log.add({ text, ts, sessionId, hasPaste, projectKey });
   const marker = commandMarker(text);
   if (!marker) return;
   const m: MarkerEv = { k: "marker", tool: TOOL, source: HISTORY_SOURCE, ts, kind: marker.kind };

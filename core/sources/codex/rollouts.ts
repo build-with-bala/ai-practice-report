@@ -565,7 +565,7 @@ class RolloutReader {
   private rateLimit(bucket: string | undefined, window: "primary" | "secondary", x: unknown, ts: number, emit: boolean): void {
     const used = isObj(x) ? num(x.used_percent) : undefined;
     if (!isObj(x) || used === undefined) return;
-    const ev: RateLimitEv = { k: "ratelimit", tool: TOOL, source: ROLLOUTS_SOURCE, ts, window, usedPercent: used };
+    const ev: RateLimitEv = { k: "ratelimit", tool: TOOL, source: ROLLOUTS_SOURCE, ts, window, usedPercent: used, sessionId: this.sessionId };
     const minutes = num(x.window_minutes);
     if (minutes !== undefined) ev.windowMinutes = minutes;
     const resets = resetTime(x, ts);
@@ -616,7 +616,8 @@ class RolloutReader {
     if (uuidTs !== undefined) fact.uuidTs = uuidTs;
     if (this.fileTs !== undefined) fact.fileTs = this.fileTs;
     this.out(fact);
-    const f: FileFactEv = { k: "file", tool: TOOL, source: ROLLOUTS_SOURCE, pathHash: this.ctx.hash(this.file), bytes: stat.size, mtime: Math.floor(stat.mtimeMs) };
+    const f: FileFactEv = { k: "file", tool: TOOL, source: ROLLOUTS_SOURCE, pathHash: this.ctx.hash(this.file), bytes: stat.size, mtime: Math.floor(stat.mtimeMs),
+      sessionId: this.sessionId };
     if (stat.birthtimeMs > 0) f.birth = Math.floor(stat.birthtimeMs);
     if (stat.ctimeMs > 0) f.ctime = Math.floor(stat.ctimeMs);
     if (this.start !== undefined) f.firstTs = this.start;

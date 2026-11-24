@@ -109,6 +109,10 @@ describe("codex rollouts: Task 11 scenario", () => {
     expect(r.store.forSession(r3, "usage")).toHaveLength(1);
     // rate limits belong to the account, not a session: R1's, then R3's own (its copied 40 % is skipped), then R2's
     expect(r.store.all("ratelimit").map((x) => [x.window, x.usedPercent])).toEqual([["primary", 10], ["secondary", 2], ["primary", 11], ["primary", 41], ["primary", 20]]);
+    // each reading, and each file fact, still names the rollout's session (the scope rules treat it like its session)
+    const sessions = new Set(r.store.all("session").map((x) => x.id));
+    for (const x of [...r.store.all("ratelimit"), ...r.store.all("file")]) expect(sessions.has(x.sessionId!)).toBe(true);
+    expect(r.store.forSession(r3, "ratelimit").map((x) => x.usedPercent)).toEqual([41]);
   });
 
   test("turns, usage, rate limits and markers of the cli rollout", async () => {
