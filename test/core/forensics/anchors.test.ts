@@ -394,8 +394,10 @@ describe("checkAnchors: a block moved in time is no change of encoding", () => {
       });
     }
   }
-  test("ids that carry on from the last old id at four times the slope imply times after the scan's end: another encoding", () => {
-    expect(anchorsOf(scanResultOf(encoded(400, 280, "slope"))).map((c) => c.reason)).toEqual(["scheme-changed", "scheme-changed"]);
+  test("known limit: ids that carry on from the last old id at four times the slope fail C1: their first ids imply plausible times, and the off verdict comes first", () => {
+    const [c1] = anchorsOf(scanResultOf(encoded(400, 280, "slope")));
+    expect([c1.status, c1.reason]).toEqual(["fail", "off-time"]);
+    expect(c1.values.foreign as number).toBeGreaterThan(0);
   });
 
   test("known limit: 300 ids invented with another slope, below the genuine range, 120 days earlier, pass as an older encoding", () => {
@@ -504,5 +506,76 @@ describe("checkAnchors: an id is evidence about time only if the time its value 
     expect(at(hist(N, parts, (_, ts) => ts))[0].status).toBe("pass");
     const [c1] = at(hist(N, parts, (i, ts) => (i >= 1_200 ? ts - 60 * DAY : ts)));
     expect([c1.status, c1.reason]).toEqual(["n/a", "scheme-changed"]);
+  });
+});
+
+describe("checkAnchors: foreign ids never hide a fail", () => {
+  const DAY = 86_400_000;
+  const YEAR = 365 * DAY;
+  const at = (evs: AnchorEv[], end = T0 + 3 * YEAR) => anchorsOf(scanResultOf(evs, { finishedAt: end }));
+  const START = T0 + 30 * DAY;
+  const N = 2_000;
+  const even = (i: number) => START + i * 30 * MIN;
+  function hist(retime: (i: number, ts: number) => number): AnchorEv[] {
+    const r = rng(41);
+    return Array.from({ length: N }, (_, i) => anchor(retime(i, even(i)), genuineTail(even(i), r)));
+  }
+  const caseA = () => hist((i, ts) => (i >= 0.8 * N ? ts - 120 * DAY : ts));
+  const case1 = () => hist((i, ts) => (i < 0.3 * N ? ts - 180 * DAY : ts));
+  /** `k` invented ids on a line of their own whose values imply times 5 years after their stated ones. */
+  const invented = (k: number) => {
+    const r = rng(42);
+    return Array.from({ length: k }, (_, i) => {
+      const ts = START + 10 * DAY + i * 20 * MIN;
+      return anchor(ts, `01${enc(BASE + BigInt(ts - T0 + 5 * YEAR) * SCALE, 12)}${randomB58(r, 10)}`);
+    });
+  };
+  /** `k` ids in the service's form, at random. */
+  const random = (k: number) => {
+    const r = rng(43);
+    return Array.from({ length: k }, () => anchor(START + Math.floor(r() * 40 * DAY), `01${randomB58(r, 22)}`));
+  };
+
+  test("case A with 20 invented ids on a line of their own fails C1, and carries the foreign count", () => {
+    const [c1] = at([...caseA(), ...invented(20)]);
+    expect([c1.status, c1.reason, c1.values.foreign]).toEqual(["fail", "off-time", 20]);
+  });
+  test("case (1) with 20 invented ids on a line of their own fails C1", () => {
+    expect(at([...case1(), ...invented(20)])[0].status).toBe("fail");
+  });
+  test("case A with 11% random ids in the service's form fails C1", () => {
+    const [c1] = at([...caseA(), ...random(250)]);
+    expect([c1.status, c1.reason, c1.values.foreign]).toEqual(["fail", "off-time", 250]);
+  });
+  test("the off share is taken over this encoding's ids: foreign ids cannot dilute it below 1%", () => {
+    const [c1] = at([...hist((i, ts) => (i >= N - 30 ? ts - 120 * DAY : ts)), ...random(1_500)]);   // 30 of 2,000 off: 1.5%
+    expect([c1.status, c1.reason, c1.values.offShare]).toEqual(["fail", "off-time", 0.015]);
+  });
+  test("a genuine history with the same foreign ids reads scheme-changed, or unverified, as before", () => {
+    expect(at([...hist((_, ts) => ts), ...invented(20)]).map((c) => c.reason)).toEqual(["scheme-changed", "scheme-changed"]);
+    expect(at([...hist((_, ts) => ts), ...random(250)]).map((c) => [c.status, c.reason])).toEqual([["n/a", "foreign-ids"], ["n/a", "foreign-ids"]]);
+    expect(at([...hist((_, ts) => ts), ...random(100)])[0].reason).toBe("foreign-ids");
+  });
+});
+
+describe("checkAnchors: C2 needs a day of ids to rank", () => {
+  const DAY = 86_400_000;
+  /** 200 ids minted every `step` ms, each record written 0 to 4 min late, at random. */
+  const burst = (step: number): AnchorEv[] => {
+    const r = rng(7), late = rng(8);
+    return Array.from({ length: 200 }, (_, i) => {
+      const mint = T0 + 30 * DAY + i * step;
+      return anchor(mint + Math.floor(late() * 4 * MIN), genuineTail(mint, r));
+    });
+  };
+  test("one dense burst (200 ids in 25 minutes, written up to 4 min late) is not applicable for C2; C1 passes", () => {
+    const [c1, c2] = anchorsOf(scanResultOf(burst(7_500)));
+    expect([c1.status, c2.status, c2.reason]).toEqual(["pass", "n/a", "too-few"]);
+  });
+  test("the same ids spread over three days with the same lateness pass C2; a real reordering over three days fails", () => {
+    const spread = burst(Math.floor((3 * DAY) / 200));
+    expect(anchorsOf(scanResultOf(spread))[1].status).toBe("pass");
+    const times = spread.map((e) => e.ts).reverse();
+    expect(anchorsOf(scanResultOf(spread.map((e, i) => ({ ...e, ts: times[i]! }))))[1].status).toBe("fail");
   });
 });

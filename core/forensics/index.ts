@@ -22,7 +22,9 @@ export type { CheckId, CheckResult, CheckStatus, CheckValues, ProvenanceKey, Rea
  * The integrity summary (spec §6.6). `band`: the verdict over every check (`bandOf`); `serverBacked`: the share of typed
  * turns from tools whose server-issued data checked out (display only: it never changes a score, an evidence minimum or
  * a confidence), null without typed turns. It is counted per tool: every typed turn of a tool whose server checks
- * passed counts, including turns of that tool's sessions that carry no server id themselves. `anchorable` /
+ * passed counts, including turns of that tool's sessions that carry no server id themselves. A tool whose server
+ * check carries a note (for example the note for unverified ids, `foreign-ids` or `malformed-ids`) still counts as
+ * backed: a note passes the ids that could be checked. `anchorable` /
  * `notAnchorable`: the tools in scope that do or do not record server-issued data (neutral, never a penalty);
  * `checks`: C1–C10, then the soft flags, always in that order.
  */
