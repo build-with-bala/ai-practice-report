@@ -19,7 +19,9 @@ export const q = (ident: string): string => `"${ident.replace(/"/g, '""')}"`;
  * store and its `-wal`), a locked store that is never copied: skipped `too-large`, coverage `note: "too-large"`, warn
  * `<logPrefix>.db-too-large`; a reader whose stores all fail keeps that reason (it is no error of the source). A store
  * that fails while it is read is an io-error (warn `<logPrefix>.db-unreadable`). True when its tables were listed. A
- * linked store counts the bytes of its target, the store's own file (links followed), not the link's.
+ * linked store counts the bytes of its target, the store's own file (links followed), not the link's. A busy store
+ * copied without its `-wal`, because that companion is a link (never followed), is read but skipped `linked-wal`: the
+ * rows that live only in the WAL are missing.
  */
 export async function readStore(file: string, ctx: ScanCtx, tally: Tally, logPrefix: string,
   body: (db: RoDb, tables: Set<string>) => void | Promise<void>): Promise<boolean> {
@@ -39,6 +41,8 @@ export async function readStore(file: string, ctx: ScanCtx, tally: Tally, logPre
   try {
     const tables = new Set(db.tables());
     listed = true;
+    // a private copy made without its linked -wal misses the rows that live only there
+    if (db.walSkipped) tally.skip("linked-wal");
     tally.files++;
     const st = statPath(file);
     tally.bytes += "stat" in st ? st.stat.size : 0;

@@ -144,7 +144,7 @@ function thread(r: Obj, ctx: ScanCtx, tally: Tally): void {
   if (start !== undefined) row.createdAt = start;
   ctx.emit(row);
   totals(r, id, ctx, tally);
-  if (start === undefined) return tally.skip("no-ts");
+  if (start === undefined) return tally.noTime(r.created_at_ms, r.created_at);
 
   const updated = toEpochMs(r.updated_at_ms, ctx.now) ?? toEpochMs(r.updated_at, ctx.now);
   const end = Math.max(start, updated ?? start);
@@ -211,7 +211,7 @@ function turn(r: Obj, ctx: ScanCtx, tally: Tally): void {
   const started = toEpochMs(r.started_at, ctx.now);
   const completed = toEpochMs(r.completed_at, ctx.now);
   const ts = completed ?? started;
-  if (ts === undefined) return tally.skip("no-ts");
+  if (ts === undefined) return tally.noTime(r.completed_at, r.started_at);
   const ev: TurnEv = { k: "turn", tool: TOOL, source: THREADS_SOURCE, ts, sessionId: cxThreadId(threadId, ctx), window: "lifetime", status };
   const duration = num(r.duration_ms);
   if (duration !== undefined && duration >= 0) ev.ms = duration;

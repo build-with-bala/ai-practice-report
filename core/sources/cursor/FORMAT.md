@@ -13,7 +13,8 @@ value types only, never values.
 **Zero-yield.** A coverage window that read records, or found files whose lines it could not use (skipped `parse` or
 `oversize`), but yielded none of its reader's primary events is drift `zero-yield` (set by the scan), except records
 skipped as `copied` or `empty`, and coverage stamped `aborted`, so a renamed field or a changed container never passes
-as a quiet store; files with no lines at all stay `empty`. Primary events: `cursor.ide` (`detail`) — a session, prompt
+as a quiet store; files with no lines at all stay `empty`; so does a
+file whose only unusable line is its last line with no line end (skipped `partial`: a record still being written). Primary events: `cursor.ide` (`detail`) — a session, prompt
 or tool call (its `lifetime` window is checked by its columns); `cursor.tracking` — a commit; `cursor.agent-cli` reads
 no records.
 

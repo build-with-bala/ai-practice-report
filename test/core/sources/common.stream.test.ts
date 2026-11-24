@@ -91,6 +91,7 @@ describe("streamJsonlFile", () => {
 
   test("a file written to while it is read: its stat is taken once the read reached its end, so its times follow its last write", async () => {
     const file = h.writeJsonl("h.jsonl", LINES);
+    const before = statSync(file).size;
     const later = new Date(Math.floor(statSync(file).mtimeMs / 1000) * 1000 + 3_600_000); // whole seconds: every file system keeps them
     const { res, tally } = await run(file, (v) => {
       if ((v as { n: number }).n !== 1) return;
@@ -99,7 +100,9 @@ describe("streamJsonlFile", () => {
     });
     expect(res.read).toBe(true);
     expect(res.stat!.mtimeMs).toBe(later.getTime());
-    expect([res.size, tally.bytes]).toEqual([statSync(file).size, statSync(file).size]);
+    expect(res.size).toBe(statSync(file).size);
+    // `bytes` is what was read: the file as it was, or with the appended line when the read reached it
+    expect([before, statSync(file).size]).toContain(tally.bytes);
   });
 
   test('"stop" ends the file: it is not counted as read to its end', async () => {

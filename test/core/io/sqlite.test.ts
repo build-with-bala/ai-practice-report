@@ -239,8 +239,19 @@ describe("openRo", () => {
     const [copyDir] = readdirSync(base);
     expect(readdirSync(path.join(base, copyDir!))).not.toContain("b.db-wal"); // the store was copied, its linked -wal not
     expect(readdirSync(path.join(base, copyDir!))).toContain("b.db");
+    expect(db.walSkipped).toBe(true); // the rows only in that WAL are missing: the caller counts it
     db.close();
     t.disposeAll();
+  });
+
+  test("close finalizes every statement the handle prepared, however many: the store's file can be removed after it", () => {
+    const f = path.join(root, "many-statements", "m.db");
+    mk(f, false).close();
+    const db = openRo(f, new TempRegistry(root))!;
+    for (let i = 0; i < 40; i++) expect(db.get<{ n: number }>(`SELECT ${i} AS n FROM t LIMIT 1`)!.n).toBe(i);
+    db.close();
+    rmSync(path.dirname(f), { recursive: true }); // on Windows a live statement keeps the file open, and this throws EBUSY
+    expect(existsSync(f)).toBe(false);
   });
 
   test("cannot-open is like any other failure that is not busy: null, no retry", () => {

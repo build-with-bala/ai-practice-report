@@ -853,3 +853,18 @@ describe("claude-code transcripts: tool call ids", () => {
     expectNoCanaries([...allEvents(r), r.coverage, r.warnings]);
   });
 });
+
+describe("claude-code transcripts: anchor ids", () => {
+  test("a message or request id that is not shaped like a server id gives no anchor, and is skipped bad-anchor: a path in it never reaches an event", async () => {
+    const t = top("A").prompt("Fix it");
+    t.assistant([{ type: "text", text: "ok" }], { requestId: `req_${CANARY.path}` });
+    t.assistant([{ type: "text", text: "ok" }], { requestId: `req_${"a".repeat(129)}` });
+    t.assistant([{ type: "text", text: "ok" }], { requestId: "req_011CAbc_d-9" });
+    t.write(h, topFile("A"));
+    const r = await run();
+    const req = r.store.all("anchor").filter((a) => a.kind === "cc-req");
+    expect(req.map((a) => a.idTail)).toEqual(["011CAbc_d-9"]);
+    expect(r.coverage[0]!.skipped["bad-anchor"]).toBe(2);
+    expectNoCanaries([...allEvents(r), r.coverage]);
+  });
+});
