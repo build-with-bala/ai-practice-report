@@ -34,7 +34,7 @@ export type Sensitivity = "public" | "aggregate" | "pseudonymous" | "revealed";
 export type FieldSpec =
   | { t: "number" | "integer" | "count" | "boolean"; s: Sensitivity } | { t: "bounded"; min: number; max: number; decimals?: number; s: Sensitivity }
   | { t: "day"; s: Sensitivity } | { t: "optional"; of: FieldSpec } | { t: "variant"; tag: string; cases: Readonly<Record<string, FieldSpec>> } | { t: "enum"; values: readonly string[]; s: Sensitivity }
-  | { t: "string"; pattern: RegExp; s: Sensitivity } | { t: "nullable"; of: FieldSpec }
+  | { t: "string"; pattern: KeyTest; s: Sensitivity } | { t: "nullable"; of: FieldSpec }
   | { t: "array"; of: FieldSpec; max: number } | { t: "tuple"; of: readonly FieldSpec[] } | { t: "object"; fields: Readonly<Record<string, FieldSpec>> }
   | { t: "record"; key: KeyTest; of: FieldSpec; maxKeys: number; fields?: Readonly<Record<string, FieldSpec>> };
 /** What a record key must pass: an anchored pattern, or a predicate in the same shape. */
@@ -262,7 +262,7 @@ const opt = (of: FieldSpec): FieldSpec => ({ t: "optional", of });
 const num = (s: Sensitivity = "aggregate"): FieldSpec => ({ t: "number", s });
 const bool = (s: Sensitivity = "aggregate"): FieldSpec => ({ t: "boolean", s });
 const en = (values: readonly string[], s: Sensitivity = "public"): FieldSpec => ({ t: "enum", values, s });
-const str = (pattern: RegExp, s: Sensitivity): FieldSpec => ({ t: "string", pattern, s });
+const str = (pattern: KeyTest, s: Sensitivity): FieldSpec => ({ t: "string", pattern, s });
 const nullable = (of: FieldSpec): FieldSpec => ({ t: "nullable", of });
 const arr = (of: FieldSpec, max: number): FieldSpec => ({ t: "array", of, max });
 const obj = (fields: Record<string, FieldSpec>): FieldSpec => ({ t: "object", fields });
@@ -342,12 +342,58 @@ const MODEL_KEY: KeyTest = { test: (k) => k === "fine-tuned" || k === "other" ||
 /** A project's opaque label: "P-" and the upper-case hex of 4, 6, 8 … or 16 digits, the shortest unique in the store. */
 const PROJECT_LABEL = str(/^P-(?:[0-9A-F]{2}){2,8}$/, "pseudonymous");
 /**
- * A project name the person chose to reveal, in any script: letters, combining marks, digits, spaces and ". _ -", and
- * the zero-width non-joiner and joiner (U+200C, U+200D) that some scripts write words with; 1 to 64 code points. It
- * starts with a letter or digit and ends with a letter, mark or digit (no edge space or joiner). No path separator,
- * control or format character other than the two joiners, or markup character can appear.
+ * The combining marks a revealed name may not hold, though they are `\p{M}`: the variation selectors U+FE00–U+FE0F and
+ * U+E0100–U+E01EF (invisible, 256 of them: a channel for hidden bytes), the combining grapheme joiner U+034F
+ * (invisible), the overlays U+0334–U+0338 (a tilde, strokes and solidi drawn through a letter, the last much like a
+ * slash), the whole block of combining marks for symbols U+20D0–U+20FF (the overlays U+20D2–U+20E5 among them, and
+ * the enclosing circles and keycaps), and every enclosing mark (`\p{Me}`).
  */
-const REVEALED_NAME = str(/^[\p{L}\p{N}](?:[\p{L}\p{M}\p{N} ._\u200C\u200D-]{0,62}[\p{L}\p{M}\p{N}])?$/u, "revealed");
+const BARRED_MARK = /[︀-️\u{E0100}-\u{E01EF}͏̴-̸⃐-⃿\p{Me}]/u;
+const LETTER_OR_DIGIT = /^[\p{L}\p{N}]$/u;
+const MARK = /^\p{M}$/u;
+const JOINER = /^[‌‍]$/u;
+/** Invisible code points (Unicode Default_Ignorable_Code_Point: tags, bidi controls, fillers, soft hyphen…), the two joiners aside. */
+const IGNORABLE = /^\p{Default_Ignorable_Code_Point}$/u;
+/** At most this many combining marks in a row (enough for a stacked Indic or vowelled Arabic letter). */
+const MAX_MARKS = 4;
+/** At most this many code points, counted in NFC. */
+const MAX_NAME = 64;
+
+/**
+ * True for a project name the person may reveal, in any script. The name must already be in NFC (the export
+ * normalizes it first, so one name has one byte form) and hold 1 to 64 code points, each a letter, a digit, a space,
+ * ". _ -", an allowed combining mark (`\p{M}` less `BARRED_MARK`) or a zero-width non-joiner or joiner (U+200C,
+ * U+200D). It starts with a letter or digit and ends with a letter, digit or mark. A mark follows a letter, a digit
+ * or another mark, at most 4 in a row. A joiner stands between two characters that are each a letter or a mark (so
+ * never first, last or two in a row). No other invisible code point, control, path separator or markup can appear.
+ */
+export function isRevealedName(name: string): boolean {
+  if (typeof name !== "string" || name.normalize("NFC") !== name) return false;
+  const cps = [...name];
+  if (cps.length < 1 || cps.length > MAX_NAME || !LETTER_OR_DIGIT.test(cps[0]!)) return false;
+  const letterOrMark = (c: string | undefined): boolean => c !== undefined && (/^\p{L}$/u.test(c) || (MARK.test(c) && !BARRED_MARK.test(c)));
+  let marks = 0;
+  for (let i = 0; i < cps.length; i++) {
+    const c = cps[i]!;
+    if (MARK.test(c)) {
+      if (BARRED_MARK.test(c) || ++marks > MAX_MARKS) return false;
+      const prev = cps[i - 1]!; // never first: cps[0] is a letter or digit
+      if (!(LETTER_OR_DIGIT.test(prev) || MARK.test(prev))) return false;
+      continue;
+    }
+    marks = 0;
+    if (JOINER.test(c)) {
+      if (!letterOrMark(cps[i - 1]) || !letterOrMark(cps[i + 1])) return false;
+      continue;
+    }
+    if (IGNORABLE.test(c)) return false;
+    if (!(LETTER_OR_DIGIT.test(c) || c === " " || c === "." || c === "_" || c === "-")) return false;
+  }
+  const last = cps[cps.length - 1]!;
+  return LETTER_OR_DIGIT.test(last) || MARK.test(last);
+}
+/** A revealed project name (`isRevealedName`). */
+const REVEALED_NAME = str({ test: isRevealedName }, "revealed");
 
 /**
  * The `aiprof/2` payload: every field the export may hold, with its type and sensitivity class (spec §6.7, Task 14's

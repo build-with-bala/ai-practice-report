@@ -100,6 +100,8 @@ function pickCounts(h: Partial<Record<string, number>>, keys: readonly string[])
   const out = pick(h, keys, (v) => { rest = addCount(rest, v); });
   return [out, rest];
 }
+/** A revealed name in NFC, the one byte form it is checked and exported in; anything else is passed on for the schema to refuse. */
+const nfc = (name: unknown): unknown => (typeof name === "string" ? name.normalize("NFC") : name);
 /** How many entries a cap leaves out of a list. */
 const cut = (list: readonly unknown[], max: number): number => Math.max(0, list.length - max);
 
@@ -230,7 +232,7 @@ function build(a: Analysis, o: ExportOptions): Record<string, unknown> {
       hooksDisabled: a.config.hooksDisabled, memoryFiles: a.config.memoryFiles, mcpServers: mcp.slice(0, MAX_MCP),
     },
     projects: shown.map((p) => ({
-      label: p.label, name: reveal.get(p.label.toUpperCase()), sessions: p.sessions, activeWeeks: p.activeWeeks, tools: p.tools, inRepo: p.inRepo,
+      label: p.label, name: nfc(reveal.get(p.label.toUpperCase())), sessions: p.sessions, activeWeeks: p.activeWeeks, tools: p.tools, inRepo: p.inRepo,
       lastWeek: p.lastWeek,
     })),
     otherProjects: { projects: rest.length, sessions: rest.reduce<number>((s, p) => addCount(s, p.sessions), 0) },
