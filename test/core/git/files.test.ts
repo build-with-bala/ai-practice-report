@@ -278,6 +278,14 @@ describe("readRepoFiles: the allowlisted repo files, as booleans and counts", ()
     expect(skipped).toEqual({ budget: 1 });
   }, 30_000);
 
+  test("session folders past the cap are counted (folders-capped), not dropped silently", async () => {
+    const root = repoWith("r", {});
+    const subs = Array.from({ length: 70 }, (_, i) => path.join(root, `s${String(i).padStart(2, "0")}`));
+    for (const d of subs) mkdirSync(d);
+    const f = await read(root, subs);
+    expect(f.skipped).toEqual({ "folders-capped": 6 });
+  });
+
   test.skipIf(!POSIX)("a FIFO where a repo file goes is no file: never opened, the read never hangs (POSIX)", async () => {
     const root = repoWith("r", {});
     mkdirSync(path.join(root, ".github", "workflows"), { recursive: true });

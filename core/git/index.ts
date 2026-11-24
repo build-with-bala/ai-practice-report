@@ -128,6 +128,10 @@ function versionOf(stdout: string): [number, number] | undefined {
 const atLeast = (v: [number, number] | undefined, min: readonly [number, number]): boolean =>
   v !== undefined && (v[0] > min[0] || (v[0] === min[0] && v[1] >= min[1]));
 
+/** A numeric option: `v` when it is a finite number in [min, max] (rounded down), else the fixed default `def`. */
+const option = (v: number | undefined, def: number, min: number, max: number): number =>
+  v !== undefined && Number.isFinite(v) && v >= min && v <= max ? Math.floor(v) : def;
+
 const isEnoent = (e: unknown): boolean => (e as { code?: unknown } | null)?.code === "ENOENT";
 
 /**
@@ -148,20 +152,24 @@ const STOPPED = Symbol("stopped");
 export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOptions = {}): Promise<RepoSignals> {
   const started = Date.now();
   const runner = o.runner ?? runGit;
-  const timeoutMs = o.timeoutMs ?? 10_000;
-  const maxCommits = o.maxCommits ?? 5_000;
-  const maxFiles = o.maxFiles ?? 200;
-  const width = Math.max(1, Math.floor(o.concurrency ?? DEFAULT_CONCURRENCY));
+  const timeoutMs = option(o.timeoutMs, 10_000, 1, 600_000);
+  const maxCommits = option(o.maxCommits, 5_000, 1, 10_000_000);
+  const maxFiles = option(o.maxFiles, 200, 0, 100_000);
+  const maxRepos = option(o.maxRepos, 200, 0, 100_000);
+  const budgetMs = option(o.budgetMs, 20_000, 0, 3_600_000);
+  const width = option(o.concurrency, DEFAULT_CONCURRENCY, 1, 64);
   const skipped: Record<string, number> = {};
   const skip = (reason: string, n = 1) => { if (n > 0) skipped[reason] = (skipped[reason] ?? 0) + n; };
   const roots = new Map<string, string>();
   const repos: RepoFacts[] = [];
   /** Each repo read, with its commits' full shas: memory only, for this pass. */
   const read: { repo: Repo; facts: RepoFacts; commits: ParsedCommit[] }[] = [];
-  const since = input.detailFrom === undefined ? undefined : input.detailFrom - 3 * DAY_MS;
+  // the window start, only when it is a date in range (a NaN or far date would throw in `toISOString`): else none
+  const from = input.detailFrom;
+  const since = from !== undefined && Number.isFinite(from) && from - 3 * DAY_MS >= 0 && from <= input.now + DAY_MS ? from - 3 * DAY_MS : undefined;
 
   const budget = new AbortController();
-  const timer = setTimeout(() => budget.abort(), Math.max(0, o.budgetMs ?? 20_000));
+  const timer = setTimeout(() => budget.abort(), budgetMs);
   const signal = AbortSignal.any([input.signal, budget.signal]);
   const stopped = new Promise<typeof STOPPED>((resolve) => {
     if (signal.aborted) resolve(STOPPED);
@@ -201,7 +209,12 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
   let version: [number, number] | undefined; // git's, from `git --version`
   let exe: string | undefined; // git's absolute path, found once per pass
   try {
-    const cands = candidates(input.cwds, input.recent, skip);
+    // the folders with the most detail-window sessions first, so the time budget goes to the repos that matter
+    const sessionsOf = (keys: readonly string[]) => keys.reduce((n, k) => n + (input.detailSessions?.get(k) ?? 0), 0);
+    const cands = candidates(input.cwds, input.recent, skip)
+      .map((c) => ({ c, n: sessionsOf(c.projectKeys) }))
+      .sort((a, b) => b.n - a.n || (a.c.dir < b.c.dir ? -1 : a.c.dir > b.c.dir ? 1 : 0))
+      .map(({ c }) => c);
     if (cands.length === 0) return result("ok");
     exe = resolveGit(process.env);
     if (exe === undefined) return result("git-missing");
@@ -228,9 +241,14 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
       try {
         const r = await git(["rev-parse", "--show-toplevel", "--git-common-dir"], cand.dir, REV_PARSE_TIMEOUT_MS);
         if (r === STOPPED) return skip("budget");
-        const [root = "", commonDir = ""] = r.stdout.split("\n").map((l) => l.replace(/\r$/, ""));
+        // exactly two lines (the root, the common dir), each ended by a newline: more means a newline inside a path,
+        // which cannot be split back into the two
+        const lines = r.stdout.split("\n");
+        const [root = "", commonDir = ""] = lines.length === 3 && lines[2] === "" ? lines.map((l) => l.replace(/\r$/, "")) : [];
         if (r.timedOut) skip("timeout");
-        else if (r.code !== 0 || root === "" || commonDir === "" || r.truncated) skip("not-a-repo");
+        else if (r.code !== 0 || r.truncated || lines.length < 3) skip("not-a-repo");
+        else if (lines.length > 3 || lines[2] !== "") skip("root-mismatch");
+        else if (root === "" || commonDir === "") skip("not-a-repo");
         // the root git reports is accepted only when it is the candidate folder itself: repo config (`core.worktree`)
         // may name any other folder, whose files would then be read as this repo's. Everything runs in the candidate.
         else if (!sameFolder(root, cand.dir)) skip("root-mismatch");
@@ -240,7 +258,7 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
       }
     });
 
-    const chosen = groupRepos(found, input.salt, input.detailSessions ?? new Map(), Math.max(0, Math.floor(o.maxRepos ?? 200)), skip);
+    const chosen = groupRepos(found, input.salt, input.detailSessions ?? new Map(), maxRepos, skip);
     let done = 0;
     await pool(chosen, async (repo) => {
       try {

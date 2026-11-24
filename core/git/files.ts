@@ -219,7 +219,8 @@ export interface RepoFileOptions {
    * Called per file left unread, by reason: `file-outside` (its real path — links resolved in every component — leaves
    * the worktree, or is no allowlisted path there: never opened, never listed, and not present), `file-not-file` (a
    * folder, pipe or device where a file goes), `file-too-large`, `file-refused` (a never-opened name, or a link to one),
-   * `file-io-error`, `file-parse` (settings that are no JSON object), `files-capped` (past MAX_FOLDER_FILES); `budget`
+   * `file-io-error`, `file-parse` (settings that are no JSON object), `files-capped` (past MAX_FOLDER_FILES), and
+   * `folders-capped` per session folder inside the worktree past MAX_FOLDER_FILES (its files are not read); `budget`
    * once when the pass was stopped (abort or budget) before its end; and `timeout` when the history command timed out.
    */
   skip?: (reason: string) => void;
@@ -244,7 +245,9 @@ export async function readRepoFiles(root: string, cwds: readonly string[], o: Re
   const skip = o.skip ?? (() => {});
   let realRoot = real(root);
   if (!realRoot.endsWith(path.sep)) realRoot += path.sep;
-  const subs = foldersInside(realRoot, cwds).slice(0, MAX_FOLDER_FILES);
+  const inside = foldersInside(realRoot, cwds);
+  for (let i = MAX_FOLDER_FILES; i < inside.length; i++) skip("folders-capped");
+  const subs = inside.slice(0, MAX_FOLDER_FILES);
   // what may be opened, by its real repo-relative path: the exact paths, and a folder's accepted entries
   const exact = new Set([...Object.values(INSTRUCTION_FILES).filter((p) => !p.endsWith("/")), ...REPO_FILES,
     ...subs.flatMap((sub) => SESSION_FOLDER_FILES.map((n) => path.join(sub, n)))].map(keyOf));

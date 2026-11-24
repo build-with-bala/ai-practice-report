@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { collectRepoSignals } from "../../../core/git/index";
 import { gitRunnerWithEnv, runGit, type GitRunner } from "../../../core/git/run";
 import type { Ev } from "../../../core/model/events";
 import { scan, type ScanOptions } from "../../../core/scan";
@@ -501,6 +502,56 @@ describe("repo signals: a read that did not finish is never ok", () => {
     const runner = except((a) => (a[0] === "log" && a.includes("--all") ? Promise.resolve(res(null, "", { timedOut: true })) : undefined));
     const r = await run([repo1()], { repoSignals: { runner } });
     expect(r.repos).toMatchObject({ status: "partial", skipped: { timeout: 1 } });
+  });
+});
+
+describe("repo signals: options and inputs are checked", () => {
+  const direct = (cwds: [string, string][], o: Parameters<typeof collectRepoSignals>[1] = {}, extra: Partial<Parameters<typeof collectRepoSignals>[0]> = {}) =>
+    collectRepoSignals({ cwds: new Map(cwds), recent: new Set(cwds.map(([k]) => k)), salt: new Uint8Array(32), now: Date.now(),
+      signal: new AbortController().signal, ...extra }, o);
+
+  test("options that are not finite numbers fall back to their defaults: no NaN reaches a worker count, a cap or a date", async () => {
+    const dir = repo1();
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, -1]) {
+      const r = await direct([["p", dir]], { concurrency: bad, maxCommits: bad, maxFiles: bad, maxRepos: bad, timeoutMs: bad, budgetMs: bad });
+      expect(r).toMatchObject({ status: "ok", skipped: {} });
+      expect(r.repos[0]!.commits).toHaveLength(3);
+      expect(r.repos[0]!.commits[0]!.files).toHaveLength(1);
+    }
+  });
+
+  test("a window start that is not a finite date in range is left out: the repo is read whole, not counted as an error", async () => {
+    const dir = repo1();
+    for (const detailFrom of [Number.NaN, Number.NEGATIVE_INFINITY, 9e15]) {
+      const r = await direct([["p", dir]], {}, { detailFrom });
+      expect(r).toMatchObject({ status: "ok", skipped: {} });
+      expect(r.since).toBeUndefined();
+      expect(r.repos[0]!.commits).toHaveLength(3);
+    }
+  });
+
+  test("a session folder that is not absolute is skipped (not-absolute), never resolved against the process's folder", async () => {
+    const calls: number[] = [];
+    const r = await direct([["p", "."], ["q", "relative/dir"]], { runner: async (a, o) => { calls.push(1); return runGit(a, o); } });
+    expect(r).toMatchObject({ status: "ok", repos: [], skipped: { "not-absolute": 2 } });
+    expect(calls).toEqual([]);
+  });
+
+  test("a rev-parse answer of other than exactly two lines is root-mismatch", async () => {
+    const dir = repo1();
+    const runner: GitRunner = (a, o) => (a[0] === "rev-parse"
+      ? Promise.resolve({ code: 0, stdout: `${dir}\nextra\n.git\n`, timedOut: false, truncated: false }) : runGit(a, o));
+    const r = await direct([["p", dir]], { runner });
+    expect(r).toMatchObject({ status: "ok", repos: [], skipped: { "root-mismatch": 1 } });
+  });
+
+  test("candidate folders are asked in order of their detail sessions, most first", async () => {
+    const dirs = ["a", "b", "c"].map((n) => makeRepo(path.join(h.root, n), [{ files: { "x.txt": n }, message: n, at: ago(2) }]));
+    const asked: string[] = [];
+    const runner: GitRunner = (a, o) => { if (a[0] === "rev-parse") asked.push(path.basename(o.cwd)); return runGit(a, o); };
+    await direct([["pa", dirs[0]!], ["pb", dirs[1]!], ["pc", dirs[2]!]], { runner, concurrency: 1 },
+      { detailSessions: new Map([["pa", 1], ["pb", 5], ["pc", 3]]) });
+    expect(asked).toEqual(["b", "c", "a"]);
   });
 });
 

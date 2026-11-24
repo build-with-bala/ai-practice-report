@@ -27,14 +27,19 @@ export interface Candidate { dir: string; projectKeys: string[] }
 
 /**
  * The repo candidates of the recent session projects, never by crawling: each recent project's raw folder, when it is
- * a folder, and its nearest `.git` ancestor. Projects whose folder is gone count as `missing`, those with no `.git`
- * above them as `not-a-repo`; neither runs anything.
+ * a folder, and its nearest `.git` ancestor. Projects whose folder is not absolute count as `not-absolute`, those whose
+ * folder is gone as `missing`, those with no `.git` above them as `not-a-repo`; none of them runs anything.
  */
 export function candidates(cwds: ReadonlyMap<string, string>, recent: ReadonlySet<string>, skip: (reason: string) => void): Candidate[] {
   const byDir = new Map<string, string[]>();
   for (const key of recent) {
     const raw = cwds.get(key);
     if (raw === undefined) continue;
+    // a folder named relatively would be resolved against this process's folder, which no session ran in
+    if (!path.isAbsolute(raw)) {
+      skip("not-absolute");
+      continue;
+    }
     if (!isDir(raw)) {
       skip("missing");
       continue;
