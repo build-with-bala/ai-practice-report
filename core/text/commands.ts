@@ -448,7 +448,10 @@ function checksOf(cmd: string, args: string[]): Check[] {
 function extraChecks(cmd: string, args: string[]): Check[] {
   const a1 = positionals(args)[0];
   if (cmd === "cargo") {
-    return a1 === "clippy" ? ["lint"] : a1 === "check" ? ["typecheck"] : a1 === "fmt" && args.includes("--check") ? ["lint"] : a1 === "nextest" ? ["test"] : [];
+    const p = positionals(args);
+    // `cargo nextest run` runs the tests; nextest's other verbs (list, archive, show-config, …) run none
+    return a1 === "clippy" ? ["lint"] : a1 === "check" ? ["typecheck"] : a1 === "fmt" && args.includes("--check") ? ["lint"]
+      : a1 === "nextest" && p[1] === "run" ? ["test"] : [];
   }
   if (cmd === "go") return a1 === "vet" ? ["typecheck"] : [];
   if (cmd === "deno") return a1 === "lint" ? ["lint"] : a1 === "check" ? ["typecheck"] : [];
