@@ -45,7 +45,7 @@ describe("questionFor", () => {
         expect(questionFor(id, r, valid(7))!.replace(/\d+/g, "#")).toBe(q.replace(/\d+/g, "#"));
       }
     }
-    expect(asked).toBe(29); // C1 5, C2 4, C3 2, C4 2, C5 3, C6 1, C7 2, C8 1, C9 2, seven soft flags
+    expect(asked).toBe(31); // C1 6, C2 5, C3 2, C4 2, C5 3, C6 1, C7 2, C8 1, C9 2, seven soft flags
   });
 
   test("trusts nothing: invalid values give no question", () => {
@@ -127,7 +127,7 @@ describe("questionFor", () => {
   });
 
   test("the vocabularies are closed lists", () => {
-    expect(Object.keys(REASONS).length).toBe(35);
+    expect(Object.keys(REASONS).length).toBe(36);
     expect(VALUE_KEYS["claude-code/human/detail"]).toBe(true);
     expect(DATE_KEY).toBe("date");
   });

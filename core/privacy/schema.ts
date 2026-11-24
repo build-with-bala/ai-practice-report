@@ -3,7 +3,7 @@ import type { RepoSignals } from "../git/types";
 import type { ConfigEv, CoverageEv } from "../model/events";
 import type { TechCategory, Toolchain, ToolId, Window } from "../model/ids";
 import type { CheckId, CheckStatus, Forensics } from "../forensics/index";
-import { DATE_KEY, isDay, REASONS, VALUE_KEYS, VALUE_KINDS, type Reason, type ValueKey, type ValueKind } from "../forensics/types";
+import { DATE_KEY, isDay, RATIO_MAX, REASONS, VALUE_KEYS, VALUE_KINDS, type Reason, type ValueKey, type ValueKind } from "../forensics/types";
 import { COMPONENTS, type MetricKey } from "../scoring/components";
 import { DIMENSION_IDS } from "../scoring/dimensions";
 import type { Band } from "../scoring/overall";
@@ -303,13 +303,9 @@ export const SHARE_METRICS: ReadonlySet<MetricKey> = new Set<MetricKey>(["vae", 
 const metricSpec = (k: MetricKey): FieldSpec => (SHARE_METRICS.has(k) ? metricOf(share()) : k === "rho" ? metricOf(bounded(-1, 1)) : METRIC);
 
 /**
- * The ceiling of a forensic `ratio` (a coefficient of variation of prompt gaps): a population CV of n gaps is at most
- * sqrt(n - 1), so 1000 needs a session of about a million prompts.
- */
-const RATIO_MAX = 1000;
-/**
  * The spec of each kind of forensic value, with the decimals core/forensics stores it to: a share and a correlation 4,
- * a ratio 2, a count none (`VALUE_KINDS`, owned by core/forensics: `questionFor` reads the same table).
+ * a ratio 2, a count none (`VALUE_KINDS`, owned by core/forensics: `questionFor` reads the same table). A ratio is
+ * at most core/forensics' `RATIO_MAX`, which every stored ratio is capped at.
  */
 export const KIND_SPECS: Readonly<Record<ValueKind, FieldSpec>> = {
   count: { t: "count", s: "aggregate" }, share: bounded(0, 1, 4), corr: bounded(-1, 1, 4), ratio: bounded(0, RATIO_MAX, 2), date: { t: "day", s: "aggregate" },
