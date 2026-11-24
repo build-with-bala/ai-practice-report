@@ -462,7 +462,8 @@ describe("claude-code config: mapping", () => {
       { k: "config", tool: "claude-code", source: "claude-code.config", kind: "feature", name: "hooks-disabled", provenance: "authored" },
     ]);
     expect(r.coverage[0]).toMatchObject({ skipped: { "hooks-disabled": 3 }, unknownTypes: { "hooks:shape": 1 }, records: 2 });
-    expect(configs(r, "skill")[0]!.firstSeen).toBeGreaterThan(0);
+    const st = statSync(path.join(h.env.home, ".claude/skills/still-listed"));
+    expect(configs(r, "skill")[0]!.firstSeen).toBe(st.birthtimeMs > 0 ? Math.floor(st.birthtimeMs) : undefined);
     expectNoCanaries([r.store, r.coverage]);
   });
 
@@ -490,7 +491,7 @@ describe("claude-code config: mapping", () => {
     h.write(".claude/plugins/cache/up/x", "a cache entry outside the plugin's own folder");
     claudeJson({ skillUsage: { "usage-only": { usageCount: 1 } }, pluginUsage: { "gamma@market": { usageCount: 2 } } });
     const r = await run([ccConfig]);
-    const born = (rel: string) => { const st = statSync(path.join(h.env.home, rel)); return Math.floor(st.birthtimeMs > 0 ? st.birthtimeMs : st.ctimeMs); };
+    const born = (rel: string) => { const st = statSync(path.join(h.env.home, rel)); return st.birthtimeMs > 0 ? Math.floor(st.birthtimeMs) : undefined; };
     expect(r.store.all("config").filter((c) => c.kind !== "plugin").map((c) => [c.kind, c.name, c.firstSeen])).toEqual([
       ["skill", "own", born(".claude/skills/own")], ["skill", "usage-only", undefined],
       ["command", "review", born(".claude/commands/review.md")], ["agent", "helper", born(".claude/agents/helper.md")],
@@ -498,7 +499,6 @@ describe("claude-code config: mapping", () => {
     expect(configs(r, "plugin").map((c) => [c.name, c.firstSeen])).toEqual([
       ["../up@market", undefined], ["alpha@market", born(".claude/plugins/cache/market/alpha")], ["beta@market", undefined], ["gamma@market", undefined],
     ]);
-    expect(born(".claude/skills/own")).toBeGreaterThan(0);
     expectNoCanaries([r.store, r.coverage]);
   });
 
@@ -510,7 +510,7 @@ describe("claude-code config: mapping", () => {
     symlinkSync(path.join(h.env.home, "dotfiles/skills/linked"), path.join(h.env.home, ".claude/skills/linked"));
     symlinkSync(path.join(h.env.home, "dotfiles/commands/linked-cmd.md"), path.join(h.env.home, ".claude/commands/linked-cmd.md"));
     const r = await run([ccConfig]);
-    const born = (rel: string) => { const st = statSync(path.join(h.env.home, rel)); return Math.floor(st.birthtimeMs > 0 ? st.birthtimeMs : st.ctimeMs); };
+    const born = (rel: string) => { const st = statSync(path.join(h.env.home, rel)); return st.birthtimeMs > 0 ? Math.floor(st.birthtimeMs) : undefined; };
     expect(r.store.all("config").map((c) => [c.kind, c.name, c.firstSeen])).toEqual([
       ["skill", "linked", born("dotfiles/skills/linked")], ["command", "linked-cmd", born("dotfiles/commands/linked-cmd.md")],
     ]);

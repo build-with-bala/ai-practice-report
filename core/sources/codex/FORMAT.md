@@ -495,7 +495,7 @@ Tables (CLI program): `[features]`, `[tui]`, `[tui.<k>]`, `[notice.<k>]`, `[plug
   skipped; manifests are never opened.
 - **skill**: one per `skills/<name>/` folder holding a `SKILL.md` (symlinked folders followed; hidden ones skipped,
   among them `.system`, which holds the bundled skills and a `.codex-system-skills.marker`); `firstSeen` = the folder's
-  birth time by stat (links followed; the ctime where the file system records none). Provenance `installed` when
+  birth time by stat (links followed), when the file system records one and it is plausible; never the change time. Provenance `installed` when
   `<home>/.agents/.skill-lock.json` lists the name (only the keys of its `skills` are read), `unknown` when that lock
   exists but cannot be read, else `authored`. The lock is read only when there is at least one skill.
 - **memory-file**: one per `*.md` file directly in `memories/` (the CLI writes `MEMORY.md`, `memory_summary.md`,

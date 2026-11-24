@@ -364,7 +364,7 @@ export class DiskKv {
     if (model !== undefined && !c.models.includes(model)) c.models.push(model);
     this.typed++;
     const ts = toEpochMs(r.created, this.ctx.now);
-    if (ts === undefined) return this.tally.skip("no-ts");
+    if (ts === undefined) return this.tally.noTime(r.created);
     this.timed++;
     c.times.push(ts);
     this.span(c, ts);

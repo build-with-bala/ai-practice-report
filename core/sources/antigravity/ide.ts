@@ -2,7 +2,7 @@ import path from "node:path";
 import type { Env } from "../../env/env";
 import { vscodeUser } from "../../env/paths";
 import { isDir, safeStat } from "../../io/fs";
-import { b64ToBytes, pbNum, pbStr, pbTime, pbTryNested, type PbField } from "../../io/protobuf";
+import { b64ToBytes, pbNum, pbStr, pbTime, pbTimeRaw, pbTryNested, type PbField } from "../../io/protobuf";
 import type { SessionEv } from "../../model/events";
 import { Tally } from "../common/coverage";
 import { str } from "../common/guards";
@@ -68,7 +68,7 @@ function entry(f: PbField, ctx: ScanCtx, tally: Tally): Entry {
   const updated = pbTime(summary.get(TRAJ_FIELDS.updated)?.[0], ctx.now);
   const start = pbTime(summary.get(TRAJ_FIELDS.created)?.[0], ctx.now) ?? updated;
   if (start === undefined) {
-    tally.skip("no-ts");
+    tally.noTime(pbTimeRaw(summary.get(TRAJ_FIELDS.created)?.[0]), pbTimeRaw(summary.get(TRAJ_FIELDS.updated)?.[0]));
     return "skipped";
   }
   const s: SessionEv = {

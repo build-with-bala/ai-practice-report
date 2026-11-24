@@ -36,7 +36,7 @@ const tally = (xs: (string | undefined)[]) => xs.reduce<Record<string, number>>(
 const skipChmod = process.platform === "win32" || process.getuid?.() === 0;
 const MIN = 60_000;
 /** A path's birth time by stat, links followed; its ctime where the file system records none. */
-const born = (rel: string): number => { const st = statSync(path.join(h.env.home, rel)); return Math.floor(st.birthtimeMs > 0 ? st.birthtimeMs : st.ctimeMs); };
+const born = (rel: string): number | undefined => { const st = statSync(path.join(h.env.home, rel)); return st.birthtimeMs > 0 ? Math.floor(st.birthtimeMs) : undefined; };
 
 /**
  * What each SELECT may name, by the table it reads: the columns the thread reader is allowed to select (written out here,

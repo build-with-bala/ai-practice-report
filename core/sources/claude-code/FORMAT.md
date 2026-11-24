@@ -307,8 +307,10 @@ Read: `version`, `dailyActivity`, `dailyModelTokens`; the rest is parsed with th
 
 - `DailyEv{source:"claude-code.stats", zone:"utc", unit:"messages"}` per `dailyActivity` entry: `day` = `date`,
   `count` = `messageCount`, `sessions` = `sessionCount`, `toolCalls` = `toolCallCount`, `models` = that day's
-  `tokensByModel` (keys that are not model-id-shaped become `other`; equal keys are summed; negative counts are
-  ignored).
+  `tokensByModel` (keys that are not model-id-shaped become `other`; equal keys are summed; a count that is not a
+  non-negative safe integer is ignored). An entry whose day lies outside the plausible range (before 2015, or more than
+  two days ahead) is skipped `bad-ts`; one whose `messageCount`, `sessionCount` or `toolCallCount` is not a
+  non-negative safe integer is skipped `bad-count`.
 - Drift: `version:missing`, `version:newer` (above 5), `dailyActivity:missing`, `dailyActivity:shape` (an entry
   without a real `YYYY-MM-DD` date or a numeric `messageCount`), `dailyModelTokens:type`, `dailyModelTokens:shape`.
   Coverage `records` = entries read from both arrays; `from`/`to` = start of the first and end of the last
@@ -364,8 +366,8 @@ allowlist; it is never exported raw.
 - `command` / `agent`: each `commands/<name>.md` / `agents/<name>.md` (names only), `authored`. A command's usage is
   the `skillUsage` entry of its name when no skill folder has that name.
 - `plugin`: each installed plugin id and each `pluginUsage` id, `installed`.
-- `firstSeen` (when the artifact appeared: its birth time by stat, links followed, the ctime where the file system
-  records none; nothing is opened) on skill folders, command and agent files, and on a plugin whose folder in the
+- `firstSeen` (when the artifact appeared: its birth time by stat, links followed, when the file system records one
+  and it is plausible; never the change time, which moves with every rename or restore; nothing is opened) on skill folders, command and agent files, and on a plugin whose folder in the
   plugin cache is there: `<root>/plugins/cache/<marketplace>/<plugin>/` for the id `<plugin>@<marketplace>`, each part
   a single path segment (the CLI installs a plugin's versions below it; the layout is not confirmed with the probe,
   which reads files, not folders). None on usage-only names.

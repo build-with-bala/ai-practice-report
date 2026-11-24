@@ -40,9 +40,12 @@ function cfg(kind: ConfigEv["kind"], provenance: ConfigEv["provenance"], name?: 
   return ev;
 }
 
-/** The event, with `firstSeen` = when the artifact at `p` appeared, when it is there (`bornAt`: stat, links followed, never opened). */
-function seen(ev: ConfigEv, p: string | undefined): ConfigEv {
-  const born = p === undefined ? undefined : bornAt(p);
+/**
+ * The event, with `firstSeen` = when the artifact at `p` appeared, when it is there and the file system gives a plausible
+ * birth time (`bornAt`: stat, links followed, never opened).
+ */
+function seen(ev: ConfigEv, p: string | undefined, now: number): ConfigEv {
+  const born = p === undefined ? undefined : bornAt(p, now);
   if (born !== undefined) ev.firstSeen = born;
   return ev;
 }
@@ -160,7 +163,7 @@ function markdownStems(dir: string, tally: Tally): string[] {
  * it is a skill found nowhere on disk — installed when the skill lock lists it or it carries a `<plugin>:` prefix,
  * unknown otherwise (bundled with the CLI, project-level, or removed).
  */
-function artifacts(c: Candidate, usage: GlobalUsage | undefined, tally: Tally, out: Out): void {
+function artifacts(c: Candidate, usage: GlobalUsage | undefined, tally: Tally, out: Out, now: number): void {
   const lock = lockedSkills(c.home, tally);
   const cache = realpathOf(path.join(c.root, "plugins", "cache"));
   const dir = path.join(c.root, "skills");
@@ -169,10 +172,10 @@ function artifacts(c: Candidate, usage: GlobalUsage | undefined, tally: Tally, o
     if (name.startsWith(".") || !isFile(path.join(dir, name, "SKILL.md"))) continue;
     const real = realpathOf(path.join(dir, name));
     const installed = lock?.has(name) || (cache !== undefined && real !== undefined && real.startsWith(cache + path.sep));
-    skills.set(name, seen(cfg("skill", installed ? "installed" : lock === undefined ? "unknown" : "authored", name), path.join(dir, name)));
+    skills.set(name, seen(cfg("skill", installed ? "installed" : lock === undefined ? "unknown" : "authored", name), path.join(dir, name), now));
   }
   const cmdDir = path.join(c.root, "commands");
-  const commands = new Map(markdownStems(cmdDir, tally).map((n) => [n, seen(cfg("command", "authored", n), path.join(cmdDir, `${n}.md`))] as const));
+  const commands = new Map(markdownStems(cmdDir, tally).map((n) => [n, seen(cfg("command", "authored", n), path.join(cmdDir, `${n}.md`), now)] as const));
   for (const [name, u] of usage?.skills ?? []) {
     let ev = skills.get(name) ?? commands.get(name);
     if (!ev) skills.set(name, (ev = cfg("skill", lock?.has(name) || name.includes(":") ? "installed" : "unknown", name)));
@@ -184,7 +187,7 @@ function artifacts(c: Candidate, usage: GlobalUsage | undefined, tally: Tally, o
     out(ev);
   }
   const agentDir = path.join(c.root, "agents");
-  for (const name of markdownStems(agentDir, tally)) out(seen(cfg("agent", "authored", name), path.join(agentDir, `${name}.md`)));
+  for (const name of markdownStems(agentDir, tally)) out(seen(cfg("agent", "authored", name), path.join(agentDir, `${name}.md`), now));
 }
 
 /**
@@ -201,12 +204,12 @@ function cacheFolder(root: string, id: string): string | undefined {
  * Installed plugin ids (keys of installed_plugins.json `plugins`) and every id with usage, with pluginUsage counts;
  * `firstSeen` from the plugin's cache folder, when it is there.
  */
-function plugins(c: Candidate, usage: GlobalUsage | undefined, tally: Tally, out: Out): void {
+function plugins(c: Candidate, usage: GlobalUsage | undefined, tally: Tally, out: Out, now: number): void {
   const installed = readSidecar(resolved(path.join(c.root, "plugins", "installed_plugins.json")), tally);
   const ids = new Set(Object.keys((installed && field(installed, "plugins", isObj, tally, "installed_plugins.plugins")) ?? {}));
   for (const id of usage?.plugins.keys() ?? []) ids.add(id);
   for (const id of [...ids].sort(byName)) {
-    const ev = seen(cfg("plugin", "installed", id), cacheFolder(c.root, id));
+    const ev = seen(cfg("plugin", "installed", id), cacheFolder(c.root, id), now);
     if (usage) ev.uses = usage.plugins.get(id) ?? 0;
     out(ev);
   }
@@ -230,8 +233,8 @@ export async function scanConfig(c: Candidate, ctx: ScanCtx): Promise<void> {
   };
   const usage = readGlobalConfig(resolved(globalConfigPath(c, ctx.env)), ctx, tally, out);
   hooks(readSidecar(resolved(path.join(c.root, "settings.json")), tally), tally, out);
-  artifacts(c, usage, tally, out);
-  plugins(c, usage, tally, out);
+  artifacts(c, usage, tally, out, ctx.now);
+  plugins(c, usage, tally, out, ctx.now);
   for (const name of [...(usage?.mcpServers ?? [])].sort(byName)) out(cfg("mcp-server", "unknown", name));
   memoryFiles(c.root, tally, out);
   const cov = tally.coverage();

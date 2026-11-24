@@ -46,7 +46,7 @@ const lines = (v: unknown): number | undefined => {
  */
 function commit(r: Obj, seen: Set<string>, ctx: ScanCtx, tally: Tally): void {
   const ts = toEpochMs(r.commitDate, ctx.now) ?? toEpochMs(r.scoredAt, ctx.now);
-  if (ts === undefined) return tally.skip("no-ts");
+  if (ts === undefined) return tally.noTime(r.commitDate, r.scoredAt);
   const hash = str(r.commitHash);
   if (hash !== undefined) {
     if (seen.has(hash)) return tally.skip("duplicate");

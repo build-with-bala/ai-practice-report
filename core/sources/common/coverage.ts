@@ -63,6 +63,14 @@ export class Tally {
     else this.unknownKey(`${field}:shape`);
   }
 
+  /**
+   * An item dropped for want of a time: `bad-ts` when one of the values it could have taken its time from is a
+   * well-formed time outside the plausible range (bad data), else `no-ts` (none there, or of no time's shape).
+   */
+  noTime(...raw: unknown[]): void {
+    this.skip(raw.some((v) => v !== undefined && v !== null && timeIssue(v) === "implausible") ? "bad-ts" : "no-ts");
+  }
+
   span(ts: number): void {
     if (this.from === undefined || ts < this.from) this.from = ts;
     if (this.to === undefined || ts > this.to) this.to = ts;

@@ -16,6 +16,10 @@ as a quiet store; files with no lines at all stay `empty`. Primary events: `anti
 prompt or tool call (its `lifetime` window is checked by its columns); `antigravity.history` — a prompt;
 `antigravity.ide` — a session. `antigravity.brain` is not guarded: its records are its own markers.
 
+**Times.** Wherever this file says an item without a time is skipped `no-ts`, an item whose time is well-formed but
+outside the plausible range (before 2015, or more than two days ahead) is skipped `bad-ts` instead (Go's zero time,
+written for a time never set, is no time).
+
 **io-error.** A file or store that cannot be opened or read counts as skipped `io-error`, and so does a never-opened
 file — a credential, token or key file, by its name or by the name of the file behind a link (`core/io/observe.ts`):
 the engine refuses it before it is opened, so it reads as unreadable.
@@ -53,7 +57,8 @@ TEXT (primary key), `title`, `preview` TEXT, `step_count` INTEGER, `last_modifie
 `last_user_input_step_index` INTEGER, `app_data_dir` TEXT, `raw_summary` BLOB, `group_id` TEXT. Program: the text columns
 default to `''` (so "no parent" and "no battle" are empty strings), booleans are stored 0/1, `workspace_uris` is a JSON
 array of URIs, and the time columns are not null — Go times as text, `YYYY-MM-DD hh:mm:ss.fffffffff±hh:mm` (the zero time
-when never set, which `toEpochMs` rejects as implausible). There is no creation time.
+when never set, which `toEpochMs` rejects as implausible; a row with no other time is skipped `no-ts`, while a set time
+outside the plausible range is `bad-ts`). There is no creation time.
 
 - **Columns read**: `conversation_id`, `step_count`, `last_modified_time`, `last_user_input_time`, `workspace_uris`,
   `parent_conversation_id`, `nesting_depth`, `killed`; and, inside SQL only (their values never leave SQLite), `battle_id`

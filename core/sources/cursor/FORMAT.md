@@ -17,6 +17,9 @@ as a quiet store; files with no lines at all stay `empty`. Primary events: `curs
 or tool call (its `lifetime` window is checked by its columns); `cursor.tracking` — a commit; `cursor.agent-cli` reads
 no records.
 
+**Times.** Wherever this file says an item without a time is skipped `no-ts`, an item whose time is well-formed but
+outside the plausible range (before 2015, or more than two days ahead) is skipped `bad-ts` instead.
+
 **io-error.** A file or store that cannot be opened or read counts as skipped `io-error`, and so does a never-opened
 file — a credential, token or key file, by its name or by the name of the file behind a link (`core/io/observe.ts`):
 the engine refuses it before it is opened, so it reads as unreadable.

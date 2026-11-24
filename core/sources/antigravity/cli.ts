@@ -2,7 +2,7 @@ import path from "node:path";
 import type { Env } from "../../env/env";
 import { joinFor } from "../../env/paths";
 import { isDir, isFile } from "../../io/fs";
-import { pbStr, pbTime, pbTryNested, type PbField } from "../../io/protobuf";
+import { pbStr, pbTime, pbTimeRaw, pbTryNested, type PbField } from "../../io/protobuf";
 import type { RoDb } from "../../io/sqlite";
 import { toEpochMs } from "../../io/time";
 import { TASK_GAP_MS } from "../../model/constants";
@@ -20,6 +20,9 @@ import type { Candidate, ScanCtx } from "../types";
 import { agSessionId, TOOL } from "./ids";
 
 export const CLI_SOURCE = "antigravity.cli";
+/** Go's zero time (`0001-01-01 …`), written for a time column never set. */
+const isGoZero = (v: unknown): boolean => typeof v === "string" && v.trimStart().startsWith("0001-01-01");
+
 /** Summary rows per query. */
 const SUMMARY_PAGE = 1_000;
 /**
@@ -292,7 +295,8 @@ function summary(r: Obj, convs: Map<string, Conv>, ctx: ScanCtx, tally: Tally): 
   convs.set(raw, conv);
   if (r.step_count === 0) return tally.skip("empty-session");
   const times = [toEpochMs(r.last_user_input_time, ctx.now), toEpochMs(r.last_modified_time, ctx.now)].filter((t): t is number => t !== undefined);
-  if (times.length === 0) return tally.skip("no-ts");
+  // Go's zero time means never set: no time, not bad data
+  if (times.length === 0) return tally.noTime(...[r.last_user_input_time, r.last_modified_time].filter((t) => !isGoZero(t)));
   const id = agSessionId(raw, ctx);
   const s: SessionEv = {
     k: "session", tool: TOOL, source: CLI_SOURCE, id, window: "lifetime", origin: conv.origin, start: Math.min(...times), end: Math.max(...times),
@@ -423,7 +427,7 @@ class Conversation {
     }
     const ts = fields ? pbTime(fields.get(1)?.[0], this.ctx.now) : undefined;
     if (ts === undefined || !fields) {
-      this.tally.skip("no-ts");
+      this.tally.noTime(fields ? pbTimeRaw(fields.get(1)?.[0]) : undefined);
       return undefined;
     }
     return { ts, fields };
@@ -507,7 +511,7 @@ class Conversation {
     const origin = this.conv?.origin ?? "human";
     if (origin === "subagent") return;
     if (this.conv?.battleCopy) return this.tally.skip("battle-copy");
-    if (ts === undefined) return this.tally.skip("no-ts");
+    if (ts === undefined) return this.tally.noTime(v.created_at);
     const text = v.content;
     if (typeof text !== "string") return this.tally.unknownKey("transcript.content:missing");
     if (text.trim() === "") return this.tally.skip("empty");
@@ -524,7 +528,7 @@ class Conversation {
   }
 
   private usage(v: Obj, ts: number | undefined, model: string | undefined): void {
-    if (ts === undefined) return this.tally.skip("no-ts");
+    if (ts === undefined) return this.tally.noTime(v.created_at);
     const ev: UsageEv = {
       k: "usage", tool: TOOL, source: CLI_SOURCE, ts, sessionId: this.id, model: model ?? "other", inTok: tokens(v.input_tokens) ?? 0,
       outTok: tokens(v.output_tokens) ?? 0, cacheR: tokens(v.cache_read_tokens) ?? 0, cacheW: tokens(v.cache_write_tokens) ?? 0,

@@ -118,7 +118,7 @@ export class LegacyKeys {
       }
       const ts = toEpochMs(e.unixMs, this.ctx.now);
       if (ts === undefined) {
-        this.life.skip("no-ts");
+        this.life.noTime(e.unixMs);
         continue;
       }
       const texts = [e.textDescription, e.text].filter((x): x is string => typeof x === "string");

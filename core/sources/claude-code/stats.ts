@@ -1,4 +1,5 @@
 import path from "node:path";
+import { plausible } from "../../io/time";
 import type { DailyEv } from "../../model/events";
 import { readSidecar, Tally } from "../common/coverage";
 import { isObj, num, safeModel, type Obj } from "../common/guards";
@@ -18,6 +19,8 @@ function dayStart(v: unknown): number | undefined {
   return Number.isFinite(ms) ? ms : undefined;
 }
 
+const isCount = (n: number): boolean => Number.isSafeInteger(n) && n >= 0;
+
 /** Tokens per model and day from `dailyModelTokens`; model ids are shape-checked, non-id keys merge into `other`. */
 function tokensByDay(v: Obj, tally: Tally): Map<string, Map<string, number>> {
   const out = new Map<string, Map<string, number>>();
@@ -36,7 +39,7 @@ function tokensByDay(v: Obj, tally: Tally): Map<string, Map<string, number>> {
     const models = out.get(day) ?? new Map<string, number>();
     for (const [model, n] of Object.entries(e.tokensByModel)) {
       const tokens = num(n);
-      if (tokens === undefined || tokens < 0) continue;
+      if (tokens === undefined || !isCount(tokens)) continue;
       const key = safeModel(model);
       models.set(key, (models.get(key) ?? 0) + tokens);
     }
@@ -63,11 +66,19 @@ export async function scanStats(c: Candidate, ctx: ScanCtx): Promise<void> {
           tally.unknownKey("dailyActivity:shape");
           continue;
         }
+        if (plausible(start, ctx.now) === undefined) {
+          tally.skip("bad-ts"); // a real date outside the plausible range
+          continue;
+        }
+        const sessions = num(e.sessionCount);
+        const toolCalls = num(e.toolCallCount);
+        if (!isCount(messages) || (sessions !== undefined && !isCount(sessions)) || (toolCalls !== undefined && !isCount(toolCalls))) {
+          tally.skip("bad-count"); // a count that is not a non-negative safe integer: the row is not trusted
+          continue;
+        }
         const day = e.date as string;
         // the CLI keys its stats by UTC day and counts every message of the day's sessions, not only typed prompts
         const ev: DailyEv = { k: "daily", tool: TOOL, source: STATS_SOURCE, day, zone: "utc", unit: "messages", count: messages };
-        const sessions = num(e.sessionCount);
-        const toolCalls = num(e.toolCallCount);
         if (sessions !== undefined) ev.sessions = sessions;
         if (toolCalls !== undefined) ev.toolCalls = toolCalls;
         const models = tokens.get(day);

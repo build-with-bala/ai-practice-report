@@ -91,13 +91,19 @@ export function pbStr(f: PbField | undefined): string | undefined {
 /** A varint field as a number; undefined when absent or of another wire type. */
 export const pbNum = (f: PbField | undefined): number | undefined => (f?.wire === 0 ? Number(f.v) : undefined);
 
-/** A `google.protobuf.Timestamp` field (`seconds` = 1, `nanos` = 2) as epoch ms; undefined when absent, malformed or implausible. */
-export function pbTime(f: PbField | undefined, now: number): number | undefined {
+/** A `google.protobuf.Timestamp` field (`seconds` = 1, `nanos` = 2) as epoch ms, unbounded; undefined when absent or malformed. */
+export function pbTimeRaw(f: PbField | undefined): number | undefined {
   if (f?.wire !== 2) return undefined;
   const t = pbTryNested(f.v);
   const seconds = pbNum(t?.get(1)?.[0]);
   if (seconds === undefined) return undefined;
-  return toEpochMs(seconds * 1000 + Math.floor((pbNum(t!.get(2)?.[0]) ?? 0) / 1e6), now);
+  return seconds * 1000 + Math.floor((pbNum(t!.get(2)?.[0]) ?? 0) / 1e6);
+}
+
+/** A `google.protobuf.Timestamp` field as epoch ms; undefined when absent, malformed or implausible (`pbTimeRaw` tells which). */
+export function pbTime(f: PbField | undefined, now: number): number | undefined {
+  const ms = pbTimeRaw(f);
+  return ms === undefined ? undefined : toEpochMs(ms, now);
 }
 
 export function b64ToBytes(s: string): Uint8Array {

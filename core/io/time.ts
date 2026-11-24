@@ -27,7 +27,11 @@ function scale(n: number): number {
   return Math.abs(n) < SECONDS_CUTOFF ? n * 1000 : n;
 }
 
-function plausible(ms: number, now: number): number | undefined {
+/**
+ * `ms` when it is a plausible time (finite, not before 2015, at most two days after `now`), else undefined: the one
+ * bound every time a reader emits goes through.
+ */
+export function plausible(ms: number, now: number): number | undefined {
   if (!Number.isFinite(ms)) return undefined;
   if (ms < MIN_MS || ms > now + TWO_DAYS) return undefined;
   return ms;

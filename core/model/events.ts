@@ -145,8 +145,8 @@ export interface MarkerEv extends Base { k: "marker"; ts: number; sessionId?: st
  * event) for the export allowlist and is never exported raw — except for `feature`, a feature of the CLI whose name is a
  * fixed token: `prompt-queue` (`uses`: times the input queue went from empty to non-empty, as the CLI counts them),
  * `hooks-disabled` (the settings turn every hook off, so none runs).
- * `firstSeen`: when the artifact appeared — its file or folder's birth time (ctime where the file system has none) by
- * stat, never opened, or an install time the tool records. It never counts as activity (spec §6.2: file times never
+ * `firstSeen`: when the artifact appeared — its file or folder's birth time by stat (absent where the file system
+ * records none, or it is implausible; never the change time), never opened, or an install time the tool records. It never counts as activity (spec §6.2: file times never
  * make a day active).
  * `projectKey`: the keyed hash of the project the entry belongs to (a per-project server, a project's own settings,
  * hooks, skills or agents); absent for a user-level entry.

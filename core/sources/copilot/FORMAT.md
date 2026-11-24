@@ -185,7 +185,9 @@ Built-in tool ids (VS Code program and extension program): see `VSCODE_TOOLS` in
   0 and 4 have not ended: no turn), else `isCanceled` true → interrupted, else `result.errorDetails` → failed, else
   completed (a request with neither response nor result has no turn). `ms` = `elapsedMs`, else
   `result.timings.totalElapsed`, else `modelState.completedAt` − (`responseTimestamp` or `timestamp`); never
-  `timeSpentWaiting`. `ts` = `completedAt`, else request time + `ms`, else the request time. `model` = the request's model.
+  `timeSpentWaiting`; each duration counts only when it is a finite, non-negative number of ms of at most a day (else
+  the next one is tried). `ts` = `completedAt`, else request time + `ms`, else the request time; a `ts` outside the
+  plausible range drops the turn, skipped `bad-ts`. `model` = the request's model.
 - **MarkerEv** `interrupt` per cancelled request (`detail: "user"`), at `completedAt` (else the request time); `denial`
   per denied tool, at the request's time.
 - **Session store** (`globalStorage/github.copilot-chat/session-store.db`): lifetime sessions and turns, as below; they
