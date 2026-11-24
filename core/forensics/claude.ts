@@ -159,7 +159,7 @@ export function checkClaudeHistory(raw: ScanResult, t: SessionTable, s: Forensic
  * C4, the session accounts vs the config's (as keyed hashes), over Claude Code's identities in scope
  * (`ForensicScope.identities`): a session's hash counts only when its session is a kept row; config hashes, and session
  * hashes that name no session the store holds, count while Claude Code is kept. `matchShare`: the share of session
- * identities whose hash the config names; none → fail. More than 1 distinct session hash → note (`accounts`). n/a when
+ * identities whose hash the config names; none → warn (the person may have changed accounts). More than 1 distinct session hash → note (`accounts`). n/a when
  * either side is missing.
  */
 export function checkAccount(raw: ScanResult, t: SessionTable, s: ForensicScope = forensicScope(raw, t)): CheckResult {
@@ -172,9 +172,9 @@ export function checkAccount(raw: ScanResult, t: SessionTable, s: ForensicScope 
   const accounts = new Set(sessions.map((e) => e.hash)).size;
   const values = { matchShare: roundUp(share), accounts } satisfies CheckValues; // fail at exactly 0
   const base = { id: "C4" as const, n: sessions.length, values, tools };
-  if (share === 0) {
-    return asked({ ...base, status: "fail", reason: "no-match" });
-  }
+  // no session naming the account signed in now cannot tell a changed account from a copied history (and copying the
+  // account id defeats it anyway): a question, never a fail
+  if (share === 0) return asked({ ...base, status: "warn", reason: "no-match" });
   if (accounts > 1) return asked({ ...base, status: "note", reason: "several-accounts" });
   return { ...base, status: "pass", reason: "ok" };
 }

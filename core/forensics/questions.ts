@@ -78,7 +78,7 @@ const QUESTIONS: { readonly [I in CheckId]?: { readonly [R in Reason]?: Ask } } 
     "off-time": (v) => {
       const s = num(v, "offShare");
       return s === undefined ? undefined
-        : `About ${pctUp1(s)}% of the server-issued ids do not match their recorded times, by more than 10 minutes. Were any trace times edited, or sessions added from somewhere else?`;
+        : `About ${pctUp1(s)}% of the server-issued ids do not match their recorded times, by more than 10 minutes. Was this machine's clock wrong for a while, were sessions run through a gateway that issues its own ids, or were trace times edited or sessions added from somewhere else?`;
     },
     "malformed-ids": (v) => {
       const m = num(v, "malformed");
@@ -102,7 +102,7 @@ const QUESTIONS: { readonly [I in CheckId]?: { readonly [R in Reason]?: Ask } } 
     "missing-stats-days": missingStatsDays,
   },
   C4: {
-    "no-match": () => "None of the sessions names the account this machine is signed in to. Were these sessions made under another account or on another machine?",
+    "no-match": () => "None of the sessions names the account this machine is signed in to now. Did you change accounts since, or were these sessions made on another machine?",
     "several-accounts": (v) => {
       const a = num(v, "accounts");
       return a === undefined ? undefined : `The sessions name ${digits(a)} different accounts. Were several accounts used on this machine?`;
@@ -149,7 +149,12 @@ const QUESTIONS: { readonly [I in CheckId]?: { readonly [R in Reason]?: Ask } } 
     "before-release": (v) => {
       const s = num(v, "sessions");
       return s === undefined ? undefined
-        : `${digits(s)} ${plural(s, "session", "sessions")} used a model or tool version more than 2 days before its public release. Were session times edited?`;
+        : `${digits(s)} ${plural(s, "session", "sessions")} used a model or tool version more than 2 days before its public release. Did you have early access to it?`;
+    },
+    "long-before-release": (v) => {
+      const s = num(v, "longBefore");
+      return s === undefined ? undefined
+        : `${digits(s)} ${plural(s, "session", "sessions")} used a model or tool version more than 30 days before its public release. Were session times edited, or did you have early access to it?`;
     },
   },
   "soft:rhythm": {

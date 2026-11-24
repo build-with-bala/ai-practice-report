@@ -252,3 +252,30 @@ describe("checkAnchors: breakdown and what is left out", () => {
     expect(c2.values.unverifiedKinds).toBe(1);
   });
 });
+
+describe("checkAnchors: no fail on a single observation", () => {
+  test("60 ids with one record 15 min late are a C1 note carrying the count, not a fail", () => {
+    const evs = genuine().slice(0, 60).map((e, i) => (i === 30 ? { ...e, ts: e.ts + 15 * MIN } : e));
+    const [c1] = anchorsOf(scanResultOf(evs));
+    expect([c1.status, c1.reason, c1.values.offIds]).toEqual(["note", "off-time", 1]);
+  });
+
+  test("C1 fails at 3 ids off and more than 1%; 2 off over 1% are a note", () => {
+    const shift = (n: number, at: number[]) => genuine().slice(0, n).map((e, i) => (at.includes(i) ? { ...e, ts: e.ts + 2 * HOUR } : e));
+    const [three] = anchorsOf(scanResultOf(shift(200, [20, 80, 140])));
+    expect([three.status, three.values.offIds]).toEqual(["fail", 3]);
+    const [two] = anchorsOf(scanResultOf(shift(100, [20, 80])));
+    expect([two.status, two.values.offIds]).toEqual(["note", 2]);
+    const [few] = anchorsOf(scanResultOf(shift(400, [20, 80, 140])));
+    expect(few.status).toBe("pass"); // 3 of 400 is under 1%
+  });
+
+  test("C2 is n/a (too-few) below 200 ids, and still fails from 200", () => {
+    const [c1, c2] = anchorsOf(scanResultOf(genuine().slice(0, 199)));
+    expect([c1.status, c2.status, c2.reason]).toEqual(["pass", "n/a", "too-few"]);
+    const evs = genuine().slice(0, 200);
+    const times = evs.map((e) => e.ts).reverse();
+    const [, r2] = anchorsOf(scanResultOf(evs.map((e, i) => ({ ...e, ts: times[i]! }))));
+    expect(r2.status).toBe("fail");
+  });
+});

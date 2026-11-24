@@ -254,11 +254,11 @@ describe("checkAccount (C4)", () => {
     expect(c.n).toBe(2);
   });
 
-  test("no match fails", () => {
+  test("no match is a warn asking whether the person changed accounts, never a fail", () => {
     const c = accountOf(scanResultOf([...sessions, ident("config", "a"), ident("session", "b", "s1")]));
-    expect(c.status).toBe("fail");
+    expect([c.status, c.reason]).toEqual(["warn", "no-match"]);
     expect(c.values.matchShare).toBe(0);
-    expect(c.askAbout).toBeString();
+    expect(c.askAbout).toContain("change accounts");
   });
 
   test("2 session accounts are a note", () => {

@@ -95,8 +95,8 @@ describe("analyze: forensics under exclusions", () => {
 
     const after = forensicsOf(raw, { ...UTC, exclude: { from: T0 + 15 * DAY } });
     expect([byId(after, "C3").n, byId(after, "C3").status]).toEqual([10, "pass"]);
-    // the later sessions name only the second account, which the config does not: C4 fails on what is left
-    expect([byId(after, "C4").n, byId(after, "C4").status, byId(after, "C4").values.accounts]).toEqual([2, "fail", 1]);
+    // the later sessions name only the second account, which the config does not: C4 asks on what is left
+    expect([byId(after, "C4").n, byId(after, "C4").status, byId(after, "C4").values.accounts]).toEqual([2, "warn", 1]);
 
     const early = forensicsOf(raw, { ...UTC, exclude: { to: T0 + 15 * DAY } });
     expect([byId(early, "C3").n, byId(early, "C4").n, byId(early, "C4").status]).toEqual([10, 2, "pass"]);

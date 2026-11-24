@@ -48,6 +48,8 @@ const RANK_SAMPLE = 20_000;
 const OFF_MS = 10 * 60_000;
 const OFF_SHARE = 0.01;
 const MIN_RHO = 0.99;
+const OFF_MIN = 3;
+const MIN_RANKED = 200;
 const KINDS: readonly AnchorEv["kind"][] = ["cc-msg", "cc-req"];
 
 interface Point { v: number; ts: number }
@@ -186,13 +188,18 @@ function checkKind(anchors: readonly AnchorEv[]): [CheckResult, CheckResult] {
   const res = ps.map((p) => Math.abs(p.ts - line.a - line.b * p.v));
   if (median(res) > OFF_MS) return naPair(anchors.length, "scheme-changed", left, tools);
 
-  const off = res.filter((r) => r > OFF_MS).length / ps.length;
-  const c1Fail = off > OFF_SHARE;
+  const offIds = res.filter((r) => r > OFF_MS).length;
+  const off = offIds / ps.length;
+  // more than 1% off fails only with at least 3 ids off: one late record among few ids is no evidence of editing
+  const offOver = off > OFF_SHARE;
+  const c1Fail = offOver && offIds >= OFF_MIN;
   const c1: CheckResult = {
-    id: "C1", status: c1Fail ? "fail" : malformed ? "note" : "pass", n: ps.length, reason: c1Fail ? "off-time" : malformed ? "malformed-ids" : "ok",
-    values: { offShare: roundUp(off), p99Seconds: Math.min(MAX_P99_S, Math.round(quantile(res, 0.99) / 1_000)), ...left }, tools,
+    id: "C1", status: c1Fail || offOver || malformed ? (c1Fail ? "fail" : "note") : "pass", n: ps.length,
+    reason: offOver ? "off-time" : malformed ? "malformed-ids" : "ok",
+    values: { offShare: roundUp(off), offIds, p99Seconds: Math.min(MAX_P99_S, Math.ceil(quantile(res, 0.99) / 1_000)), ...left }, tools: [...tools],
   };
 
+  if (ps.length < MIN_RANKED) return [c1, { id: "C2", status: "n/a", n: ps.length, reason: "too-few", values: { ...left }, tools: [...tools] }];
   const rankSample = stride(ps, RANK_SAMPLE);
   const rho = spearman(rankSample);
   if (rho === undefined) return [c1, { id: "C2", status: "n/a", n: rankSample.length, reason: "degenerate", values: { ...left }, tools }];

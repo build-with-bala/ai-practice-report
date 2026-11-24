@@ -143,10 +143,10 @@ describe("checkRollouts: C7, the id's time is not after the file name's", () => 
     expect(c7.n).toBe(1);
   });
 
-  test("within the second of the name passes; 2 s after fails", () => {
+  test("within the second of the name passes; 2 s after is a violation", () => {
     expect(run([rollout(0, { uuidTs: T0 + 999, fileTs: T0 })])[1].status).toBe("pass");
     const [, c7] = run([rollout(0, { uuidTs: T0 + 2 * SEC, fileTs: T0 }), rollout(1)]);
-    expect(c7.status).toBe("fail");
+    expect([c7.status, c7.reason]).toEqual(["note", "uuid-after-name"]);
     expect(c7.values.violations).toBe(1);
     expect(c7.askAbout).toBe("1 Codex session id carries a time later than its file name, by more than a second. Were session files renamed, or their ids edited?");
   });
@@ -163,14 +163,14 @@ describe("checkRollouts: C7, the id's time is not after the file name's", () => 
     expect(run([rollout(0, { uuidTs: T0 + 14 * HOUR, fileTs: T0 })])[1].status).toBe("note");
     expect(run([rollout(0, { uuidTs: T0 + 16 * HOUR, fileTs: T0 })])[1].status).toBe("note");
     expect(run([rollout(0, { uuidTs: T0 + 26 * HOUR, fileTs: T0 })])[1].status).toBe("note");
-    expect(run([rollout(0, { uuidTs: T0 + 26.25 * HOUR, fileTs: T0 })])[1].status).toBe("fail");
-    expect(run([rollout(0, { uuidTs: T0 + 3 * HOUR + 5 * SEC, fileTs: T0 })])[1].status).toBe("fail");
-    expect(run([rollout(0, { uuidTs: T0 + 10 * MIN, fileTs: T0 })])[1].status).toBe("fail");
+    expect(run([rollout(0, { uuidTs: T0 + 26.25 * HOUR, fileTs: T0 })])[1].reason).toBe("uuid-after-name");
+    expect(run([rollout(0, { uuidTs: T0 + 3 * HOUR + 5 * SEC, fileTs: T0 })])[1].reason).toBe("uuid-after-name");
+    expect(run([rollout(0, { uuidTs: T0 + 10 * MIN, fileTs: T0 })])[1].reason).toBe("uuid-after-name");
   });
 
   test("a violation outranks a zone change", () => {
     const [, c7] = run([rollout(0, { uuidTs: T0 + 3 * HOUR, fileTs: T0 }), rollout(1, { uuidTs: T0 + HOUR + 5 * MIN, fileTs: T0 + HOUR })]);
-    expect(c7.status).toBe("fail");
+    expect([c7.status, c7.reason]).toEqual(["note", "uuid-after-name"]);
     expect(c7.values).toEqual({ violations: 1, zoneShifted: 1 });
   });
 
@@ -283,5 +283,16 @@ describe("checkRollouts: C8, the rate-limit ledger only rises within a window", 
       for (const v of Object.values(c.values)) expect(typeof v === "number" && Number.isFinite(v)).toBe(true);
       expect(`${c.reason}${c.askAbout ?? ""}`).toMatch(/^[ -ÿ -⁯−]*$/);
     }
+  });
+});
+
+describe("checkRollouts: C7 never fails on one file", () => {
+  test("one file whose id is after its name is a note; max(2, 1% of the files) fail", () => {
+    const late = (n: number, bad: number) => Array.from({ length: n }, (_, i) => rollout(i, i < bad ? { uuidTs: T0 + i * HOUR + 10 * MIN } : {}));
+    const one = run(late(20, 1))[1];
+    expect([one.status, one.reason, one.values.violations]).toEqual(["note", "uuid-after-name", 1]);
+    expect(run(late(20, 2))[1].status).toBe("fail");
+    expect(run(late(300, 2))[1].status).toBe("note");
+    expect(run(late(300, 3))[1].status).toBe("fail");
   });
 });

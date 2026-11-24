@@ -74,8 +74,8 @@ function isZoneShift(d: number): boolean {
 /**
  * C7, the thread id's UUIDv7 time is not after the file name's time. The name is local time truncated to the second,
  * so `uuidTs − fileTs` up to 1 s is allowed; more is a violation, unless it is a time-zone change (`isZoneShift`: the
- * name was written in another zone than the one it is read in now), which is a note. Any violation → fail. n/a without
- * a rollout that has both times.
+ * name was written in another zone than the one it is read in now), which is a note. Violations: at least max(2, 1% of
+ * the rollouts) → fail, fewer → note (one renamed file proves nothing). n/a without a rollout that has both times.
  */
 function checkIdTimes(s: ForensicScope): CheckResult {
   const rollouts = s.rollouts().filter((r) => r.uuidTs !== undefined && r.fileTs !== undefined);
@@ -90,7 +90,8 @@ function checkIdTimes(s: ForensicScope): CheckResult {
   }
   const base = { id: "C7" as const, n: rollouts.length, values: { violations, zoneShifted } satisfies CheckValues, tools };
   if (violations > 0) {
-    return { ...base, status: "fail", reason: "uuid-after-name" };
+    const fail = violations >= Math.max(MISSING_MIN, MISSING_SHARE * rollouts.length);
+    return { ...base, status: fail ? "fail" : "note", reason: "uuid-after-name" };
   }
   if (zoneShifted > 0) return { ...base, status: "note", reason: "time-zone-change" };
   return { ...base, status: "pass", reason: "ok" };
