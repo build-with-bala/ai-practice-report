@@ -353,8 +353,16 @@ const PROJECT_LABEL = str(/^P-(?:[0-9A-F]{2}){2,8}$/, "pseudonymous");
  * slash), the whole block of combining marks for symbols U+20D0-U+20FF (the overlays U+20D2-U+20E5 among them, and
  * the enclosing circles and keycaps), and every enclosing mark (`\p{Me}`). Every default-ignorable code point, marks
  * among them (the Mongolian free variation selectors, the Khmer inherent vowels), is refused before this list is read.
+ * Two marks render as nothing yet are not in the runtime's default-ignorable table, so they are barred by name:
+ * U+16FE4 (Khitan small script filler) and U+1BC9D (Duployan thick letter selector).
  */
-const BARRED_MARK = /[\uFE00-\uFE0F\u{E0100}-\u{E01EF}\u034F\u0334-\u0338\u20D0-\u20FF\p{Me}]/u;
+const BARRED_MARK = /[\uFE00-\uFE0F\u{E0100}-\u{E01EF}\u034F\u0334-\u0338\u20D0-\u20FF\u{16FE4}\u{1BC9D}\p{Me}]/u;
+/**
+ * The scripts whose words use the zero-width joiner or non-joiner (Unicode Script property): a joiner is allowed only
+ * after a letter of one of them (or after marks on such a letter). In any other script it would render as nothing and
+ * carry hidden bits.
+ */
+const JOINER_SCRIPTS = /^[\p{Script=Arabic}\p{Script=Syriac}\p{Script=Nko}\p{Script=Mandaic}\p{Script=Mongolian}\p{Script=Devanagari}\p{Script=Bengali}\p{Script=Gurmukhi}\p{Script=Gujarati}\p{Script=Oriya}\p{Script=Tamil}\p{Script=Telugu}\p{Script=Kannada}\p{Script=Malayalam}\p{Script=Sinhala}\p{Script=Khmer}\p{Script=Myanmar}]$/u;
 const LETTER = /^\p{L}$/u;
 const LETTER_OR_DIGIT = /^[\p{L}\p{N}]$/u;
 const MARK = /^\p{M}$/u;
@@ -381,7 +389,8 @@ const ID_SHAPES = [/^P-(?:[0-9A-F]{2}){2,8}$/i, /^[0-9A-F]{16}$/i];
  * - a space, ".", "_" or "-" is allowed, but never last;
  * - an allowed combining mark (`\p{M}` less `BARRED_MARK`) follows a letter, a digit or another mark, or a joiner
  *   whose left neighbour is a letter or a mark; at most 4 marks in a row, a joiner not ending the run;
- * - a joiner (U+200C, U+200D) has a letter or mark on its left, and on its right a letter or a mark, or nothing when
+ * - a joiner (U+200C, U+200D) follows a letter of a script that uses joiners (`JOINER_SCRIPTS`), directly or after
+ *   marks on it; it has a letter or mark on its left, and on its right a letter or a mark, or nothing when
  *   it directly follows a mark (an old-style Malayalam chillu ends a word so); never two in a row, never first, and
  *   at most one between two letters, so joiners carry no string of bits;
  * - the Tibetan syllable mark U+0F0B stands between two letters or marks;
@@ -402,6 +411,10 @@ export function isRevealedName(name: string): boolean {
     const next = cps[i + 1];
     if (JOINER.test(c)) {
       if (!letterOrMark(prev) || ++joinersSinceLetter > 1) return false;
+      // the letter it follows, under any marks, must be of a script that uses joiners
+      let base = i - 1;
+      while (base >= 0 && MARK.test(cps[base]!)) base--;
+      if (base < 0 || !JOINER_SCRIPTS.test(cps[base]!)) return false;
       if (next === undefined ? !allowedMark(prev) : !letterOrMark(next)) return false;
       continue; // a joiner neither ends nor starts a run of marks
     }
