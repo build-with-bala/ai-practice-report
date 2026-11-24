@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import path from "node:path";
 import { analyze, type Analysis } from "../../../core/analyze";
-import { canonicalJson, exportPayload, scan } from "../../../core/index";
+import { canonicalJson, exportPayload, scan, VERSION } from "../../../core/index";
 import { ExportError, RevealError } from "../../../core/privacy/export";
 import { questionFor, type CheckResult } from "../../../core/forensics/index";
 import type { ConfigEv, CoverageEv, Ev, FileFactEv, PromptEv, SessionEv } from "../../../core/model/events";
@@ -943,9 +943,16 @@ describe("the reading side rebuilds every question from the export", () => {
 });
 
 describe("exportPayload: golden bytes", () => {
+  /** The bytes with the core version replaced by a fixed token: a release must not change the golden bytes. */
+  const unversioned = (json: string): string => {
+    const at = `"core":${JSON.stringify(VERSION)}`;
+    expect(json.split(at).length).toBe(2); // the version appears once, as the core field
+    return json.replace(at, `"core":"<version>"`);
+  };
+
   test("the intermediate persona (fixed salt, now, seed, TZ=UTC) exports these exact bytes", () => {
     const result = withTz("UTC", () => exportPayload(analyze(personaScan("intermediate"), { timeZone: "UTC", seed: 0x5eed }), OPTS));
-    expect(result.json).toMatchSnapshot();
+    expect(unversioned(result.json)).toMatchSnapshot();
     const dims = (JSON.parse(result.json) as Json).dimensions as Array<{ components: Array<{ x: number | null; z: number | null }> }>;
     let checked = 0;
     for (const d of dims) {
@@ -976,7 +983,7 @@ describe("exportPayload: golden bytes", () => {
     expect([c5.status, c5.reason, (c5.values as Json).date]).toEqual(["note", "restore-cluster", "2026-11-02"]);
     expect((out.projects as Json[])[0]!.name).toBe("bibliothèque ü-lib");
     expectNoCanaries(result.json);
-    expect(result.json).toMatchSnapshot();
+    expect(unversioned(result.json)).toMatchSnapshot();
   });
 
   test("persona canaries: the expert with canaries exports none (P3 pre-flight F25)", () => {
