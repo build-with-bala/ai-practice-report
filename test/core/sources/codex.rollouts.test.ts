@@ -258,6 +258,10 @@ describe("codex rollouts: prompts", () => {
       [CANARY.prompt, undefined, "system", "other"],
       [{ subagent: "review" }, undefined, "subagent", "subagent"],
       [{ subagent: { thread_spawn: { parent_thread_id: "not-a-uuid", depth: 2, agent_role: CANARY.project } } }, undefined, "subagent", "subagent"],
+      ["internal", undefined, "system", "internal"], // the CLI's own work
+      [{ internal: CANARY.project }, undefined, "system", "internal"], // a known name holding data: its data never read
+      [["subagent"], undefined, "system", "other"], // shapes the CLI is not known to write: never a human
+      [42, undefined, "system", "other"],
     ];
     const ids = cases.map(([source, originator], i) => {
       const x = rollout((r) => r.user("go"), { source, ...(originator !== undefined && { originator }) }, fixtureStart() + i * 60_000);
@@ -269,8 +273,8 @@ describe("codex rollouts: prompts", () => {
     const deep = r.store.session(sidOf(ids[7]!))!;
     expect(deep).toMatchObject({ parentId: sidOf(keyedHash(r.salt, "not-a-uuid")), spawnDepth: 2, agentType: keyedHash(r.salt, CANARY.project) });
     expect(r.store.session(sidOf(ids[6]!))!.parentId).toBeUndefined();
-    expect(r.store.all("prompt").map((p) => p.origin)).toEqual(["human", "human", "peer", "scripted", "peer", "system"]);
-    expect(r.coverage[0]!.unknownTypes).toEqual({ "session_meta.source:(other)": 1 });
+    expect(r.store.all("prompt").map((p) => p.origin)).toEqual(["human", "human", "peer", "scripted", "peer", "system", "system", "system", "system", "system"]);
+    expect(r.coverage[0]!.unknownTypes).toEqual({ "session_meta.source:(other)": 1, "session_meta.source:shape": 2 });
     expectNoCanaries(allEvents(r));
   });
 });

@@ -223,8 +223,12 @@ describe("codex threads: thread index and turn history", () => {
       [spawn("not-a-uuid", CANARY.project), "Claude Code", "subagent", "subagent"],
       [CANARY.prompt, null, "system", "other"], // a source the CLI is not known to write: never a human
       ["desktop", "Claude Code", "peer", "other"],
-      [JSON.stringify(["subagent"]), null, "human", "other"],
-      ["{not json", null, "human", "other"],
+      ["internal", null, "system", "internal"], // the CLI's own work
+      [JSON.stringify({ internal: CANARY.project }), null, "system", "internal"], // a known name holding data: its data never read
+      [JSON.stringify({ custom: CANARY.prompt }), null, "human", "custom"],
+      [JSON.stringify({ cli: 1, exec: 2 }), null, "system", "other"], // several keys
+      [JSON.stringify(["subagent"]), null, "system", "other"], // a shape the CLI is not known to write: never a human
+      ["{not json", null, "system", "other"],
     ];
     const ids = cases.map((_, i) => uuidV7(at - 1000, 0xd0 + i));
     writeStateDb(h, ".codex/state_5.sqlite", cases.map(([source, originator], i) => threadRow(ids[i]!, at + i * MIN, { source, originator })));
@@ -234,7 +238,7 @@ describe("codex threads: thread index and turn history", () => {
     expect(r.store.session(sidOf(ids[7]!))).toMatchObject({
       parentId: sidOf(keyedHash(r.salt, "not-a-uuid")), spawnDepth: 2, agentType: keyedHash(r.salt, CANARY.project),
     });
-    expect(covOf(r, "codex.threads").unknownTypes).toEqual({ "threads.source:shape": 2, "threads.source:(other)": 2 });
+    expect(covOf(r, "codex.threads").unknownTypes).toEqual({ "threads.source:shape": 3, "threads.source:(other)": 2 });
     expectNoCanaries([r.store, r.coverage, r.warnings]);
   });
 
