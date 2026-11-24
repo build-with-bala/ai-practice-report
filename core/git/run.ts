@@ -98,10 +98,6 @@ const REAP_MS = 1_000;
  */
 export const runGit: GitRunner = (args, o) => run(args, o, gitEnv(process.env));
 
-/** A runner whose child environment `adjust` changes (tests: the environment of a git older than GIT_NO_LAZY_FETCH). */
-export const gitRunnerWithEnv = (adjust: (env: Record<string, string>) => Record<string, string>): GitRunner =>
-  (args, o) => run(args, o, adjust(gitEnv(process.env)));
-
 async function run(args: readonly string[], o: Parameters<GitRunner>[1], env: Record<string, string>): Promise<GitResult> {
   if (o.signal.aborted) return { code: null, stdout: "", timedOut: false, truncated: false };
   const exe = o.git ?? resolveGit(process.env);

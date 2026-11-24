@@ -2,14 +2,14 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { collectRepoSignals } from "../../../core/git/index";
-import { gitRunnerWithEnv, runGit, type GitRunner } from "../../../core/git/run";
+import { runGit, type GitRunner } from "../../../core/git/run";
 import type { Ev } from "../../../core/model/events";
 import { scan, type ScanOptions } from "../../../core/scan";
 import type { Candidate, SourcePlugin } from "../../../core/sources/types";
 import { keyedHash } from "../../../core/text/hash";
 import { CANARY, expectNoCanaries } from "../../kit/canary";
 import { fakeHome, type FakeHome } from "../../kit/home";
-import { git, gitVersion, isolateGitHome, makeRepo } from "../../fixtures/repos";
+import { git, gitVersion, isolateGitHome, makeRepo, runnerWithEnv } from "../../fixtures/repos";
 
 const POSIX = process.platform !== "win32";
 const DAY = 86_400_000;
@@ -417,7 +417,7 @@ describe("repo signals: one repo, one count; hostile repos", () => {
     expect(existsSync(marker)).toBe(true);
     rmSync(marker);
 
-    const oldGit = gitRunnerWithEnv((env) => {
+    const oldGit = runnerWithEnv((env) => {
       const { GIT_NO_LAZY_FETCH: _drop, ...rest } = env;
       return rest;
     });

@@ -1,5 +1,6 @@
 // Synthetic git repositories for the repo-signal tests, built with the real `git` (present on every CI runner).
 import { mkdirSync, writeFileSync } from "node:fs";
+import { GIT_SAFE_ARGS, gitEnv as engineGitEnv, resolveGit, type GitRunner } from "../../core/git/run";
 import os from "node:os";
 import path from "node:path";
 
@@ -84,4 +85,27 @@ export function isolateGitHome(home: string): () => void {
 export function gitVersion(): [number, number] {
   const m = /(\d+)\.(\d+)/.exec(git(process.cwd(), ["--version"]));
   return m ? [Number(m[1]), Number(m[2])] : [0, 0];
+}
+
+/**
+ * A test runner like the engine's, whose child environment `adjust` changes (the environment of a git older than
+ * GIT_NO_LAZY_FETCH). It returns stdout whole (it does not stream) and kills the child at the timeout or an abort.
+ * The production runner offers no such seam: its environment cannot be weakened from outside.
+ */
+export function runnerWithEnv(adjust: (env: Record<string, string>) => Record<string, string>): GitRunner {
+  return async (args, o) => {
+    const exe = o.git ?? resolveGit(process.env);
+    if (exe === undefined) throw Object.assign(new Error("git not found"), { code: "ENOENT" });
+    const child = Bun.spawn([exe, ...GIT_SAFE_ARGS, ...args], { cwd: o.cwd, env: adjust(engineGitEnv(process.env)), stdin: "ignore", stdout: "pipe", stderr: "ignore" });
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, o.timeoutMs);
+    const onAbort = () => child.kill("SIGKILL");
+    o.signal.addEventListener("abort", onAbort, { once: true });
+    const out = await new Response(child.stdout).text();
+    const code = await child.exited;
+    clearTimeout(timer);
+    o.signal.removeEventListener("abort", onAbort);
+    const truncated = out.length > o.maxBytes;
+    return { code: timedOut || truncated ? null : code, stdout: truncated ? out.slice(0, o.maxBytes) : out, timedOut, truncated };
+  };
 }
