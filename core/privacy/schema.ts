@@ -11,7 +11,7 @@ import { PRACTICE_ROLES, STACK_ROLES } from "../scoring/roles";
 import type { Metric } from "../analysis/types";
 import type { Evidence } from "../signals/types";
 import type { EditLang } from "../text/langs";
-import { MCP_PUBLIC, MODEL_FAMILY_PATTERN, RISK_TOKENS } from "./allowlists";
+import { MCP_PUBLIC, modelExportId, RISK_TOKENS } from "./allowlists";
 
 /**
  * The sensitivity class of an exported value (spec §6.7): `public` (fixed vocabulary), `aggregate` (counts, rates,
@@ -36,7 +36,9 @@ export type FieldSpec =
   | { t: "day"; s: Sensitivity } | { t: "optional"; of: FieldSpec } | { t: "variant"; tag: string; cases: Readonly<Record<string, FieldSpec>> } | { t: "enum"; values: readonly string[]; s: Sensitivity }
   | { t: "string"; pattern: RegExp; s: Sensitivity } | { t: "nullable"; of: FieldSpec }
   | { t: "array"; of: FieldSpec; max: number } | { t: "tuple"; of: readonly FieldSpec[] } | { t: "object"; fields: Readonly<Record<string, FieldSpec>> }
-  | { t: "record"; key: RegExp; of: FieldSpec; maxKeys: number; fields?: Readonly<Record<string, FieldSpec>> };
+  | { t: "record"; key: KeyTest; of: FieldSpec; maxKeys: number; fields?: Readonly<Record<string, FieldSpec>> };
+/** What a record key must pass: an anchored pattern, or a predicate in the same shape. */
+export interface KeyTest { test(key: string): boolean }
 
 /**
  * A value as the schema allows it (deny by default), or `undefined` when it is not allowed at all:
@@ -330,8 +332,11 @@ const CHECK: FieldSpec = (() => {
 
 /** An MCP server's export label: a public name, or "custom #n". */
 const MCP_LABEL = str(new RegExp(`^(?:${[...MCP_PUBLIC].map(esc).join("|")}|custom #[1-9]\\d{0,3})$`), "pseudonymous");
-/** A model's export id: a known family's allowlisted id or `<family>-other`, "fine-tuned" or "other" (at most 64 characters). */
-const MODEL_KEY = new RegExp(`^(?=.{1,64}$)(?:fine-tuned|other|(?:${MODEL_FAMILY_PATTERN})(?:-[a-z0-9.]+)*)$`);
+/**
+ * A model's export id: exactly what `modelExportId` gives back unchanged (a known family's allowlisted id or
+ * `<family>-other`), or one of its two fixed tokens, "fine-tuned" and "other". No looser shape is accepted.
+ */
+const MODEL_KEY: KeyTest = { test: (k) => k === "fine-tuned" || k === "other" || modelExportId(k) === k };
 /** A project's opaque label: "P-" and the upper-case hex of 4, 6, 8 … or 16 digits, the shortest unique in the store. */
 const PROJECT_LABEL = str(/^P-(?:[0-9A-F]{2}){2,8}$/, "pseudonymous");
 /**

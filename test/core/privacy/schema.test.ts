@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { AIPROF2, KIND_SPECS, sanitize, violations, type FieldSpec } from "../../../core/privacy/schema";
+import { AIPROF2, KIND_SPECS, sanitize, violations, type FieldSpec, type KeyTest } from "../../../core/privacy/schema";
+import { modelExportId } from "../../../core/privacy/allowlists";
 import { isValueOf, VALUE_KEYS, VALUE_KINDS, type ValueKind } from "../../../core/forensics/types";
 
 /** A field that may be absent. */
@@ -199,8 +200,8 @@ describe("AIPROF2", () => {
     "claude-opus-4-1-20250805", "gpt-other", "fine-tuned", "other", "restore-cluster", "Was this history restored from a backup then?",
     "matchShare", "claude-code/human/detail", "py", "data", "skill", "default", "never", "read-only", "subagents",
   ];
-  const patterns = (): Array<[string, RegExp]> => {
-    const out: Array<[string, RegExp]> = [];
+  const patterns = (): Array<[string, KeyTest]> => {
+    const out: Array<[string, KeyTest]> = [];
     const walk = (s: FieldSpec, at: string): void => {
       if (s.t === "string") out.push([at, s.pattern]);
       else if (s.t === "optional") walk(s.of, at);
@@ -222,7 +223,8 @@ describe("AIPROF2", () => {
     const list = patterns();
     expect(list.length).toBeGreaterThan(30);
     for (const [at, re] of list) {
-      expect(`${at} m:${re.multiline} g:${re.global} y:${re.sticky}`).toBe(`${at} m:false g:false y:false`);
+      // a pattern has no flag that loosens anchoring; a predicate key (the model ids) is held by the same samples below
+      if (re instanceof RegExp) expect(`${at} m:${re.multiline} g:${re.global} y:${re.sticky}`).toBe(`${at} m:false g:false y:false`);
       const valid = SAMPLES.filter((x) => re.test(x));
       expect(`${at} samples:${valid.length > 0}`).toBe(`${at} samples:true`);
       for (const x of valid) {
@@ -289,5 +291,21 @@ describe("AIPROF2", () => {
   test("the payload never declares the private, diagnostics or meta parts of an analysis", () => {
     if (AIPROF2.t !== "object") throw new Error("AIPROF2 is an object spec");
     for (const k of ["private", "diagnostics", "meta"]) expect(Object.hasOwn(AIPROF2.fields, k)).toBe(false);
+  });
+});
+
+describe("AIPROF2: model keys", () => {
+  const fieldsOf = (f: FieldSpec | undefined): Readonly<Record<string, FieldSpec>> => (f as Extract<FieldSpec, { t: "object" }>).fields;
+  const models = fieldsOf(fieldsOf(AIPROF2).exposure).models!;
+
+  test("a key of exposure.models is accepted only when modelExportId maps it to itself, or is fine-tuned or other", () => {
+    for (const k of ["claude-opus-4-1-20250805", "gpt-4o-mini", "gpt-other", "claude-other", "other", "fine-tuned", "claude-fable-5", "gemini"]) {
+      expect(`${k} ${violations({ [k]: 1 }, models).length}`).toBe(`${k} 0`);
+    }
+    for (const k of ["claude-acme-payroll", "gpt-4o-contoso-prod", "anthropic.claude-3-haiku-20240307-v1:0", "claude-3-5-sonnet@20240620", "Claude-Opus-4",
+      "fine-tuned-acme", "acme"]) {
+      expect(modelExportId(k) === k).toBe(false);
+      expect(`${k} ${violations({ [k]: 1 }, models).join(",")}`).toBe(`${k} $.<key>`);
+    }
   });
 });

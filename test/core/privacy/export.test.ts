@@ -133,6 +133,38 @@ describe("exportPayload: raw channels", () => {
     expect(JSON.stringify(out)).not.toContain("acme");
   });
 
+  test("model words include fable and mythos", () => {
+    for (const id of ["claude-fable-5-2", "claude-mythos-1", "claude-fable-5"]) expect(`${id} → ${modelExportId(id)}`).toBe(`${id} → ${id}`);
+  });
+
+  test("the two public cloud forms reduce to the plain id before the grammar runs; nothing else about them is looser", () => {
+    for (const [id, out] of [
+      ["anthropic.claude-3-5-sonnet-20241022-v2:0", "claude-3-5-sonnet-20241022"],
+      ["us.anthropic.claude-sonnet-4-20250514-v1:0", "claude-sonnet-4-20250514"],
+      ["eu.anthropic.claude-3-haiku-20240307-v1:0", "claude-3-haiku-20240307"],
+      ["apac.anthropic.claude-opus-4-1-20250805-v1:0", "claude-opus-4-1-20250805"],
+      ["claude-3-5-sonnet@20240620", "claude-3-5-sonnet"],
+      ["claude-opus-4-1@20250805", "claude-opus-4-1"],
+      // the reduced id still meets the grammar
+      ["anthropic.claude-3-acme-payroll-v1:0", "claude-other"],
+      ["claude-acme-payroll@20240620", "claude-other"],
+      // anything else about the two forms stays as strict as before
+      ["anthropic.claude-3-5-sonnet-20241022-v2", "other"],
+      ["anthropic.claude-3-5-sonnet-20241022-v2:0:1", "other"],
+      ["us.east.anthropic.claude-3-haiku-20240307-v1:0", "other"],
+      ["acme.claude-3-haiku-20240307-v1:0", "other"],
+      ["Anthropic.claude-3-haiku-20240307-v1:0", "other"],
+      ["claude-3-5-sonnet@2024-06-20", "other"],
+      ["claude-3-5-sonnet@20241332", "other"],
+      ["claude-3-5-sonnet@20240620@20240620", "other"],
+      ["anthropic.claude-3-5-sonnet@20240620-v1:0", "other"],
+    ] as const) expect(`${id} → ${modelExportId(id)}`).toBe(`${id} → ${out}`);
+    // counts of the cloud forms and the plain id sum under one export id
+    const a = analyze(personaScan("expert"), UTC);
+    a.private.models = { "claude-3-5-sonnet-20241022": 1, "anthropic.claude-3-5-sonnet-20241022-v2:0": 2, "us.anthropic.claude-3-5-sonnet-20241022-v2:0": 3 };
+    expect((parsed(a).exposure as Json).models).toEqual({ "claude-3-5-sonnet-20241022": 6 });
+  });
+
   test("150 model ids give 64 keys: the 63 most used and other with the summed rest", () => {
     const a = analyze(personaScan("expert"), UTC);
     const raw: Record<string, number> = { "acme-model": 5 };
