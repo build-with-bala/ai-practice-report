@@ -399,5 +399,9 @@ describe("--explain: what repo signals read", () => {
     // settings.local.json is named only as never opened (pre-flight P21)
     expect(reads.split(/(?<=\.) /).filter((sentence) => sentence.includes("settings.local.json"))).toEqual([expect.stringMatching(/never opened/)]);
     expect(reads).toMatch(/system-level git config/i);
+    // the known limits are stated where the guarantee is
+    expect([/link swapped in between the check and the open/, /hard link/, /\.git file .*another repository/, /root git reports/]
+      .filter((re) => !re.test(reads))).toEqual([]);
+    expect(REPO_SIGNALS_DESCRIBE.runs.join("\n")).toMatch(/older than 2\.37/);
   });
 });

@@ -3,12 +3,14 @@ import path from "node:path";
 import { fileState, isDir } from "../io/fs";
 import { keyedHash, normalizePath } from "../text/hash";
 
-/** How many ancestors of a session folder are checked for `.git` (the folder itself included). */
+/** How many ancestors of a session folder are checked for `.git`, besides the folder itself (21 folders at most). */
 export const MAX_ANCESTORS = 20;
 
 /**
  * The folder holding the nearest `.git` (a folder, or a file: a worktree or submodule) at or above `dir`, checked by
- * stat only, at most MAX_ANCESTORS levels up to the file-system root; undefined when there is none.
+ * stat only, at most MAX_ANCESTORS levels up to the file-system root; undefined when there is none. A `.git` file is
+ * taken as git takes it: one that names another repository's git folder (its back-pointer is not checked) makes that
+ * repository's history read under this folder.
  */
 export function gitAncestor(dir: string): string | undefined {
   let at = path.resolve(dir);

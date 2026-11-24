@@ -2,6 +2,11 @@
  * A repo's allowlisted files — instruction files, Claude Code hooks, CI and pre-commit configuration — read in memory
  * and reduced to kinds, check lists, booleans and counts. Only the exact paths and the three folders below are opened
  * or listed; source files never are. No text leaves these functions.
+ *
+ * What the path checks cannot promise (they check a path, then open it): a link swapped in between the check and the
+ * open is followed; a hard link to a file outside the worktree is a file inside it, and is read when it has an
+ * allowlisted name; and a `.git` file naming another repository's git folder makes that repository's history read
+ * under this folder (`discover.ts`).
  */
 import { realpathSync } from "node:fs";
 import path from "node:path";

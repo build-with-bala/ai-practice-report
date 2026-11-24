@@ -73,7 +73,11 @@ export const REPO_SIGNALS_DESCRIBE: { reads: string[]; runs: string[] } = {
       "Links are resolved in every path component first: a file is opened, or a folder listed, only when its real path lies inside " +
       "the worktree and is itself one of these paths there (so CLAUDE.md linked to AGENTS.md is read; a link to a source file or out " +
       "of the worktree is not). .claude/settings.local.json, source files and any other file are never opened; " +
-      "a credential, token or key file name (or a link to one) is refused unopened.",
+      "a credential, token or key file name (or a link to one) is refused unopened. " +
+      "What a path check cannot promise: a link swapped in between the check and the open is followed, and a hard link " +
+      "to a file elsewhere, under an allowlisted name, is read.",
+    "a .git file is taken as git takes it: one that names another repository's git folder makes that repository's history read " +
+      "under the session's folder.",
     "git config: the system-level git config is ignored (GIT_CONFIG_NOSYSTEM); only user.email and, for a git older than 2.44, " +
       "the partial-clone keys are asked for.",
   ],
