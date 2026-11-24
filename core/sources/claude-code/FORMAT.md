@@ -191,7 +191,9 @@ manual), preTokens, postTokens, durationMs, preservedSegment, …}`, `logicalPar
   says `interrupted: true`; such a call has no `ok` and no `exit`. Else `ok` = not `is_error`, and `exit` =
   `toolUseResult.exitCode`, else — for a failing Bash/PowerShell call — the `<n>` of its reply's leading `Exit code <n>`.
 - `UsageEv` and `AnchorEv` (`cc-msg`, `cc-req`) once per `message.id`, usage fields taking the maximum over the
-  message's block records; each `AnchorEv` names its session (`sessionId`).
+  message's block records; each `AnchorEv` names its session (`sessionId`). `idTail` = the id after `msg_` / `req_`,
+  only when it has a server id's shape (letters, digits, `_` and `-`, at most 128 characters); any other id gives no
+  anchor and is skipped `bad-anchor`.
 - `TurnEv` per `turn_duration` (`effort` outside `low|medium|high|xhigh|max` becomes `other`); `TotalsEv` from the
   last `cost-state` and from each workflow summary (`claude-code:wf:<workflowId>`); `IdentityEv` per distinct
   `session-owner.accountUuid`; `FileFactEv` per fully read transcript, naming its session (`sessionId`).

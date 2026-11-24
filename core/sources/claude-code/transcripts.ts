@@ -53,6 +53,8 @@ const SURFACE = /^[a-z][a-z0-9-]{0,31}$/;
 const EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
 /** A commit's sha starts with at least 7 hex digits; those 7, lower-cased, are its key (`commitKey`). */
 const SHA_HEAD = /^[0-9a-f]{7}/i;
+/** The part of a server-issued message or request id after its prefix: the only characters and length one can have. */
+const ID_TAIL = /^[A-Za-z0-9_-]{1,128}$/;
 /** Names the CLI gives its files and folders (sessions are UUID-named); any other name is hashed before it becomes part of an id. */
 const AGENT_STEM = /^agent-[A-Za-z0-9]+$/;
 const WORKFLOW_DIR = /^wf_[A-Za-z0-9_-]+$/;
@@ -289,9 +291,9 @@ class TranscriptReader {
     let p = id === undefined ? undefined : this.messages.get(id);
     if (!p) {
       p = { ts, model, inTok: 0, outTok: 0, cacheR: 0, cacheW: 0, seen: false };
-      if (id?.startsWith("msg_") && id.length > 4) this.out({ k: "anchor", tool: TOOL, source: TRANSCRIPTS_SOURCE, kind: "cc-msg", ts, idTail: id.slice(4), sessionId: this.spec.sessionId });
+      if (id?.startsWith("msg_") && id.length > 4) this.anchor("cc-msg", id.slice(4), ts);
       const req = str(v.requestId);
-      if (req?.startsWith("req_") && req.length > 4) this.out({ k: "anchor", tool: TOOL, source: TRANSCRIPTS_SOURCE, kind: "cc-req", ts, idTail: req.slice(4), sessionId: this.spec.sessionId });
+      if (req?.startsWith("req_") && req.length > 4) this.anchor("cc-req", req.slice(4), ts);
       if (id !== undefined) {
         this.messages.set(id, p);
         if (this.messages.size > MESSAGE_WINDOW) {
@@ -309,6 +311,15 @@ class TranscriptReader {
       p.cacheW = Math.max(p.cacheW, num(usage.cache_creation_input_tokens) ?? 0);
     }
     if (id === undefined) this.usage(p);
+  }
+
+  /**
+   * An anchor, when its id has the shape a server-issued id has (ID_TAIL: letters, digits, `_` and `-`, at most 128):
+   * anything else is no server id, and kept nowhere — skipped `bad-anchor`.
+   */
+  private anchor(kind: "cc-msg" | "cc-req", tail: string, ts: number): void {
+    if (!ID_TAIL.test(tail)) return this.tally.skip("bad-anchor");
+    this.out({ k: "anchor", tool: TOOL, source: TRANSCRIPTS_SOURCE, kind, ts, idTail: tail, sessionId: this.spec.sessionId });
   }
 
   private usage(p: PendingUsage): void {
