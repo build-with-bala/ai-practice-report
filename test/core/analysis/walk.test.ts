@@ -489,7 +489,7 @@ describe("walk: tiers and tokens (rules 15–16)", () => {
   });
 });
 
-const commit = (ts: number, shaKey: string, owner = true): CommitFact => ({ ts, shaKey, files: [], owner, mine: true });
+const commit = (ts: number, shaKey: string, mine = true, id?: string): CommitFact => ({ ts, shaKey, files: [], mine, ...(id ? { id } : {}) });
 const repo = (repoKey: string, projectKeys: string[], commits: CommitFact[], identity = true): RepoFacts => ({
   repoKey, projectKeys, identity, commits, commitsTruncated: false, fileLists: true,
   instructions: { files: [], namesChecks: [], touched: 0 }, hooks: { entries: 0, checks: [], disabled: false },
@@ -514,7 +514,7 @@ describe("walk: delivery (rules 17–18)", () => {
     const s = all.get("s")!;
     expect([s.repoKey, s.editEpisodes, s.editEpisodesInRepo, s.landedEpisodes]).toEqual(["R", 1, 1, 1]);
     expect(s.prKeys).toEqual(["pr1"]);
-    expect(s.landed).toBe(2); // own commit k1 (k2 is another repo's, k3 is past the window) + one PR
+    expect(s.landed).toBe(2); // own commit k1 (k2 is another author's, k3 is past the window) + one PR
     const n = all.get("n")!;
     expect([n.editEpisodes, n.editEpisodesInRepo, n.landedEpisodes, n.landed]).toEqual([1, 0, 0, 0]);
   });
@@ -537,7 +537,7 @@ describe("walk: delivery (rules 17–18)", () => {
     expect([all.get("a")!.landed, all.get("b")!.landed]).toEqual([1, 0]);
   });
 
-  test("a commit goes to the latest-starting row that covers it; a commit marker is a landed unit without git", () => {
+  test("a commit goes to the earliest-starting row that covers it; a commit marker is a landed unit without git", () => {
     const repos = signals([repo("R", ["PK"], [commit(T0 + 3 * HOUR, "k9")])]);
     const all = walk([
       sess("a", { projectKey: "PK", start: T0, end: T0 + HOUR }), prompt("a", T0), edit("a", T0 + SEC, "ts", 2),
@@ -545,10 +545,32 @@ describe("walk: delivery (rules 17–18)", () => {
       sess("c", { projectKey: "PK", start: T0 + 4 * HOUR, end: T0 + 5 * HOUR }), prompt("c", T0 + 4 * HOUR),
       sess("m", { projectKey: "PM" }), prompt("m", T0), edit("m", T0 + SEC, "ts", 2), marker("m", T0 + 2 * SEC, "commit", { detail: "kx" }),
     ], { repos });
-    expect([all.get("a")!.landed, all.get("b")!.landed, all.get("c")!.landed]).toEqual([0, 1, 0]);
+    expect([all.get("a")!.landed, all.get("b")!.landed, all.get("c")!.landed]).toEqual([1, 0, 0]);
     expect(all.get("a")!.landedEpisodes).toBe(1);
     const m = all.get("m")!;
     expect([m.editEpisodesInRepo, m.landedEpisodes, m.landed]).toEqual([0, 0, 1]);
+  });
+});
+
+describe("walk: commits once among kept clones, and a cut commit list", () => {
+  test("a commit two kept clones list is one landed unit, for the earliest-starting row across repositories", () => {
+    const shared = [commit(T0 + 3 * HOUR, "k1", true, "id1"), commit(T0 + 4 * HOUR, "k2", true, "id2")];
+    const repos = signals([repo("R1", ["P1"], shared.map((c) => ({ ...c }))), repo("R2", ["P2"], shared.map((c) => ({ ...c })))]);
+    const all = walk([
+      sess("a", { projectKey: "P2", start: T0, end: T0 + HOUR }), prompt("a", T0),
+      sess("b", { projectKey: "P1", start: T0 + 2 * HOUR, end: T0 + 2 * HOUR + MIN }), prompt("b", T0 + 2 * HOUR),
+    ], { repos });
+    expect([all.get("a")!.landed, all.get("b")!.landed]).toEqual([2, 0]);
+  });
+
+  test("a cut list: an edit episode that ends before the reach is in no delivery denominator", () => {
+    const cut: RepoFacts = { ...repo("R", ["PK"], [commit(T0 + 30 * HOUR, "k1")]), commitsTruncated: true, commitsReach: T0 + 24 * HOUR };
+    const all = walk([
+      sess("old", { projectKey: "PK", start: T0, end: T0 + HOUR }), prompt("old", T0), edit("old", T0 + SEC, "ts", 2),
+      sess("new", { projectKey: "PK", start: T0 + 29 * HOUR, end: T0 + 29 * HOUR + MIN }), prompt("new", T0 + 29 * HOUR), edit("new", T0 + 29 * HOUR + SEC, "ts", 2),
+    ], { repos: signals([cut]) });
+    expect([all.get("old")!.editEpisodes, all.get("old")!.editEpisodesInRepo, all.get("old")!.landedEpisodes]).toEqual([1, 0, 0]);
+    expect([all.get("new")!.editEpisodesInRepo, all.get("new")!.landedEpisodes]).toEqual([1, 1]);
   });
 });
 

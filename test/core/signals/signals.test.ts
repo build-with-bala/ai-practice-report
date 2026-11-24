@@ -254,7 +254,7 @@ const config = (kind: ConfigEv["kind"], name: string | undefined, over: Partial<
   if (name !== undefined) c.name = name;
   return c;
 };
-const commit = (ts: number, shaKey: string, files: string[], over: Partial<CommitFact> = {}): CommitFact => ({ ts, shaKey, files, owner: true, mine: true, ...over });
+const commit = (ts: number, shaKey: string, files: string[], over: Partial<CommitFact> = {}): CommitFact => ({ ts, shaKey, files, mine: true, ...over });
 const repo = (repoKey: string, projectKeys: string[], over: Partial<RepoFacts> = {}): RepoFacts => ({
   repoKey, projectKeys, identity: true, commits: [], commitsTruncated: false, fileLists: true,
   instructions: { files: [], namesChecks: [], touched: 0 }, hooks: { entries: 0, checks: [], disabled: false },
@@ -297,7 +297,7 @@ const REPOS = (): RepoSignals => signals([
     commits: [
       commit(T0 + 30 * MIN, "c1", ["f1"], { ai: "claude" }), commit(T0 + 5 * HOUR, "c2", ["f1", "f3"], { rework: "fix" }),
       commit(T0 - 10 * DAY, "c3", ["f1"]), commit(T0 + 6 * HOUR, "c4", ["f9"], { rework: "revert" }),
-      commit(T0 + 3 * HOUR, "c5", ["f2"], { owner: false }),
+      commit(T0 + 3 * HOUR, "c5", ["f2"], { mine: false }),
     ],
   }),
   repo("S", ["PS"], { instructions: { files: [], namesChecks: ["test"], touched: 0 } }),
@@ -352,7 +352,7 @@ describe("computeGlobals", () => {
 
   test("rework, AI co-authored share and commits after a session, from own commits", () => {
     const { g } = globalsOf(WORLD, { repos: REPOS(), now: T0 + 15 * DAY });
-    // own non-revert commits in [detail from − 3 days, now]: c1, c2 (c3 is older, c5 is no owner's); c2 fixes c1's file
+    // own non-revert commits in [detail from − 3 days, now]: c1, c2 (c3 is older, c5 is another author's); c2 fixes c1's file
     expect([g.reworkShare.value, g.reworkShare.n, g.reworkShare.sources]).toEqual([0.5, 2, ["git"]]);
     expect([g.reworkShare.from, g.reworkShare.to]).toEqual([T0 - 3 * DAY, T0 + 15 * DAY]);
     // own commits in the detail span: c1 (claude), c2, c4
@@ -368,9 +368,44 @@ describe("computeGlobals", () => {
     expect([none.value, none.reason, none.n]).toEqual([null, "not-captured", 3]); // c4 is no revert now: it joins c1, c2
     const other = REPOS();
     other.repos[0]!.commits = other.repos[0]!.commits.filter((c) => c.shaKey !== "c2" && c.shaKey !== "c4");
-    other.repos[0]!.commits.push(commit(T0 + 20 * DAY, "c6", ["f7"], { owner: false, rework: "fixup" }));
+    other.repos[0]!.commits.push(commit(T0 + 20 * DAY, "c6", ["f7"], { mine: false, rework: "fixup" }));
     const marked = globalsOf(WORLD, { repos: other, now: T0 + 25 * DAY }).g.reworkShare;
     expect([marked.value, marked.reason]).toEqual([0, undefined]);
+  });
+
+  test("a commit two kept clones list counts once: the second clone's project excluded or not, n is the same", () => {
+    const shared = (): CommitFact[] => [0, 1, 2, 3].map((i) => commit(T0 + (i + 1) * HOUR, `s${i}`, [`f${i}`], { id: `id${i}`, ai: "claude" }));
+    const two = signals([repo("R", ["PK"], { commits: shared() }), repo("S", ["PS"], { commits: shared() })]);
+    const evs: Ev[] = [sess("a", { projectKey: "PK" }), prompt("a", T0), sess("b", { projectKey: "PS" }), prompt("b", T0)];
+    const both = globalsOf(evs, { repos: two, now: T0 + 15 * DAY }).g;
+    const one = globalsOf(evs, { repos: two, now: T0 + 15 * DAY, exclude: { projects: ["PS"] } }).g;
+    expect([both.aiCoauthoredShare.n, both.evidence.ownCommits]).toEqual([4, 4]);
+    expect([one.aiCoauthoredShare.n, one.reworkShare.n]).toEqual([4, both.reworkShare.n]);
+  });
+
+  test("counting a shared commit once does not depend on the scan's salt", () => {
+    const run = (fill: number) => {
+      const salt = new Uint8Array(32).fill(fill);
+      const h = (v: string) => keyedHash(salt, v);
+      const shared = (): CommitFact[] => [0, 1, 2].map((i) => commit(T0 + (i + 1) * HOUR, h(`sha${i}`), [h(`f${i}`)], { id: h(`id${i}`), ai: i === 0 ? "claude" : undefined }));
+      const repos = signals([repo(h("R"), ["PK"], { commits: shared() }), repo(h("S"), ["PS"], { commits: [...shared(), commit(T0 + 5 * HOUR, h("solo"), [])] })]);
+      const g = globalsOf([sess("a", { projectKey: "PK" }), prompt("a", T0), sess("b", { projectKey: "PS" }), prompt("b", T0)], { repos, now: T0 + 15 * DAY }).g;
+      return [g.aiCoauthoredShare.n, g.aiCoauthoredShare.value, g.reworkShare.n, g.commitAfterSession.value];
+    };
+    expect(run(1)).toEqual([4, 0.25, 4, 1]);
+    for (const fill of [2, 7, 200]) expect(run(fill)).toEqual(run(1));
+  });
+
+  test("a cut list: windows start no earlier than its reach; a session before it is no 'no commit after'", () => {
+    const reach = T0 + 5 * DAY;
+    const r: RepoFacts = repo("R", ["PK"], { commits: [commit(T0 + 6 * DAY, "c1", ["f1"]), commit(T0 + 6 * DAY + HOUR, "c2", ["f1"], { rework: "fix" })],
+      commitsTruncated: true, commitsReach: reach });
+    const evs: Ev[] = [sess("a", { projectKey: "PK" }), prompt("a", T0), sess("b", { projectKey: "PK", start: T0 + 6 * DAY - HOUR, end: T0 + 6 * DAY - MIN }),
+      prompt("b", T0 + 6 * DAY - HOUR)];
+    const g = globalsOf(evs, { repos: signals([r]), now: T0 + 15 * DAY }).g;
+    expect([g.commitAfterSession.value, g.commitAfterSession.n]).toEqual([1, 1]); // a ended before the reach: not counted
+    expect(g.aiCoauthoredShare.from).toBe(reach);
+    expect(g.reworkShare.from).toBe(reach);
   });
 
   test("used artifacts, weighted by provenance; memory files shown", () => {

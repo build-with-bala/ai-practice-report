@@ -103,7 +103,7 @@ describe("persona golden output", () => {
     intermediate: {
       dims: {
         leverage: [50, [49, 52]], orchestration: [50, [47, 52]], verification: [50, [46, 53]], steering: [50, [35, 67]],
-        context: [50, [49, 50]], judgment: [50, [43, 62]], delivery: [49, [44, 55]],
+        context: [50, [49, 50]], judgment: [50, [43, 61]], delivery: [49, [44, 55]],
       },
       overall: { score: 50, interval: [48, 52], band: "developing", coverage: "7/7" },
     },
@@ -202,5 +202,20 @@ describe("artifacts in use", () => {
     const one: Ev = { k: "config", tool: "claude-code", source: "claude-code.config", kind: "plugin", name: "p", provenance: "installed", uses: 3 };
     expect(context(withConfigs([]))).toBeLessThanOrEqual(context(withConfigs([one])));
     expect(score(withConfigs([])).signals.artifacts.value).toBe(0);
+  });
+});
+
+describe("a cut commit list", () => {
+  test("12 weeks read with only the newest 28 days of commits: delivery over the part read equals the full history over those 28 days", async () => {
+    const { analyze } = await import("../../../core/analyze");
+    const cutAt = personaScan("intermediate").finishedAt - 28 * 86_400_000;
+    const cut = analyze(personaScan("intermediate", { cutDays: 28 }), { timeZone: "UTC" });
+    const full = analyze(personaScan("intermediate"), { timeZone: "UTC", exclude: { from: cutAt } });
+    for (const k of ["landedShare", "commitAfterSession"] as const) {
+      expect([k, cut.signals[k].value, cut.signals[k].n]).toEqual([k, full.signals[k].value, full.signals[k].n]);
+    }
+    expect(cut.signals.landedShare.n).toBeLessThan(analyze(personaScan("intermediate"), { timeZone: "UTC" }).signals.landedShare.n);
+    expect(cut.diagnostics.cutCommitLists).toBe(3);
+    expect(cut.signals.aiCoauthoredShare.from).toBe(cutAt);
   });
 });

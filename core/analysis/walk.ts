@@ -1,4 +1,4 @@
-import type { RepoSignals } from "../git/types";
+import type { CommitFact, RepoSignals } from "../git/types";
 import { BUCKET_MS, CORRECTION_WINDOW_MS, DELIVERY_WINDOW_MS, TASK_GAP_MS } from "../model/constants";
 import type { MarkerEv, PromptEv, PromptFeatures, ToolEv, TurnEv, UsageEv } from "../model/events";
 import type { Intent, Origin, Toolchain, ToolId } from "../model/ids";
@@ -42,7 +42,9 @@ export type Hist = Record<number, number>;
  *   [episode start, episode end + DELIVERY_WINDOW_MS]; the row's markers include its descendants'); `prKeys` and
  *   `commitShaKeys` (marker details of the row and its descendants, sorted; a key two rows name belongs to the
  *   earliest-starting one only); `landed` units (rule 18, from owner commits only). A git commit becomes a landed unit
- *   only in a repo with an identity (`RepoFacts.identity`); marker keys count without one.
+ *   only in a repo with an identity (`RepoFacts.identity`); marker keys count without one. In a repo whose commit
+ *   list was cut (`RepoFacts.commitsReach`), an edit episode that ended before the reach is in no delivery
+ *   denominator (`editEpisodesInRepo`, `landedEpisodes`): its commits may not have been read.
  * - Date range (`SessionTable.scope`): events, markers and commits outside [from, to] are ignored, even in a kept row
  *   that overlaps the range; `start` and `end` are the row's, clipped to the range. A descendant out of scope
  *   (`inScope`) counts nowhere (not in background, types, workflows or depth); a direct child counts in fan-out when any
@@ -162,7 +164,7 @@ interface Child { id: string; start: number; tools: ToolEv[]; actions: number; l
 interface Turn { p: PromptEv; pos: number; end: number; children: Child[]; a: number; work?: ToolEv[] }
 
 /** Repo facts the walk reads, per repoKey: identity and the commit times (ascending). */
-interface RepoIndex { identity: boolean; commitTs: number[] }
+interface RepoIndex { identity: boolean; commitTs: number[]; reach?: number }
 
 /**
  * The per-session sufficient statistics: one walk per `detailTop` row under the walk rules (Task 5). Pure: no clock,
@@ -179,7 +181,9 @@ export function buildSessionStats(t: SessionTable, store: EventStore, repos: Rep
   const repoIndex = new Map<string, RepoIndex>();
   for (const r of repos.repos) {
     if (repoIndex.has(r.repoKey)) continue;
-    repoIndex.set(r.repoKey, { identity: r.identity, commitTs: r.commits.map((c) => c.ts).filter(inRange).sort((a, b) => a - b) });
+    const idx: RepoIndex = { identity: r.identity, commitTs: r.commits.map((c) => c.ts).filter(inRange).sort((a, b) => a - b) };
+    if (r.commitsReach !== undefined) idx.reach = r.commitsReach;
+    repoIndex.set(r.repoKey, idx);
   }
 
   const out = t.detailTop.map((row) => walkRow(row, t, store, { timeZone: o.timeZone, gated, markersOf, repoIndex, inRange }));
@@ -199,11 +203,15 @@ function ownKeysOnce(out: readonly SessionStats[]): void {
   }
 }
 
+/** The key a commit is counted once by: its `id` (equal in every clone), else its `shaKey` (hand-made facts). */
+export const commitKey = (c: CommitFact): string => c.id ?? c.shaKey;
+
 /**
- * Rule 18: each own commit (`owner`, so a commit in several clones is counted once) goes to the latest-starting
- * `detailTop` row of its repo whose [start, end + DELIVERY_WINDOW_MS] holds it, and each row's landed units become
- * |its commit marker keys ∪ the commits assigned to it| + its distinct PRs. A commit a commit marker of any row already
- * names is not assigned again: the marker's row counts it (one commit, counted once).
+ * Rule 18: each of the person's commits (`mine`) in a repo with an identity counts once among the repositories with
+ * kept rows (by `commitKey`, first by repository key, then by the repo's own order), and goes to the earliest-starting
+ * `detailTop` row, across those repositories, whose repo lists it and whose [start, end + DELIVERY_WINDOW_MS] holds it.
+ * Each row's landed units become |its commit marker keys ∪ the commits assigned to it| + its distinct PRs. A commit a
+ * commit marker of any row already names is not assigned again: the marker's row counts it (one commit, counted once).
  */
 function assignCommits(repos: RepoSignals, out: SessionStats[], inRange: (ts: number) => boolean): void {
   const marked = new Set<string>();
@@ -215,22 +223,31 @@ function assignCommits(repos: RepoSignals, out: SessionStats[], inRange: (ts: nu
     if (list) list.push(s);
     else rowsByRepo.set(s.repoKey, [s]);
   }
-  const assigned = new Map<SessionStats, Set<string>>();
-  for (const r of repos.repos) {
-    const rows = rowsByRepo.get(r.repoKey);
-    if (!r.identity || !rows) continue;
-    rows.sort((a, b) => a.start - b.start || cmp(a.id, b.id));
+  // each commit once, with every kept repo that lists it
+  const commits = new Map<string, { ts: number; shaKey: string; repos: string[] }>();
+  for (const r of [...repos.repos].sort((a, b) => cmp(a.repoKey, b.repoKey))) {
+    if (!r.identity || !rowsByRepo.has(r.repoKey)) continue;
     for (const c of r.commits) {
-      if (!c.owner || marked.has(c.shaKey) || !inRange(c.ts)) continue;
-      for (let i = lastAtMost(rows, c.ts, (s) => s.start); i >= 0; i--) {
-        const s = rows[i]!;
-        if (c.ts > s.end + DELIVERY_WINDOW_MS) continue;
-        let set = assigned.get(s);
-        if (!set) assigned.set(s, (set = new Set()));
-        set.add(c.shaKey);
-        break;
+      if (!c.mine || marked.has(c.shaKey) || !inRange(c.ts)) continue;
+      const key = commitKey(c);
+      const at = commits.get(key);
+      if (at) { if (!at.repos.includes(r.repoKey)) at.repos.push(r.repoKey); }
+      else commits.set(key, { ts: c.ts, shaKey: c.shaKey, repos: [r.repoKey] });
+    }
+  }
+  const assigned = new Map<SessionStats, Set<string>>();
+  for (const c of commits.values()) {
+    let best: SessionStats | undefined;
+    for (const key of c.repos) {
+      for (const s of rowsByRepo.get(key)!) {
+        if (s.start > c.ts || c.ts > s.end + DELIVERY_WINDOW_MS) continue;
+        if (!best || s.start < best.start || (s.start === best.start && s.id < best.id)) best = s;
       }
     }
+    if (!best) continue;
+    let set = assigned.get(best);
+    if (!set) assigned.set(best, (set = new Set()));
+    set.add(c.shaKey);
   }
   for (const s of out) {
     const shas = new Set([...s.commitShaKeys, ...(assigned.get(s) ?? [])]);
@@ -588,6 +605,8 @@ function walkRow(row: SessionRow, t: SessionTable, store: EventStore, cx: WalkCt
     if (!isEdit) continue;
     s.editEpisodes++;
     if (!inRepo) continue;
+    // a cut commit list (`commitsReach`): an episode that ended before the oldest commit read cannot be matched
+    if (repo!.reach !== undefined && endAt < repo!.reach) continue;
     s.editEpisodesInRepo++;
     const hi = endAt + DELIVERY_WINDOW_MS;
     const inWindow = (ts: readonly number[]): boolean => {

@@ -101,22 +101,6 @@ export const REPO_SIGNALS_DESCRIBE: { reads: string[]; runs: string[] } = {
   ],
 };
 
-/**
- * One owner per commit: a commit several repos list (clones, forks, anything whose `log --all` shares it), compared by
- * its full sha, is the owner's in exactly one of them — the repo with the most detail-window sessions, then the smallest
- * repoKey. Every repo keeps its full list; the shas are held for this pass only.
- */
-function assignOwners(read: readonly { repo: Repo; facts: RepoFacts; commits: readonly ParsedCommit[] }[]): void {
-  const ranked = [...read].sort((a, b) => b.repo.sessions - a.repo.sessions || (a.repo.repoKey < b.repo.repoKey ? -1 : a.repo.repoKey > b.repo.repoKey ? 1 : 0));
-  const owned = new Set<string>();
-  for (const { commits } of ranked) {
-    for (const c of commits) {
-      c.fact.owner = !owned.has(c.sha);
-      owned.add(c.sha);
-    }
-  }
-}
-
 /** Commits newest first, then by `id`: the order every repo's list is returned in, whatever order git printed. */
 const byNewest = (a: ParsedCommit, b: ParsedCommit): number => {
   const [x, y] = [a.fact.id ?? "", b.fact.id ?? ""];
@@ -172,7 +156,6 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
   const roots = new Map<string, string>();
   const repos: RepoFacts[] = [];
   /** Each repo read, with its commits' full shas: memory only, for this pass. */
-  const read: { repo: Repo; facts: RepoFacts; commits: ParsedCommit[] }[] = [];
   // the window start, only when it is a date in range (a NaN or far date would throw in `toISOString`): else none
   const from = input.detailFrom;
   const since = from !== undefined && Number.isFinite(from) && from - 3 * DAY_MS >= 0 && from <= input.now + DAY_MS ? from - 3 * DAY_MS : undefined;
@@ -193,10 +176,9 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
     if (signal.aborted) return STOPPED;
     return Promise.race([runner(args, { cwd, timeoutMs: ms, maxBytes, signal, git: exe, ...(onChunk ? { onChunk } : {}) }), stopped]);
   };
-  // every return goes through here: a shared commit is owned once whatever path the pass ends by (done, stopped, thrown)
+  // every return goes through here, whatever path the pass ends by (done, stopped, thrown)
   const result = (status: RepoSignals["status"]): RepoSignals => {
     clearTimeout(timer);
-    assignOwners(read);
     // repos finish in any order when several are read at once: the result lists them by repoKey
     repos.sort((a, b) => (a.repoKey < b.repoKey ? -1 : a.repoKey > b.repoKey ? 1 : 0));
     const out: RepoSignals = { status, repos, roots, skipped, ms: Date.now() - started };
@@ -280,7 +262,6 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
         if (got === STOPPED) return skip("budget");
         roots.set(repo.repoKey, repo.root);
         repos.push(got.facts);
-        read.push({ repo, ...got });
       } catch {
         skip("error");
       }

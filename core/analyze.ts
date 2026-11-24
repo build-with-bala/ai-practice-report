@@ -57,7 +57,8 @@ export interface AnalyzeOptions { reference?: "v0"; bootstrap?: number; seed?: n
  * - `diagnostics`: orphan events per kind inside the date range, and `orphanPrompts`, the orphan detail prompts per tool
  *   (naming a session the store does not hold, or none); what the cross-tool dedupe found; the scan's warnings, less
  *   those that name an excluded tool; and `dailyRowsLeftOut` (a tool's own per-day totals left out under a project
- *   exclusion, since they carry no project).
+ *   exclusion, since they carry no project); `cutCommitLists`, the repositories of kept rows whose commit list was cut
+ *   short (their delivery and commit metrics read only the part read, from its reach).
  */
 export interface Analysis {
   meta: { core: string; reference: "v0"; bootstrap: number; seed: number; now: number; timeZone: string; repoSignals: RepoSignals["status"] };
@@ -66,7 +67,7 @@ export interface Analysis {
   identity: { accounts: number; hashes: string[] }; exclusions: { tools: number; projects: number; sessions: number;
     dateRange: boolean; weeksOutside: number };
   diagnostics: { orphans: Partial<Record<Ev["k"], number>>; dedupe: { hostSessions: number; pairedPrompts: number; relabelled: number }; warnings: Warning[];
-    orphanPrompts: Partial<Record<ToolId, number>>; dailyRowsLeftOut: number };
+    orphanPrompts: Partial<Record<ToolId, number>>; dailyRowsLeftOut: number; cutCommitLists: number };
   private: { dayParts: DayParts; config: Array<{ kind: ConfigEv["kind"]; name: string; key: string; provenance: ConfigEv["provenance"]; used: boolean }>;
     models: Record<string, number> };
 }
@@ -128,6 +129,9 @@ export function analyze(raw: ScanResult, o: AnalyzeOptions = {}): Analysis {
   const personas = roles(dimensions, p.stack);
   const forensics = runForensics(raw, t, stats, { now, timeZone, ...(o.releases ? { releases: o.releases } : {}) });
   const hashes = identityHashes(raw, t);
+  // repos of kept rows whose commit list was cut short (`commitsReach`): delivery and commit metrics read only its newest part
+  const keptRepos = new Set([...t.rows.values()].filter((r) => r.repoKey !== undefined && !t.hosts.has(r.id)).map((r) => r.repoKey!));
+  const cutLists = raw.repos.repos.filter((r) => r.commitsReach !== undefined && keptRepos.has(r.repoKey)).length;
 
   return {
     meta: { core: pkg.version, reference, bootstrap: boot.B, seed, now, timeZone, repoSignals: raw.repos.status },
@@ -136,7 +140,7 @@ export function analyze(raw: ScanResult, o: AnalyzeOptions = {}): Analysis {
     identity: { accounts: hashes.length, hashes },
     exclusions: { ...t.exclusions },
     diagnostics: { orphans: { ...t.orphans }, dedupe: { ...t.dedupe }, warnings: raw.warnings.filter((w) => w.tool === "scan" || !t.scope.tools.has(w.tool)).map((w) => ({ ...w })),
-      orphanPrompts: { ...t.orphanPrompts }, dailyRowsLeftOut: t.dailyRowsLeftOut },
+      orphanPrompts: { ...t.orphanPrompts }, dailyRowsLeftOut: t.dailyRowsLeftOut, cutCommitLists: cutLists },
     private: { dayParts: p.dayParts, config: p.privateConfig, models: p.privateModels },
   };
 }

@@ -438,32 +438,16 @@ describe("repo signals: one repo, one count; hostile repos", () => {
     expect(r.repos.repos[0]!.commits).toHaveLength(2);
   });
 
-  test("two clones of one repo: both list every commit; each is the owner's in one — most detail sessions, then smallest key", async () => {
+  test("two clones of one repo: both list every commit, with the same ids, each the person's (counting once is the analysis's job)", async () => {
     const a = makeRepo(path.join(h.root, "a"), [1, 2, 3].map((i) => ({ files: { "n.txt": `${i}` }, message: `c${i}`, at: ago(5 - i) })));
     const b = path.join(h.root, "b");
     git(h.root, ["clone", "-q", a, b]);
     git(b, ["config", "user.email", "dev@fixture.test"]);
-    mkdirSync(path.join(a, "sub"));
-    mkdirSync(path.join(b, "sub"));
-    const salt = new Uint8Array(32).fill(3);
-    const owners = (r: Awaited<ReturnType<typeof run>>) => r.repos.repos.map((x) => [x.repoKey, x.commits.length, x.commits.filter((c) => c.owner).length]).sort();
-
-    // a tie in sessions: the smaller key owns; both list all 3
-    const t = await run([a, b], { salt });
-    const [small, large] = t.repos.repos.map((x) => x.repoKey).sort();
-    expect(owners(t)).toEqual([[small, 3, 3], [large, 3, 0]]);
-
-    // the larger-key clone has more sessions: it owns
-    const largeDir = t.repos.roots.get(large!)!;
-    const largeIsB = path.basename(largeDir) === "b";
-    const r = await run(largeIsB ? [a, b, path.join(b, "sub")] : [a, path.join(a, "sub"), b], { salt });
-    expect(owners(r)).toEqual([[small, 3, 0], [large, 3, 3]]);
-
-    // a pass that ends partial (aborted once both were read) still owns each shared commit once
-    const ac = new AbortController();
-    const p = await run([a, b], { salt, signal: ac.signal, onProgress: (x) => { if (x.plugin === "repo-signals" && x.done === x.total) ac.abort(); } });
-    expect(p.repos.status).toBe("partial");
-    expect(owners(p)).toEqual([[small, 3, 3], [large, 3, 0]]);
+    const t = await run([a, b], { salt: new Uint8Array(32).fill(3) });
+    const [x, y] = t.repos.repos;
+    expect([x!.commits.length, y!.commits.length]).toEqual([3, 3]);
+    expect(x!.commits.map((c) => c.id)).toEqual(y!.commits.map((c) => c.id));
+    expect([...x!.commits, ...y!.commits].every((c) => c.mine && !("owner" in c))).toBe(true);
   });
 
   test("commits of the same time are listed by id, smallest first", async () => {
@@ -500,7 +484,7 @@ describe("repo signals: one repo, one count; hostile repos", () => {
     const r = await run([r6]);
     const commits = r.repos.repos[0]!.commits;
     expect(commits).toHaveLength(1);
-    expect(commits[0]).toMatchObject({ shaKey: keyedHash(r.salt, git(r6, ["rev-parse", "HEAD"]).slice(0, 7)), owner: true });
+    expect(commits[0]).toMatchObject({ shaKey: keyedHash(r.salt, git(r6, ["rev-parse", "HEAD"]).slice(0, 7)), mine: true });
     expect(commits[0]!.ai).toBeUndefined();
     expect(commits[0]!.files).toHaveLength(2);
   });

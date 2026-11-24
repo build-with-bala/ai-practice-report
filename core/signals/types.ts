@@ -9,7 +9,7 @@ import type { ToolId, Window } from "../model/ids";
  * `editTurns` (gated rows), `followUps`, `briefs`, `failingChecks`, `interrupts`, `workEpisodes` (the instructions with
  * an action: the unit of turns per work, under its older name), `tierEpisodes` (episodes with a known tier and effort), `editEpisodesInRepo`, `landed`, `bgKnown`. Global: `repos` (active repos
  * with repo facts), `buckets` (active buckets), `artifacts` (distinct used artifacts), `lifetimeWeeks`, `ownCommits`
- * (owner commits in the detail span).
+ * (the person's commits in the detail span, each once among the kept repos).
  */
 export interface Evidence { typedTurns: number; sessions: number; days: number; weeks: number; episodes: number; editTurns: number;
   followUps: number; briefs: number; failingChecks: number; interrupts: number; workEpisodes: number; tierEpisodes: number;

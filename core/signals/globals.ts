@@ -3,7 +3,7 @@ import { artifactUse } from "../analysis/artifacts";
 import { analysisScope } from "../analysis/scope";
 import { CONFIG_SOURCES, PR_LINK_TOOLS, STARTED_ORIGINS, SWITCH_TOOLS, type Metric, type SessionTable } from "../analysis/types";
 import type { CoverageEv } from "../model/events";
-import type { SessionStats } from "../analysis/walk";
+import { commitKey, type SessionStats } from "../analysis/walk";
 import type { CommitFact, RepoFacts } from "../git/types";
 import { BUCKET_MS, DELIVERY_WINDOW_MS, REWORK_WINDOW_MS } from "../model/constants";
 import type { ConfigEv } from "../model/events";
@@ -46,7 +46,10 @@ function toolDays(t: SessionTable, tools: ReadonlySet<ToolId>, window: "detailDa
  * - **Repos.** An active repo is the `repoKey` of at least one `detailTop` row; repo-wide totals (rework, co-authored
  *   share) read the repos of kept detail-window rows (no host copy), so a repo only an excluded project or tool, or
  *   only lifetime-window sessions, used never counts; the artifacts' child types and MCP calls read the same rows.
- *   Whole-report totals count owner commits only; per-repo matching (a commit after a session, a later fix) takes any.
+ *   Whole-report totals count the person's commits (`mine`) once among the kept repos (by `commitKey`); per-repo
+ *   matching (a commit after a session, a later fix) takes any author's. A repo whose commit list was cut
+ *   (`commitsReach`) starts the rework and co-authored windows no earlier than its reach, and a session of it that
+ *   ended before the reach is no "no commit after the session"; the spans start where counting did.
  * - **Rework** (`reworkShare`) reads commit-message conventions (revert, fixup!, fix:): when no commit by anyone in the
  *   kept repositories' window is marked as rework, the history does not use them, and the share is null
  *   (`not-captured`), not a measured 0.
@@ -165,20 +168,31 @@ export function computeGlobals(t: SessionTable, stats: readonly SessionStats[], 
   let reworkMarked = false; // any commit of the window, by anyone, marked as rework: the history uses the conventions
   let own = 0;
   let ai = 0;
+  // each commit counts once among the kept repos (by `commitKey`: first by repository key, then the repo's own order);
+  // a cut list (`commitsReach`) starts its windows no earlier than its reach, and the spans start where counting did
+  const counted = new Set<string>();
+  let ownStart = Infinity;
+  let reworkStart = Infinity;
   for (const key of [...keptRepos].sort()) {
     const r = facts.get(key);
     if (!r || detailFrom === undefined) continue;
+    const reach = r.commitsReach ?? -Infinity;
+    const ownFrom = Math.max(detailFrom, reach);
+    const repoReworkFrom = Math.max(reworkFrom!, reach);
+    ownStart = Math.min(ownStart, ownFrom);
     const commits = r.commits.filter((c) => inRange(c.ts) && c.ts <= hi);
-    for (const c of commits) {
-      if (!c.owner || c.ts < detailFrom) continue;
+    const first = commits.filter((c) => { const k = commitKey(c); return !counted.has(k) && (counted.add(k), true); });
+    for (const c of first) {
+      if (!c.mine || c.ts < ownFrom) continue;
       own++;
       if (c.ai !== undefined || c.generated !== undefined) ai++;
     }
     if (!r.fileLists) continue;
+    reworkStart = Math.min(reworkStart, repoReworkFrom);
     const later = commits.filter((c) => c.rework !== undefined);
     if (later.length > 0) reworkMarked = true;
-    for (const c of commits) {
-      if (!c.owner || c.rework === "revert" || c.ts < reworkFrom!) continue;
+    for (const c of first) {
+      if (!c.mine || c.rework === "revert" || c.ts < repoReworkFrom) continue;
       reworkDen++;
       if (reworkedBy(c, later)) reworked++;
     }
@@ -193,6 +207,7 @@ export function computeGlobals(t: SessionTable, stats: readonly SessionStats[], 
     if (!r.identity) continue;
     const ts = r.commits.map((c) => c.ts).filter((x) => inRange(x) && x <= hi);
     for (const s of rows) {
+      if (r.commitsReach !== undefined && s.end < r.commitsReach) continue; // its commits may not have been read
       afterDen++;
       afterSpan.add(s);
       if (ts.some((x) => x > s.end && x <= s.end + DELIVERY_WINDOW_MS)) afterNum++;
@@ -212,8 +227,9 @@ export function computeGlobals(t: SessionTable, stats: readonly SessionStats[], 
     ? { window: "lifetime", sources: [...artifactSources].sort(), n: used.length, value: artifactWeight }
     : fixedMetric("lifetime", [], 0, null, "not-captured");
 
+  const reworkSpan = { from: Number.isFinite(reworkStart) ? reworkStart : reworkFrom, to: hi };
   const memoryFiles = configs.filter((c) => c.kind === "memory-file").length;
-  const commitSpan = { from: detailFrom, to: hi };
+  const commitSpan = { from: Number.isFinite(ownStart) ? ownStart : detailFrom, to: hi };
 
   return {
     parallelShare: bucketSpan.metric("detail", perBucket.size, ratio(parallel, perBucket.size)),
@@ -225,8 +241,8 @@ export function computeGlobals(t: SessionTable, stats: readonly SessionStats[], 
     artifacts,
     memoryFiles,
     switchesPerWeek: switchSpan.metric("lifetime", switchWeeks, ratio(switches, switchWeeks), switchWeeks === 0 ? "not-captured" : "no-data"),
-    reworkShare: repoOff || reworkMarked ? repoMetric(reworkDen, ratio(reworked, reworkDen), { from: reworkFrom, to: hi })
-      : fixedMetric("detail", ["git"], reworkDen, null, "not-captured", { from: reworkFrom, to: hi }),
+    reworkShare: repoOff || reworkMarked ? repoMetric(reworkDen, ratio(reworked, reworkDen), reworkSpan)
+      : fixedMetric("detail", ["git"], reworkDen, null, "not-captured", reworkSpan),
     prsPerWeek: prSpan.metric("detail", prWeeks, ratio(prs.size, prWeeks), prWeeks === 0 ? "not-captured" : "no-data"),
     aiCoauthoredShare: repoMetric(own, ratio(ai, own), commitSpan),
     commitAfterSession: repoMetric(afterDen, ratio(afterNum, afterDen), afterSpan.range()),

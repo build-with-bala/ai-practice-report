@@ -318,8 +318,8 @@ export interface CommitOptions { salt: Uint8Array; email: string; maxFiles: numb
  * The person's commits of a streamed `git log` output of LOG_ARGS: `push` its chunks, then `end(cut)`. Each record is
  * reduced to keyed facts as soon as it is complete (its message and paths are dropped then): only those whose author
  * email equals `o.email` (case-insensitively), each with `id` (`commitId`), `mine` true, `ts` = commit time in ms, `shaKey`, the trailers
- * `classifyCommit` reads, up to `o.maxFiles` changed paths as keyed hashes, and `owner` true (a later pass decides
- * between repos). The last record is held back as facts until the next one or the end, so a `cut` output (its last
+ * `classifyCommit` reads, and up to `o.maxFiles` changed paths as keyed hashes (counting a commit once among the
+ * repositories in scope is the analysis's job, by `id`). The last record is held back as facts until the next one or the end, so a `cut` output (its last
  * record possibly incomplete) leaves it out, as `logRecords` does. `records`: every author's records, the left-out one
  * not counted; `oldest`: the smallest commit time (epoch ms) among those records, absent when there is none.
  */
@@ -341,7 +341,7 @@ export function commitStream(o: CommitOptions): { push(chunk: Uint8Array): void;
     lastTs = r.ct * 1000;
     const sha = r.sha.toLowerCase();
     last = r.email.trim().toLowerCase() !== email ? null : { sha, fact: { id: commitId(o.salt, sha), ts: r.ct * 1000, shaKey: shaKey(o.salt, r.sha),
-      ...classifyCommit(r.message), files: r.files.slice(0, o.maxFiles).map((f) => keyedHash(o.salt, f)), owner: true, mine: true } };
+      ...classifyCommit(r.message), files: r.files.slice(0, o.maxFiles).map((f) => keyedHash(o.salt, f)), mine: true } };
   }, { maxFiles: o.maxFiles });
   return {
     push: (chunk) => stream.push(chunk),
