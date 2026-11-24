@@ -10,7 +10,9 @@ import { roundDown, roundUp, toolsOf, type CheckResult, type CheckValues, type R
  * the prefix) grow with time. The time line is fitted from the history's own ids (its slope and offset are not the
  * service's constants), so the checks catch sessions that do not fit the rest of the history: spliced in, shuffled, or
  * partly re-timed. They do not catch a history re-timed as a whole (stretched or moved, every id with it), nor ids
- * invented to grow with time: both fit a line of their own. C9 (release dates) is the check that bounds re-timing.
+ * invented to grow with time: both fit a line of their own. Nor ids invented with another slope, or with values far
+ * from the genuine ones, at the start or end of the history: they read as an older or newer encoding
+ * (`scheme-changed`, a question, never `consistent`). C9 (release dates) is the check that bounds re-timing.
  *
  * Per anchor kind (`cc-msg`, `cc-req`):
  * - recognized scheme: the tail starts with the marker `01`, which at least 90% of the kind's anchors share (else n/a
@@ -32,10 +34,12 @@ import { roundDown, roundUp, toolsOf, type CheckResult, type CheckValues, type R
  * - a median |residual| over 10 min: no line holds half of the anchors, n/a (`scheme-changed`);
  * - C1 fails when more than 1% of the anchors, and at least 3, are off their time by more than 10 min (`offIds`;
  *   `p99Seconds` rounded up, capped at a year); more than 1% with fewer than 3 off is a note (`off-time`);
- * - a change of encoding: when C1 would fail, and the time-ordered ids split at one point into two sides of at least
- *   10 that each fit their own line without failing that rule, whose id values do not overlap (`schemeSplit`), both
- *   are n/a (`scheme-changed`), at any split ratio. A minority of fewer than 10 ids is judged by the rule above;
- * - C2 is Spearman's rank correlation of `v` and `ts` over a stride sample of at most 20,000, and fails below 0.99;
+ * - a change of encoding: when C1 or C2 would fail, and the time-ordered ids split at one point into two sides of at
+ *   least 3 that each fit their own line without failing that rule, whose id values do not overlap, and that are no
+ *   block moved in time (same slope, and the ids advanced no further than the time between them allows), both are n/a
+ *   (`scheme-changed`), at any split ratio (`schemeSplit`). A minority of 1 or 2 ids is judged by the rule above;
+ * - C2 is Spearman's rank correlation of `v` and `ts` over a stride sample of at most 20,000 of the ids on C1's line
+ *   (those C1 counted off are judged by C1's own thresholds), and fails below 0.99;
  *   it needs at least 200 recognized anchors (else n/a `too-few`: one late record among a few dozen moves it below
  *   0.99), and is n/a wherever C1 is.
  *
@@ -167,76 +171,116 @@ function recognize(anchors: readonly AnchorEv[]): Recognized {
   return { points: ok.map((a, i) => ({ v: Number(raw[i]! - min), ts: a.ts })), ...out };
 }
 
-/** The ids each side of a change point needs, the sample a side's line is fitted on, and the split grid per pass. */
-const SPLIT_MIN = 10;
+/** The ids the smaller side of a change point needs, the sample a side's line is fitted on, and the split grid per pass. */
+const SPLIT_MIN = 3;
 const SPLIT_FIT = 1_000;
 const SPLIT_GRID = 32;
+/** At most this many places where the whole history's line stops or starts fitting are tried as splits. */
+const MAX_FLIPS = 64;
+/** The smaller side's slope is judged only when it spans at least this long (ten times the time tolerance). */
+const SLOPE_SPAN_MS = 10 * OFF_MS;
 
 /** Whether `off` ids off the line among `n` fail C1: more than 1% of them, and at least 3. */
 const offFails = (off: number, n: number): boolean => off > OFF_SHARE * n && off >= OFF_MIN;
 
+interface Side { off: number; err: number; line: Line }
+
 /**
- * One side of a split: the ids off its own line (the start and fit C1 uses, over a stride sample of at most 1,000), or
- * undefined when no line holds half of the side.
+ * One side of a split: its own line (the start and fit C1 uses, over a stride sample of at most 1,000) and the ids off
+ * it, or undefined when no line holds half of the side.
  */
-function sideOff(ps: readonly Point[]): number | undefined {
+function sideFit(ps: readonly Point[]): Side | undefined {
   const sample = stride(ps, SPLIT_FIT);
   const start = inlierLine(sample);
   const line = start ? ols(sample.filter((p) => Math.abs(p.ts - start.a - start.b * p.v) <= OFF_MS)) : undefined;
   if (line === undefined) return undefined;
   const res = ps.map((p) => Math.abs(p.ts - line.a - line.b * p.v));
   if (median(res) > OFF_MS) return undefined;
-  return res.filter((r) => r > OFF_MS).length;
+  let err = 0;
+  for (const r of res) err += Math.min(r, OFF_MS);
+  return { off: res.filter((r) => r > OFF_MS).length, err, line };
+}
+
+/** The lowest and highest id value of some points. */
+function range(xs: readonly Point[]): [number, number] {
+  let lo = Infinity, hi = -Infinity;
+  for (const p of xs) {
+    if (p.v < lo) lo = p.v;
+    if (p.v > hi) hi = p.v;
+  }
+  return [lo, hi];
 }
 
 /**
- * A change of encoding at one point in time: of the splits of the time-ordered ids with at least 10 on each side, the
- * one with the fewest ids off their side's own line (a grid of 33 splits, narrowed around the best until it is exact;
- * deterministic), when neither side fails C1's rule on its own line, and the two sides' id values do not overlap (more
- * than C1's rule allows): a new encoding mints values outside the old range, a block of re-timed ids keeps its own.
+ * Whether the ids split at `k` (time order) are one encoding moved in time rather than two encodings. Genuine ids grow
+ * along one line, so a block moved in time keeps its slope, and at the split more time has passed than the ids account
+ * for. With the larger side's line (`ts = a + b·v`, b ms per id unit): the slopes agree (judged only when the smaller
+ * side spans at least 100 min: |b_small − b_large| over the smaller side's id span moves a time by at most 10 min; on a
+ * shorter span they count as agreeing), and the step in id value from the last id before the split to the first after
+ * it lies between minus the tolerance (10 min in id units) and what the time between them explains plus the tolerance.
+ * A slope that is not positive is no genuine line: it counts as moved, so the fail stands.
  */
-function schemeSplit(ps: readonly Point[]): boolean {
-  const memo = new Map<number, [number, number] | undefined>();
-  const sides = (k: number): [number, number] | undefined => {
+function movedInTime(ps: readonly Point[], k: number, before: Side, after: Side): boolean {
+  const [small, large, smallPs] = k <= ps.length - k ? [before, after, ps.slice(0, k)] : [after, before, ps.slice(k)];
+  const b = large.line.b;
+  if (!(b > 0)) return true;
+  const span = smallPs[smallPs.length - 1]!.ts - smallPs[0]!.ts;
+  const [v0, v1] = range(smallPs);
+  const agree = span < SLOPE_SPAN_MS || Math.abs(small.line.b - b) * (v1 - v0) <= OFF_MS;
+  const p = ps[k - 1]!, q = ps[k]!;
+  const jump = q.v - p.v, tol = OFF_MS / b;
+  return agree && jump >= -tol && jump <= (q.ts - p.ts) / b + tol;
+}
+
+/**
+ * A change of encoding at one point in time: of the splits of the time-ordered ids with at least 3 on each side, the
+ * one with the fewest ids off their side's own line, among equals the smallest sum of residuals (each capped at 10 min),
+ * so the exact boundary beats a tilted line that absorbs a shift (a grid of 33 splits, narrowed around the best until
+ * it is exact, together with the places where the whole history's line stops or starts fitting; deterministic), when neither side fails C1's rule on its own line, the two sides' id values do not overlap (more than
+ * C1's rule allows: a block of re-timed ids keeps its values inside the other side's range), and the split is no block
+ * moved in time (`movedInTime`): a real change of encoding changes the slope, or makes the values drop or leap.
+ */
+function schemeSplit(ps: readonly Point[], off: readonly boolean[]): boolean {
+  const memo = new Map<number, [Side, Side] | undefined>();
+  const sides = (k: number): [Side, Side] | undefined => {
     if (!memo.has(k)) {
-      const a = sideOff(ps.slice(0, k)), b = a === undefined ? undefined : sideOff(ps.slice(k));
+      const a = sideFit(ps.slice(0, k)), b = a === undefined ? undefined : sideFit(ps.slice(k));
       memo.set(k, a === undefined || b === undefined ? undefined : [a, b]);
     }
     return memo.get(k);
   };
   let lo = SPLIT_MIN, hi = ps.length - SPLIT_MIN;
   if (lo > hi) return false;
-  let best = -1, bestOff = Infinity;
+  let best = -1, bestOff = Infinity, bestErr = Infinity;
+  const consider = (k: number): void => {
+    const x = sides(k);
+    if (x === undefined) return;
+    const o = x[0].off + x[1].off, err = x[0].err + x[1].err;
+    if (o < bestOff || (o === bestOff && err < bestErr)) {
+      bestOff = o;
+      bestErr = err;
+      best = k;
+    }
+  };
+  // the places where the whole history's line stops or starts fitting, in time order: a change point is one of them
+  const flips: number[] = [];
+  for (let k = lo; k <= hi; k++) if (off[k - 1] !== off[k]) flips.push(k);
+  if (flips.length <= MAX_FLIPS) for (const k of flips) consider(k);
   for (;;) {
     const step = Math.max(1, Math.ceil((hi - lo) / SPLIT_GRID));
-    for (let k = lo; k <= hi; k = k === hi ? hi + 1 : Math.min(hi, k + step)) {
-      const x = sides(k);
-      if (x !== undefined && x[0] + x[1] < bestOff) {
-        bestOff = x[0] + x[1];
-        best = k;
-      }
-    }
+    for (let k = lo; k <= hi; k = k === hi ? hi + 1 : Math.min(hi, k + step)) consider(k);
     if (best < 0 || step === 1) break;
     lo = Math.max(SPLIT_MIN, best - step);
     hi = Math.min(ps.length - SPLIT_MIN, best + step);
   }
   if (best < 0) return false;
   const [a, b] = sides(best)!;
-  if (offFails(a, best) || offFails(b, ps.length - best)) return false;
-  // a new encoding mints ids outside the old ones' range; ids re-timed as a block keep their values inside the other
-  // side's range, so that is no scheme change
-  const range = (xs: readonly Point[]): [number, number] => {
-    let lo = Infinity, hi = -Infinity;
-    for (const p of xs) {
-      if (p.v < lo) lo = p.v;
-      if (p.v > hi) hi = p.v;
-    }
-    return [lo, hi];
-  };
+  if (offFails(a.off, best) || offFails(b.off, ps.length - best)) return false;
   const before = ps.slice(0, best), after = ps.slice(best);
   const [b0, b1] = range(before), [a0, a1] = range(after);
   const inside = after.filter((p) => p.v >= b0 && p.v <= b1).length + before.filter((p) => p.v >= a0 && p.v <= a1).length;
-  return !offFails(inside, ps.length);
+  if (offFails(inside, ps.length)) return false;
+  return !movedInTime(ps, best, a, b);
 }
 
 const MAX_P99_S = 31_536_000;
@@ -272,8 +316,13 @@ function checkKind(anchors: readonly AnchorEv[]): [CheckResult, CheckResult] {
   // more than 1% off fails only with at least 3 ids off: one late record among few ids is no evidence of editing
   const offOver = off > OFF_SHARE;
   const c1Fail = offFails(offIds, ps.length);
+  // C2 ranks only the ids on C1's line: the ids off it are C1's business, under C1's thresholds
+  const onLine = ps.filter((_, i) => res[i]! <= OFF_MS);
+  const rankSample = stride(onLine, RANK_SAMPLE);
+  const rho = ps.length < MIN_RANKED ? undefined : spearman(rankSample);
+  const c2Fail = rho !== undefined && rho < MIN_RHO;
   // ids that fit one line before a point in time and another after it: the encoding changed, which fails no one
-  if (c1Fail && schemeSplit(ps)) return naPair(anchors.length, "scheme-changed", left, tools);
+  if ((c1Fail || c2Fail) && schemeSplit(ps, res.map((r) => r > OFF_MS))) return naPair(anchors.length, "scheme-changed", left, tools);
   const c1: CheckResult = {
     id: "C1", status: c1Fail || offOver || malformed ? (c1Fail ? "fail" : "note") : "pass", n: ps.length,
     reason: offOver ? "off-time" : malformed ? "malformed-ids" : "ok",
@@ -281,12 +330,9 @@ function checkKind(anchors: readonly AnchorEv[]): [CheckResult, CheckResult] {
   };
 
   if (ps.length < MIN_RANKED) return [c1, { id: "C2", status: "n/a", n: ps.length, reason: "too-few", values: { ...left }, tools: [...tools] }];
-  const rankSample = stride(ps, RANK_SAMPLE);
-  const rho = spearman(rankSample);
-  if (rho === undefined) return [c1, { id: "C2", status: "n/a", n: rankSample.length, reason: "degenerate", values: { ...left }, tools }];
-  const c2Fail = rho < MIN_RHO;
+  if (rho === undefined) return [c1, { id: "C2", status: "n/a", n: rankSample.length, reason: "degenerate", values: { ...left }, tools: [...tools] }];
   const c2: CheckResult = { id: "C2", status: c2Fail ? "fail" : "pass", n: rankSample.length, reason: c2Fail ? "out-of-order" : "ok",
-    values: { rho: roundDown(rho), ...left } satisfies CheckValues, tools };
+    values: { rho: roundDown(rho), ...left } satisfies CheckValues, tools: [...tools] };
   return [c1, c2];
 }
 

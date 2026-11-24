@@ -299,11 +299,12 @@ describe("checkAnchors: a change of id encoding never fails anyone", () => {
     });
   }
 
-  test("a minority side of fewer than 10 ids is judged by the off-time rule", () => {
-    const [c1] = anchorsOf(scanResultOf(changed(400, 395)));
-    expect([c1.status, c1.reason, c1.values.offIds]).toEqual(["fail", "off-time", 5]);
+  test("a minority side of 3 ids is enough; one of 1 or 2 ids is judged by the off-time rule", () => {
+    expect(anchorsOf(scanResultOf(changed(400, 395)))[0].reason).toBe("scheme-changed");
     const [two] = anchorsOf(scanResultOf(changed(400, 398)));
     expect([two.status, two.reason]).toEqual(["pass", "ok"]); // 2 of 400 off: under 1%
+    const [few] = anchorsOf(scanResultOf(changed(100, 98)));
+    expect([few.status, few.reason, few.values.offIds]).toEqual(["note", "off-time", 2]); // 2% off, fewer than 3
   });
 
   test("edited times are not mistaken for a scheme change", () => {
@@ -331,5 +332,81 @@ describe("checkAnchors: known limits (a later improvement changes these on purpo
     });
     const [c1, c2] = anchorsOf(scanResultOf(evs));
     expect([c1.status, c2.status]).toEqual(["pass", "pass"]);
+  });
+});
+
+describe("checkAnchors: a block moved in time is no change of encoding", () => {
+  const DAY = 86_400_000;
+  /** `n` genuine ids, one every 30 min from 200 days after T0; `retime` moves a record's time, its id untouched. */
+  function history(n: number, retime: (i: number, ts: number) => number, idOf?: (i: number, mint: number, r: () => number) => string): AnchorEv[] {
+    const r = rng(n + 17);
+    return Array.from({ length: n }, (_, i) => {
+      const mint = T0 + 200 * DAY + i * 30 * MIN;
+      return anchor(retime(i, mint), idOf ? idOf(i, mint, r) : genuineTail(mint, r));
+    });
+  }
+
+  for (const [share, days] of [[0.02, 30], [0.1, 90], [0.3, 180], [0.6, 120]] as const) {
+    test(`the oldest ${share * 100}% of the history moved ${days} days back fails C1`, () => {
+      const [c1] = anchorsOf(scanResultOf(history(2_000, (i, ts) => (i < share * 2_000 ? ts - days * DAY : ts))));
+      expect([c1.status, c1.reason]).toEqual(["fail", "off-time"]);
+    });
+  }
+
+  test("a clock 20 min slow for the first 3% reads like one slow mid-history: the off-time fail, whose question names the clock", () => {
+    for (const from of [0, 1_000]) {
+      const [c1] = anchorsOf(scanResultOf(history(2_000, (i, ts) => (i >= from && i < from + 60 ? ts - 20 * MIN : ts))));
+      expect([from, c1.status, c1.reason]).toEqual([from, "fail", "off-time"]);
+      expect(c1.askAbout).toContain("clock wrong");
+    }
+  });
+
+  test("the newest 20% moved 30 days forward fails C1", () => {
+    const [c1] = anchorsOf(scanResultOf(history(2_000, (i, ts) => (i >= 1_600 ? ts + 30 * DAY : ts))));
+    expect([c1.status, c1.reason]).toEqual(["fail", "off-time"]);
+  });
+
+  /** `n` ids over 60 days; from id `old` on, another encoding of the given kind under the same marker. */
+  function encoded(n: number, old: number, kind: "slope" | "drop" | "leap"): AnchorEv[] {
+    const r = rng(n + old);
+    const at = (i: number) => T0 + Math.floor((i * 60 * DAY) / n);
+    // "slope": values carry on from the last old id at four times the old slope
+    const last = at(old - 1);
+    return Array.from({ length: n }, (_, i) => {
+      const ts = at(i);
+      if (i < old) return anchor(ts, genuineTail(ts, r));
+      const v = kind === "slope" ? BASE + BigInt(last - T0) * SCALE + BigInt(ts - last) * 4n * SCALE
+        : kind === "drop" ? BASE - 2n * 58n ** 11n + BigInt(ts - T0) * SCALE
+          : BASE + 10n * 58n ** 11n + BigInt(ts - T0) * SCALE;
+      return anchor(ts, `01${enc(v, 12)}${randomB58(r, 10)}`);
+    });
+  }
+  for (const kind of ["slope", "drop", "leap"] as const) {
+    for (const [n, old] of [[400, 360], [400, 280], [400, 120], [400, 20], [200, 197], [200, 191]] as const) {
+      test(`a real change of encoding (${kind}) at ${old}/${n - old} of ${n} ids is scheme-changed`, () => {
+        const [c1, c2] = anchorsOf(scanResultOf(encoded(n, old, kind)));
+        expect([c1.status, c1.reason, c2.status, c2.reason]).toEqual(["n/a", "scheme-changed", "n/a", "scheme-changed"]);
+      });
+    }
+  }
+
+  test("known limit: 300 ids invented with another slope, below the genuine range, 120 days earlier, pass as an older encoding", () => {
+    const r = rng(9);
+    const fab = Array.from({ length: 300 }, (_, i) => anchor(T0 + 50 * DAY + i * 40 * MIN, `01${enc(2n * 58n ** 11n + BigInt(i) * 777_000_000n, 12)}${randomB58(r, 10)}`));
+    const [c1, c2] = anchorsOf(scanResultOf([...fab, ...history(2_000, (_, ts) => ts)]));
+    expect([c1.status, c1.reason, c2.status, c2.reason]).toEqual(["n/a", "scheme-changed", "n/a", "scheme-changed"]);
+  });
+
+  test("C2 ranks only the ids on C1's line: a few new lower ids at the end fail neither", () => {
+    for (const k of [9, 15]) {
+      const evs = history(2_000, (_, ts) => ts, (i, mint, r) => (i >= 2_000 - k ? `01${enc(58n ** 11n + BigInt(i) * 1_000n, 12)}${randomB58(r, 10)}` : genuineTail(mint, r)));
+      const [c1, c2] = anchorsOf(scanResultOf(evs));
+      expect([k, c1.status, c2.status]).toEqual([k, "pass", "pass"]);
+    }
+  });
+
+  test("a scattered 0.75% of ids off their time fails neither C1 nor C2", () => {
+    const [c1, c2] = anchorsOf(scanResultOf(history(2_000, (i, ts) => (i % 133 === 7 ? ts + 3 * HOUR : ts))));
+    expect([c1.status, c1.values.offIds, c2.status]).toEqual(["pass", 15, "pass"]);
   });
 });
