@@ -52,9 +52,9 @@ describe("a project exclusion removes everything that carries the project", () =
     expect(ex.dailyRowsLeftOut).toBe(2);
   });
 
-  test("scope.projects holds every excluded key given, matched or not", () => {
-    const t = buildSessionTable(scanResultOf(world()), { ...opts, exclude: { projects: ["kA", "kNone"] } });
-    expect([...t.scope.projects].sort()).toEqual(["kA", "kNone"]);
+  test("scope.projects holds every excluded key given, a session's or only a prompt's", () => {
+    const t = buildSessionTable(scanResultOf([...world(), sess("s", T0, { projectKey: "kS" })]), { ...opts, exclude: { projects: ["kA", "kS"] } });
+    expect([...t.scope.projects].sort()).toEqual(["kA", "kS"]);
   });
 
   test("human() leaves out a prompt carrying an excluded project; a prompt naming a kept row follows the row", () => {

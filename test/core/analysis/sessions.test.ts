@@ -130,14 +130,15 @@ describe("buildSessionTable: exclusions", () => {
   });
 
   test("a project exclusion drops that project's rows with their descendants", () => {
-    const t = buildSessionTable(scanResultOf(evs()), { ...opts, exclude: { projects: ["P1", "P9"] } });
+    const t = buildSessionTable(scanResultOf(evs()), { ...opts, exclude: { projects: ["P1"] } });
     expect([...t.rows.keys()].sort()).toEqual(["cc2", "cx1", "cx2"]);
     expect(t.exclusions).toEqual({ tools: 0, projects: 1, sessions: 2, dateRange: false, weeksOutside: 0 });
   });
 
-  test("scope.projects holds every excluded key given; empty without one", () => {
-    const t = buildSessionTable(scanResultOf(evs()), { ...opts, exclude: { projects: ["P1", "P9"] } });
-    expect([...t.scope.projects]).toEqual(["P1", "P9"]);
+  test("scope.projects holds every excluded key given; empty without one; a key nothing carries fails closed", () => {
+    const t = buildSessionTable(scanResultOf(evs()), { ...opts, exclude: { projects: ["P1", "P2"] } });
+    expect([...t.scope.projects]).toEqual(["P1", "P2"]);
+    expect(() => buildSessionTable(scanResultOf(evs()), { ...opts, exclude: { projects: ["P1", "P9"] } })).toThrow(/matches no project label or key/);
     const u = buildSessionTable(scanResultOf(evs()), { ...opts, exclude: { tools: ["codex"] } });
     expect(u.scope.projects.size).toBe(0);
   });

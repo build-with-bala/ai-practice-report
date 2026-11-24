@@ -20,6 +20,8 @@ export interface DedupeResult {
   relabelled: Set<PromptEv>;
   /** The sessions holding relabelled prompts. */
   relabelledSessions: Set<string>;
+  /** Prompt pairs (step 2) per session pair: `host` is the host copy when the pair is one, `original` its other side. */
+  pairs: Array<{ a: string; b: string; prompts: number; host?: string; original?: string }>;
   pairedPrompts: number;
 }
 
@@ -114,24 +116,32 @@ export function dedupe(prompts: readonly PromptEv[], sessions: ReadonlyMap<strin
   const relabelledSessions = new Set<string>();
   for (const [host, original] of hostPairs) {
     if (hosts.has(original)) continue; // both sides are host copies (of other pairs): nothing to relabel
-    const copies = new Map<string, PromptEv[]>();
+    // the copy's prompts by text hash, in time order, each list with a cursor: the originals are taken in time order, so
+    // a copy before the cursor is used or too early for every later prompt (one to one, earliest first, by index)
+    const copies = new Map<string, { list: PromptEv[]; at: number }>();
     for (const p of bySession.get(host) ?? []) {
-      const list = copies.get(p.textHash);
-      if (list) list.push(p);
-      else copies.set(p.textHash, [p]);
+      const c = copies.get(p.textHash);
+      if (c) c.list.push(p);
+      else copies.set(p.textHash, { list: [p], at: 0 });
     }
-    for (const list of copies.values()) list.sort(byTime);
-    const used = new Set<PromptEv>();
+    for (const c of copies.values()) c.list.sort(byTime);
     for (const p of [...(bySession.get(original) ?? [])].sort(byTime)) {
       if (p.origin !== "scripted") continue;
-      const q = (copies.get(p.textHash) ?? []).find((c) => !used.has(c) && Math.abs(c.ts - p.ts) <= PAIR_WINDOW_MS);
-      if (q === undefined) continue;
-      used.add(q);
+      const c = copies.get(p.textHash);
+      if (!c) continue;
+      while (c.at < c.list.length && c.list[c.at]!.ts < p.ts - PAIR_WINDOW_MS) c.at++;
+      if (c.at >= c.list.length || c.list[c.at]!.ts > p.ts + PAIR_WINDOW_MS) continue;
+      c.at++;
       relabelled.add(p);
       relabelledSessions.add(original);
     }
   }
-  return { hosts, relabelled, relabelledSessions, pairedPrompts };
+  const hostOfPair = new Map(hostPairs.map(([h, o]) => [h < o ? `${h}\u0000${o}` : `${o}\u0000${h}`, { host: h, original: o }]));
+  const pairList: DedupeResult["pairs"] = [...pairs.keys()].sort().map((key) => {
+    const [a, b] = key.split("\u0000") as [string, string];
+    return { a, b, prompts: pairs.get(key)!.length, ...(hostOfPair.get(key) ?? {}) };
+  });
+  return { hosts, relabelled, relabelledSessions, pairs: pairList, pairedPrompts };
 }
 
 const byTime = (a: PromptEv, b: PromptEv): number => a.ts - b.ts || cmp(a.tool, b.tool) || cmp(a.sessionId!, b.sessionId!);
