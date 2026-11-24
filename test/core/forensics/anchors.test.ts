@@ -279,3 +279,39 @@ describe("checkAnchors: no fail on a single observation", () => {
     expect(r2.status).toBe("fail");
   });
 });
+
+describe("checkAnchors: a change of id encoding never fails anyone", () => {
+  /** `n` ids over 60 days; the first `old` minted in the genuine encoding, the rest in another under the same marker. */
+  function changed(n: number, old: number, seed = 9): AnchorEv[] {
+    const r = rng(seed);
+    return Array.from({ length: n }, (_, i) => {
+      const ts = T0 + Math.floor((i * 60 * 86_400_000) / n);
+      const tail = i < old ? genuineTail(ts, r) : `01${enc(20n * 58n ** 11n + BigInt(ts - T0) * 250n, 12)}${randomB58(r, 10)}`;
+      return anchor(ts, tail);
+    });
+  }
+
+  for (const old of [360, 280, 120, 20]) {
+    test(`a split of ${old}/${400 - old} on 400 ids is scheme-changed, with a question about a tool or provider change`, () => {
+      const [c1, c2] = anchorsOf(scanResultOf(changed(400, old)));
+      expect([c1.status, c1.reason, c2.status, c2.reason]).toEqual(["n/a", "scheme-changed", "n/a", "scheme-changed"]);
+      expect(c1.askAbout).toContain("tool, the provider or a gateway change");
+    });
+  }
+
+  test("a minority side of fewer than 10 ids is judged by the off-time rule", () => {
+    const [c1] = anchorsOf(scanResultOf(changed(400, 395)));
+    expect([c1.status, c1.reason, c1.values.offIds]).toEqual(["fail", "off-time", 5]);
+    const [two] = anchorsOf(scanResultOf(changed(400, 398)));
+    expect([two.status, two.reason]).toEqual(["pass", "ok"]); // 2 of 400 off: under 1%
+  });
+
+  test("edited times are not mistaken for a scheme change", () => {
+    const tail = genuine().map((e, i) => (i % 33 === 5 ? { ...e, ts: e.ts + 2 * 365 * 86_400_000 } : e)); // re-timed ids sort last
+    expect(anchorsOf(scanResultOf(tail))[0].status).toBe("fail");
+    const evs = genuine().map((e, i) => (i % 33 === 5 ? { ...e, ts: e.ts + 2 * HOUR } : e));
+    expect(anchorsOf(scanResultOf(evs))[0].reason).toBe("off-time");
+    const block = genuine().map((e, i) => (i >= 1_000 && i < 1_200 ? { ...e, ts: e.ts + 2 * HOUR } : e));
+    expect(anchorsOf(scanResultOf(block))[0].status).toBe("fail");
+  });
+});

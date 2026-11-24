@@ -73,8 +73,20 @@ const missingThreadRows: Ask = (v) => {
     : `${digits(m)} Codex session ${plural(m, "file has", "files have")} no entry in Codex's own thread index. Were session files copied in from somewhere else?`;
 };
 
+/** The questions C1 and C2 share: their n/a results for ids that exist but cannot be verified. */
+const unverifiedIds: { readonly [R in Reason]?: Ask } = {
+  "unknown-marker": (v) => {
+    const u = num(v, "unrecognized");
+    return u === undefined ? undefined
+      : `${digits(u)} server-issued ${plural(u, "id does", "ids do")} not start the way the service's ids do, so the ids could not be checked against their times. Were some sessions run through another provider or a gateway?`;
+  },
+  "scheme-changed": () => "The server-issued ids do not follow one line in time: their encoding seems to have changed, so they could not be checked against their times. Did the tool, the provider or a gateway change during this history?",
+  degenerate: () => "All server-issued ids, or all their recorded times, are the same, so their order could not be checked. Were these ids or times copied or rewritten?",
+};
+
 const QUESTIONS: { readonly [I in CheckId]?: { readonly [R in Reason]?: Ask } } = {
   C1: {
+    ...unverifiedIds,
     "off-time": (v) => {
       const s = num(v, "offShare");
       return s === undefined ? undefined
@@ -87,6 +99,7 @@ const QUESTIONS: { readonly [I in CheckId]?: { readonly [R in Reason]?: Ask } } 
     },
   },
   C2: {
+    ...unverifiedIds,
     "out-of-order": (v) => {
       const r = num(v, "rho");
       return r === undefined ? undefined
