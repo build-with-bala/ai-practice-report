@@ -198,7 +198,7 @@ export class Pass {
       if (rows.length > 0) each(rows);
       if (rows.length < this.page) return true;
       const last = rows[rows.length - 1]!.key;
-      // keys inside a text range are text; one that does not sort after the start key (Bun reads text that is not valid
+      // keys inside a text range are text; one that does not sort after the start key (the runtime reads text that is not valid
       // UTF-8 as other text), or lies outside the range, cannot place the next page
       if (typeof last !== "string" || cmpCodePoints(last, after) <= 0 || cmpCodePoints(last, hi) >= 0) return this.stalled();
       after = last;

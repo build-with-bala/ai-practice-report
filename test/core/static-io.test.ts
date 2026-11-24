@@ -4,8 +4,10 @@ import os from "node:os";
 import path from "node:path";
 
 const ROOT = path.join(import.meta.dir, "..", "..");
-/** Every core source file: TypeScript or JavaScript, dotfiles included. */
-const PATTERN = "core/**/*.{ts,tsx,js,mjs,cjs,mts,cts}";
+/** The extensions of the source files the rules scan: TypeScript and JavaScript, JSX included. */
+const SCANNED = ["ts", "tsx", "js", "jsx", "mjs", "cjs", "mts", "cts"];
+/** Every core source file, dotfiles included. */
+const PATTERN = `core/**/*.{${SCANNED.join(",")}}`;
 const sourcesUnder = (cwd: string): string[] =>
   [...new Bun.Glob(PATTERN).scanSync({ cwd, dot: true })].map((f) => f.split(path.sep).join("/")).sort();
 const FILES = sourcesUnder(ROOT);
@@ -15,7 +17,7 @@ const FILES = sourcesUnder(ROOT);
 // Whatever the lists below do not allow fails there. And no core file, core/io's included, runs a program, but for an
 // exemption.
 
-/** The modules core may import outside core/io (relative imports aside), and what each is for. */
+/** The modules core may import outside core/io (relative imports: `relativeEscapes`), and what each is for. */
 const MODULES: Readonly<Record<string, string>> = {
   "node:fs": "file metadata: the names in FS_NAMES only",
   fs: "the same module by its bare name: FS_NAMES only",
@@ -46,7 +48,7 @@ const EXEMPT: readonly Exemption[] = [
 interface Exemption { file: string; construct: string; why: string }
 /** Which files a rule checks: `readers`, every core file outside core/io; `all`, every core file. */
 type Scope = "readers" | "all";
-interface Rule { id: string; scope: Scope; why: string; find: (text: string) => string[] }
+interface Rule { id: string; scope: Scope; why: string; find: (text: string, file: string) => string[] }
 interface ModuleRef { module: string; at: number; text: string }
 
 /** Every match of `re` in a text. */
@@ -75,6 +77,33 @@ function namesContent(text: string, at: number): boolean {
     .some((n) => !n.startsWith("type ") && !FS_NAMES.has(n.split(/\s+as\s+/)[0]!));
 }
 
+/** The one file a relative import may reach outside core/: the package manifest, for the version (a JSON import). */
+const OUTSIDE_CORE_ALLOWED: ReadonlySet<string> = new Set(["package.json"]);
+
+/**
+ * A relative import that leaves core/, or names a file the rules do not scan: resolved against the importing file, it
+ * must stay inside core/ and name a scanned extension, `.json`, or none (a TypeScript module path). `../package.json`
+ * is the one file outside core/ allowed.
+ */
+function relativeEscapes(text: string, file: string): string[] {
+  return modulesOf(text).filter((m) => m.module.startsWith(".")).filter((m) => {
+    const target = path.posix.normalize(path.posix.join(path.posix.dirname(file), m.module));
+    if (OUTSIDE_CORE_ALLOWED.has(target)) return false;
+    if (!target.startsWith("core/")) return true;
+    const ext = /\.([A-Za-z0-9]+)$/.exec(path.posix.basename(target))?.[1];
+    return ext !== undefined && ext !== "json" && !SCANNED.includes(ext);
+  }).map((m) => m.text);
+}
+
+/**
+ * An import attribute other than `type: "json"` (`with { … }`, or the older `assert { … }`): Bun loads a module as a
+ * database (`sqlite`), as text, or as a file by its attributes, around every rule here.
+ */
+function attributesOf(text: string): string[] {
+  return [...text.matchAll(/(["'])[^"'\s]+\1\s*(?:with|assert)\s*\{([^}]*)\}/g)]
+    .filter((m) => !/^\s*type\s*:\s*(["'])json\1\s*,?\s*$/.test(m[2]!)).map((m) => m[0]);
+}
+
 /** `process` not followed by a member access (`.`, `?.` or `[`). */
 const NOT_MEMBER = String.raw`(?!\s*(?:\?\.|\.|\[))`;
 /**
@@ -89,6 +118,9 @@ const PROCESS_USE = new RegExp([
   String.raw`[(,[{:]\s*process\s*[)\],};]`,
   String.raw`\.\.\.\s*process\b`,
   String.raw`(?:=>|\breturn\b|\byield\b)\s*process\b${NOT_MEMBER}`,
+  // the ordinary TypeScript forms around a member access: a cast (`(process as any).x`) and a non-null assertion (`process!.x`)
+  String.raw`\bprocess\s+as\b`,
+  String.raw`\bprocess\s*!(?!=)`,
 ].join("|"));
 
 /** A Bun member, written with `.` or `?.` and any spacing. */
@@ -100,6 +132,7 @@ const bunMember = (member: string, why: string): Rule => {
 const RULES: readonly Rule[] = [
   // readers: every core file outside core/io
   { id: "import", scope: "readers", why: "a module not in MODULES", find: (t) => modulesOf(t).filter((m) => !m.module.startsWith(".") && !Object.hasOwn(MODULES, m.module)).map((m) => m.text) },
+  { id: "relative-import", scope: "all", why: "it reaches a file outside core/, or one the rules do not scan", find: relativeEscapes },
   {
     id: "fs-name", scope: "readers", why: "the rest of node:fs opens, reads or copies content",
     find: (t) => modulesOf(t).filter((m) => (m.module === "node:fs" || m.module === "fs") && namesContent(t, m.at)).map((m) => m.text),
@@ -118,6 +151,7 @@ const RULES: readonly Rule[] = [
   bunMember("spawnSync", "it runs a program"),
   bunMember("$", "it runs a shell"),
   { id: "child_process", scope: "all", why: "it runs programs", find: every(/\bchild_process\b/) },
+  { id: "import-attribute", scope: "all", why: "an attribute other than type json loads a database, text or a file", find: attributesOf },
   { id: "spawnSync", scope: "all", why: "it runs a program", find: every(/\bspawnSync\b/) },
 ];
 
@@ -129,7 +163,7 @@ function violations(file: string, text: string, exempt: readonly Exemption[] = E
   let checked = text;
   for (const e of exempt) if (e.file === file) checked = checked.replace(new RegExp(CONSTRUCTS[e.construct]!.source, "g"), " ");
   const reader = !file.startsWith("core/io/");
-  return RULES.filter((r) => r.scope === "all" || reader).flatMap((r) => r.find(checked).map((m) => `${file}: ${r.id}: ${m.replace(/\s+/g, " ")}`));
+  return RULES.filter((r) => r.scope === "all" || reader).flatMap((r) => r.find(checked, file).map((m) => `${file}: ${r.id}: ${m.replace(/\s+/g, " ")}`));
 }
 
 describe("static I/O rule: deny by default", () => {
@@ -137,7 +171,7 @@ describe("static I/O rule: deny by default", () => {
     for (const f of ["core/index.ts", "core/scan.ts", "core/io/fs.ts", "core/io/sqlite.ts", "core/sources/codex/config.ts"]) expect(FILES).toContain(f);
     const tmp = mkdtempSync(path.join(os.tmpdir(), "static-io-"));
     try {
-      const made = ["core/a.ts", "core/b.tsx", "core/c.js", "core/d.mjs", "core/e.cjs", "core/f.mts", "core/g.cts", "core/.hidden/h.ts", "core/x/.i.js"];
+      const made = ["core/a.ts", "core/b.tsx", "core/c.js", "core/d.mjs", "core/e.cjs", "core/f.mts", "core/g.cts", "core/.hidden/h.ts", "core/x/.i.js", "core/k.jsx"];
       for (const f of [...made, "core/notes.md", "core/x/y.json"]) {
         mkdirSync(path.dirname(path.join(tmp, f)), { recursive: true });
         writeFileSync(path.join(tmp, f), "");
@@ -191,6 +225,14 @@ describe("static I/O rule: deny by default", () => {
       ["Bun.openInEditor(p)", "openInEditor"], ["openUriReadOnly(uri)", "openUriReadOnly"],
       ['await fetch("file:///etc/hosts")', "fetch"], ["globalThis.Bun.file(p)", "indirection"],
       ["handle.readFileSync(p)", "opener"], ["new Database(p)", "opener"],
+      // relative imports: out of core/, or to a file no rule scans; attributes that load a module as something else
+      ['import { helper } from "../../scripts/helper";', "relative-import"], ['import { read } from "./evil.db";', "relative-import"],
+      ['export * from "../../app/x";', "relative-import"], ['import "../../test/kit/home";', "relative-import"],
+      ['import db from "./x.db" with { type: "sqlite" };', "import-attribute"], ['import t from "./x.txt" with { type: "text" };', "import-attribute"],
+      ['import f from "./x.bin" with { type: "file" };', "import-attribute"], ['import j from "./x.json" assert { type: "text" };', "import-attribute"],
+      ['import j from "./x.json" with { type: "json", other: "x" };', "import-attribute"],
+      // process through the ordinary TypeScript forms
+      ['(process as any).getBuiltinModule("node:fs")', "process"], ["process!.binding('fs')", "process"], ["const p = process as unknown;", "process"],
     ];
     const missed = caught.filter(([text, rule]) => !violations("core/sources/x.ts", text).some((v) => v.startsWith(`core/sources/x.ts: ${rule}: `)));
     expect(missed).toEqual([]);
@@ -200,10 +242,28 @@ describe("static I/O rule: deny by default", () => {
       'import { lstatSync as lst } from "fs";',
       'import path from "node:path";', 'import os from "node:os";', 'import { randomBytes } from "node:crypto";',
       'import { scan } from "./scan";', 'import pkg from "../package.json" with { type: "json" };', 'export type * from "./model/events";',
+      'import { view } from "./view.jsx";', 'import data from "./table.json" with { type: \'json\' };', 'if (process !== undefined) f();',
       "const dir = import.meta.dir;", "const e = process.env;", 'const home = process.env.HOME;', 'if (process.platform === "win32") f();',
       "// one DailyEv per local day (process time zone), as the scanning process's zone counts it; the process ends.",
     ];
     expect(allowed.flatMap((text) => violations("core/sources/x.ts", text))).toEqual([]);
+  });
+
+  test("the five routes the rule used to pass now fail it, the jsx file among the files read", () => {
+    const sqlAttr = ["sql", "ite"].join(""); // built from parts: a control, never a use
+    const controls = [
+      'import { helper } from "../../scripts/helper";',
+      'import { read } from "./evil.jsx";\nread();\nBun.file("x");', // a jsx module is scanned like the rest
+      `import db from "./x.db" with { type: "${sqlAttr}" };`,
+      'import t from "./x.db" with { type: "text" };',
+      'import f from "./x.db" with { type: "file" };',
+    ];
+    for (const c of controls) expect(violations("core/sources/x.ts", c)).not.toEqual([]);
+    expect(violations("core/sources/evil.jsx", "Bun.file(p)")).toEqual(["core/sources/evil.jsx: Bun: Bun"]);
+    // the manifest is the one file outside core/ a relative import may name, from any depth
+    expect(violations("core/index.ts", 'import pkg from "../package.json" with { type: "json" };')).toEqual([]);
+    expect(violations("core/a/b/c.ts", 'import pkg from "../../../package.json" with { type: "json" };')).toEqual([]);
+    expect(violations("core/index.ts", 'import x from "../bun.lock";')).toEqual(['core/index.ts: relative-import: from "../bun.lock"']);
   });
 
   test("core/io holds the primitives: it may open files, but no file there runs a program", () => {
