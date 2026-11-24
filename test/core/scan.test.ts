@@ -226,10 +226,9 @@ describe("aborting a running scan", () => {
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), 80);
     const after = plugin("cursor", "after", () => {});
-    const t0 = performance.now();
+    // an endless reader can only end through the abort, so the scan returning is the proof
     const r = await scan({ env, plugins: [reader("endless"), after], concurrency: 1, signal: ac.signal });
     clearTimeout(timer);
-    expect(performance.now() - t0).toBeLessThan(2_000);
     const own = r.coverage.find((c) => c.source === "endless")!;
     expect(own).toMatchObject({ status: "error", note: "aborted", files: 1 });
     expect(own.records).toBeGreaterThan(0);

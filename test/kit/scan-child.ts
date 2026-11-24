@@ -7,7 +7,7 @@
 //   tail:     one plugin that makes a temp dir, then works ~1.5 s synchronously after its last await
 //   overlap:  two scans at once (A and B), each with a plugin that works 2 s in yielding slices until it is aborted
 //   overlap-listener: the same, while the application keeps a SIGINT listener of its own beside the core's trap
-//   stubborn: one plugin that makes a temp dir and ignores the abort, working 3 s in yielding slices
+//   stubborn: one plugin that makes a temp dir and ignores the abort, working 3 s in yielding slices, then `stubborn-done`
 //   late:     scan A works in yielding slices until a signal aborts it; while A unwinds (300 ms more) it starts scan B,
 //             which enters the trap after the signal was caught: B's plugin prints `located B` if it is ever located
 import { writeFileSync } from "node:fs";
@@ -64,6 +64,7 @@ const overlap = (name: string) => plugin(`test.overlap-${name}`, async (ctx) => 
 const stubborn = plugin("test.stubborn", async (ctx) => {
   makeCopy(ctx);
   await work(ctx, 3_000, true);
+  console.log("stubborn-done"); // must never print when a second signal ends the child
 });
 const lateB: SourcePlugin = {
   ...plugin("test.late-B", async (ctx) => makeCopy(ctx, " B")),
