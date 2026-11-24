@@ -249,6 +249,22 @@ describe("the refusal: no core/io primitive opens a never-opened file", () => {
     if (link(h.write(".codex/auth.json", "{}"), linked)) expect(isNeverOpened(linked)).toBe(true);
   });
 
+  test("isNeverOpened: every link of a chain is checked by name, not only the first and the last", () => {
+    // history.jsonl → auth.json (itself a link) → vault/codex-store: the middle name is a credential's
+    const target = h.write("vault/codex-store", JSON.stringify({ token: CANARY.secret }));
+    const middle = path.join(h.env.home, ".codex", "auth.json");
+    mkdirSync(path.dirname(middle), { recursive: true });
+    const first = path.join(h.env.home, ".claude", "history.jsonl");
+    mkdirSync(path.dirname(first), { recursive: true });
+    if (!link(target, middle) || !link(middle, first)) return;
+    expect([isNeverOpened(first), isNeverOpened(middle), isNeverOpened(target)]).toEqual([true, true, false]);
+    // a chain of ordinary names stays readable
+    const plain = path.join(h.env.home, "notes", "plain.json");
+    mkdirSync(path.dirname(plain), { recursive: true });
+    const plainTarget = h.write("data/plain-target.json", "{}");
+    if (link(plainTarget, plain)) expect(isNeverOpened(plain)).toBe(false);
+  });
+
   /** The OAuth, token and secret files that AI CLIs and editors keep beside their data, by name (a pattern and an ending included). */
   const AI_CREDENTIALS = [
     "oauth_creds.json", "google_accounts.json", "mcp-oauth-tokens.json", "mcp-oauth-tokens-v2.json", "mcp-auth.json", "secrets.json",

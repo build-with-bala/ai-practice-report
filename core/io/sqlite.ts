@@ -2,6 +2,7 @@ import { constants, Database } from "bun:sqlite";
 import { closeSync, copyFileSync, existsSync, lstatSync, openSync, readSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import type { TempDirs } from "../sources/types";
+import { statPath } from "./fs";
 import { noteOpen } from "./observe";
 
 export const MAX_COPY_BYTES = 2_147_483_648;
@@ -54,7 +55,8 @@ const READ_PRAGMA = /^PRAGMA\s+(?:table_info|index_list|index_xinfo)\s*\([^;=()]
  * Only reads run on a store: one SELECT or WITH statement, or one of the readers' PRAGMAs (READ_PRAGMA), and no `;`, so
  * never a second statement. Anything else throws ReadOnlyQueryError before it runs: ATTACH, which would open a file the
  * open observer never sees; DETACH; VACUUM, whose INTO form writes a copy even through a read-only handle; writes, schema
- * changes and every other PRAGMA.
+ * changes and every other PRAGMA. The filter reads only a statement's first word: a write behind a WITH (`WITH x AS (…)
+ * DELETE …`) passes it, and is refused by the read-only connection itself (an SQLite error, not ReadOnlyQueryError).
  */
 function readOnly(sql: string): void {
   const s = sql.trim();
@@ -191,10 +193,14 @@ export function copyBytes(file: string): number {
  * - any other store opens with `mode=ro`, and a busy one falls back to a private copy — unless the copy would take more
  *   than `o.maxCopyBytes` (default MAX_COPY_BYTES; `copyBytes`: the store and its `-wal`), when it is null.
  * A never-opened store (`noteOpen`) is refused at its first open, the header read: null, and nothing of it is read.
+ * Anything at the path that is not a regular file (a folder, a pipe, a device; links followed) is null before any open,
+ * so a pipe never blocks the read. A private copy takes the `-wal` and `-shm` only when they are regular files, never
+ * through a link (SQLite itself refuses a linked companion). Read-only is the store's own file and `-wal`: with a `-wal`
+ * present (a writer is or was there), SQLite may create or rewrite the `-shm` index beside the store, as any reader does.
  */
 export function openRo(file: string, temp: TempDirs, opener: (uri: string) => Database = defaultOpener, o?: { maxCopyBytes?: number }): RoDb | null {
   const store = storePath(file);
-  if (store === null) return null;
+  if (store === null || statPath(store).state !== "file") return null;
   let wal: boolean;
   try {
     wal = walMode(store);
@@ -222,6 +228,7 @@ export function openRo(file: string, temp: TempDirs, opener: (uri: string) => Da
     const dest = path.join(dir, path.basename(store));
     for (const suffix of ["", "-wal", "-shm"]) {
       if (!existsSync(store + suffix)) continue;
+      if (suffix !== "" && !lstatSync(store + suffix).isFile()) continue; // a linked or odd companion is never followed
       noteOpen(store + suffix, "copy");
       copyFileSync(store + suffix, dest + suffix);
     }
