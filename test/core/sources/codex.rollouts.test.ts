@@ -376,6 +376,18 @@ describe("codex rollouts: tools", () => {
     expect(toolsByTs(r).find((t) => t.editExt === "go")).not.toHaveProperty("linesRemoved");
   });
 
+  test("a patch call with no file section is no edit, and is counted: skipped empty-patch", async () => {
+    rollout((r) => {
+      r.fn("shell_command", { command: "apply_patch" });
+      r.fn("exec_command", { cmd: "apply_patch '*** Begin Patch\n*** End Patch'" });
+      r.fn("apply_patch", { input: "" });
+      r.fn("exec_command", { cmd: "echo hi" });
+    }).write(h);
+    const r = await run();
+    expect(r.store.all("tool").map((t) => t.name)).toEqual(["exec_command"]);
+    expect(r.coverage.find((c) => c.source === "codex.rollouts")!.skipped["empty-patch"]).toBe(3);
+  });
+
   test("a shell call that runs apply_patch, completed by the CLI's file change under the call's id, is one edit per file", async () => {
     const r1 = rollout((r) => {
       const p = r.fn("exec_command", { cmd: "apply_patch <<'EOF'\n*** Begin Patch\n*** Update File: src/a.ts\n@@\n-old\n+new\n+more\n*** Add File: b.md\n+x\n*** End Patch\nEOF" });

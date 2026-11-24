@@ -270,7 +270,8 @@ CLI's EventMsg tags (`exec_command_end`, `mcp_tool_call_end`, `collab_*`, `realt
 - **RolloutFactEv** per fully read rollout: `threadId` = the session id, `uuidTs` = the thread id's UUIDv7 time,
   `fileTs` = the file name's local time; **FileFactEv** likewise, naming its session (`sessionId`).
 - **CoverageEv**: `files`/`bytes` of fully read rollouts, `records` = parsed lines; skipped `sniffed`, `oversize`,
-  `parse`, `io-error`, `duplicate`, `foreign-item`, `exec-interaction`, `bad-record` (also logged once per root as
+  `parse`, `io-error`, `duplicate`, `foreign-item`, `exec-interaction`, `empty-patch` (a patch call — the `apply_patch`
+  tool, or a shell call starting `apply_patch` — with no file section: no edit), `bad-record` (also logged once per root as
   `warn cx.bad-record`), `bad-ts` (a line whose time is well-formed but outside the plausible range, counted once and
   never also `no-ts` for what it holds), `no-ts` (an event whose line gives no time, absent or shapeless; markers and
   command items take the latest earlier one when there is one); drift, beyond unknown types:

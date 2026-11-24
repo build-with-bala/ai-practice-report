@@ -199,6 +199,22 @@ function callOf(name: string | undefined, args: unknown, namespace: string | und
 }
 
 /**
+ * Whether a response_item payload applies a patch — the `apply_patch` tool, or a shell call whose command starts with
+ * `apply_patch` — so that one with no file section (no tool action at all) is counted, never silently dropped.
+ */
+export function isPatchCall(item: unknown): boolean {
+  if (!isObj(item)) return false;
+  if (item.type === "custom_tool_call") return item.name === "apply_patch";
+  if (item.type === "local_shell_call") return shellPatch(isObj(item.action) ? item.action.command : undefined) !== undefined;
+  if (item.type !== "function_call" || item.namespace !== undefined) return false;
+  const name = str(item.name);
+  if (name === "apply_patch") return true;
+  if (name === undefined || !SHELL_TOOLS.has(name)) return false;
+  const args = parseArgs(item.arguments);
+  return shellPatch(isObj(args) ? (args.cmd ?? args.command) : undefined) !== undefined;
+}
+
+/**
  * The tool actions in one rollout entry: a response_item payload (`function_call`, `custom_tool_call`, `local_shell_call`,
  * `web_search_call`) or a completed item (`CommandExecution`, `FileChange`, `McpToolCall`, `ImageView`, `Extension`,
  * `CollabAgentToolCall`, `DynamicToolCall`). One entry per call, or per file for apply_patch (a shell call that runs it

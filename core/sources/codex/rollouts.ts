@@ -13,7 +13,7 @@ import { streamJsonlFile } from "../common/stream";
 import type { Candidate, ScanCtx } from "../types";
 import { cxEffort } from "./effort";
 import { cxSource, cxThreadId } from "./origin";
-import { cxOutcome, cxToolCalls, type CxOutcome, type CxToolCall } from "./tools";
+import { cxOutcome, cxToolCalls, isPatchCall, type CxOutcome, type CxToolCall } from "./tools";
 import { uuidV7Ms } from "./uuid";
 
 export const ROLLOUTS_SOURCE = "codex.rollouts";
@@ -435,7 +435,10 @@ class RolloutReader {
     if (id !== undefined && (this.pending.has(id) || this.done.has(id))) return; // the same call again
     if (ts === undefined) return this.noTs();
     const evs = cxToolCalls(p).map((c) => this.toolEv(c, ts, id));
-    if (evs.length === 0) return;
+    if (evs.length === 0) {
+      if (isPatchCall(p)) this.tally.skip("empty-patch"); // a patch with no file section: no edit to count, but counted
+      return;
+    }
     if (id === undefined) {
       for (const ev of evs) this.out(ev);
       return;
