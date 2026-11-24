@@ -221,7 +221,8 @@ describe("codex threads: thread index and turn history", () => {
       ["cli", "Claude Code", "peer", "cli"],
       [JSON.stringify({ subagent: "review" }), null, "subagent", "subagent"],
       [spawn("not-a-uuid", CANARY.project), "Claude Code", "subagent", "subagent"],
-      [CANARY.prompt, null, "human", "other"],
+      [CANARY.prompt, null, "system", "other"], // a source the CLI is not known to write: never a human
+      ["desktop", "Claude Code", "peer", "other"],
       [JSON.stringify(["subagent"]), null, "human", "other"],
       ["{not json", null, "human", "other"],
     ];
@@ -233,7 +234,7 @@ describe("codex threads: thread index and turn history", () => {
     expect(r.store.session(sidOf(ids[7]!))).toMatchObject({
       parentId: sidOf(keyedHash(r.salt, "not-a-uuid")), spawnDepth: 2, agentType: keyedHash(r.salt, CANARY.project),
     });
-    expect(covOf(r, "codex.threads").unknownTypes).toEqual({ "threads.source:shape": 2 });
+    expect(covOf(r, "codex.threads").unknownTypes).toEqual({ "threads.source:shape": 2, "threads.source:(other)": 2 });
     expectNoCanaries([r.store, r.coverage, r.warnings]);
   });
 

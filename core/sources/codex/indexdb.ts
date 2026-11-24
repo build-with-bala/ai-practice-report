@@ -150,8 +150,9 @@ function thread(r: Obj, ctx: ScanCtx, tally: Tally): void {
   const updated = toEpochMs(r.updated_at_ms, ctx.now) ?? toEpochMs(r.updated_at, ctx.now);
   const end = Math.max(start, updated ?? start);
   // origin, surface and subagent links, by the rules the rollouts reader shares (origin.ts)
-  const { unknownShape, subagent: _subagent, ...driver } = cxSource(sourceValue(r.source), r.originator, ctx);
+  const { unknownShape, unknownValue, subagent: _subagent, ...driver } = cxSource(sourceValue(r.source), r.originator, ctx);
   if (unknownShape) tally.unknownKey("threads.source:shape");
+  if (unknownValue) tally.unknownKey("threads.source:(other)");
   const model = str(r.model);
   const s: SessionEv = {
     k: "session", tool: TOOL, source: THREADS_SOURCE, id, window: "lifetime", ...driver, start, end, models: model === undefined ? [] : [safeModel(model)],

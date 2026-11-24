@@ -248,14 +248,14 @@ describe("codex rollouts: prompts", () => {
     expect(byOrigin("scripted")).toEqual([false, false]);
   });
 
-  test("sources: exec is scripted, mcp is peer, any other string is human, Claude Code as originator is peer whatever the source", async () => {
+  test("sources: exec is scripted, mcp is peer, the CLI's other strings human, an unknown one system and drift; Claude Code as originator is peer whatever the source", async () => {
     const cases: [unknown, string | undefined, string, string][] = [
       ["cli", undefined, "human", "cli"],
       ["vscode", undefined, "human", "vscode"],
       ["mcp", undefined, "peer", "mcp"],
       ["exec", undefined, "scripted", "exec"],
       ["exec", "Claude Code", "peer", "exec"],
-      [CANARY.prompt, undefined, "human", "other"],
+      [CANARY.prompt, undefined, "system", "other"],
       [{ subagent: "review" }, undefined, "subagent", "subagent"],
       [{ subagent: { thread_spawn: { parent_thread_id: "not-a-uuid", depth: 2, agent_role: CANARY.project } } }, undefined, "subagent", "subagent"],
     ];
@@ -269,8 +269,8 @@ describe("codex rollouts: prompts", () => {
     const deep = r.store.session(sidOf(ids[7]!))!;
     expect(deep).toMatchObject({ parentId: sidOf(keyedHash(r.salt, "not-a-uuid")), spawnDepth: 2, agentType: keyedHash(r.salt, CANARY.project) });
     expect(r.store.session(sidOf(ids[6]!))!.parentId).toBeUndefined();
-    expect(r.store.all("prompt").map((p) => p.origin)).toEqual(["human", "human", "peer", "scripted", "peer", "human"]);
-    expect(r.coverage[0]!.unknownTypes).toEqual({});
+    expect(r.store.all("prompt").map((p) => p.origin)).toEqual(["human", "human", "peer", "scripted", "peer", "system"]);
+    expect(r.coverage[0]!.unknownTypes).toEqual({ "session_meta.source:(other)": 1 });
     expectNoCanaries(allEvents(r));
   });
 });

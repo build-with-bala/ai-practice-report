@@ -23,20 +23,25 @@ export interface CxSource {
   agentType?: string;
   /** A source that is neither a string nor a `{subagent: …}` object: format drift for the caller to count. */
   unknownShape: boolean;
+  /** A source string the CLI is not known to write: drift for the caller to count, and never a human. */
+  unknownValue: boolean;
 }
 
 /**
  * The origin of a thread from its `source` — a string (`cli`, `exec`, `vscode`, `mcp`, …) or an object `{subagent: …}` —
  * and its `originator`: `exec` → scripted; `mcp` (Codex run through its MCP server by another client) → peer; a subagent
- * source → subagent, with parent (`thread_spawn.parent_thread_id`, else `parentThreadId`), depth and role; any other
- * string, or none → human. An `originator` of exactly `Claude Code` makes the thread peer, unless its source is a
+ * source → subagent, with parent (`thread_spawn.parent_thread_id`, else `parentThreadId`), depth and role; another
+ * string the CLI writes (`cli`, `vscode`, …), or none → human; a string it is not known to write → system (and
+ * `unknownValue`, drift): a future automated source must never count as typed prompts. An `originator` of exactly `Claude Code` makes the thread peer, unless its source is a
  * subagent one (subagents inherit the originator and stay subagents). Shared by both readers so they cannot diverge.
  */
 export function cxSource(source: unknown, originator: unknown, ctx: ScanCtx, parentThreadId?: unknown): CxSource {
-  const s: CxSource = { origin: "human", subagent: false, unknownShape: false };
+  const s: CxSource = { origin: "human", subagent: false, unknownShape: false, unknownValue: false };
   if (typeof source === "string") {
-    s.origin = source === "exec" ? "scripted" : source === "mcp" ? "peer" : "human";
-    s.surface = SOURCES.has(source) ? source : "other";
+    const known = SOURCES.has(source);
+    s.origin = source === "exec" ? "scripted" : source === "mcp" ? "peer" : known ? "human" : "system";
+    s.surface = known ? source : "other";
+    s.unknownValue = !known;
   } else if (isObj(source) && "subagent" in source) {
     s.origin = "subagent";
     s.subagent = true;

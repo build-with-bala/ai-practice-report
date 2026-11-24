@@ -318,8 +318,9 @@ class RolloutReader {
     if (ts !== undefined) this.tick(ts);
 
     // origin, surface and subagent links, by the rules the thread index reader shares (origin.ts)
-    const { unknownShape, ...driver } = cxSource(p.source, p.originator, this.ctx, p.parent_thread_id);
+    const { unknownShape, unknownValue, ...driver } = cxSource(p.source, p.originator, this.ctx, p.parent_thread_id);
     if (unknownShape) this.tally.unknownKey("session_meta.source:shape");
+    if (unknownValue) this.tally.unknownKey("session_meta.source:(other)");
     const meta: Meta = { ...driver, inRepo: !!p.git };
     const version = str(p.cli_version);
     if (version !== undefined && VERSION.test(version)) {

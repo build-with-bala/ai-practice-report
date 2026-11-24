@@ -198,7 +198,8 @@ CLI's EventMsg tags (`exec_command_end`, `mcp_tool_call_end`, `collab_*`, `realt
   diverge): origin from `source` — `exec` → scripted; `mcp` (Codex run through its MCP server,
   driven by another client or agent) → peer; `{subagent: …}` → subagent (`parentId` from
   `thread_spawn.parent_thread_id`, else `parent_thread_id`; `spawnDepth` = `depth`; `agentType` = the role when
-  built in, else its keyed hash); any other string, or no source → human; `originator` exactly `Claude Code` → peer,
+  built in, else its keyed hash); another string the CLI writes, or no source → human; a string it is not known to
+  write → system and drift `session_meta.source:(other)` (a future automated source never counts as typed prompts); `originator` exactly `Claude Code` → peer,
   whatever the string source (a subagent source wins: its subagents inherit the originator and stay subagents).
   `surface` = the source when the CLI writes it (`cli`, `vscode`, `exec`, `mcp`, `custom`, `internal`, `unknown`; CLI
   program), else `other`, or `subagent`; `version` = `cli_version`;
@@ -428,7 +429,8 @@ The SQL names only the columns below, validated against `pragma_table_info` firs
 - **SessionEv** (window `lifetime`) per thread with a creation time (else skipped `no-ts`): `start` = created,
   `end` = updated (never before `start`); origin, `surface`, `parentId`, `spawnDepth`, `agentType` from `source` and
   `originator` by the rollouts' rules (`origin.ts`: `exec` → scripted, `mcp` → peer, a subagent source → subagent,
-  `originator` exactly `Claude Code` → peer unless the source is a subagent one, else human). `source` text that starts
+  `originator` exactly `Claude Code` → peer unless the source is a subagent one; a source string the CLI is not known
+  to write → system and drift `threads.source:(other)`; else human). `source` text that starts
   with `{`, `[` or `"` is parsed as JSON; JSON that does not parse, or a source that is neither a string nor a subagent
   object, is drift `threads.source:shape` (surface `other`). `models` = [`model`] (model-id-shaped, else `other`);
   `effort` = `reasoning_effort` by the CLI's levels (`effort.ts`, shared with the rollouts' turns: `none`, `minimal`,
