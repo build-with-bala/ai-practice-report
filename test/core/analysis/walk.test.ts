@@ -422,7 +422,7 @@ describe("walk: tiers and tokens (rules 15–16)", () => {
   });
 });
 
-const commit = (ts: number, shaKey: string, owner = true): CommitFact => ({ ts, shaKey, files: [], owner });
+const commit = (ts: number, shaKey: string, owner = true): CommitFact => ({ ts, shaKey, files: [], owner, mine: true });
 const repo = (repoKey: string, projectKeys: string[], commits: CommitFact[], identity = true): RepoFacts => ({
   repoKey, projectKeys, identity, commits, commitsTruncated: false, fileLists: true,
   instructions: { files: [], namesChecks: [], touched: 0 }, hooks: { entries: 0, checks: [], disabled: false },

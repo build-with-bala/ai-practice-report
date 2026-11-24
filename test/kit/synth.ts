@@ -151,7 +151,7 @@ export function synthStore(events: number): ScanResult {
       }
       if (turnNo % 4 === 3) {
         const shaKey = `synth-c-${pad(commitNo, 7)}`;
-        const fact: CommitFact = { ts: done + 30 * SEC, shaKey, ai: "claude", files: [`synth-f-${commitNo % 50}`, `synth-f-${(commitNo + 7) % 50}`], owner: true };
+        const fact: CommitFact = { ts: done + 30 * SEC, shaKey, ai: "claude", files: [`synth-f-${commitNo % 50}`, `synth-f-${(commitNo + 7) % 50}`], owner: true, mine: true };
         if (commitNo % 9 === 8) fact.rework = "fixup";
         commits[repo]!.push(fact);
         commitNo++;

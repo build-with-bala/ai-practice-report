@@ -17,9 +17,15 @@ export type InstructionKind = "claude" | "agents" | "gemini" | "cursorrules" | "
  * use all of a repo's commits.
  *
  * `id`: a keyed hash (16 lowercase hex digits) of the commit's full sha: equal for the same commit in every clone of one
- * repository within one scan, never the sha itself.
+ * repository within one scan, never the sha itself. Repo signals set it on every commit; it is optional in the type only
+ * for facts made elsewhere (tests, synthetic personas).
+ *
+ * `mine`: the commit's author is the person (author email = the repo's `user.email`, the rule that decides which commits
+ * are listed at all): true in every clone that lists the commit, unlike `owner`. Deciding "once" among the repos in
+ * scope is the analysis's job, by `id`.
  */
-export interface CommitFact { id?: string; ts: number; shaKey: string; ai?: AiTool; generated?: AiTool; rework?: "revert" | "fixup" | "fix"; files: string[]; owner: boolean }
+export interface CommitFact { id?: string; ts: number; shaKey: string; ai?: AiTool; generated?: AiTool; rework?: "revert" | "fixup" | "fix"; files: string[]; owner: boolean;
+  mine: boolean }
 export interface InstructionFacts { files: InstructionKind[]; namesChecks: CheckKind[]; touched: number; lastTouched?: number }
 /** `.claude/settings.json` hooks: the entries there, the checks their commands run, and `disableAllHooks` (then none runs, and `checks` is empty). */
 export interface HookFacts { entries: number; checks: CheckKind[]; disabled: boolean }

@@ -142,6 +142,9 @@ export function classifyCommit(full: string): Pick<CommitFact, "ai" | "generated
   return out;
 }
 
+/** A commit's id: the keyed hash (16 lowercase hex digits) of its full sha, lower-cased — the same in every clone, never the sha. */
+export const commitId = (salt: Uint8Array, sha: string): string => keyedHash(salt, sha.toLowerCase(), 16);
+
 /** A commit's key: the keyed hash of its sha's first 7 hex digits, lower-cased — what a Claude Code commit marker keys. */
 export const shaKey = (salt: Uint8Array, sha: string): string => keyedHash(salt, sha.slice(0, 7).toLowerCase());
 
@@ -300,7 +303,7 @@ export interface CommitOptions { salt: Uint8Array; email: string; maxFiles: numb
 /**
  * The person's commits of a streamed `git log` output of LOG_ARGS: `push` its chunks, then `end(cut)`. Each record is
  * reduced to keyed facts as soon as it is complete (its message and paths are dropped then): only those whose author
- * email equals `o.email` (case-insensitively), each with `ts` = commit time in ms, `shaKey`, the trailers
+ * email equals `o.email` (case-insensitively), each with `id` (`commitId`), `mine` true, `ts` = commit time in ms, `shaKey`, the trailers
  * `classifyCommit` reads, up to `o.maxFiles` changed paths as keyed hashes, and `owner` true (a later pass decides
  * between repos). The last record is held back as facts until the next one or the end, so a `cut` output (its last
  * record possibly incomplete) leaves it out, as `logRecords` does. `records`: every author's records, the left-out one
@@ -318,8 +321,9 @@ export function commitStream(o: CommitOptions): { push(chunk: Uint8Array): void;
   };
   const stream = new LogStream((r) => {
     keep();
-    last = r.email.trim().toLowerCase() !== email ? null : { sha: r.sha.toLowerCase(), fact: { ts: r.ct * 1000, shaKey: shaKey(o.salt, r.sha),
-      ...classifyCommit(r.message), files: r.files.slice(0, o.maxFiles).map((f) => keyedHash(o.salt, f)), owner: true } };
+    const sha = r.sha.toLowerCase();
+    last = r.email.trim().toLowerCase() !== email ? null : { sha, fact: { id: commitId(o.salt, sha), ts: r.ct * 1000, shaKey: shaKey(o.salt, r.sha),
+      ...classifyCommit(r.message), files: r.files.slice(0, o.maxFiles).map((f) => keyedHash(o.salt, f)), owner: true, mine: true } };
   }, { maxFiles: o.maxFiles });
   return {
     push: (chunk) => stream.push(chunk),

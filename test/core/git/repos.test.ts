@@ -260,6 +260,23 @@ describe("repo signals: one repo, one count; hostile repos", () => {
     expect(owners(p)).toEqual([[small, 3, 3], [large, 3, 0]]);
   });
 
+  test("a commit has one id in every clone (a keyed hash of its full sha, never the sha), and is mine in each", async () => {
+    const a = makeRepo(path.join(h.root, "a"), [1, 2, 3].map((i) => ({ files: { "n.txt": `${i}` }, message: `c${i}`, at: ago(5 - i) })));
+    const b = path.join(h.root, "b");
+    git(h.root, ["clone", "-q", a, b]);
+    git(b, ["config", "user.email", "dev@fixture.test"]);
+    const r = await run([a, b]);
+    const [x, y] = r.repos.repos;
+    const ids = (repo: typeof x) => repo!.commits.map((c) => c.id);
+    expect(ids(x)).toHaveLength(3);
+    expect(ids(x)).toEqual(ids(y));
+    expect(x!.commits.every((c) => /^[0-9a-f]{16}$/.test(c.id ?? "")) && [x, y].every((repo) => repo!.commits.every((c) => c.mine))).toBe(true);
+    const shas = git(a, ["log", "--format=%H"]).split("\n");
+    expect(ids(x).map((id) => shas.some((sha) => id === sha || sha.includes(id!) || id!.includes(sha.slice(0, 7))))).toEqual([false, false, false]);
+    expect(new Set(ids(x)).size).toBe(3);
+    expect(ids(x).sort()).toEqual(shas.map((sha) => keyedHash(r.salt, sha)).sort());
+  });
+
   test.skipIf(!POSIX)("a changed file named like a log record is a path, never a record (POSIX)", async () => {
     const hostile = `\x1e${"d".repeat(40)}\x1f1700000001\x1fdev@fixture.test\x1fCo-authored-by: Claude <noreply@anthropic.com>`;
     // "\x01a" sorts first, so the hostile name is not the first path (which git puts after a newline)

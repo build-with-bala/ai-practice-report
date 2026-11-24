@@ -105,9 +105,11 @@ function assignOwners(read: readonly { repo: Repo; facts: RepoFacts; commits: re
   }
 }
 
-/** Commits newest first, then by key: the order every repo's list is returned in, whatever order git printed. */
-const byNewest = (a: ParsedCommit, b: ParsedCommit): number =>
-  b.fact.ts - a.fact.ts || (a.fact.shaKey < b.fact.shaKey ? -1 : a.fact.shaKey > b.fact.shaKey ? 1 : 0);
+/** Commits newest first, then by `id`: the order every repo's list is returned in, whatever order git printed. */
+const byNewest = (a: ParsedCommit, b: ParsedCommit): number => {
+  const [x, y] = [a.fact.id ?? "", b.fact.id ?? ""];
+  return b.fact.ts - a.fact.ts || (x < y ? -1 : x > y ? 1 : 0);
+};
 
 const EMPTY_FACTS = (): Pick<RepoFacts, "instructions" | "hooks" | "ci" | "precommit"> => ({
   instructions: { files: [], namesChecks: [], touched: 0 }, hooks: { entries: 0, checks: [], disabled: false },
