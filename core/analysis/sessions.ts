@@ -208,6 +208,9 @@ export function buildSessionTable(raw: ScanResult, o: { timeZone: string; exclud
     for (const e of raw.store.all(k)) {
       const id = (e as { sessionId?: string }).sessionId;
       const sessionless = id === undefined && e.k === "prompt" && e.window === "detail";
+      // an event that carries an excluded project is left out, not an orphan
+      const pk = (e as { projectKey?: string }).projectKey;
+      if (pk !== undefined && projEx.has(pk)) continue;
       if ((id === undefined && !sessionless) || (id !== undefined && sessions.has(id)) || !keepTool(e.tool)) continue;
       const ts = (e as { ts?: number }).ts;
       if (ts !== undefined && !inRange(ts)) continue;

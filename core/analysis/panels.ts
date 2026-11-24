@@ -38,7 +38,8 @@ export interface ConfigPanel { byKind: Partial<Record<ConfigEv["kind"], { author
 /**
  * What was read, per tool and window of kept tools (sorted): each source once (sorted) with its status — the first of
  * error, drift, present-undecodable, ok, empty, absent among its candidates — and beta flag; `from`/`to` span the
- * coverage's, each clipped to the date range (a span wholly outside it adds none); `sessions` = top-level kept rows (`isTopLevel`) of that tool and window, `prompts` = its human prompts in scope;
+ * coverage's, each clipped to the date range (a span wholly outside it adds none); under a project exclusion they span
+ * the row's in-scope sessions and prompts instead, since a source's reported span cannot tell projects apart; `sessions` = top-level kept rows (`isTopLevel`) of that tool and window, `prompts` = its human prompts in scope;
  * `formatChanged` when any source drifted.
  */
 export interface CoveragePanel { rows: Array<{ tool: ToolId; window: Window; sources: Array<{ source: string; status: CoverageEv["status"]; beta: boolean }>;
@@ -176,6 +177,22 @@ export function panels(t: SessionTable, raw: ScanResult, o: { timeZone: string }
     sessionsOf.set(key, (sessionsOf.get(key) ?? 0) + 1);
     for (const m of new Set(r.models)) models.set(m, (models.get(m) ?? 0) + 1);
   }
+  // under a project exclusion a source's reported span cannot tell projects apart: a row's span is then that of its
+  // in-scope sessions (clipped) and prompts (any origin), so the excluded project's dates never show
+  const scoped = t.scope.projects.size > 0 ? new Map<string, Span>() : undefined;
+  if (scoped) {
+    const spanOf = (key: string): Span => { let x = scoped.get(key); if (!x) scoped.set(key, (x = new Span())); return x; };
+    for (const r of t.rows.values()) {
+      if (t.hosts.has(r.id)) continue;
+      const c = scope.clip(r);
+      if (c.start > c.end) continue;
+      const x = spanOf(`${r.tool}\u0000${r.window}`);
+      x.addTs(c.start);
+      x.addTs(c.end);
+    }
+    const anyOrigin = analysisScope(raw, { ...t, isHuman: () => true }).human;
+    for (const p of raw.store.all("prompt")) if (anyOrigin(p)) spanOf(`${p.tool}\u0000${p.window}`).addTs(p.ts);
+  }
   const groups = new Map<string, CoverageEv[]>();
   for (const c of raw.coverage) {
     if (excluded.has(c.tool)) continue;
@@ -201,6 +218,11 @@ export function panels(t: SessionTable, raw: ScanResult, o: { timeZone: string }
       if (ct !== undefined && Math.min(ct, t.scope.to) > to) to = Math.min(ct, t.scope.to);
     }
     const [tool, window] = key.split("\u0000") as [ToolId, Window];
+    if (scoped) {
+      const r = scoped.get(key)?.range() ?? {};
+      from = r.from ?? Infinity;
+      to = r.to ?? -Infinity;
+    }
     return {
       tool, window, sources: [...bySource.keys()].sort(cmp).map((source) => ({ source, ...bySource.get(source)! })),
       ...(Number.isFinite(from) ? { from } : {}), ...(Number.isFinite(to) ? { to } : {}),

@@ -48,12 +48,14 @@ export interface AnalyzeOptions { reference?: "v0"; bootstrap?: number; seed?: n
  *   `weeksOutside`: the distinct ISO weeks in which the person was active (a human prompt, in any window, of a tool and
  *   project that are not excluded) that lie outside the date range; 0 without a range. The weekly series holds no week
  *   outside the range.
- *   A project exclusion removes every session, prompt and config entry that carries the project (a prompt or entry
- *   carries one when its source records it). It cannot remove: per-day totals, which carry no project (a source that
- *   also supplied prompts is read from its prompts; any other source's per-day totals are left out of the activity
- *   whole under a project exclusion, counted in `diagnostics.dailyRowsLeftOut`); lifetime prompts of a tool that
- *   records no project per prompt and whose session file is gone; the commits of a repository that still has another
- *   folder in the report.
+ *   A project exclusion removes every session (with its descendants and host copies), prompt and config entry that
+ *   carries the project (a prompt or entry carries one when its source records it), the events of those sessions, its
+ *   repository's commits (a repository with no kept session counts nowhere) and its dates (coverage spans then follow
+ *   the in-scope sessions and prompts). It cannot remove: per-day totals, which carry no project (a source that also
+ *   supplied prompts is read from its prompts; any other source's per-day totals are left out of the activity whole
+ *   under a project exclusion, counted in `diagnostics.dailyRowsLeftOut`); per-project memory files (their folder name
+ *   cannot be turned back into a project); lifetime prompts of a tool that records no project per prompt and whose
+ *   session file is gone; the commits of a repository that still has another folder in the report.
  * - `diagnostics`: orphan events per kind inside the date range, and `orphanPrompts`, the orphan detail prompts per tool
  *   (naming a session the store does not hold, or none); what the cross-tool dedupe found; the scan's warnings, less
  *   those that name an excluded tool; and `dailyRowsLeftOut` (a tool's own per-day totals left out under a project
