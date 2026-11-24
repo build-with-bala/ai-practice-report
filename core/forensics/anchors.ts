@@ -12,7 +12,8 @@ import { roundDown, roundUp, toolsOf, type CheckResult, type CheckValues, type R
  * partly re-timed. They do not catch a history re-timed as a whole (stretched or moved, every id with it), nor ids
  * invented to grow with time: both fit a line of their own. Nor ids invented with another slope, or with values far
  * from the genuine ones, at the start or end of the history: they read as an older or newer encoding
- * (`scheme-changed`, a question, never `consistent`). C9 (release dates) is the check that bounds re-timing.
+ * (`scheme-changed`, a question, never `consistent`). C9 (release dates) is the check that bounds re-timing: it
+ * catches a history moved back more than 90 days before a model's release.
  *
  * Per anchor kind (`cc-msg`, `cc-req`):
  * - recognized scheme: the tail starts with the marker `01`, which at least 90% of the kind's anchors share (else n/a

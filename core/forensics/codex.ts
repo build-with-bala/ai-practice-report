@@ -30,9 +30,11 @@ const ZONE_LAG_MS = 60_000;
 const ZONE_MAX_QUARTERS = 104;   // 26 h: two real zones can differ by up to 26 h
 const RESET_TOL_MS = 60_000;
 const DROP_POINTS = 2;
+/** A fall counts only when the lower reading is stamped more than this after the higher one: closer is interleaving. */
+const DROP_GAP_MS = 10 * 60_000;
 const MIN_PAIRS = 20;
 const FAIL_MIN = 3;
-const FAIL_SHARE = 0.005;
+const FAIL_SHARE = 0.01;
 
 /**
  * C6, every rollout in scope has a thread-index row in scope (by `threadId`). Rollouts that began at or after 10 min
@@ -121,20 +123,22 @@ function checkIdTimes(s: ForensicScope): CheckResult {
 interface Open { resetsAt: number; last: RateLimitEv; drops: number }
 
 /**
- * The pairs and contradictions of one ledger (one bucket and window), in time order (equal times: lower reading first).
- * A snapshot with `resetsAt` pairs with the latest snapshot of the open reset window whose reset time is within 60 s of
- * its own (the nearest one), else opens a new window; windows whose reset time has passed close. A snapshot without
- * `resetsAt` is never paired: nothing tells which window it belongs to. A drop is a pair whose reading falls by more
- * than 2 points. A window holding a single drop looks like a reset on the service's side, so drops are contradictions
- * only in windows that hold two or more of them.
+ * The pairs, counted drops and readings of one ledger (one bucket and window), in time order (equal times: lower reading
+ * first). A snapshot with `resetsAt` pairs with the latest snapshot of the open reset window whose reset time is within
+ * 60 s of its own (the nearest one), else opens a new window; windows whose reset time has passed close. A snapshot
+ * without `resetsAt` is never paired: nothing tells which window it belongs to (`readings` counts only those with one).
+ * A drop is a pair whose reading falls by more than 2 points, and counts only when the lower reading is stamped more
+ * than 10 min after the higher one: two sessions of one account at once each log a reading when their own response
+ * ends, so their readings interleave within minutes.
  */
-function ledgerPairs(snaps: RateLimitEv[]): { pairs: number; contradictions: number } {
+function ledgerPairs(snaps: RateLimitEv[]): { pairs: number; contradictions: number; readings: number } {
   snaps.sort((a, b) => a.ts - b.ts || a.usedPercent - b.usedPercent);
-  let pairs = 0;
+  let pairs = 0, readings = 0;
   const windows: Open[] = [];
   let open: Open[] = [];
   for (const s of snaps) {
     if (s.resetsAt === undefined) continue;
+    readings++;
     open = open.filter((w) => w.resetsAt + RESET_TOL_MS >= s.ts);
     let best: Open | undefined;
     for (const w of open) {
@@ -143,7 +147,7 @@ function ledgerPairs(snaps: RateLimitEv[]): { pairs: number; contradictions: num
     }
     if (best) {
       pairs++;
-      if (best.last.usedPercent - s.usedPercent > DROP_POINTS) best.drops++;
+      if (best.last.usedPercent - s.usedPercent > DROP_POINTS && s.ts - best.last.ts > DROP_GAP_MS) best.drops++;
       best.last = s;
       best.resetsAt = s.resetsAt;
     } else {
@@ -152,13 +156,14 @@ function ledgerPairs(snaps: RateLimitEv[]): { pairs: number; contradictions: num
       windows.push(w);
     }
   }
-  const contradictions = windows.reduce((a, w) => a + (w.drops >= 2 ? w.drops : 0), 0);
-  return { pairs, contradictions };
+  const contradictions = windows.reduce((a, w) => a + w.drops, 0);
+  return { pairs, contradictions, readings };
 }
 
 /**
  * C8, the usage-limit ledger only rises within one reset window, per (bucket, window) ledger (`ledgerPairs`). `values`:
- * `pairs`, `contradictions`. n/a under 20 pairs; at least 3 contradictions and more than 0.5% of the pairs → fail. `n`: the pairs.
+ * `pairs`, `contradictions` (the counted drops). n/a under 20 pairs; at least max(3, 1% of the readings) counted drops →
+ * fail; fewer, but at least 1 → note (a reset on the service's side, or a second machine). `n`: the pairs.
  */
 function checkLedger(s: ForensicScope): CheckResult {
   const all = s.rateLimits();
@@ -170,17 +175,17 @@ function checkLedger(s: ForensicScope): CheckResult {
     if (list) list.push(e);
     else ledgers.set(key, [e]);
   }
-  let pairs = 0, contradictions = 0;
+  let pairs = 0, contradictions = 0, readings = 0;
   for (const list of ledgers.values()) {
     const r = ledgerPairs(list);
     pairs += r.pairs;
     contradictions += r.contradictions;
+    readings += r.readings;
   }
   const base = { id: "C8" as const, n: pairs, values: { pairs, contradictions } satisfies CheckValues, tools };
   if (pairs < MIN_PAIRS) return { ...base, status: "n/a", reason: "too-few" };
-  if (contradictions >= FAIL_MIN && contradictions > FAIL_SHARE * pairs) {
-    return { ...base, status: "fail", reason: "ledger-contradictions" };
-  }
+  if (contradictions >= Math.max(FAIL_MIN, FAIL_SHARE * readings)) return { ...base, status: "fail", reason: "ledger-contradictions" };
+  if (contradictions > 0) return { ...base, status: "note", reason: "ledger-contradictions" };
   return { ...base, status: "pass", reason: "ok" };
 }
 

@@ -21,7 +21,7 @@ export const RELEASES: ReleaseTable = shipped as ReleaseTable;
 
 const DAY_MS = 86_400_000;
 const TOL_MS = 2 * DAY_MS;
-const FAR_MS = 30 * DAY_MS;
+const FAR_MS = 90 * DAY_MS;
 const FAIL_MIN = 3;
 const FAIL_SHARE = 0.01;
 
@@ -49,9 +49,10 @@ function firstUses(raw: ScanResult, sessionId: string, s: ForensicScope): Map<st
  * for an early one; where no event carries it (a version, a model only the session row names), with the row's end. It
  * is violated when that time is more than 2 days before the release day. Any violation → warn (`before-release`): early
  * access is real, so a question. At least max(3, 1% of the dated sessions — the rows with a check) used a model or
- * version more than 30 days before its release → fail (`long-before-release`). n/a when nothing matched. `values`:
+ * version more than 90 days before its release → fail (a private early-access period can run longer than a month) (`long-before-release`). n/a when nothing matched. `values`:
  * `checked` (the checks made), `violations`, `sessions` (the rows with a violation), `longBefore` (the rows more than
- * 30 days early). The result names no model or version: counts only.
+ * 90 days early). C9 is the check that bounds a history moved back in time as a whole (C1 and C2 cannot see one): it
+ * catches a shift of more than 90 days before a model's release. The result names no model or version: counts only.
  */
 export function checkReleases(t: SessionTable, table: ReleaseTable, raw: ScanResult, s: ForensicScope = forensicScope(raw, t)): CheckResult {
   const models = table.models.map((m) => ({ re: new RegExp(m.match), at: dayMs(m.released) }));

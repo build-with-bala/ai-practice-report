@@ -235,7 +235,7 @@ describe("checkRollouts: C8, the rate-limit ledger only rises within a window", 
     expect(c8.status).toBe("fail");
     expect(c8.reason).toBe("ledger-contradictions");
     expect(c8.values.contradictions as number).toBeGreaterThanOrEqual(3);
-    expect(c8.askAbout).toContain("more than one account");
+    expect(c8.askAbout).toContain("more than one machine or account");
   });
 
   test("a drop of 2 points is no contradiction; a reset starts a new window", () => {
@@ -248,27 +248,26 @@ describe("checkRollouts: C8, the rate-limit ledger only rises within a window", 
   /** `ledger()` with the readings at the given indexes 8 points lower: each a drop of more than 2 points. */
   const dropped = (evs: RateLimitEv[], at: number[]) => evs.map((e, i) => (at.includes(i) ? { ...e, usedPercent: e.usedPercent - 8 } : e));
 
-  test("one drop in each of four windows passes: a single drop in a window looks like a service-side reset", () => {
+  test("one drop in each of four windows counts each: 4 of 48 readings fail", () => {
     const [, , c8] = run(dropped(ledger(), [3, 11, 19, 27]));
-    expect(c8.values.contradictions).toBe(0);
-    expect(c8.status).toBe("pass");
+    expect([c8.values.contradictions, c8.status]).toEqual([4, "fail"]);
   });
 
-  test("drops count in windows holding two or more of them; 4 such among 42 pairs fail", () => {
+  test("4 counted drops among 48 readings fail; 2 are a note", () => {
     const [, , c8] = run(dropped(ledger(), [3, 5, 11, 13]));
     expect(c8.values.contradictions).toBe(4);
     expect(c8.status).toBe("fail");
     const two = run(dropped(ledger(), [3, 5]))[2];
-    expect([two.values.contradictions, two.status]).toEqual([2, "pass"]);
+    expect([two.values.contradictions, two.status]).toEqual([2, "note"]);
   });
 
-  test("4 contradictions among 1,050 pairs are within 0.5% and pass", () => {
+  test("4 counted drops among 1,200 readings are under 1%: a note, not a fail", () => {
     const evs: RateLimitEv[] = [];
     for (let k = 0; k < 25; k++) evs.push(...ledger(T0 + k * 30 * HOUR));
     const [, , c8] = run(dropped(evs, [3, 5, 11, 13]));
     expect(c8.values.pairs).toBe(1_050);
     expect(c8.values.contradictions).toBe(4);
-    expect(c8.status).toBe("pass");
+    expect(c8.status).toBe("note");
   });
 
   test("buckets and windows are separate ledgers", () => {
@@ -328,5 +327,39 @@ describe("checkRollouts: known limits (a later improvement changes these on purp
     const unindexed = [NOW - 5 * MIN, NOW + DAY, NOW + 2 * DAY].map((ts, i) => rollout(100 + i, { fileTs: ts, uuidTs: ts }));
     const [c6] = run([...indexed(5), ...unindexed]);
     expect([c6.status, c6.values.missing, c6.n]).toEqual(["pass", 0, 5]);
+  });
+});
+
+describe("checkRollouts: C8 readings out of order", () => {
+  /** `ledger()` with the readings at the given indexes 8 points lower. */
+  const dropped = (evs: RateLimitEv[], at: number[]) => evs.map((e, i) => (at.includes(i) ? { ...e, usedPercent: e.usedPercent - 8 } : e));
+  test("one account, two sessions at once, each reading logged when its response ends: interleaving, no drop", () => {
+    for (const perMin of [0.2, 0.5, 1]) {
+      const evs: RateLimitEv[] = [];
+      const u = (t: number) => Math.min(100, Math.round(((t - T0) / MIN) * perMin * 10) / 10);
+      for (let t = T0; t < T0 + 90 * MIN; t += 3 * MIN) evs.push(snap(t + 3 * MIN, u(t), T0 + 5 * HOUR));
+      for (let t = T0 + 5 * SEC; t < T0 + 90 * MIN; t += 20 * SEC) evs.push(snap(t + 20 * SEC, u(t), T0 + 5 * HOUR));
+      const [, , c8] = run(evs);
+      expect([perMin, c8.status, c8.values.contradictions]).toEqual([perMin, "pass", 0]);
+    }
+  });
+
+  test("a real splice (drops of many points, hours apart, several) still fails", () => {
+    const evs: RateLimitEv[] = [];
+    for (let i = 0; i < 10; i++) {
+      evs.push(snap(T0 + i * 2 * HOUR, 60 + i, T0 + 30 * HOUR), snap(T0 + i * 2 * HOUR + HOUR, 10 + i, T0 + 30 * HOUR));
+    }
+    for (let i = 0; i < 20; i++) evs.push(snap(T0 + 40 * HOUR + i * 10 * MIN, i, T0 + 45 * HOUR));
+    const [, , c8] = run(evs);
+    expect([c8.status, c8.reason]).toEqual(["fail", "ledger-contradictions"]);
+    expect(c8.values.contradictions as number).toBeGreaterThanOrEqual(3);
+  });
+
+  test("one or two counted drops are a note asking about more than one machine or account", () => {
+    for (const at of [[3], [3, 13]]) {
+      const [, , c8] = run(dropped(ledger(), at));
+      expect([at.length, c8.status, c8.reason, c8.values.contradictions]).toEqual([at.length, "note", "ledger-contradictions", at.length]);
+      expect(c8.askAbout).toContain("more than one machine or account");
+    }
   });
 });

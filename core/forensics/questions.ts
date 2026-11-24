@@ -156,7 +156,7 @@ const QUESTIONS: { readonly [I in CheckId]?: { readonly [R in Reason]?: Ask } } 
     "ledger-contradictions": (v) => {
       const c = num(v, "contradictions");
       return c === undefined ? undefined
-        : `The usage-limit readings fell ${digits(c)} times within one limit window, where they only rise. Were traces from more than one account combined here?`;
+        : `The usage-limit readings fell ${digits(c)} times within one limit window, where they only rise. Were traces from more than one machine or account combined here?`;
     },
   },
   C9: {
@@ -168,7 +168,7 @@ const QUESTIONS: { readonly [I in CheckId]?: { readonly [R in Reason]?: Ask } } 
     "long-before-release": (v) => {
       const s = num(v, "longBefore");
       return s === undefined ? undefined
-        : `${digits(s)} ${plural(s, "session", "sessions")} used a model or tool version more than 30 days before its public release. Were session times edited, or did you have early access to it?`;
+        : `${digits(s)} ${plural(s, "session", "sessions")} used a model or tool version more than 90 days before its public release. Were session times edited, or did you have early access to it?`;
     },
   },
   "soft:rhythm": {

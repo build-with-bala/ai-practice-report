@@ -350,7 +350,7 @@ describe("wording: every reason and question the forensic checks produce", () =>
       { k: "codex-rollout", tool: "codex", source: "codex.rollouts", threadId: "codex:b", fileTs: T0, uuidTs: T0 + 3 * HOUR }],
     [{ k: "codex-rollout", tool: "codex", source: "codex.rollouts", threadId: "codex:b", fileTs: T0, uuidTs: T0 + 3 * HOUR }],
     Array.from({ length: 60 }, (_, i) => ({
-      k: "ratelimit", tool: "codex", source: "codex.rollouts", ts: T0 + i * MIN, window: "primary", usedPercent: (i % 2) * 50 + i / 10, resetsAt: T0 + 5 * HOUR,
+      k: "ratelimit", tool: "codex", source: "codex.rollouts", ts: T0 + i * 20 * MIN, window: "primary", usedPercent: (i % 2) * 50 + i / 10, resetsAt: T0 + 30 * HOUR,
     }) as Ev),
     [sess("m", "claude-code", T0, { models: ["model-x"] })],
     // three sessions far before the release: the long-before-release fail
