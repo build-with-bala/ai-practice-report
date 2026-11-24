@@ -74,11 +74,6 @@ export function mergeSessions(reports: readonly SessionEv[]): SessionEv {
   };
 }
 
-/** Two reports of one session: `mergeSessions([a, b])`. */
-export function mergeSession(a: SessionEv, b: SessionEv): SessionEv {
-  return mergeSessions([a, b]);
-}
-
 export class EventStore {
   private byKind = new Map<Kind, Ev[]>();
   private sessions = new Map<string, SessionEv>();
@@ -86,6 +81,11 @@ export class EventStore {
   private reports = new Map<string, SessionEv[]>();
   /** A session's position in the `session` list, so a merge replaces it in place. */
   private sessionAt = new Map<string, number>();
+  /**
+   * Session ids with a report not merged yet. A report is only queued on `add`; the merge runs once, on the next read of
+   * sessions, so a session reported n times costs one merge of n reports, not n merges.
+   */
+  private unmerged = new Set<string>();
   /**
    * `forSession`'s index, built on first use and dropped by `add`. Compact on purpose (it lives as long as the store):
    * one number per distinct session id, and per kind a CSR table — `order` holds the kind list's positions grouped by
@@ -99,9 +99,7 @@ export class EventStore {
       const reports = this.reports.get(e.id);
       if (reports) {
         reports.push(e);
-        const merged = mergeSessions(reports);
-        this.sessions.set(e.id, merged);
-        this.byKind.get("session")![this.sessionAt.get(e.id)!] = merged;
+        this.unmerged.add(e.id);
         return;
       }
       this.reports.set(e.id, [e]);
@@ -113,11 +111,25 @@ export class EventStore {
     else this.byKind.set(e.k, [e]);
   }
 
+  /** Merges every session with reports queued since the last read (`mergeSessions` of all its reports). */
+  private merge(): void {
+    if (this.unmerged.size === 0) return;
+    const list = this.byKind.get("session")!;
+    for (const id of this.unmerged) {
+      const merged = mergeSessions(this.reports.get(id)!);
+      this.sessions.set(id, merged);
+      list[this.sessionAt.get(id)!] = merged;
+    }
+    this.unmerged.clear();
+  }
+
   all<K extends Kind>(k: K): readonly EvOf<K>[] {
+    if (k === "session") this.merge();
     return (this.byKind.get(k) ?? []) as EvOf<K>[];
   }
 
   session(id: string): SessionEv | undefined {
+    if (this.unmerged.has(id)) this.merge();
     return this.sessions.get(id);
   }
 
