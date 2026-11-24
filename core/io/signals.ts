@@ -26,8 +26,6 @@ export function reraise(sig: TermSignal): void {
 
 /** A scan inside the process-wide signal trap (`enterScanTrap`). */
 export interface ScanTrap {
-  /** The signal that stopped this scan: one caught while it was inside the trap, or before it entered. */
-  readonly caught: TermSignal | undefined;
   /**
    * Leaves the trap, once the scan has cleaned up. It first gives the event loop one turn, so that a signal that landed
    * during the scan's last synchronous work (a job's tail, its temp cleanup) is caught. Without a signal it resolves (the
@@ -39,7 +37,7 @@ export interface ScanTrap {
   leave(): Promise<void>;
 }
 
-interface Member { readonly abort: () => void; readonly closeSync: () => void; caught?: TermSignal }
+interface Member { readonly abort: () => void; readonly closeSync: () => void }
 
 /** The trap every scan inside it shares: one SIGINT/SIGTERM listener pair, while at least one scan is inside. */
 interface Shared {
@@ -91,10 +89,7 @@ function end(t: Shared, sig: TermSignal): void {
 function onSignal(t: Shared, sig: TermSignal): void {
   if (t.caught === undefined) {
     t.caught = sig;
-    for (const m of t.members) {
-      m.caught = sig;
-      attempt(m.abort);
-    }
+    for (const m of t.members) attempt(m.abort);
     return;
   }
   for (const m of t.members) attempt(m.closeSync);
@@ -111,10 +106,7 @@ export function enterScanTrap(o: { abort: () => void; closeSync: () => void }): 
   const t = (shared ??= open());
   const m: Member = { abort: o.abort, closeSync: o.closeSync };
   t.members.add(m);
-  if (t.caught !== undefined) {
-    m.caught = t.caught;
-    attempt(m.abort);
-  }
+  if (t.caught !== undefined) attempt(m.abort);
   let leaving: Promise<void> | undefined;
   const leave = async (): Promise<void> => {
     await new Promise<void>((resolve) => setImmediate(resolve)); // a signal that landed in synchronous work is dispatched here
@@ -127,10 +119,5 @@ export function enterScanTrap(o: { abort: () => void; closeSync: () => void }): 
     if (t.members.size > 0) return new Promise<void>((resolve) => t.waiting.push(resolve)); // the last scan re-raises
     end(t, t.caught);
   };
-  return {
-    get caught() {
-      return m.caught;
-    },
-    leave: () => (leaving ??= leave()),
-  };
+  return { leave: () => (leaving ??= leave()) };
 }

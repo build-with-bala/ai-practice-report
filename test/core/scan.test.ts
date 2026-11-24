@@ -1,9 +1,8 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { detectEnv } from "../../core/env/env";
-import { readJsonlStream } from "../../core/io/jsonl";
+import { readJsonlStream, STREAM_GC } from "../../core/io/jsonl";
 import { TERM_SIGNALS } from "../../core/io/signals";
 import type { CoverageEv, Ev } from "../../core/model/events";
 import type { ToolId } from "../../core/model/ids";
@@ -14,8 +13,11 @@ import type { Candidate, ScanCtx, SourcePlugin } from "../../core/sources/types"
 import { CC_S1, CC_S2, CcTranscript, ccHistoryLine, fixtureStart, MIN, slug } from "../fixtures/claude-code";
 import { fakeHome, type FakeHome } from "../kit/home";
 
-const home = mkdtempSync(path.join(os.tmpdir(), "scan-test-"));
-const env = detectEnv({ home, tmp: os.tmpdir(), platform: "linux", wslHomes: [] });
+/** The fake home's environment (no variable or XDG path of the developer's), with the system temp folder. */
+const fh = fakeHome("linux");
+afterAll(() => fh.cleanup());
+const home = fh.env.home;
+const env = { ...fh.env, tmp: os.tmpdir() };
 
 function cov(tool: ToolId, source: string, over: Partial<CoverageEv> = {}): CoverageEv {
   return { k: "coverage", tool, source, window: "detail", status: "ok", beta: false, files: 1, bytes: 1, records: 1, skipped: {}, unknownTypes: {}, versions: [], ...over };
@@ -178,7 +180,7 @@ describe("scan hygiene", () => {
 
 describe("scan temp folder and concurrency", () => {
   test("a scan that makes no private copy never touches the temp folder: a missing one does not fail it", async () => {
-    const missing = detectEnv({ home, tmp: path.join(home, "no-such-tmp"), platform: "linux", wslHomes: [] });
+    const missing = { ...env, tmp: path.join(home, "no-such-tmp") };
     const p = plugin("codex", "a", (c) => { c.emit(session("codex", "a")); c.emit(cov("codex", "a")); });
     const r = await scan({ env: missing, plugins: [p] });
     expect(r.tempClean).toBe(true);
@@ -191,7 +193,7 @@ describe("scan temp folder and concurrency", () => {
     const seen: string[][] = [];
     const quiet = plugin("codex", "quiet", () => { seen.push(readdirSync(tmp)); });
     const copier = plugin("cursor", "copier", (c) => { c.temp.dir(); seen.push(readdirSync(tmp)); });
-    const r = await scan({ env: detectEnv({ home, tmp, platform: "linux", wslHomes: [] }), plugins: [quiet, copier], concurrency: 1 });
+    const r = await scan({ env: { ...env, tmp }, plugins: [quiet, copier], concurrency: 1 });
     expect(seen[0]).toEqual([]);
     expect(seen[1]!.map((n) => n.startsWith("aipr-scan-"))).toEqual([true]);
     expect(readdirSync(tmp)).toEqual([]);
@@ -442,3 +444,19 @@ describe("coverage the orchestrator writes", () => {
 });
 
 process.on("exit", () => rmSync(home, { recursive: true, force: true }));
+
+describe("scan cleanup", () => {
+  test("the temp folder is removed even when the pacer's own end-of-scan step throws", async () => {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), "scan-cleanup-"));
+    const settle = STREAM_GC.settle;
+    try {
+      const copier = plugin("cursor", "copier", (ctx) => { writeFileSync(path.join(ctx.temp.dir(), "copy.db"), "x"); });
+      STREAM_GC.settle = () => { throw new Error("a pacer bug"); };
+      await expect(scan({ env: { ...env, tmp }, plugins: [copier], handleSignals: false })).rejects.toThrow("a pacer bug");
+      expect(readdirSync(tmp).filter((n) => n.startsWith("aipr-"))).toEqual([]);
+    } finally {
+      STREAM_GC.settle = settle;
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
