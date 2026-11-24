@@ -312,6 +312,14 @@ describe("exportPayload: projects and reveal", () => {
       "a tsheg first": "\u0f0bab", "a tsheg last": "ab\u0f0b", "a tsheg after a space": "a \u0f0bb", "two tshegs": "a\u0f0b\u0f0bb",
       "a label's shape": "P-ABCD12", "a label's shape in lower case": "p-abcd12ef", "a 4-hex label's shape": "P-0A1B", "a keyed hash's shape": "0123456789abcdef",
       "a keyed hash's shape in upper case": "0123456789ABCDEF",
+      // round 4: marks that render as nothing but are not default-ignorable, and joiners in scripts that never use one
+      "the Khitan small script filler": "a\u{16FE4}b", "the Duployan thick letter selector": "a\u{1BC9D}b",
+      "31 joiners between Latin letters (63 code points)": `${"a\u200D".repeat(31)}a`,
+      "a joiner between Latin letters": "a\u200Db", "a non-joiner between Latin letters": "a\u200Cb", "a joiner after a Latin letter and mark": "a\u0301\u200Db",
+      "a joiner between Cyrillic letters": "\u0430\u200D\u0431", "a joiner between Greek letters": "\u03B1\u200C\u03B2",
+      "a joiner between Han characters": "\u65E5\u200D\u672C", "a joiner between Hangul syllables": "\uD55C\u200C\uAD6D",
+      "a joiner between Hebrew letters": "\u05D0\u200D\u05D1", "a joiner between Thai letters": "\u0E01\u200D\u0E02",
+      "a joiner after a Latin letter before a Devanagari one": "a\u200D\u0915",
     };
     expect(Object.entries(hostileNames).filter(([, n]) => !refusedBy(n)).map(([what]) => what)).toEqual([]);
     // the bound counts code points after normalisation: 64 composed letters pass, though decomposed they are 128
@@ -332,6 +340,11 @@ describe("exportPayload: projects and reveal", () => {
       "Devanagari KA, joiner, virama": "\u0915\u200d\u094d\u0937",
       "a Malayalam word ending in an old-style chillu (letter, virama, joiner)": "\u0d05\u0d35\u0d28\u0d4d\u200d",
       "a Tibetan name of several syllables": "\u0f56\u0f40\u0fb2\u0f0b\u0f64\u0f72\u0f66\u0f0b\u0f56\u0f51\u0f7a\u0f0b\u0f63\u0f7a\u0f42\u0f66",
+      "Persian with a non-joiner": "\u0645\u06CC\u200C\u062E\u0648\u0627\u0647\u0645",
+      "Sinhala, a conjunct with a joiner": "\u0DC1\u0DCA\u200D\u0DBB\u0DD3",
+      "Kannada with a non-joiner": "\u0C95\u0CCD\u200C\u0CB7", "Odia with a non-joiner": "\u0B15\u0B4D\u200C\u0B37",
+      "Marathi eyelash RA (RA, virama, joiner, YA)": "\u0930\u094D\u200D\u092F", "a Malayalam old-style chillu": "\u0D28\u0D4D\u200D",
+      "a Devanagari half form with a non-joiner": "\u0915\u094D\u200C\u0937",
       "Tibetan, the language's name": "\u0f56\u0f7c\u0f51\u0f0b\u0f66\u0f90\u0f51",
     };
     expect(Object.entries(names).filter(([, n]) => out(n) !== n.normalize("NFC")).map(([what]) => what)).toEqual([]);
