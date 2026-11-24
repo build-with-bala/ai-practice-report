@@ -50,6 +50,7 @@ export interface DayParts { night: number; morning: number; afternoon: number; e
  * Everything `panels` returns. `privateConfig` and `privateModels` hold raw names (config names, model ids) and belong
  * to `analysis.private` only: `privateConfig` = every `artifactUse` record with `key` = keyedHash(raw.salt, name)
  * (pre-flight P15); `privateModels` = raw model id → top-level kept sessions whose models name it (pre-flight P13).
+ * Every count record has its keys in sorted order.
  */
 export interface Panels { stack: Stack; risk: RiskPosture; config: ConfigPanel; coverage: CoveragePanel; dayParts: DayParts;
   privateConfig: Array<{ kind: ConfigEv["kind"]; name: string; key: string; provenance: ConfigEv["provenance"]; used: boolean }>;
@@ -67,7 +68,10 @@ const BACKEND_LANGS: ReadonlySet<EditLang> = new Set<EditLang>(["py", "go", "rus
 const STATUS_ORDER: readonly CoverageEv["status"][] = ["error", "drift", "present-undecodable", "ok", "empty", "absent"];
 
 const cmp = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
-const bump = <K extends string>(h: Partial<Record<K, number>>, k: K, by = 1): void => { h[k] = (h[k] ?? 0) + by; };
+const bump = <K extends string>(h: Partial<Record<K, number>>, k: K, by = 1): void => { h[k] = (Object.hasOwn(h, k) ? h[k]! : 0) + by; };
+/** A copy of a count record with its keys in sorted order (built with defineProperty semantics, so any key is a key). */
+export const sortedKeys = <T extends Partial<Record<string, number>>>(h: T): T =>
+  Object.fromEntries(Object.entries(h).sort(([a], [b]) => cmp(a, b))) as T;
 
 /** The stack role of a code edit's extension: Frontend, Mobile and Data by extension first, then Backend by language. */
 export function stackRoleOf(ext: string | undefined): StackRole | undefined {
@@ -165,12 +169,12 @@ export function panels(t: SessionTable, raw: ScanResult, o: { timeZone: string }
 
   // coverage, sessions and models
   const sessionsOf = new Map<string, number>();
-  const privateModels: Record<string, number> = {};
+  const models = new Map<string, number>(); // a Map: a model id named like an Object.prototype member is a key like any other
   for (const r of t.rows.values()) {
     if (!isTopLevel(r) || t.hosts.has(r.id)) continue;
     const key = `${r.tool}\u0000${r.window}`;
     sessionsOf.set(key, (sessionsOf.get(key) ?? 0) + 1);
-    for (const m of new Set(r.models)) privateModels[m] = (privateModels[m] ?? 0) + 1;
+    for (const m of new Set(r.models)) models.set(m, (models.get(m) ?? 0) + 1);
   }
   const groups = new Map<string, CoverageEv[]>();
   for (const c of raw.coverage) {
@@ -205,9 +209,10 @@ export function panels(t: SessionTable, raw: ScanResult, o: { timeZone: string }
   });
 
   return {
-    stack: { languages, toolchains, techCategories, roleEdits, meta: metaOf(editSpan, edits) },
-    risk: { permission, approval, sandbox, meta: metaOf(riskSpan, riskRows) },
-    config, coverage: { rows }, dayParts, privateConfig, privateModels,
+    stack: { languages: sortedKeys(languages), toolchains: sortedKeys(toolchains), techCategories: sortedKeys(techCategories), roleEdits: sortedKeys(roleEdits),
+      meta: metaOf(editSpan, edits) },
+    risk: { permission: sortedKeys(permission), approval: sortedKeys(approval), sandbox: sortedKeys(sandbox), meta: metaOf(riskSpan, riskRows) },
+    config, coverage: { rows }, dayParts, privateConfig, privateModels: Object.fromEntries([...models].sort(([a], [b]) => cmp(a, b))),
   };
 }
 

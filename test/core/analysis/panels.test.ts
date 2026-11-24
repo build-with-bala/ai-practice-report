@@ -189,6 +189,20 @@ describe("panels: day parts and models", () => {
       sess("k", T0, { parentId: "a", origin: "subagent", models: ["m-3"] })]);
     expect(p.privateModels).toEqual({ "m-1": 2, "m-2": 1 });
   });
+
+  test("privateModels: a model id named like an Object.prototype member is a key like any other; keys are sorted", () => {
+    const { p } = run([sess("a", T0, { models: ["toString", "m-2", "constructor", "__proto__"] }), prompt("a", T0),
+      sess("b", T0 + DAY, { models: ["constructor", "valueOf"] }), prompt("b", T0 + DAY)]);
+    expect(Object.entries(p.privateModels)).toEqual([["__proto__", 1], ["constructor", 2], ["m-2", 1], ["toString", 1], ["valueOf", 1]]);
+    expect(Object.getPrototypeOf(p.privateModels)).toBe(Object.prototype);
+  });
+
+  test("stack counts have sorted keys, whatever the arrival order", () => {
+    const { p } = run([sess("a", T0), prompt("a", T0), tool("a", T0 + 1_000, { category: "edit", editExt: "py" }), tool("a", T0 + 2_000, { category: "edit", editExt: "go" }),
+      tool("a", T0 + 3_000, { category: "edit", editExt: "tsx" })]);
+    for (const h of [p.stack.languages, p.stack.roleEdits]) expect(Object.keys(h)).toEqual(Object.keys(h).sort());
+    expect(Object.keys(p.stack.languages)).toEqual(["go", "js", "py"]);
+  });
 });
 
 describe("project labels", () => {

@@ -251,5 +251,5 @@ function firstSeen(t: SessionTable, raw: ScanResult, scope: AnalysisScope, first
   }
   for (const c of scope.configs) if (c.kind === "skill" && c.firstSeen !== undefined) see("skills", c.firstSeen);
   if (firstParallelBucket !== undefined) see("parallel-sessions", firstParallelBucket);
-  return out;
+  return Object.fromEntries(Object.entries(out).sort(([a], [b]) => cmp(a, b)));
 }
