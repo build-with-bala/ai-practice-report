@@ -20,6 +20,10 @@ const MIN_MATCH = 0.75;
 const FAIL_DAYS = 2;
 const FAIL_DAY_SHARE = 0.02;
 const DAY_MS = 86_400_000;
+/** A pass needs this many compared prompts: a handful of matching prompts says nothing about a history. */
+const MIN_COMPARED = 20;
+/** C4 passes only on at least this many sessions that carry an account. */
+const MIN_ACCOUNT_SESSIONS = 5;
 
 /** The day before and the day after a day "YYYY-MM-DD". */
 function neighbours(day: string): [string, string] {
@@ -27,7 +31,7 @@ function neighbours(day: string): [string, string] {
   return [new Date(at - DAY_MS).toISOString().slice(0, 10), new Date(at + DAY_MS).toISOString().slice(0, 10)];
 }
 
-interface Part { status: CheckStatus; reason: Reason }
+interface Part { status: CheckStatus; reason: Reason; compared: number }
 
 /** Whether a sorted list holds a value within `tol` of `x`. */
 function near(sorted: readonly number[], x: number, tol: number): boolean {
@@ -87,7 +91,9 @@ function pasteMatches(prompts: readonly PromptEv[], pasted: readonly PromptEv[])
  *   so one cache can hold both; at any instant the local date is the UTC date or a day either side of it, so a day
  *   either side counts as present (this covers travel across zones too). The day's `zone` label is not read: no
  *   label can be trusted to say which key a day was written under.
- * Each part needs its own side; n/a without human transcript prompts, or with neither part measurable. A pass says which
+ * Each part needs its own side; n/a without human transcript prompts, or with neither part measurable. A part passes
+ * only on at least 20 compared prompts (the transcript prompts in the history's span, or in the stats span); a part
+ * that would pass on fewer is left out, and with no part left C3 is n/a (`too-few`). A pass says which
  * parts ran: `ok` (both), `ok-history-only`, `ok-stats-only`. `n`: the transcript prompts in the history's span when the
  * match part ran, else the transcript days in the stats span.
  */
@@ -120,8 +126,8 @@ export function checkClaudeHistory(raw: ScanResult, t: SessionTable, s: Forensic
       values.matchShare = roundDown(share); // warn below 75%
       values.prompts = inSpan.length;
       parts.push(share < MIN_MATCH
-        ? { status: "warn", reason: "history-mismatch" }
-        : { status: "pass", reason: "ok-history-only" });
+        ? { status: "warn", reason: "history-mismatch", compared: inSpan.length }
+        : { status: "pass", reason: "ok-history-only", compared: inSpan.length });
     }
   }
 
@@ -134,9 +140,13 @@ export function checkClaudeHistory(raw: ScanResult, t: SessionTable, s: Forensic
       if (d.day > last) last = d.day;
     }
     const days = new Set<string>();
+    let compared = 0;
     for (const p of transcript) {
       const day = dayKey(p.ts, "UTC");
-      if (day >= first && day <= last) days.add(day);
+      if (day >= first && day <= last) {
+        days.add(day);
+        compared++;
+      }
     }
     if (days.size > 0) {
       const missing = [...days].filter((d) => !have.has(d) && !neighbours(d).some((x) => have.has(x))).length;
@@ -144,14 +154,17 @@ export function checkClaudeHistory(raw: ScanResult, t: SessionTable, s: Forensic
       values.missingDays = missing;
       values.days = days.size;
       parts.push(missing >= FAIL_DAYS && missing / days.size >= FAIL_DAY_SHARE
-        ? { status: "fail", reason: "missing-stats-days" }
-        : missing > 0 ? { status: "note", reason: "missing-stats-days" } : { status: "pass", reason: "ok-stats-only" });
+        ? { status: "fail", reason: "missing-stats-days", compared }
+        : missing > 0 ? { status: "note", reason: "missing-stats-days", compared } : { status: "pass", reason: "ok-stats-only", compared });
     }
   }
 
-  const w = worst(parts);
-  if (w === undefined) return { id: "C3", status: "n/a", n: 0, reason: "no-data", values: {}, tools };
-  const reason = w.status === "pass" && parts.length === 2 ? "ok" : w.reason;
+  if (parts.length === 0) return { id: "C3", status: "n/a", n: 0, reason: "no-data", values: {}, tools };
+  // a part passes only on enough compared prompts; one that found something stands on any number
+  const kept = parts.filter((p) => p.status !== "pass" || p.compared >= MIN_COMPARED);
+  const w = worst(kept);
+  if (w === undefined) return { id: "C3", status: "n/a", n, reason: "too-few", values, tools };
+  const reason = w.status === "pass" && kept.length === 2 ? "ok" : w.reason;
   return asked({ id: "C3", status: w.status, n, reason, values, tools });
 }
 
@@ -159,7 +172,8 @@ export function checkClaudeHistory(raw: ScanResult, t: SessionTable, s: Forensic
  * C4, the session accounts vs the config's (as keyed hashes), over Claude Code's identities in scope
  * (`ForensicScope.identities`): a session's hash counts only when its session is a kept row; config hashes, and session
  * hashes that name no session the store holds, count while Claude Code is kept. `matchShare`: the share of session
- * identities whose hash the config names; none → warn (the person may have changed accounts). More than 1 distinct session hash → note (`accounts`). n/a when
+ * identities whose hash the config names; none → warn (the person may have changed accounts). A pass needs at least 5
+ * session identities; fewer, with nothing to ask about, is n/a (`too-few`). More than 1 distinct session hash → note (`accounts`). n/a when
  * either side is missing.
  */
 export function checkAccount(raw: ScanResult, t: SessionTable, s: ForensicScope = forensicScope(raw, t)): CheckResult {
@@ -172,6 +186,7 @@ export function checkAccount(raw: ScanResult, t: SessionTable, s: ForensicScope 
   const accounts = new Set(sessions.map((e) => e.hash)).size;
   const values = { matchShare: roundUp(share), accounts } satisfies CheckValues; // fail at exactly 0
   const base = { id: "C4" as const, n: sessions.length, values, tools };
+  if (accounts === 1 && share > 0 && sessions.length < MIN_ACCOUNT_SESSIONS) return { ...base, status: "n/a", reason: "too-few" };
   // no session naming the account signed in now cannot tell a changed account from a copied history (and copying the
   // account id defeats it anyway): a question, never a fail
   if (share === 0) return asked({ ...base, status: "warn", reason: "no-match" });

@@ -111,6 +111,7 @@ describe("C6 under a project exclusion", () => {
     const withoutB = scanResultOf(evs.filter((e) => !("threadId" in e && e.threadId === "codex:b") && !(e.k === "session" && e.id === "codex:b")), { finishedAt: NOW });
     const excluded = byId(run(withB, { projects: ["kB"] }), "C6");
     expect(excluded).toEqual(byId(run(withoutB), "C6"));
-    expect([excluded.status, excluded.n, excluded.values.beforeIndex]).toEqual(["pass", 1, 1]);
+    // one rollout checked, none missing: too few for a pass
+    expect([excluded.status, excluded.reason, excluded.n, excluded.values.beforeIndex]).toEqual(["n/a", "too-few", 1, 1]);
   });
 });

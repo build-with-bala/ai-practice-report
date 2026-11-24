@@ -136,15 +136,17 @@ describe("checkRollouts: C6, every rollout has a thread row", () => {
 });
 
 describe("checkRollouts: C7, the id's time is not after the file name's", () => {
-  test("uuidTs 1 s before fileTs passes", () => {
-    const [, c7] = run([threadsCov(), rollout(0, { uuidTs: T0 - SEC, fileTs: T0 })]);
+  test("uuidTs 1 s before fileTs passes; a pass needs 5 rollouts", () => {
+    const evs = [threadsCov(), rollout(0, { uuidTs: T0 - SEC, fileTs: T0 }), rollout(1), rollout(2), rollout(3), rollout(4)];
+    const [, c7] = run(evs);
     expect(c7.id).toBe("C7");
     expect([c7.status, c7.reason]).toEqual(["pass", "ok"]);
-    expect(c7.n).toBe(1);
+    expect(c7.n).toBe(5);
+    expect([run(evs.slice(0, 5))[1].status, run(evs.slice(0, 5))[1].reason]).toEqual(["n/a", "too-few"]);
   });
 
   test("within the second of the name passes; 2 s after is a violation", () => {
-    expect(run([rollout(0, { uuidTs: T0 + 999, fileTs: T0 })])[1].status).toBe("pass");
+    expect(run([rollout(0, { uuidTs: T0 + 999, fileTs: T0 }), rollout(1), rollout(2), rollout(3), rollout(4)])[1].status).toBe("pass");
     const [, c7] = run([rollout(0, { uuidTs: T0 + 2 * SEC, fileTs: T0 }), rollout(1)]);
     expect([c7.status, c7.reason]).toEqual(["note", "uuid-after-name"]);
     expect(c7.values.violations).toBe(1);

@@ -16,6 +16,8 @@ import { toolsOf, type CheckResult, type CheckValues } from "./types";
 const RECENT_MS = 10 * 60_000;
 const MISSING_MIN = 2;
 const MISSING_SHARE = 0.01;
+/** C6 and C7 pass only on at least this many rollouts: a pass on one or two says nothing about a history. */
+const MIN_PASS = 5;
 const ID_TOL_MS = 1_000;
 const QUARTER_MS = 15 * 60_000;
 const ZONE_TOL_MS = 2_000;
@@ -35,7 +37,8 @@ const FAIL_SHARE = 0.005;
  * that began before the earliest one are not checked (`beforeIndex`; without any `createdAt` every rollout is).
  * `createdAt` is an absolute time and a file name a local one, so a rollout's start — for the 10-min rule too — is read
  * on one clock: its id's time (`uuidTs`) where it has one, else its file name's (`fileTs`). When every rollout began
- * before the index: n/a, reason `before-index`. `n`: the rollouts checked; `values`: `missing`, `rollouts` (checked),
+ * before the index: n/a, reason `before-index`. A pass needs at least 5 rollouts checked; fewer, none missing: n/a
+ * (`too-few`). `n`: the rollouts checked; `values`: `missing`, `rollouts` (checked),
  * `beforeIndex`.
  */
 function checkThreadRows(s: ForensicScope, now: number): CheckResult {
@@ -60,7 +63,7 @@ function checkThreadRows(s: ForensicScope, now: number): CheckResult {
   const have = new Set(rows.map((r) => r.threadId));
   const missing = checked.filter((r) => !have.has(r.threadId)).length;
   const base = { id: "C6" as const, n: checked.length, values: { missing, rollouts: checked.length, beforeIndex } satisfies CheckValues, tools };
-  if (missing === 0) return { ...base, status: "pass", reason: "ok" };
+  if (missing === 0) return { ...base, status: checked.length >= MIN_PASS ? "pass" : "n/a", reason: checked.length >= MIN_PASS ? "ok" : "too-few" };
   const fail = missing >= Math.max(MISSING_MIN, MISSING_SHARE * checked.length);
   return { ...base, status: fail ? "fail" : "note", reason: "missing-thread-rows" };
 }
@@ -75,7 +78,8 @@ function isZoneShift(d: number): boolean {
  * C7, the thread id's UUIDv7 time is not after the file name's time. The name is local time truncated to the second,
  * so `uuidTs − fileTs` up to 1 s is allowed; more is a violation, unless it is a time-zone change (`isZoneShift`: the
  * name was written in another zone than the one it is read in now), which is a note. Violations: at least max(2, 1% of
- * the rollouts) → fail, fewer → note (one renamed file proves nothing). n/a without a rollout that has both times.
+ * the rollouts) → fail, fewer → note (one renamed file proves nothing). n/a without a rollout that has both times; a
+ * pass needs at least 5 of them (fewer, nothing found: n/a `too-few`).
  */
 function checkIdTimes(s: ForensicScope): CheckResult {
   const rollouts = s.rollouts().filter((r) => r.uuidTs !== undefined && r.fileTs !== undefined);
@@ -94,6 +98,7 @@ function checkIdTimes(s: ForensicScope): CheckResult {
     return { ...base, status: fail ? "fail" : "note", reason: "uuid-after-name" };
   }
   if (zoneShifted > 0) return { ...base, status: "note", reason: "time-zone-change" };
+  if (rollouts.length < MIN_PASS) return { ...base, status: "n/a", reason: "too-few" };
   return { ...base, status: "pass", reason: "ok" };
 }
 

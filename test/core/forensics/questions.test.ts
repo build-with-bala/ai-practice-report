@@ -3,7 +3,7 @@ import { DATE_KEY, questionFor, REASONS, VALUE_KEYS, type CheckId, type CheckVal
 import { isValueOf, roundDown, roundUp, VALUE_KINDS } from "../../../core/forensics/types";
 
 const IDS: CheckId[] = ["C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10",
-  "soft:rhythm", "soft:repeated-long", "soft:recent-burst", "soft:unclosed-tools", "soft:new-config"];
+  "soft:rhythm", "soft:repeated-long", "soft:recent-burst", "soft:unclosed-tools", "soft:new-config", "soft:no-server-pass", "soft:missing-ids"];
 const SHARES = new Set(["offShare", "matchShare", "share"]);
 const FIXED = Object.keys(VALUE_KEYS).filter((k) => !k.includes("/"));
 /** Valid values under every fixed key: `n` for a count, 0.5 for a share or a correlation, a real day under `date`. */
@@ -45,7 +45,7 @@ describe("questionFor", () => {
         expect(questionFor(id, r, valid(7))!.replace(/\d+/g, "#")).toBe(q.replace(/\d+/g, "#"));
       }
     }
-    expect(asked).toBe(21); // C1 2, C2 1, C3 2, C4 2, C5 3, C6 1, C7 2, C8 1, C9 2, five soft flags
+    expect(asked).toBe(23); // C1 2, C2 1, C3 2, C4 2, C5 3, C6 1, C7 2, C8 1, C9 2, seven soft flags
   });
 
   test("trusts nothing: invalid values give no question", () => {
@@ -127,7 +127,7 @@ describe("questionFor", () => {
   });
 
   test("the vocabularies are closed lists", () => {
-    expect(Object.keys(REASONS).length).toBe(33);
+    expect(Object.keys(REASONS).length).toBe(35);
     expect(VALUE_KEYS["claude-code/human/detail"]).toBe(true);
     expect(DATE_KEY).toBe("date");
   });

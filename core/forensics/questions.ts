@@ -192,6 +192,16 @@ const QUESTIONS: { readonly [I in CheckId]?: { readonly [R in Reason]?: Ask } } 
         : `${digits(r)} of the ${digits(m)} ${plural(m, "tool or skill", "tools and skills")} in use ${plural(r, "was", "were")} first seen in the 7 days before this scan. Was this machine set up or migrated, or were its tools updated, in that week?`;
     },
   },
+  "soft:no-server-pass": {
+    "no-server-pass": () => "No check on server-issued data could confirm this history, so what was checked rests on the tools' own local records alone. Which tools and providers did you use?",
+  },
+  "soft:missing-ids": {
+    "missing-ids": (v) => {
+      const n = num(v, "turns");
+      return n === undefined ? undefined
+        : `${digits(n)} typed ${plural(n, "turn comes", "turns come")} from a tool that records server-issued ids, but none of them carries one. Were these sessions run through another provider or a gateway?`;
+    },
+  },
 };
 
 /**
