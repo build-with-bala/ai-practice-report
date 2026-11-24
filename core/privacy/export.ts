@@ -7,8 +7,9 @@ import { AIPROF2, CONFIG_KINDS, DURATION_ARCS, EDIT_LANGS, FEATURES, METRIC_KEYS
 
 /**
  * How to export. `schema`: the payload schema (`aiprof/2`, the only one). `reveal`: projects the person chose to name,
- * by label (matched without regard to letter case); every other project stays a label. A label that names no exported
- * project is a `RevealError`; when two entries name the same label, the last one wins.
+ * by label (matched exactly, without regard to letter case: never a prefix); every other project stays a label. A label
+ * that names no exported project, or more than one, is a `RevealError`; when two entries name the same label, the last
+ * one wins.
  */
 export interface ExportOptions { schema: "aiprof/2"; reveal?: Array<{ label: string; name: string }> }
 /** The export: `value` is the payload, `json` its canonical bytes (RFC 8785), `bytes` their UTF-8 length; `JSON.parse(json)` deep-equals `value` (the preview contract). */
@@ -47,14 +48,19 @@ const ours = (e: unknown): boolean => {
   }
 };
 
-/** A `reveal` label that names no exported project. The message quotes the label only when it has a label's shape, and never the name. */
+/**
+ * A `reveal` label that names no exported project, or (`ambiguous`) more than one. The message quotes the label only
+ * when it has a label's shape, and never the name.
+ */
 export class RevealError extends ExportError {
   override readonly name: string = "RevealError";
-  constructor(label: string) {
-    const shown = /^P-[0-9A-Fa-f]{4,6}$/.test(label) ? ` "${label}"` : "";
-    super([], "reveal", `exportPayload: the reveal label${shown} names no exported project`);
+  constructor(label: string, ambiguous = false) {
+    const shown = LABEL_SHAPE.test(label) ? ` "${label}"` : "";
+    super([], "reveal", `exportPayload: the reveal label${shown} names ${ambiguous ? "more than one exported project" : "no exported project"}`);
   }
 }
+/** A project label's shape, any letter case: "P-" and 4, 6, 8 … 16 hex digits. */
+const LABEL_SHAPE = /^P-(?:[0-9A-Fa-f]{2}){2,8}$/;
 
 /** At most this many projects are exported, by sessions; the rest are counted in `otherProjects`. */
 const MAX_PROJECTS = 100;
@@ -138,13 +144,18 @@ function build(a: Analysis, o: ExportOptions): Record<string, unknown> {
     value: roundOrNull(m.value), n: m.n, window: m.window, from: month(m.from), to: month(m.to), reason: m.reason,
   });
 
-  // reveal: by label, case-insensitive; the last entry for a label wins; every label must name an exported project
+  // reveal: by label, exactly but for letter case; the last entry for a label wins; every label must name exactly one
+  // exported project (a label two projects share would put the name on both)
   const shown = a.projects.slice(0, MAX_PROJECTS);
   const rest = a.projects.slice(MAX_PROJECTS);
   const reveal = new Map<string, string>();
   for (const r of o.reveal ?? []) reveal.set(r.label.toUpperCase(), r.name);
-  const exported = new Set(shown.map((p) => p.label.toUpperCase()));
-  for (const r of o.reveal ?? []) if (!exported.has(r.label.toUpperCase())) throw new RevealError(r.label);
+  const exported = new Map<string, number>();
+  for (const p of shown) exported.set(p.label.toUpperCase(), (exported.get(p.label.toUpperCase()) ?? 0) + 1);
+  for (const r of o.reveal ?? []) {
+    const n = exported.get(r.label.toUpperCase()) ?? 0;
+    if (n !== 1) throw new RevealError(r.label, n > 1);
+  }
 
   return {
     schema: "aiprof/2",

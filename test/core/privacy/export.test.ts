@@ -222,6 +222,37 @@ describe("exportPayload: projects and reveal", () => {
     expect((out.projects as Json[])[0]!.name).toBe("second");
   });
 
+  test("labels are P- and 4, 6, 8 … 16 upper-case hex; reveal matches one label exactly, never a prefix", () => {
+    const b = structuredClone(a);
+    expect(b.projects.length).toBeGreaterThanOrEqual(3);
+    b.projects[0]!.label = "P-ABCD12";
+    b.projects[1]!.label = "P-ABCD34";
+    b.projects[2]!.label = "P-ABCD12EF90AB34CD";
+    const out = parsed(b, { ...OPTS, reveal: [{ label: "p-abcd12", name: "my-lib" }] });
+    const named = (out.projects as Json[]).filter((p) => "name" in p);
+    expect(named).toEqual([expect.objectContaining({ label: "P-ABCD12", name: "my-lib" })]);
+    expect(() => exportPayload(b, { ...OPTS, reveal: [{ label: "P-ABCD", name: "x" }] })).toThrow(RevealError);
+    for (const [label, ok] of [["P-ABCD", true], ["P-ABCDEF01", true], ["P-0123456789ABCDEF", true], ["P-ABCDE", false], ["P-ABC", false],
+      ["P-0123456789ABCDEF01", false], ["P-abcd", false]] as const) {
+      const c = structuredClone(b);
+      c.projects[0]!.label = label;
+      let err: unknown;
+      try { exportPayload(c, OPTS); } catch (e) { err = e; }
+      expect(`${label} ${err === undefined}`).toBe(`${label} ${ok}`);
+    }
+  });
+
+  test("a reveal label that would name two exported projects throws RevealError, naming neither", () => {
+    const b = structuredClone(a);
+    b.projects[0]!.label = "P-ABCD12";
+    b.projects[1]!.label = "P-ABCD12";
+    let err: unknown;
+    try { exportPayload(b, { ...OPTS, reveal: [{ label: "P-ABCD12", name: "secret-name" }] }); } catch (e) { err = e; }
+    expect(err).toBeInstanceOf(RevealError);
+    expect((err as Error).message).toBe('exportPayload: the reveal label "P-ABCD12" names more than one exported project');
+    expect((err as Error).message).not.toContain("secret-name");
+  });
+
   test("at most 100 projects, ranked by sessions; the rest are counted", () => {
     const evs: SessionEv[] = [];
     for (let i = 0; i < 120; i++) {

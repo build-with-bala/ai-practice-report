@@ -308,6 +308,8 @@ const CHECK: FieldSpec = (() => {
 const MCP_LABEL = str(new RegExp(`^(?:${[...MCP_PUBLIC].map(esc).join("|")}|custom #[1-9]\\d{0,3})$`), "pseudonymous");
 /** A model's export id: a known family's allowlisted id or `<family>-other`, "fine-tuned" or "other" (at most 64 characters). */
 const MODEL_KEY = new RegExp(`^(?=.{1,64}$)(?:fine-tuned|other|(?:${MODEL_FAMILY_PATTERN})(?:-[a-z0-9.]+)*)$`);
+/** A project's opaque label: "P-" and the upper-case hex of 4, 6, 8 … or 16 digits, the shortest unique in the store. */
+const PROJECT_LABEL = str(/^P-(?:[0-9A-F]{2}){2,8}$/, "pseudonymous");
 /** A project name the person chose to reveal: letters, digits, spaces and ". _ -", 1 to 64 of them, no edge space. */
 const REVEALED_NAME = str(/^[\p{L}\p{N}](?:[\p{L}\p{N} ._-]{0,62}[\p{L}\p{N}])?$/u, "revealed");
 
@@ -360,7 +362,7 @@ export const AIPROF2: FieldSpec = obj({
     hooksDisabled: bool(), memoryFiles: int(), mcpServers: arr(MCP_LABEL, 256),
   }),
   projects: arr(obj({
-    label: str(/^P-[0-9A-F]{4,6}$/, "pseudonymous"), name: opt(REVEALED_NAME), sessions: int(), activeWeeks: int(), tools: arr(TOOL, TOOL_IDS.length),
+    label: PROJECT_LABEL, name: opt(REVEALED_NAME), sessions: int(), activeWeeks: int(), tools: arr(TOOL, TOOL_IDS.length),
     inRepo: bool(), lastWeek: opt(WEEK),
   }), 100),
   otherProjects: obj({ projects: int(), sessions: int() }),
