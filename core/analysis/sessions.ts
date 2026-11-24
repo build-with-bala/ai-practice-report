@@ -121,6 +121,14 @@ export function buildSessionTable(raw: ScanResult, o: { timeZone: string; exclud
     if (drop) direct.push(id);
   }
   const dropped = withDescendants(direct, allChildren);
+
+  // dedupe: over every detail-window session and every prompt, before any exclusion (a host copy is a fact about the
+  // data, not about the scope); a host copy and all its descendants are never counted, whatever is excluded
+  const prompts = raw.store.all("prompt");
+  const detailSessions = new Map<string, SessionEv>();
+  for (const [id, s] of sessions) if (s.window === "detail") detailSessions.set(id, s);
+  const d = dedupe(prompts, detailSessions);
+  const hosts = withDescendants(d.hosts, allChildren);
   const droppedByProject = withDescendants(directProject, allChildren);
 
   // rows
@@ -169,17 +177,14 @@ export function buildSessionTable(raw: ScanResult, o: { timeZone: string; exclud
     rows.set(id, row);
   }
 
-  // dedupe
-  const prompts = raw.store.all("prompt");
-  const d = dedupe(prompts.filter((p) => inRange(p.ts)), rows); // a prompt outside the date range never helps pair a session
   for (const id of d.relabelledSessions) {
-    const row = rows.get(id)!;
-    if (row.parentId === undefined && row.origin === "scripted") row.origin = "human";
+    const row = rows.get(id);
+    if (row && row.parentId === undefined && row.origin === "scripted") row.origin = "human";
   }
   const isHuman = (p: PromptEv): boolean => p.origin === "human" || d.relabelled.has(p);
 
   const detailTop = [...rows.values()]
-    .filter((r) => r.window === "detail" && r.parentId === undefined && !d.hosts.has(r.id))
+    .filter((r) => r.window === "detail" && r.parentId === undefined && !hosts.has(r.id))
     .sort((a, b) => a.start - b.start || cmp(a.id, b.id));
 
   // orphan events
@@ -199,14 +204,14 @@ export function buildSessionTable(raw: ScanResult, o: { timeZone: string; exclud
   const activity = activityOf({
     timeZone: o.timeZone,
     detail: prompts.filter((p) => p.window === "detail" && p.sessionId !== undefined && rows.has(p.sessionId)
-      && !d.hosts.has(p.sessionId) && inRange(p.ts) && isHuman(p)),
+      && !hosts.has(p.sessionId) && inRange(p.ts) && isHuman(p)),
     lifetime: prompts.filter((p) => p.window === "lifetime" && keepTool(p.tool) && inRange(p.ts) && isHuman(p)
-      && (p.sessionId === undefined || (!droppedByProject.has(p.sessionId) && !d.hosts.has(p.sessionId)))),
+      && (p.sessionId === undefined || (!droppedByProject.has(p.sessionId) && !hosts.has(p.sessionId)))),
     daily: raw.store.all("daily").filter((e) => keepTool(e.tool) && (fromDay === undefined || e.day >= fromDay) && (toDay === undefined || e.day <= toDay)),
   });
 
   return {
-    rows, detailTop, hosts: d.hosts, repoOf, scope: { from, to, tools: toolEx, projects: projectsHit }, timeZone: o.timeZone, isHuman, activity, capabilities: capabilitiesOf(raw, (id) => id !== undefined && rows.has(id) && !d.hosts.has(id)),
+    rows, detailTop, hosts, repoOf, scope: { from, to, tools: toolEx, projects: projectsHit }, timeZone: o.timeZone, isHuman, activity, capabilities: capabilitiesOf(raw, (id) => id !== undefined && rows.has(id) && !hosts.has(id)),
     dedupe: { hostSessions: d.hosts.size, pairedPrompts: d.pairedPrompts, relabelled: d.relabelled.size },
     exclusions: { tools: toolsHit.size, projects: projectsHit.size, sessions: dropped.size }, orphans,
   };

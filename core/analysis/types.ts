@@ -41,9 +41,11 @@ export interface Activity { detailDays: string[]; lifetimeDays: string[]; detail
 
 /**
  * The first stage of analysis: every session row that survived the exclusions, the detail-window top-level sessions
- * metrics walk (`detailTop`: no parent, not a host copy), the host copies the cross-tool dedupe found (`hosts`, left out
- * of every metric: a pair of sessions from different tools with at least 3 paired prompts — equal text hash, within
- * 60 s, more than 2 words, inside the date range — making at least half of BOTH sessions' such prompts; see dedupe.ts), the projectKey → repoKey map, activity and capabilities, and what was dropped or unplaced.
+ * metrics walk (`detailTop`: no parent, not a host copy), the host copies the cross-tool dedupe found and all their
+ * descendants (`hosts`, left out of every metric whatever is excluded: a pair of sessions from different tools with at
+ * least 3 paired prompts — equal text hash, within 60 s, more than 2 words — making at least half of BOTH sessions'
+ * such prompts, decided over every detail-window session and prompt before any exclusion; see dedupe.ts), the
+ * projectKey → repoKey map, activity and capabilities, and what was dropped or unplaced.
  * `orphans`: events (per kind) whose `sessionId` names no session, and `session` = rows whose parent is missing.
  */
 export interface SessionTable {

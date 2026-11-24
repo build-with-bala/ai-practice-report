@@ -120,23 +120,37 @@ describe("cross-tool dedupe", () => {
     expect(under.dedupe).toEqual({ hostSessions: 0, pairedPrompts: 3, relabelled: 0 });
   });
 
-  test("short prompts never pair, even in a true mirror, and are left out of the shares", () => {
-    const { evs } = hosted(5 * SEC);
+  test("short prompts never establish a pair, but once paired every matching scripted prompt is relabelled, short ones too", () => {
+    const { evs, a } = hosted(5 * SEC);
+    const short: PromptEv[] = [];
     for (let i = 0; i < 4; i++) {
-      evs.push(prompt("H", "copilot", T0 + (30 + i) * MIN, `ok${i}`, "human", 2), prompt("A", "claude-code", T0 + (30 + i) * MIN + SEC, `ok${i}`, "scripted", 2));
+      const p = prompt("A", "claude-code", T0 + (30 + i) * MIN + SEC, `ok${i}`, "scripted", 2);
+      short.push(p);
+      evs.push(prompt("H", "copilot", T0 + (30 + i) * MIN, `ok${i}`, "human", 2), p);
     }
+    const lone = prompt("A", "claude-code", T0 + 50 * MIN, "nowhere", "scripted", 1); // no host prompt matches it
+    evs.push(lone);
     const t = buildSessionTable(scanResultOf(evs), opts);
     expect([...t.hosts]).toEqual(["H"]);
-    expect(t.dedupe).toEqual({ hostSessions: 1, pairedPrompts: 4, relabelled: 4 });
+    expect(t.dedupe).toEqual({ hostSessions: 1, pairedPrompts: 4, relabelled: 8 });
+    expect([...a, ...short].every((p) => t.isHuman(p))).toBe(true);
+    expect(t.isHuman(lone)).toBe(false);
   });
 
-  test("prompts outside the date range never help pair a session", () => {
-    // 4 pairs, but 2 of them before `from`: only 2 pairs remain in range, under HOST_MIN_PAIRS
+  test("short prompts alone never make a host copy", () => {
+    const evs: Ev[] = [sess("H", "copilot", { surface: "vscode" }), sess("A", "claude-code", { origin: "scripted" })];
+    for (let i = 0; i < 6; i++) evs.push(prompt("H", "copilot", T0 + i * MIN, `ok${i}`, "human", 2), prompt("A", "claude-code", T0 + i * MIN + SEC, `ok${i}`, "scripted", 2));
+    const t = buildSessionTable(scanResultOf(evs), opts);
+    expect(t.hosts.size).toBe(0);
+    expect(t.dedupe.relabelled).toBe(0);
+  });
+
+  test("pairing reads every prompt, before the date range: a range that cuts half the pairs still finds the host copy", () => {
     const { evs } = hosted(5 * SEC);
     const from = T0 + 10 * MIN - 1; // prompts at T0 + 0, 5, 10, 15 min: the first two (and their copies) are out of range
     const t = buildSessionTable(scanResultOf(evs), { ...opts, exclude: { from } });
-    expect(t.hosts.size).toBe(0);
-    expect(t.dedupe).toEqual({ hostSessions: 0, pairedPrompts: 2, relabelled: 0 });
+    expect([...t.hosts]).toEqual(["H"]);
+    expect(t.dedupe).toEqual({ hostSessions: 1, pairedPrompts: 4, relabelled: 4 });
   });
 
   test("isHuman: human prompts are human, scripted ones only when relabelled", () => {
@@ -144,5 +158,62 @@ describe("cross-tool dedupe", () => {
     expect(t.isHuman(prompt("S", "codex", T0, "a"))).toBe(true);
     expect(t.isHuman(prompt("S", "codex", T0, "a", "scripted"))).toBe(false);
     expect(t.isHuman(prompt("S", "codex", T0, "a", "subagent"))).toBe(false);
+  });
+});
+
+describe("host copies are decided before any exclusion", () => {
+  /** A (claude-code, scripted, project kA) mirrored by H (copilot VS Code, no project): 4 paired prompts. */
+  const mirrored = (hProject?: string): { evs: Ev[]; a: PromptEv[]; h: PromptEv[] } => {
+    const { evs, a } = hosted(5 * SEC);
+    (evs[1] as SessionEv).projectKey = "kA";
+    if (hProject !== undefined) (evs[0] as SessionEv).projectKey = hProject;
+    return { evs, a, h: evs.filter((e): e is PromptEv => e.k === "prompt" && e.sessionId === "H") };
+  };
+  const humanDetail = (t: ReturnType<typeof buildSessionTable>): string[] => Object.keys(t.activity.byTool).filter((k) => (t.activity.byTool[k as ToolId]?.detailDays.length ?? 0) > 0);
+
+  test("excluding the host tool keeps the original paired: its prompts are still typed by a person", () => {
+    const { evs, a } = mirrored();
+    const t = buildSessionTable(scanResultOf(evs), { ...opts, exclude: { tools: ["copilot"] } });
+    expect([...t.hosts]).toEqual(["H"]);
+    expect(t.rows.has("H")).toBe(false);
+    expect(a.every((p) => t.isHuman(p))).toBe(true);
+    expect(t.rows.get("A")!.origin).toBe("human");
+    expect(t.detailTop.map((r) => r.id)).toEqual(["A"]);
+  });
+
+  test("excluding the original's tool keeps the copy out too", () => {
+    const { evs } = mirrored();
+    const t = buildSessionTable(scanResultOf(evs), { ...opts, exclude: { tools: ["claude-code"] } });
+    expect(t.hosts.has("H")).toBe(true);
+    expect(t.detailTop).toEqual([]);
+    expect(humanDetail(t)).toEqual([]);
+    expect(t.capabilities).toEqual({ outcomes: [], lines: [], background: [], usage: [], effort: [] });
+  });
+
+  test("excluding the original's project keeps the copy out, though the copy carries no project or another one", () => {
+    for (const hProject of [undefined, "kOther"]) {
+      const { evs } = mirrored(hProject);
+      const t = buildSessionTable(scanResultOf(evs), { ...opts, exclude: { projects: ["kA"] } });
+      expect(t.hosts.has("H")).toBe(true);
+      expect(t.detailTop).toEqual([]);
+      expect(humanDetail(t)).toEqual([]);
+    }
+  });
+
+  test("excluding the original's dates keeps the copy out", () => {
+    const { evs } = mirrored();
+    const t = buildSessionTable(scanResultOf(evs), { ...opts, exclude: { from: T0 + 40 * MIN } });
+    expect(t.hosts.has("H")).toBe(true);
+    expect(t.detailTop).toEqual([]);
+  });
+
+  test("a host copy's descendants are never counted either", () => {
+    const { evs } = mirrored();
+    evs.push(sess("Hc", "copilot", { parentId: "H", origin: "subagent" }), sess("Hcc", "copilot", { parentId: "Hc", origin: "subagent" }));
+    evs.push({ k: "tool", tool: "copilot", source: "copilot.x", ts: T0 + MIN, sessionId: "Hc", name: "edit", category: "edit", editExt: "py", linesAdded: 3 });
+    const t = buildSessionTable(scanResultOf(evs), opts);
+    expect([...t.hosts].sort()).toEqual(["H", "Hc", "Hcc"]);
+    expect(t.dedupe.hostSessions).toBe(1);
+    expect(t.capabilities.lines).toEqual([]);
   });
 });
