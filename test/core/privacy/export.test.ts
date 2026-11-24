@@ -357,8 +357,9 @@ describe("exportPayload: the preview contract and deny by default", () => {
 
   test("an unexpected key added at every depth of a real analysis never survives", () => {
     const a = analyze(personaScan("expert", { canaries: true }), UTC);
-    // open records whose entries all pass on: text planted there fails the export instead (tests below)
-    const checkValues = new Set<unknown>([...a.forensics.checks.map((c) => c.values), a.private.models, a.risk.permission, a.risk.approval, a.risk.sandbox]);
+    // open records whose entries all pass on or are counted: text planted there fails the export instead (tests below)
+    const checkValues = new Set<unknown>([...a.forensics.checks.map((c) => c.values), a.private.models, a.risk.permission, a.risk.approval, a.risk.sandbox,
+      a.stack.languages, a.stack.toolchains, a.stack.techCategories, a.exposure.arcs.prompts, a.exposure.arcs.durations, a.config.byKind]);
     let planted = 0;
     const plant = (v: unknown): void => {
       if (Array.isArray(v)) { for (const x of v) plant(x); return; }
@@ -622,8 +623,8 @@ describe("exportPayload: the preview contract and deny by default", () => {
 
   test("the top level holds exactly the declared parts", () => {
     const out = parsed(analyze(personaScan("intermediate"), UTC));
-    expect(Object.keys(out).sort()).toEqual(["config", "core", "coverage", "dimensions", "exclusions", "exposure", "forensics", "identity", "otherProjects",
-      "overall", "personas", "projects", "reference", "repoSignals", "risk", "schema", "signals", "stack"]);
+    expect(Object.keys(out).sort()).toEqual(["config", "core", "coverage", "dimensions", "exclusions", "exposure", "forensics", "identity", "omitted",
+      "otherProjects", "overall", "personas", "projects", "reference", "repoSignals", "risk", "schema", "signals", "stack"]);
   });
 
   test("an empty scan exports a valid payload with nothing scored", () => {
@@ -643,6 +644,70 @@ describe("exportPayload: the preview contract and deny by default", () => {
     a.risk.sandbox = { "workspace-write": 5, other: 1, [CANARY.project]: 1 };
     expect(parsed(a).risk).toEqual({ permission: { default: 2, acceptEdits: 1, other: 7 }, approval: { never: 1, other: 2 }, sandbox: { "workspace-write": 5, other: 2 },
       window: a.risk.meta.window, n: a.risk.meta.n });
+  });
+});
+
+describe("exportPayload: nothing is left out silently", () => {
+  const NONE = { coverage: 0, weeks: 0, tools: 0, mcpServers: 0, bindings: 0, promptArcs: 0, durationArcs: 0, languages: 0, toolchains: 0,
+    techCategories: 0, configKinds: 0, features: 0 };
+
+  test("a persona leaves nothing out", () => {
+    expect(parsed(analyze(personaScan("expert"), UTC)).omitted).toEqual(NONE);
+  });
+
+  test("70 identity hashes export 64 bindings and say 6 were left out", () => {
+    const a = analyze(personaScan("expert"), UTC);
+    a.identity.hashes = Array.from({ length: 70 }, (_, i) => i.toString(16).padStart(16, "0"));
+    a.identity.accounts = 70;
+    const out = parsed(a);
+    expect(((out.identity as Json).bindings as string[]).length).toBe(64);
+    expect(out.omitted).toEqual({ ...NONE, bindings: 6 });
+  });
+
+  test("300 MCP servers export 256 labels and say 44 were left out", () => {
+    const a = analyze(personaScan("expert"), UTC);
+    a.private.config = Array.from({ length: 300 }, (_, i) => ({ kind: "mcp-server" as const, name: `internal-${i}`, key: i.toString(16).padStart(16, "0"),
+      provenance: "authored" as const, used: false }));
+    const out = parsed(a);
+    expect(((out.config as Json).mcpServers as string[]).length).toBe(256);
+    expect(out.omitted).toEqual({ ...NONE, mcpServers: 44 });
+  });
+
+  test("coverage rows, weeks and exposure tools past their caps are counted", () => {
+    const a = analyze(personaScan("expert"), UTC);
+    const row = a.coverage.rows[0]!;
+    a.coverage.rows = Array.from({ length: 70 }, () => structuredClone(row));
+    const w = a.exposure.weekly.at(-1)!;
+    a.exposure.weekly = Array.from({ length: 60 }, () => structuredClone(w));
+    const t = a.exposure.tools[0]!;
+    a.exposure.tools = Array.from({ length: 65 }, () => structuredClone(t));
+    expect(parsed(a).omitted).toEqual({ ...NONE, coverage: 6, weeks: 8, tools: 1 });
+  });
+
+  test("a key outside a vocabulary is counted with its count, never dropped with it", () => {
+    const a = analyze(personaScan("expert"), UTC);
+    hostile<Json>(a.stack.languages).cobol = 5;
+    hostile<Json>(a.stack.toolchains).fortran = 2;
+    hostile<Json>(a.stack.techCategories).quantum = 3;
+    hostile<Json>(a.exposure.arcs.prompts)["99+"] = 4;
+    hostile<Json>(a.exposure.arcs.durations)[">1d"] = 1;
+    hostile<Json>(a.config.byKind).widget = { authored: 1, installed: 2, other: 3, used: 1 };
+    hostile<Json>(a.exposure.firstSeen).teleport = Date.UTC(2026, 9, 1);
+    hostile<Json>(a.risk.permission).yolo = 7; // a block with an other bucket counts it there
+    const before = (a.risk.permission.other ?? 0);
+    const out = parsed(a);
+    expect(out.omitted).toEqual({ ...NONE, languages: 5, toolchains: 2, techCategories: 3, promptArcs: 4, durationArcs: 1, configKinds: 6, features: 1 });
+    expect(((out.risk as Json).permission as Json).other).toBe(before + 7);
+    expect(JSON.stringify(out)).not.toMatch(/cobol|fortran|quantum|widget|teleport|yolo/);
+  });
+
+  test("a value under an unknown key that is no count fails the export instead of vanishing", () => {
+    const a = analyze(personaScan("expert"), UTC);
+    hostile<Json>(a.stack.languages).cobol = "LEAKVALUE";
+    let err: unknown;
+    try { exportPayload(a, OPTS); } catch (e) { err = e; }
+    expect((err as ExportError).paths).toEqual(["$.omitted.languages"]);
+    expect((err as Error).message).not.toContain("LEAK");
   });
 });
 

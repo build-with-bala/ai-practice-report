@@ -378,5 +378,13 @@ export const AIPROF2: FieldSpec = obj({
   }),
   identity: obj({ accounts: int(), bindings: arr(KEYED_HASH, 64) }),
   /** What the exclusions left out: tool, project and session counts, whether a date range was given, and the active weeks outside it (no dates). */
+  /**
+   * What the builder left out, never silently: entries a cap cut from a list (`coverage`, `weeks`, `tools`,
+   * `mcpServers`, `bindings`), the summed counts under keys outside a vocabulary (`promptArcs`, `durationArcs`,
+   * `languages`, `toolchains`, `techCategories`; `configKinds` = config entries of an unknown kind), and the first-seen
+   * features outside `FEATURES` (`features`).
+   */
+  omitted: obj(Object.fromEntries(["coverage", "weeks", "tools", "mcpServers", "bindings", "promptArcs", "durationArcs", "languages", "toolchains",
+    "techCategories", "configKinds", "features"].map((k) => [k, int()]))),
   exclusions: obj({ tools: int(), projects: int(), sessions: int(), dateRange: bool(), weeksOutside: int() }),
 });
