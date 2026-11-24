@@ -12,14 +12,16 @@ import { STREAM_GC } from "../io/jsonl";
  *
  * - before every subcommand (GIT_SAFE_ARGS): `--no-pager` and `-c key=value` are far older; a `-c` key an older git
  *   does not know (`core.fsmonitor` 2.16, `protocol.allow` 2.12) is ignored, never refused.
- * - `--version`; `rev-parse --show-toplevel` (1.7.0) `--git-common-dir` (2.5); `config --get <key>`.
+ * - `--version`; `rev-parse --show-toplevel` (1.7.0) `--git-common-dir` (2.5); `rev-parse --verify --quiet
+ *   HEAD^{commit}` (all far older); `config --get <key>`.
  * - `log`: `--no-use-mailmap` (the `--no-` form of `--use-mailmap`, 1.8.2; the shorter `--no-mailmap` needs 2.27),
  *   `--exclude=<glob>` (1.9 or 2.0: release notes not confirmed, well before 2.13), `--all`, `--no-merges`,
  *   `--no-renames`, `--since=<date>`, `--max-count=<n>` / `-n<n>`, `--name-only`, `-z`, `--format=` with `%x00`, `%H`,
  *   `%ct`, `%ae`, `%n` and `%B` (1.7.2), the `:(literal)` pathspec magic (1.8); `--since-as-filter=<date>` only from 2.37
  *   (`SINCE_AS_FILTER_SINCE`).
  *
- * The tests run every argument list against a fake git that refuses what 2.13 does not accept.
+ * The tests run every argument vector against a fake git that refuses what 2.13 does not accept. A git older than this
+ * is not used: the pass is `git-missing`, counted `git-too-old`.
  */
 export const OLDEST_GIT: readonly [number, number] = [2, 13];
 
