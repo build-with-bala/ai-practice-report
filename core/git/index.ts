@@ -1,6 +1,7 @@
-import { commitStream, LOG_ARGS, type ParsedCommit } from "./commits";
-import { candidates, groupRepos, type Found, type Repo } from "./discover";
+import { commitStream, LOG_ARGS, SINCE_AS_FILTER_SINCE, sinceArg, type ParsedCommit } from "./commits";
+import { candidates, groupRepos, sameFolder, type Found, type Repo } from "./discover";
 import { INSTRUCTION_FILES, MAX_FOLDER_FILES, MAX_REPO_FILE_BYTES, readRepoFiles, REPO_FILES, REPO_FOLDERS, SESSION_FOLDER_FILES } from "./files";
+import path from "node:path";
 import { resolveGit, runGit, type GitResult, type GitRunner } from "./run";
 import type { RepoFacts, RepoSignals } from "./types";
 
@@ -62,6 +63,8 @@ export const REPO_SIGNALS_DESCRIBE: { reads: string[]; runs: string[] } = {
     "git metadata of the repos that hold recent session folders (found by checking each folder's ancestors for .git, never by crawling): " +
       "commit times; whether the author is the repo's user.email (compared in memory, never kept); AI co-author and generated-with trailers; " +
       "revert and fix-up subjects; changed-file paths as keyed hashes. Commit messages, emails, paths and source files are never kept.",
+    "a repo is read only when the root git reports for a session folder's repo is that folder itself (a repo whose config names " +
+      "another folder as its worktree is skipped), and git runs only in such a folder.",
     `allowlisted repo files, from the worktree the most detail sessions ran in, read in memory (at most ${MAX_REPO_FILE_BYTES / 1024} KiB each; ` +
       "larger ones count as present, unread) and reduced to kinds, check kinds, booleans and counts — their text is never kept: " +
       `${[...Object.values(INSTRUCTION_FILES).filter((p) => !p.endsWith("/")), ...REPO_FILES].join(", ")}; ` +
@@ -70,7 +73,11 @@ export const REPO_SIGNALS_DESCRIBE: { reads: string[]; runs: string[] } = {
       "Links are resolved in every path component first: a file is opened, or a folder listed, only when its real path lies inside " +
       "the worktree and is itself one of these paths there (so CLAUDE.md linked to AGENTS.md is read; a link to a source file or out " +
       "of the worktree is not). .claude/settings.local.json, source files and any other file are never opened; " +
-      "a credential, token or key file name (or a link to one) is refused unopened.",
+      "a credential, token or key file name (or a link to one) is refused unopened. " +
+      "What a path check cannot promise: a link swapped in between the check and the open is followed, and a hard link " +
+      "to a file elsewhere, under an allowlisted name, is read.",
+    "a .git file is taken as git takes it: one that names another repository's git folder makes that repository's history read " +
+      "under the session's folder.",
     "git config: the system-level git config is ignored (GIT_CONFIG_NOSYSTEM); only user.email and, for a git older than 2.44, " +
       "the partial-clone keys are asked for.",
   ],
@@ -79,11 +86,14 @@ export const REPO_SIGNALS_DESCRIBE: { reads: string[]; runs: string[] } = {
     "git rev-parse --show-toplevel --git-common-dir",
     "git config --get user.email",
     "git config --get extensions.partialClone, git config --get remote.origin.promisor (git older than 2.44 only)",
-    "git log --all --no-merges --no-renames --date-order --since=<date> --max-count=<n> --name-only -z (commit metadata only)",
-    "git log -n50 --since=<180 days ago> --format=%ct -- <instruction file paths> (commit times only; not for a partial clone read without paths)",
+    "git log --no-mailmap --exclude=refs/stash --all --no-merges --no-renames --since-as-filter=<date> --max-count=<n> --name-only -z (commit metadata only)",
+    "git log --no-mailmap -n50 --since-as-filter=<180 days ago> --format=%ct -- <instruction file paths> (commit times only; not for a partial clone read without paths)",
+    "on a git older than 2.37, --since instead of --since-as-filter: there, a commit whose recorded date is older than the window " +
+      "hides the ancestors no other branch reaches, so their commits are not read",
     "every git command: started by its absolute path on PATH (never from the repo folder), with no stdin, no pager and no prompt; " +
       "no transport at all (-c protocol.allow=never, GIT_ALLOW_PROTOCOL=none) and GIT_NO_LAZY_FETCH=1, so nothing is " +
-      "fetched whatever the repo config says; fsmonitor and signature checks off; no system config; inherited GIT_* variables removed",
+      "fetched whatever the repo config says; fsmonitor and signature checks off; log output in UTF-8; no .mailmap; no system config; " +
+      "inherited GIT_* variables removed",
   ],
 };
 
@@ -103,6 +113,12 @@ function assignOwners(read: readonly { repo: Repo; facts: RepoFacts; commits: re
   }
 }
 
+/** Commits newest first, then by `id`: the order every repo's list is returned in, whatever order git printed. */
+const byNewest = (a: ParsedCommit, b: ParsedCommit): number => {
+  const [x, y] = [a.fact.id ?? "", b.fact.id ?? ""];
+  return b.fact.ts - a.fact.ts || (x < y ? -1 : x > y ? 1 : 0);
+};
+
 const EMPTY_FACTS = (): Pick<RepoFacts, "instructions" | "hooks" | "ci" | "precommit"> => ({
   instructions: { files: [], namesChecks: [], touched: 0 }, hooks: { entries: 0, checks: [], disabled: false },
   ci: { present: false, checks: [] }, precommit: { present: false, checks: [] },
@@ -116,7 +132,18 @@ function versionOf(stdout: string): [number, number] | undefined {
 const atLeast = (v: [number, number] | undefined, min: readonly [number, number]): boolean =>
   v !== undefined && (v[0] > min[0] || (v[0] === min[0] && v[1] >= min[1]));
 
+/** A numeric option: `v` when it is a finite number in [min, max] (rounded down), else the fixed default `def`. */
+const option = (v: number | undefined, def: number, min: number, max: number): number =>
+  v !== undefined && Number.isFinite(v) && v >= min && v <= max ? Math.floor(v) : def;
+
 const isEnoent = (e: unknown): boolean => (e as { code?: unknown } | null)?.code === "ENOENT";
+
+/**
+ * Skip reasons that mean a read did not finish — a repo dropped, or its data cut, by a timeout, an error, the budget or
+ * an abort: any of them makes the pass `partial`. The others (`missing`, `not-a-repo`, `root-mismatch`, `too-many-repos`,
+ * the deliberate `file-*` refusals and caps) are what the rules leave out, and keep it `ok`.
+ */
+const UNFINISHED: readonly string[] = ["budget", "timeout", "error", "identity-error", "log-error", "files-error", "file-io-error"];
 
 /** Stopped by the budget or an abort before the command settled. */
 const STOPPED = Symbol("stopped");
@@ -129,20 +156,24 @@ const STOPPED = Symbol("stopped");
 export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOptions = {}): Promise<RepoSignals> {
   const started = Date.now();
   const runner = o.runner ?? runGit;
-  const timeoutMs = o.timeoutMs ?? 10_000;
-  const maxCommits = o.maxCommits ?? 5_000;
-  const maxFiles = o.maxFiles ?? 200;
-  const width = Math.max(1, Math.floor(o.concurrency ?? DEFAULT_CONCURRENCY));
+  const timeoutMs = option(o.timeoutMs, 10_000, 1, 600_000);
+  const maxCommits = option(o.maxCommits, 5_000, 1, 10_000_000);
+  const maxFiles = option(o.maxFiles, 200, 0, 100_000);
+  const maxRepos = option(o.maxRepos, 200, 0, 100_000);
+  const budgetMs = option(o.budgetMs, 20_000, 0, 3_600_000);
+  const width = option(o.concurrency, DEFAULT_CONCURRENCY, 1, 64);
   const skipped: Record<string, number> = {};
   const skip = (reason: string, n = 1) => { if (n > 0) skipped[reason] = (skipped[reason] ?? 0) + n; };
   const roots = new Map<string, string>();
   const repos: RepoFacts[] = [];
   /** Each repo read, with its commits' full shas: memory only, for this pass. */
   const read: { repo: Repo; facts: RepoFacts; commits: ParsedCommit[] }[] = [];
-  const since = input.detailFrom === undefined ? undefined : input.detailFrom - 3 * DAY_MS;
+  // the window start, only when it is a date in range (a NaN or far date would throw in `toISOString`): else none
+  const from = input.detailFrom;
+  const since = from !== undefined && Number.isFinite(from) && from - 3 * DAY_MS >= 0 && from <= input.now + DAY_MS ? from - 3 * DAY_MS : undefined;
 
   const budget = new AbortController();
-  const timer = setTimeout(() => budget.abort(), Math.max(0, o.budgetMs ?? 20_000));
+  const timer = setTimeout(() => budget.abort(), budgetMs);
   const signal = AbortSignal.any([input.signal, budget.signal]);
   const stopped = new Promise<typeof STOPPED>((resolve) => {
     if (signal.aborted) resolve(STOPPED);
@@ -167,7 +198,7 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
     if (since !== undefined) out.since = since;
     return out;
   };
-  const partial = () => (input.signal.aborted || budget.signal.aborted ? "partial" : "ok");
+  const partial = () => (input.signal.aborted || budget.signal.aborted || UNFINISHED.some((k) => (skipped[k] ?? 0) > 0) ? "partial" : "ok");
 
   /** Runs `job` over `items`, `width` at once; items not started once stopped count as `budget`. */
   const pool = async <T>(items: readonly T[], job: (item: T) => Promise<void>): Promise<void> => {
@@ -182,23 +213,30 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
   let version: [number, number] | undefined; // git's, from `git --version`
   let exe: string | undefined; // git's absolute path, found once per pass
   try {
-    const cands = candidates(input.cwds, input.recent, skip);
+    // the folders with the most detail-window sessions first, so the time budget goes to the repos that matter
+    const sessionsOf = (keys: readonly string[]) => keys.reduce((n, k) => n + (input.detailSessions?.get(k) ?? 0), 0);
+    const cands = candidates(input.cwds, input.recent, skip)
+      .map((c) => ({ c, n: sessionsOf(c.projectKeys) }))
+      .sort((a, b) => b.n - a.n || (a.c.dir < b.c.dir ? -1 : a.c.dir > b.c.dir ? 1 : 0))
+      .map(({ c }) => c);
     if (cands.length === 0) return result("ok");
     exe = resolveGit(process.env);
     if (exe === undefined) return result("git-missing");
 
-    // git itself: missing (ENOENT), and its version
+    // git itself: missing (ENOENT, a non-zero exit, a timeout, or no version in its answer), and its version. Asked
+    // once per pass, in the root of git's own path — a folder that always exists, and no candidate's
     try {
-      const v = await git(["--version"], cands[0]!.dir, timeoutMs);
+      const v = await git(["--version"], path.parse(exe).root, timeoutMs);
       if (v === STOPPED) {
         skip("budget", cands.length);
         return result("partial");
       }
-      version = versionOf(v.stdout);
+      version = v.code === 0 && !v.timedOut ? versionOf(v.stdout) : undefined;
+      if (version === undefined) return result("git-missing");
     } catch (e) {
       if (isEnoent(e)) return result("git-missing");
       skip("error", cands.length);
-      return result("ok");
+      return result("partial");
     }
 
     // each candidate's root
@@ -207,16 +245,24 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
       try {
         const r = await git(["rev-parse", "--show-toplevel", "--git-common-dir"], cand.dir, REV_PARSE_TIMEOUT_MS);
         if (r === STOPPED) return skip("budget");
-        const [root = "", commonDir = ""] = r.stdout.split("\n").map((l) => l.replace(/\r$/, ""));
+        // exactly two lines (the root, the common dir), each ended by a newline: more means a newline inside a path,
+        // which cannot be split back into the two
+        const lines = r.stdout.split("\n");
+        const [root = "", commonDir = ""] = lines.length === 3 && lines[2] === "" ? lines.map((l) => l.replace(/\r$/, "")) : [];
         if (r.timedOut) skip("timeout");
-        else if (r.code !== 0 || root === "" || commonDir === "" || r.truncated) skip("not-a-repo");
-        else found.push({ cand, root, commonDir });
+        else if (r.code !== 0 || r.truncated || lines.length < 3) skip("not-a-repo");
+        else if (lines.length > 3 || lines[2] !== "") skip("root-mismatch");
+        else if (root === "" || commonDir === "") skip("not-a-repo");
+        // the root git reports is accepted only when it is the candidate folder itself: repo config (`core.worktree`)
+        // may name any other folder, whose files would then be read as this repo's. Everything runs in the candidate.
+        else if (!sameFolder(root, cand.dir)) skip("root-mismatch");
+        else found.push({ cand, root: cand.dir, commonDir });
       } catch {
         skip("error");
       }
     });
 
-    const chosen = groupRepos(found, input.salt, input.detailSessions ?? new Map(), Math.max(0, Math.floor(o.maxRepos ?? 200)), skip);
+    const chosen = groupRepos(found, input.salt, input.detailSessions ?? new Map(), maxRepos, skip);
     let done = 0;
     await pool(chosen, async (repo) => {
       try {
@@ -253,7 +299,8 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
           const r = await git(args, ro.cwd, ro.timeoutMs, ro.maxBytes);
           return r === STOPPED ? { code: null, stdout: "", timedOut: false, truncated: false } : r;
         };
-        Object.assign(facts, await readRepoFiles(tree.root, cwds, { signal, runner: filesRunner, now: input.now, timeoutMs, skip, history: got.names }));
+        Object.assign(facts, await readRepoFiles(tree.root, cwds, { signal, runner: filesRunner, now: input.now, timeoutMs, skip, history: got.names,
+          sinceAsFilter: atLeast(version, SINCE_AS_FILTER_SINCE) }));
       } catch {
         Object.assign(facts, EMPTY_FACTS());
         skip("files-error");
@@ -267,26 +314,41 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
    * partial clone that cannot list paths without fetching).
    */
   async function readCommits(repo: Repo, facts: RepoFacts): Promise<{ commits: ParsedCommit[]; names: boolean } | typeof STOPPED> {
+    // git runs in a candidate folder (a worktree sessions ran in), never in a folder only git's answers named
+    const cwd = repo.trees[0]?.root ?? repo.root;
     // an older git would fetch a partial clone's missing trees to list paths (it has no GIT_NO_LAZY_FETCH): read it
     // without them. A partial clone says so by `extensions.partialClone` (older layouts) or its remote's `promisor`.
     let names = true;
     if (!atLeast(version, NO_LAZY_FETCH_SINCE)) {
       for (const key of PARTIAL_CLONE_KEYS) {
-        const r = await git(["config", "--get", key], repo.root);
+        const r = await git(["config", "--get", key], cwd);
         if (r === STOPPED) return STOPPED;
-        if (r.code === 0 && r.stdout.trim() !== "") names = false;
+        if (r.timedOut) skip("timeout");
+        // set, or not known to be unset: read without paths
+        if ((r.code === 0 && r.stdout.trim() !== "") || r.timedOut || (r.code !== 0 && r.code !== 1)) names = false;
         if (!names) break;
       }
     }
-    const id = await git(["config", "--get", "user.email"], repo.root);
+    // the person's email: exit 1 is git's own answer for a key that is not set (no identity); any other failure is a
+    // read that did not finish, counted
+    const id = await git(["config", "--get", "user.email"], cwd);
     if (id === STOPPED) return STOPPED;
+    if (id.timedOut || id.truncated || (id.code !== 0 && id.code !== 1)) {
+      skip(id.timedOut ? "timeout" : "identity-error");
+      return { commits: [], names };
+    }
     const email = id.code === 0 ? id.stdout.trim() : "";
     if (email === "") return { commits: [], names };
     facts.identity = true;
 
+    // no `--date-order`: with a window start it stops at the first commit older than the window, on every ref. The
+    // window start is `--since-as-filter` where git has it; on an older git, `--since` (see `sinceArg`) still lets a
+    // commit whose recorded date is older than the window hide the ancestors no other branch reaches.
     const logArgs = (withNames: boolean): string[] => [
-      "log", "--all", "--no-merges", "--no-renames", "--date-order",
-      ...(since === undefined ? [] : [`--since=${new Date(since).toISOString()}`]),
+      // `--exclude=refs/stash` before `--all`: a stash is no commit of the person's; `--no-mailmap`: the worktree's
+      // `.mailmap` (a file anyone can commit, or a FIFO) is never opened
+      "log", "--no-mailmap", "--exclude=refs/stash", "--all", "--no-merges", "--no-renames",
+      ...(since === undefined ? [] : [sinceArg(since, atLeast(version, SINCE_AS_FILTER_SINCE))]),
       `--max-count=${maxCommits}`, ...(withNames ? ["--name-only"] : []), ...LOG_ARGS,
     ];
     /**
@@ -296,11 +358,12 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
     const readLog = async (withNames: boolean) => {
       const parse = commitStream({ salt: input.salt, email, maxFiles });
       let streamed = false;
-      const r = await git(logArgs(withNames), repo.root, timeoutMs, LOG_BYTES, (chunk) => { streamed = true; parse.push(chunk); });
+      const r = await git(logArgs(withNames), cwd, timeoutMs, LOG_BYTES, (chunk) => { streamed = true; parse.push(chunk); });
       if (r === STOPPED) return STOPPED;
       if (!streamed && r.stdout !== "") parse.push(new TextEncoder().encode(r.stdout));
       return { r, parse };
     };
+    const history = names; // whether the instruction history may read paths, whatever the commit log below does
     let log = await readLog(names);
     if (log === STOPPED) return STOPPED;
     // with lazy fetch off, a partial clone that lacks trees cannot list paths (git fails): read it again without them
@@ -317,10 +380,18 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
     }
     // a cut output's last record may be incomplete: it is left out
     const cut = r.truncated || r.timedOut;
-    const { commits, records } = parse.end(cut);
-    if (!r.truncated && !r.timedOut && r.code !== 0) return { commits: [], names }; // an empty repo, or a history git cannot read
+    const { commits, records, oldest } = parse.end(cut);
+    // a log that failed (twice, when the first asked for paths): no commits, counted. An empty repo exits 0.
+    if (!r.truncated && !r.timedOut && r.code !== 0) {
+      skip("log-error");
+      return { commits: [], names: history };
+    }
+    // git lists commits in no strict date order without `--date-order`: one stable order for every consumer
+    commits.sort(byNewest);
     facts.commits = commits.map((c) => c.fact);
     facts.commitsTruncated ||= r.truncated || records >= maxCommits;
+    // a cut list reaches back only to its oldest record read (any author's); with none read, to nothing before now
+    if (facts.commitsTruncated) facts.commitsReach = oldest ?? input.now;
     return { commits, names };
   }
 }

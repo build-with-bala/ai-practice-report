@@ -240,7 +240,7 @@ export function personaScan(kind: PersonaKind, o: { now?: number; hourUtc?: numb
   const commits: CommitFact[][] = k.repos.map(() => []);
   let shas = 0;
   const commit = (r: number, ts: number, files: string[], rework?: CommitFact["rework"]): void => {
-    const c: CommitFact = { ts, shaKey: hash((++shas).toString(16).padStart(7, "0")), files, owner: true, ai: "claude" };
+    const c: CommitFact = { ts, shaKey: hash((++shas).toString(16).padStart(7, "0")), files, owner: true, mine: true, ai: "claude" };
     if (rework !== undefined) c.rework = rework;
     commits[r]!.push(c);
   };

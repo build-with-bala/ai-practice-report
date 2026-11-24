@@ -3,7 +3,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { buildSessionTable } from "../../../core/analysis/sessions";
 import { buildSessionStats, type SessionStats } from "../../../core/analysis/walk";
-import { runForensics, type Forensics } from "../../../core/forensics";
+import { bandOf, runForensics, type Forensics } from "../../../core/forensics";
 import type { ReleaseTable } from "../../../core/forensics/releases";
 import type { CheckResult } from "../../../core/forensics/types";
 import type { AnchorEv, ConfigEv, CoverageEv, DailyEv, Ev, FileFactEv, IdentityEv, PromptEv, SessionEv, ToolEv } from "../../../core/model/events";
@@ -82,13 +82,19 @@ const file = (i: number, over: Partial<FileFactEv> = {}): FileFactEv => {
 };
 const files = (n: number, f: (i: number) => FileFactEv = (i) => file(i)): FileFactEv[] => Array.from({ length: n }, (_, i) => f(i));
 
-/** Ten days of typed transcript prompts in one session, with `inHistory` of them echoed in the prompt history. */
+/**
+ * Ten days of typed transcript prompts in one session, three a day (a C3 pass needs 20 compared), with those of the first
+ * `inHistory` days echoed in the prompt history.
+ */
 function claudeDays(inHistory: number, statsDays: (day: string, i: number) => boolean = () => false): Ev[] {
   const out: Ev[] = [sess("s", "claude-code", T0, { end: T0 + 10 * DAY })];
   for (let i = 0; i < 10; i++) {
+    for (let k = 0; k < 3; k++) {
+      const ts = T0 + i * DAY + k * HOUR;
+      out.push(prompt("s", ts, "claude-code", { textHash: `p${i}-${k}` }));
+      if (i < inHistory) out.push(history(ts + 5 * SEC, `p${i}-${k}`));
+    }
     const ts = T0 + i * DAY;
-    out.push(prompt("s", ts, "claude-code", { textHash: `p${i}` }));
-    if (i < inHistory) out.push(history(ts + 5 * SEC, `p${i}`));
     if (statsDays(ymd(ts), i)) out.push(statsDay(ymd(ts)));
   }
   out.push(history(T0 - DAY, "early"), history(T0 + 12 * DAY, "late"));
@@ -104,7 +110,7 @@ const run = (events: Ev[], stats: readonly SessionStats[] = [], releases: Releas
 };
 const byId = (f: Forensics, id: CheckResult["id"]): CheckResult => f.checks.find((c) => c.id === id)!;
 const ORDER: CheckResult["id"][] = ["C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10",
-  "soft:rhythm", "soft:repeated-long", "soft:recent-burst", "soft:unclosed-tools", "soft:new-config"];
+  "soft:rhythm", "soft:repeated-long", "soft:recent-burst", "soft:unclosed-tools", "soft:new-config", "soft:no-server-pass", "soft:missing-ids"];
 const statsOf = (rows: [ToolId, number][]): SessionStats[] => rows.map(([tool, turns]) => ({ tool, turns }) as SessionStats);
 
 describe("runForensics: the band", () => {
@@ -161,7 +167,7 @@ describe("runForensics: the band", () => {
   });
 
   test("unverifiable ids with C4 passing are consistent with notes", () => {
-    const f = run([...scrambled(anchors("cc-msg", 1), 5), sess("a"), identity("session", "a"), identity("config", "a")]);
+    const f = run([...scrambled(anchors("cc-msg", 1), 5), sess("a"), ...Array.from({ length: 5 }, () => identity("session", "a")), identity("config", "a")]);
     expect(byId(f, "C4").status).toBe("pass");
     expect(f.band).toBe("consistent-with-notes");
   });
@@ -185,10 +191,14 @@ describe("runForensics: the band", () => {
     expect(f.band).toBe("consistent-with-notes");
   });
 
-  test("too few ids stay neutral: with C3 passing the band is consistent", () => {
+  test("too few ids stay neutral, but C3 passing alone is no server-backed pass: consistent with notes", () => {
     const f = run([...anchors().slice(0, 30), ...claudeDays(10)]);
     expect(byId(f, "C1").reason).toBe("too-few");
-    expect(f.band).toBe("consistent");
+    expect(byId(f, "C3").status).toBe("pass");
+    expect([byId(f, "soft:no-server-pass").status, byId(f, "soft:no-server-pass").reason]).toEqual(["note", "no-server-pass"]);
+    expect(f.band).toBe("consistent-with-notes");
+    const g = run([...anchors(), ...claudeDays(10)]);
+    expect([byId(g, "soft:no-server-pass").status, g.band]).toEqual(["pass", "consistent"]);
   });
 
   test("a raised soft flag alone makes notes", () => {
@@ -207,12 +217,71 @@ describe("runForensics: the band", () => {
   });
 });
 
+describe("runForensics: consistent needs evidence", () => {
+  const cursor = (): Ev[] => [sess("c", "cursor", T0, { end: T0 + 40 * DAY }), ...Array.from({ length: 1_200 }, (_, i) => prompt("c", T0 + i * 20 * MIN, "cursor"))];
+  const threads = cov("codex", "codex.threads", "lifetime");
+
+  test("1,200 Cursor prompts plus one matching item are never consistent", () => {
+    const account = run([...cursor(), sess("a"), identity("session", "a"), identity("config", "a")]);
+    const inHistory = run([...cursor(), sess("s"), prompt("s", T0, "claude-code", { textHash: "x" }), history(T0 + SEC, "x"),
+      history(T0 - DAY, "e"), history(T0 + DAY, "l")]);
+    const rollout = run([...cursor(), threads, { k: "codex-rollout", tool: "codex", source: "codex.rollouts", threadId: "codex:r", fileTs: T0, uuidTs: T0 + 400 },
+      { k: "codex-thread-row", tool: "codex", source: "codex.threads", threadId: "codex:r", createdAt: T0 + 300 }]);
+    for (const f of [account, inHistory, rollout]) {
+      expect(f.band).not.toBe("consistent");
+      expect(f.band).toBe("unverifiable");
+    }
+  });
+
+  test("a history written from nothing, with the account id copied in, is at best consistent with notes, and asks about the missing ids", () => {
+    const evs: Ev[] = [identity("config", "acct")];
+    for (let k = 0; k < 30; k++) {
+      const id = `f${k}`;
+      evs.push(sess(id, "claude-code", T0 + k * DAY), { ...identity("session", "acct"), sessionId: id });
+      for (let i = 0; i < 60; i++) evs.push(prompt(id, T0 + k * DAY + i * MIN));
+    }
+    const f = run(evs, statsOf(Array.from({ length: 30 }, () => ["claude-code", 60] as [ToolId, number])));
+    expect(byId(f, "C4").status).toBe("pass");
+    expect([byId(f, "soft:no-server-pass").status, byId(f, "soft:missing-ids").status, byId(f, "soft:missing-ids").values.turns]).toEqual(["note", "note", 1_800]);
+    expect(byId(f, "soft:missing-ids").askAbout).toBe("1800 typed turns come from a tool that records server-issued ids, but none of them carries one. Were these sessions run through another provider or a gateway?");
+    expect(f.band).toBe("consistent-with-notes");
+  });
+
+  test("missing ids: n/a under 50 typed turns, a pass when the tool has ids", () => {
+    expect(byId(run([sess("s")], statsOf([["claude-code", 49]])), "soft:missing-ids").status).toBe("n/a");
+    expect(byId(run([sess("s"), ...anchors()], statsOf([["claude-code", 50]])), "soft:missing-ids").status).toBe("pass");
+    expect(byId(run([sess("c", "codex")], statsOf([["codex", 500]])), "soft:missing-ids").status).toBe("n/a"); // Codex records no server ids
+  });
+
+  test("the band truth table", () => {
+    const r = (id: CheckResult["id"], status: CheckResult["status"], reason: CheckResult["reason"] = "ok", values: CheckResult["values"] = {}): CheckResult =>
+      ({ id, status, n: 1, reason, values, tools: [] });
+    const na = (id: CheckResult["id"]) => r(id, "n/a", "too-few");
+    const rows: [string, CheckResult[], Forensics["band"]][] = [
+      ["a fail anywhere", [r("C1", "pass"), r("C5", "fail", "file-times")], "inconsistent"],
+      ["a soft fail would be too", [r("C1", "pass"), r("soft:rhythm", "fail", "regular-rhythm")], "inconsistent"],
+      ["every anchored check n/a, C5 and C9 passing", [na("C1"), na("C2"), na("C3"), na("C4"), r("C5", "pass"), na("C6"), na("C7"), na("C8"), r("C9", "pass")], "unverifiable"],
+      ["every anchored check n/a, a note", [na("C1"), na("C3"), r("C5", "note", "restore-cluster")], "unverifiable"],
+      ["C1 pass and a warn", [r("C1", "pass"), r("C3", "warn", "history-mismatch")], "consistent-with-notes"],
+      ["C1 pass and a soft note", [r("C1", "pass"), r("soft:new-config", "note", "new-config")], "consistent-with-notes"],
+      ["C1 pass and an unverified kind", [r("C1", "pass", "ok", { unverifiedKinds: 1 })], "consistent-with-notes"],
+      ["C2 n/a scheme-changed, C3 pass", [r("C2", "n/a", "scheme-changed"), r("C3", "pass")], "consistent-with-notes"],
+      ["own-record passes only (C3, C4, C6, C7)", [na("C1"), na("C2"), r("C3", "pass"), r("C4", "pass"), r("C6", "pass"), r("C7", "pass"), na("C8")], "consistent-with-notes"],
+      ["C1 pass, nothing else", [r("C1", "pass"), na("C3")], "consistent"],
+      ["C8 pass, nothing else", [na("C1"), r("C8", "pass")], "consistent"],
+      ["C2 pass with C3 pass", [r("C2", "pass"), r("C3", "pass")], "consistent"],
+    ];
+    for (const [name, checks, band] of rows) expect([name, bandOf(checks)]).toEqual([name, band]);
+  });
+});
+
 describe("provenance (C10)", () => {
   test("prompt counts by tool, origin and window, classified only", () => {
     const f = run([sess("s"), prompt("s", T0 + MIN), prompt("s", T0 + 2 * MIN), history(T0 + 3 * MIN, "a"),
       prompt("s", T0 + 4 * MIN, "claude-code", { origin: "scripted" }), sess("c", "cursor"), prompt("c", T0 + MIN, "cursor")]);
     const c = byId(f, "C10");
-    expect([c.status, c.reason, c.n]).toEqual(["info", "classify-only", 5]);
+    // n: the prompts of each tool's one window (Claude Code's detail window here), never both windows summed
+    expect([c.status, c.reason, c.n]).toEqual(["info", "classify-only", 4]);
     expect(c.values).toEqual({ "claude-code/human/detail": 2, "claude-code/human/lifetime": 1, "claude-code/scripted/detail": 1, "cursor/human/detail": 1 });
     expect(c.tools).toEqual(["claude-code", "cursor"]);
     expect(byId(run([]), "C10").status).toBe("n/a");
@@ -270,7 +339,7 @@ describe("wording: every reason and question the forensic checks produce", () =>
     scrambled(anchors(), 3),
     claudeDays(6),
     claudeDays(10, (_, i) => i === 0 || i === 9),
-    claudeDays(10, (_, i) => i !== 4),
+    claudeDays(10, (_, i) => i < 3 || i > 5),
     [sess("a"), identity("session", "a"), identity("config", "b")],
     [sess("a"), identity("session", "a"), identity("session", "c"), identity("config", "a")],
     files(20, (i) => (i < 3 ? file(i, { mtime: T0 }) : file(i))),
@@ -288,6 +357,8 @@ describe("wording: every reason and question the forensic checks produce", () =>
       sess("s", "claude-code", NOW - 3 * DAY, { end: NOW }), cov("claude-code", CC, "detail"),
       ...Array.from({ length: 61 }, (_, i) => prompt("s", NOW - 3 * DAY + i * MIN, "claude-code",
         { textHash: i < 5 ? "x" : `u${i}`, features: { ...features, chars: 300 } })),
+      ...["r2", "r3", "r4", "r5"].flatMap((id): Ev[] => [sess(id, "claude-code", NOW - 3 * DAY, { end: NOW }),
+        ...Array.from({ length: 61 }, (_, i) => prompt(id, NOW - 3 * DAY + i * MIN))]),
       ...[80, 1, 2, 3].map((d) => history(NOW - d * DAY, `l${d}`)),
       ...Array.from({ length: 10 }, (_, i): ToolEv => ({ k: "tool", tool: "claude-code", source: CC, ts: NOW - DAY + i, sessionId: "s", name: "Read", category: "read" })),
       ...["a", "b", "c"].map((name): ConfigEv => ({ k: "config", tool: "claude-code", source: "claude-code.config", kind: "skill", name, provenance: "authored", uses: 1, firstSeen: NOW - DAY })),
@@ -303,10 +374,11 @@ describe("wording: every reason and question the forensic checks produce", () =>
   test("the scenarios reach every question", () => {
     const asked = new Set(results.filter((c) => c.askAbout !== undefined).map((c) => `${c.id}:${c.reason}`));
     expect([...asked].sort()).toEqual([
-      "C1:malformed-ids", "C1:off-time", "C2:out-of-order", "C3:history-mismatch", "C3:missing-stats-days", "C4:no-match",
-      "C4:several-accounts", "C5:bulk-change", "C5:file-times", "C5:restore-cluster", "C6:missing-thread-rows", "C7:time-zone-change",
+      "C1:malformed-ids", "C1:off-time", "C1:scheme-changed", "C2:out-of-order", "C2:scheme-changed", "C3:history-mismatch", "C3:missing-stats-days", "C4:no-match",
+      "C4:several-accounts", "C5:changed-after-write", "C5:file-times", "C5:restore-cluster", "C6:missing-thread-rows", "C7:time-zone-change",
       "C7:uuid-after-name", "C8:ledger-contradictions", "C9:before-release", "soft:new-config:new-config",
       "soft:recent-burst:recent-burst", "soft:repeated-long:repeated-long", "soft:rhythm:regular-rhythm", "soft:unclosed-tools:unclosed-tools",
+      "soft:no-server-pass:no-server-pass",
     ].sort());
     const statuses = new Set(results.filter((c) => c.id === "C3").map((c) => c.status));
     expect(statuses.has("note") && statuses.has("fail") && statuses.has("warn")).toBe(true);
@@ -316,6 +388,24 @@ describe("wording: every reason and question the forensic checks produce", () =>
     for (const c of results) {
       expect(c.reason).toMatch(/^[a-z0-9-]+$/);
       for (const v of Object.values(c.values)) expect(typeof v === "number" ? Number.isFinite(v) : /^\d{4}-\d{2}-\d{2}$/.test(v)).toBe(true);
+    }
+  });
+});
+
+describe("runForensics: the closed vocabularies are guarded at run time", () => {
+  test("a result with an unlisted reason or value key throws, naming only the check", async () => {
+    const { guardVocabulary } = await import("../../../core/forensics");
+    const ok: CheckResult = { id: "C6", status: "pass", n: 1, reason: "ok", values: { missing: 0 }, tools: [] };
+    expect(() => guardVocabulary([ok])).not.toThrow();
+    const values = Object.fromEntries([["cwd", 1]]) as CheckResult["values"];
+    expect(() => guardVocabulary([{ ...ok, values }])).toThrow("forensics: C6 holds a value key outside the closed list");
+    expect(() => guardVocabulary([{ ...ok, reason: "made-up" as CheckResult["reason"] }])).toThrow("forensics: C6 holds a reason outside the closed list");
+  });
+
+  test("C1 and C2 never share one tools array", () => {
+    for (const evs of [anchors(), anchors().slice(0, 30), scrambled(anchors(), 3)]) {
+      const f = run(evs);
+      expect(byId(f, "C1").tools === byId(f, "C2").tools).toBe(false);
     }
   });
 });

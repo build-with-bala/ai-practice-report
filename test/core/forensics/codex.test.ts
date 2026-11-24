@@ -91,6 +91,23 @@ describe("checkRollouts: C6, every rollout has a thread row", () => {
     expect(c6.status).toBe("fail");
   });
 
+  test("a rollout whose own row was created a few ms after its id's time is not before the index", () => {
+    const evs: Ev[] = [threadsCov()];
+    for (let i = 0; i < 5; i++) {
+      const at = T0 + i * DAY;
+      evs.push(rollout(i, { fileTs: Math.floor(at / SEC) * SEC, uuidTs: at }), { ...row(i), createdAt: at + 50 });
+    }
+    const [c6] = run(evs);
+    expect([c6.status, c6.n, c6.values.beforeIndex]).toEqual(["pass", 5, 0]);
+  });
+
+  test("a zone-shifted file gets the same lag after its id as an unshifted one (up to a minute)", () => {
+    const shifted = (lag: number) => run([rollout(0, { uuidTs: T0 + 3 * HOUR, fileTs: T0 + lag })])[1];
+    expect([shifted(5 * SEC).reason, shifted(59 * SEC).reason]).toEqual(["time-zone-change", "time-zone-change"]);
+    expect(shifted(2 * MIN).reason).toBe("uuid-after-name");
+    expect(run([rollout(0, { uuidTs: T0, fileTs: T0 + 5 * SEC }), ...[1, 2, 3, 4].map((i) => rollout(i))])[1].status).toBe("pass");
+  });
+
   test("every rollout before the index is n/a, with its own reason", () => {
     const dated = (i: number): ThreadRowEv => ({ ...row(i), createdAt: T0 + 10 * HOUR });
     const [c6] = run([threadsCov(), dated(0), rollout(0), rollout(1, { uuidTs: undefined })]);
@@ -136,17 +153,19 @@ describe("checkRollouts: C6, every rollout has a thread row", () => {
 });
 
 describe("checkRollouts: C7, the id's time is not after the file name's", () => {
-  test("uuidTs 1 s before fileTs passes", () => {
-    const [, c7] = run([threadsCov(), rollout(0, { uuidTs: T0 - SEC, fileTs: T0 })]);
+  test("uuidTs 1 s before fileTs passes; a pass needs 5 rollouts", () => {
+    const evs = [threadsCov(), rollout(0, { uuidTs: T0 - SEC, fileTs: T0 }), rollout(1), rollout(2), rollout(3), rollout(4)];
+    const [, c7] = run(evs);
     expect(c7.id).toBe("C7");
     expect([c7.status, c7.reason]).toEqual(["pass", "ok"]);
-    expect(c7.n).toBe(1);
+    expect(c7.n).toBe(5);
+    expect([run(evs.slice(0, 5))[1].status, run(evs.slice(0, 5))[1].reason]).toEqual(["n/a", "too-few"]);
   });
 
-  test("within the second of the name passes; 2 s after fails", () => {
-    expect(run([rollout(0, { uuidTs: T0 + 999, fileTs: T0 })])[1].status).toBe("pass");
+  test("within the second of the name passes; 2 s after is a violation", () => {
+    expect(run([rollout(0, { uuidTs: T0 + 999, fileTs: T0 }), rollout(1), rollout(2), rollout(3), rollout(4)])[1].status).toBe("pass");
     const [, c7] = run([rollout(0, { uuidTs: T0 + 2 * SEC, fileTs: T0 }), rollout(1)]);
-    expect(c7.status).toBe("fail");
+    expect([c7.status, c7.reason]).toEqual(["note", "uuid-after-name"]);
     expect(c7.values.violations).toBe(1);
     expect(c7.askAbout).toBe("1 Codex session id carries a time later than its file name, by more than a second. Were session files renamed, or their ids edited?");
   });
@@ -163,14 +182,14 @@ describe("checkRollouts: C7, the id's time is not after the file name's", () => 
     expect(run([rollout(0, { uuidTs: T0 + 14 * HOUR, fileTs: T0 })])[1].status).toBe("note");
     expect(run([rollout(0, { uuidTs: T0 + 16 * HOUR, fileTs: T0 })])[1].status).toBe("note");
     expect(run([rollout(0, { uuidTs: T0 + 26 * HOUR, fileTs: T0 })])[1].status).toBe("note");
-    expect(run([rollout(0, { uuidTs: T0 + 26.25 * HOUR, fileTs: T0 })])[1].status).toBe("fail");
-    expect(run([rollout(0, { uuidTs: T0 + 3 * HOUR + 5 * SEC, fileTs: T0 })])[1].status).toBe("fail");
-    expect(run([rollout(0, { uuidTs: T0 + 10 * MIN, fileTs: T0 })])[1].status).toBe("fail");
+    expect(run([rollout(0, { uuidTs: T0 + 26.25 * HOUR, fileTs: T0 })])[1].reason).toBe("uuid-after-name");
+    expect(run([rollout(0, { uuidTs: T0 + 3 * HOUR + 5 * SEC, fileTs: T0 })])[1].reason).toBe("uuid-after-name");
+    expect(run([rollout(0, { uuidTs: T0 + 10 * MIN, fileTs: T0 })])[1].reason).toBe("uuid-after-name");
   });
 
   test("a violation outranks a zone change", () => {
     const [, c7] = run([rollout(0, { uuidTs: T0 + 3 * HOUR, fileTs: T0 }), rollout(1, { uuidTs: T0 + HOUR + 5 * MIN, fileTs: T0 + HOUR })]);
-    expect(c7.status).toBe("fail");
+    expect([c7.status, c7.reason]).toEqual(["note", "uuid-after-name"]);
     expect(c7.values).toEqual({ violations: 1, zoneShifted: 1 });
   });
 
@@ -283,5 +302,31 @@ describe("checkRollouts: C8, the rate-limit ledger only rises within a window", 
       for (const v of Object.values(c.values)) expect(typeof v === "number" && Number.isFinite(v)).toBe(true);
       expect(`${c.reason}${c.askAbout ?? ""}`).toMatch(/^[ -ÿ -⁯−]*$/);
     }
+  });
+});
+
+describe("checkRollouts: C7 never fails on one file", () => {
+  test("one file whose id is after its name is a note; max(2, 1% of the files) fail", () => {
+    const late = (n: number, bad: number) => Array.from({ length: n }, (_, i) => rollout(i, i < bad ? { uuidTs: T0 + i * HOUR + 10 * MIN } : {}));
+    const one = run(late(20, 1))[1];
+    expect([one.status, one.reason, one.values.violations]).toEqual(["note", "uuid-after-name", 1]);
+    expect(run(late(20, 2))[1].status).toBe("fail");
+    expect(run(late(300, 2))[1].status).toBe("note");
+    expect(run(late(300, 3))[1].status).toBe("fail");
+  });
+});
+
+describe("checkRollouts: known limits (a later improvement changes these on purpose)", () => {
+  test("known limit: two accounts' ledgers whose reset times differ by 7 minutes pass C8", () => {
+    const a = ledger(T0, 0);
+    const b = ledger(T0 + 10 * MIN, 50).map((e) => ({ ...e, resetsAt: e.resetsAt! - 3 * MIN }));
+    const [, , c8] = run([...a, ...b]);
+    expect([c8.status, c8.values.contradictions]).toEqual(["pass", 0]);
+  });
+
+  test("known limit: rollouts without a row whose start is within 10 minutes of the scan, or after it, are not checked by C6", () => {
+    const unindexed = [NOW - 5 * MIN, NOW + DAY, NOW + 2 * DAY].map((ts, i) => rollout(100 + i, { fileTs: ts, uuidTs: ts }));
+    const [c6] = run([...indexed(5), ...unindexed]);
+    expect([c6.status, c6.values.missing, c6.n]).toEqual(["pass", 0, 5]);
   });
 });

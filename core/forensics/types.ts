@@ -12,7 +12,8 @@ import type { Origin, ToolId, Window } from "../model/ids";
 
 export type CheckStatus = "pass" | "note" | "warn" | "fail" | "n/a" | "info";
 export type CheckId = "C1" | "C2" | "C3" | "C4" | "C5" | "C6" | "C7" | "C8" | "C9" | "C10"
-  | "soft:rhythm" | "soft:repeated-long" | "soft:recent-burst" | "soft:unclosed-tools" | "soft:new-config";
+  | "soft:rhythm" | "soft:repeated-long" | "soft:recent-burst" | "soft:unclosed-tools" | "soft:new-config"
+  | "soft:no-server-pass" | "soft:missing-ids";
 
 /*
  * Closed vocabularies. A result leaves the machine as its `id`, `status`, `n`, `reason` and `values` only, and the
@@ -26,26 +27,27 @@ export type CheckId = "C1" | "C2" | "C3" | "C4" | "C5" | "C6" | "C7" | "C8" | "C
 /** Every reason code a check or soft flag can give. */
 export type Reason = "ok" | "ok-history-only" | "ok-stats-only" | "no-data" | "too-few" | "unknown-marker" | "scheme-changed"
   | "degenerate" | "off-time" | "malformed-ids" | "out-of-order" | "history-mismatch" | "missing-stats-days" | "no-match"
-  | "several-accounts" | "file-times" | "restore-cluster" | "bulk-change" | "no-thread-index" | "no-rollouts" | "before-index"
-  | "missing-thread-rows" | "uuid-after-name" | "time-zone-change" | "ledger-contradictions" | "before-release"
-  | "classify-only" | "regular-rhythm" | "repeated-long" | "recent-burst" | "unclosed-tools" | "new-config";
+  | "several-accounts" | "file-times" | "restore-cluster" | "changed-after-write" | "no-thread-index" | "no-rollouts" | "before-index"
+  | "missing-thread-rows" | "uuid-after-name" | "time-zone-change" | "ledger-contradictions" | "before-release" | "long-before-release"
+  | "classify-only" | "regular-rhythm" | "repeated-long" | "recent-burst" | "unclosed-tools" | "new-config"
+  | "no-server-pass" | "missing-ids";
 export const REASONS: Readonly<Record<Reason, true>> = {
   ok: true, "ok-history-only": true, "ok-stats-only": true, "no-data": true, "too-few": true, "unknown-marker": true,
   "scheme-changed": true, degenerate: true, "off-time": true, "malformed-ids": true, "out-of-order": true, "history-mismatch": true,
   "missing-stats-days": true, "no-match": true, "several-accounts": true, "file-times": true, "restore-cluster": true,
-  "bulk-change": true, "no-thread-index": true, "no-rollouts": true, "before-index": true, "missing-thread-rows": true,
-  "uuid-after-name": true, "time-zone-change": true, "ledger-contradictions": true, "before-release": true,
+  "changed-after-write": true, "no-thread-index": true, "no-rollouts": true, "before-index": true, "missing-thread-rows": true,
+  "uuid-after-name": true, "time-zone-change": true, "ledger-contradictions": true, "before-release": true, "long-before-release": true,
   "classify-only": true, "regular-rhythm": true, "repeated-long": true, "recent-burst": true, "unclosed-tools": true,
-  "new-config": true,
+  "new-config": true, "no-server-pass": true, "missing-ids": true,
 };
 
 /** The one `values` key whose value is a string: a day, "YYYY-MM-DD". */
 export const DATE_KEY = "date";
 /** The fixed `values` keys (every check but C10). */
-type FixedKey = typeof DATE_KEY | "unrecognized" | "malformed" | "offShare" | "p99Seconds" | "rho" | "unverifiedKinds"
-  | "matchShare" | "prompts" | "missingDays" | "days" | "accounts" | "violations" | "clusterFiles" | "bulkFiles" | "missing"
-  | "rollouts" | "beforeIndex" | "zoneShifted" | "pairs" | "contradictions" | "checked" | "sessions" | "medianCv" | "repeated"
-  | "recentDays" | "spanDays" | "share" | "open" | "recent" | "artifacts";
+type FixedKey = typeof DATE_KEY | "unrecognized" | "malformed" | "offShare" | "offIds" | "p99Seconds" | "rho" | "unverifiedKinds"
+  | "matchShare" | "prompts" | "missingDays" | "days" | "accounts" | "violations" | "clusterFiles" | "bulkFiles" | "changedFiles" | "missing"
+  | "rollouts" | "beforeIndex" | "zoneShifted" | "pairs" | "contradictions" | "checked" | "sessions" | "longBefore" | "medianCv" | "repeated"
+  | "recentDays" | "spanDays" | "share" | "open" | "recent" | "artifacts" | "turns";
 /** C10's keys: `<tool>/<origin>/<window>`, where a relabelled scripted prompt counts as `human`. */
 export type ProvenanceKey = `${ToolId}/${Origin}/${Window}`;
 /** Every key a check can put in `values`. */
@@ -54,11 +56,11 @@ export type ValueKey = FixedKey | ProvenanceKey;
 export type CheckValues = { [K in ValueKey]?: K extends typeof DATE_KEY ? string : number };
 
 const FIXED_KEYS: Readonly<Record<FixedKey, true>> = {
-  date: true, unrecognized: true, malformed: true, offShare: true, p99Seconds: true, rho: true, unverifiedKinds: true,
+  date: true, unrecognized: true, malformed: true, offShare: true, offIds: true, p99Seconds: true, rho: true, unverifiedKinds: true,
   matchShare: true, prompts: true, missingDays: true, days: true, accounts: true, violations: true, clusterFiles: true,
-  bulkFiles: true, missing: true, rollouts: true, beforeIndex: true, zoneShifted: true, pairs: true, contradictions: true,
-  checked: true, sessions: true, medianCv: true, repeated: true, recentDays: true, spanDays: true, share: true, open: true,
-  recent: true, artifacts: true,
+  bulkFiles: true, changedFiles: true, missing: true, rollouts: true, beforeIndex: true, zoneShifted: true, pairs: true, contradictions: true,
+  checked: true, sessions: true, longBefore: true, medianCv: true, repeated: true, recentDays: true, spanDays: true, share: true, open: true,
+  recent: true, artifacts: true, turns: true,
 };
 const TOOL_IDS: Readonly<Record<ToolId, true>> = {
   "claude-code": true, codex: true, copilot: true, cursor: true, antigravity: true, "gemini-cli": true, opencode: true, cline: true,
@@ -82,11 +84,11 @@ export const VALUE_KEYS: Readonly<Record<ValueKey, true>> = (() => {
  */
 export type ValueKind = "count" | "share" | "corr" | "ratio" | "date";
 const FIXED_KINDS: Readonly<Record<FixedKey, ValueKind>> = {
-  date: "date", unrecognized: "count", malformed: "count", offShare: "share", p99Seconds: "count", rho: "corr", unverifiedKinds: "count",
+  date: "date", unrecognized: "count", malformed: "count", offShare: "share", offIds: "count", p99Seconds: "count", rho: "corr", unverifiedKinds: "count",
   matchShare: "share", prompts: "count", missingDays: "count", days: "count", accounts: "count", violations: "count", clusterFiles: "count",
-  bulkFiles: "count", missing: "count", rollouts: "count", beforeIndex: "count", zoneShifted: "count", pairs: "count", contradictions: "count",
-  checked: "count", sessions: "count", medianCv: "ratio", repeated: "count", recentDays: "count", spanDays: "count", share: "share", open: "count",
-  recent: "count", artifacts: "count",
+  bulkFiles: "count", changedFiles: "count", missing: "count", rollouts: "count", beforeIndex: "count", zoneShifted: "count", pairs: "count", contradictions: "count",
+  checked: "count", sessions: "count", longBefore: "count", medianCv: "ratio", repeated: "count", recentDays: "count", spanDays: "count", share: "share", open: "count",
+  recent: "count", artifacts: "count", turns: "count",
 };
 /** The kind of every `values` key: the fixed ones as listed, every C10 `<tool>/<origin>/<window>` a count. */
 export const VALUE_KINDS: Readonly<Record<ValueKey, ValueKind>> = (() => {

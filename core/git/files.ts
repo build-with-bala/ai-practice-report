@@ -2,6 +2,11 @@
  * A repo's allowlisted files — instruction files, Claude Code hooks, CI and pre-commit configuration — read in memory
  * and reduced to kinds, check lists, booleans and counts. Only the exact paths and the three folders below are opened
  * or listed; source files never are. No text leaves these functions.
+ *
+ * What the path checks cannot promise (they check a path, then open it): a link swapped in between the check and the
+ * open is followed; a hard link to a file outside the worktree is a file inside it, and is read when it has an
+ * allowlisted name; and a `.git` file naming another repository's git folder makes that repository's history read
+ * under this folder (`discover.ts`).
  */
 import { realpathSync } from "node:fs";
 import path from "node:path";
@@ -11,6 +16,7 @@ import type { CheckKind } from "../model/ids";
 import { isObj } from "../sources/common/guards";
 import { parseHooks } from "../sources/common/hooks";
 import { classifyCommand } from "../text/commands";
+import { sinceArg } from "./commits";
 import type { GitRunner } from "./run";
 import type { InstructionKind, RepoFacts } from "./types";
 
@@ -58,15 +64,24 @@ const checksOfAll = (commands: Iterable<string>): CheckKind[] => {
 };
 
 const FENCE = /^ {0,3}(`{3,}|~{3,})/;
+/** An instruction-file line longer than this (characters) is scanned for commands up to this length only. */
+export const MAX_SCAN_LINE_CHARS = 4_096;
+/**
+ * An inline code span: a run of backticks, text, the same run. A span starts only at the first backtick of a run (the
+ * look-behind): starting inside a run too would retry every backtick of a long run, in time growing with its square.
+ */
+const CODE_SPAN = /(?<!`)(`+)([^`]+?)\1(?!`)/g;
 
 /**
  * The checks an instruction file names as commands (`classifyCommand`): its inline code spans, the lines of its fenced
- * code blocks (an unclosed fence runs to the end), and lines starting with `$ `. Prose is never read as a command.
+ * code blocks (an unclosed fence runs to the end), and lines starting with `$ `. Prose is never read as a command. Each
+ * line is scanned up to MAX_SCAN_LINE_CHARS.
  */
 export function mentionedChecks(text: string): CheckKind[] {
   const commands: string[] = [];
   let fence: string | undefined;
-  for (const line of text.split(/\r?\n/)) {
+  for (const whole of text.split(/\r?\n/)) {
+    const line = whole.length > MAX_SCAN_LINE_CHARS ? whole.slice(0, MAX_SCAN_LINE_CHARS) : whole;
     const f = FENCE.exec(line);
     if (fence !== undefined) {
       if (f && f[1]![0] === fence[0] && f[1]!.length >= fence.length && line.trim() === f[1]) fence = undefined;
@@ -79,7 +94,7 @@ export function mentionedChecks(text: string): CheckKind[] {
     }
     const prompt = /^\s*\$ (.*)$/.exec(line);
     if (prompt) commands.push(prompt[1]!);
-    for (const m of line.matchAll(/(`+)([^`]+?)\1(?!`)/g)) commands.push(m[2]!);
+    for (const m of line.matchAll(CODE_SPAN)) commands.push(m[2]!);
   }
   return checksOfAll(commands);
 }
@@ -209,12 +224,15 @@ export interface RepoFileOptions {
    * Called per file left unread, by reason: `file-outside` (its real path — links resolved in every component — leaves
    * the worktree, or is no allowlisted path there: never opened, never listed, and not present), `file-not-file` (a
    * folder, pipe or device where a file goes), `file-too-large`, `file-refused` (a never-opened name, or a link to one),
-   * `file-io-error`, `file-parse` (settings that are no JSON object), `files-capped` (past MAX_FOLDER_FILES); `budget`
+   * `file-io-error`, `file-parse` (settings that are no JSON object), `files-capped` (past MAX_FOLDER_FILES), and
+   * `folders-capped` per session folder inside the worktree past MAX_FOLDER_FILES (its files are not read); `budget`
    * once when the pass was stopped (abort or budget) before its end; and `timeout` when the history command timed out.
    */
   skip?: (reason: string) => void;
   /** Whether git may read the history by path (default true; false for a partial clone read without paths). */
   history?: boolean;
+  /** Whether git has `--since-as-filter` (2.37 or later; default false): see `sinceArg`. */
+  sinceAsFilter?: boolean;
 }
 
 /**
@@ -232,7 +250,9 @@ export async function readRepoFiles(root: string, cwds: readonly string[], o: Re
   const skip = o.skip ?? (() => {});
   let realRoot = real(root);
   if (!realRoot.endsWith(path.sep)) realRoot += path.sep;
-  const subs = foldersInside(realRoot, cwds).slice(0, MAX_FOLDER_FILES);
+  const inside = foldersInside(realRoot, cwds);
+  for (let i = MAX_FOLDER_FILES; i < inside.length; i++) skip("folders-capped");
+  const subs = inside.slice(0, MAX_FOLDER_FILES);
   // what may be opened, by its real repo-relative path: the exact paths, and a folder's accepted entries
   const exact = new Set([...Object.values(INSTRUCTION_FILES).filter((p) => !p.endsWith("/")), ...REPO_FILES,
     ...subs.flatMap((sub) => SESSION_FOLDER_FILES.map((n) => path.join(sub, n)))].map(keyOf));
@@ -347,7 +367,7 @@ export async function readRepoFiles(root: string, cwds: readonly string[], o: Re
     const paths = [...Object.values(INSTRUCTION_FILES), ...subs.flatMap((sub) => SESSION_FOLDER_FILES.map((n) => path.join(sub, n)))]
       .map((p) => `:(literal)${p.split(path.sep).join("/").replace(/\/$/, "")}`);
     try {
-      const r = await o.runner(["log", `-n${HISTORY_MAX}`, `--since=${new Date(since).toISOString()}`, "--format=%ct", "--", ...paths],
+      const r = await o.runner(["log", "--no-mailmap", `-n${HISTORY_MAX}`, sinceArg(since, o.sinceAsFilter ?? false), "--format=%ct", "--", ...paths],
         { cwd: root, timeoutMs: o.timeoutMs, maxBytes: HISTORY_BYTES, signal: o.signal });
       if (r.timedOut) skip("timeout");
       else if (r.code === 0 && !r.truncated) {

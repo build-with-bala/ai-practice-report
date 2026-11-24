@@ -20,10 +20,11 @@ export type GitRunner = (args: readonly string[], o: { cwd: string; timeoutMs: n
 /**
  * Put before every subcommand: no pager; and repo config that would run a program, take a lock or change the output is
  * overridden — no fsmonitor hook, no signature check (`log.showSignature` would run `gpg.program`), paths unquoted,
- * no colour.
+ * no colour, no transport, and log output in UTF-8 (`i18n.logOutputEncoding` set to UTF-16 would make every record
+ * unreadable).
  */
 export const GIT_SAFE_ARGS: readonly string[] = ["--no-pager", "-c", "core.fsmonitor=false", "-c", "log.showSignature=false", "-c", "core.quotepath=off", "-c", "color.ui=never",
-  "-c", "protocol.allow=never"];
+  "-c", "protocol.allow=never", "-c", "i18n.logOutputEncoding=UTF-8"];
 
 /**
  * Set on every git child: no optional locks, no prompt, no lazy fetch of a partial clone, no transport at all (so even a
@@ -96,10 +97,6 @@ const REAP_MS = 1_000;
  * backing buffer, what it really allocated, so collections keep pace with git output as they do with file streams.
  */
 export const runGit: GitRunner = (args, o) => run(args, o, gitEnv(process.env));
-
-/** A runner whose child environment `adjust` changes (tests: the environment of a git older than GIT_NO_LAZY_FETCH). */
-export const gitRunnerWithEnv = (adjust: (env: Record<string, string>) => Record<string, string>): GitRunner =>
-  (args, o) => run(args, o, adjust(gitEnv(process.env)));
 
 async function run(args: readonly string[], o: Parameters<GitRunner>[1], env: Record<string, string>): Promise<GitResult> {
   if (o.signal.aborted) return { code: null, stdout: "", timedOut: false, truncated: false };

@@ -244,7 +244,8 @@ const BANDS = keysOf<Band>({ exceptional: true, strong: true, developing: true, 
 /** The integrity bands, and the checks every analysis runs (C1–C10, then the soft flags): the acceptance script reads these. */
 export const FORENSIC_BANDS = keysOf<Forensics["band"]>({ consistent: true, "consistent-with-notes": true, inconsistent: true, unverifiable: true });
 export const CHECK_IDS = keysOf<CheckId>({ C1: true, C2: true, C3: true, C4: true, C5: true, C6: true, C7: true, C8: true, C9: true, C10: true,
-  "soft:rhythm": true, "soft:repeated-long": true, "soft:recent-burst": true, "soft:unclosed-tools": true, "soft:new-config": true });
+  "soft:rhythm": true, "soft:repeated-long": true, "soft:recent-burst": true, "soft:unclosed-tools": true, "soft:new-config": true,
+  "soft:no-server-pass": true, "soft:missing-ids": true });
 const CHECK_STATUS = keysOf<CheckStatus>({ pass: true, note: true, warn: true, fail: true, "n/a": true, info: true });
 const REPO_STATUS = keysOf<RepoSignals["status"]>({ ok: true, partial: true, off: true, "git-missing": true });
 const ROLES: readonly string[] = Object.freeze([...Object.values(PRACTICE_ROLES), ...Object.values(STACK_ROLES)]);
@@ -421,3 +422,4 @@ export const AIPROF2: FieldSpec = obj({
     "techCategories", "configKinds", "features"].map((k) => [k, int()]))),
   exclusions: obj({ tools: int(), projects: int(), sessions: int(), dateRange: bool(), weeksOutside: int() }),
 });
+
