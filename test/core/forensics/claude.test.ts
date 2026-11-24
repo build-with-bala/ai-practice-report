@@ -110,14 +110,15 @@ describe("checkClaudeHistory (C3)", () => {
     expect(historyOf(raw, t).values.matchShare).toBe(0.9);
   });
 
-  test("2 transcript days missing from the stats span, neither with a neighbour in it, fail", () => {
+  test("2 transcript days missing from the stats span, neither with a neighbour in it, warn, never fail", () => {
     const evs = promptsWithHistory(10);
     for (let i = 0; i < 10; i++) if (i === 0 || i === 4 || i === 5 || i === 9) evs.push(stats(day(T0 + i * DAY)));
     const { raw, t } = tableOf(evs);
     const c = historyOf(raw, t);
-    expect(c.status).toBe("fail");
+    expect(c.status).toBe("warn");
     expect(c.values.missingDays).toBe(2);
     expect(c.askAbout).toContain("2 days");
+    expect(c.askAbout).toContain("made on another machine");
   });
 
   test("a single missing day is a note", () => {
@@ -250,7 +251,7 @@ describe("checkClaudeHistory (C3): the stats cache's day may be the UTC day or t
     const one = tableOf(daily([5, 6, 7]));
     expect([historyOf(one.raw, one.t).status, historyOf(one.raw, one.t).values.missingDays]).toEqual(["note", 1]);
     const two = tableOf(daily([5, 6, 7, 15, 16, 17]));
-    expect([historyOf(two.raw, two.t).status, historyOf(two.raw, two.t).values.missingDays]).toEqual(["fail", 2]);
+    expect([historyOf(two.raw, two.t).status, historyOf(two.raw, two.t).values.missingDays]).toEqual(["warn", 2]);
   });
 
   test("the day's zone label is not read: a stats day labelled local counts like one labelled utc", () => {

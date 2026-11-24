@@ -4,6 +4,11 @@ import type { Origin, ToolId, Window } from "../model/ids";
  * Forensics: integrity checks over a scan result (spec §6.6). They let a reader judge whether a trace history is genuine
  * or was edited, copied or fabricated. Every check is pure and synchronous, like the rest of the analysis.
  *
+ * The line between the statuses, which every check applies: `fail` = cannot happen unless data or times were altered,
+ * or the clock was wrong; `warn` = can happen honestly and needs an answer; `note` = worth asking about. No check fails
+ * on a single observation, nor on something an honest person does (moving files, changing accounts, syncing sessions in
+ * from another machine, living away from UTC, early access).
+ *
  * A result holds no free text from traces: `values` holds finite numbers, and one day ("YYYY-MM-DD") under `date`,
  * under closed keys (`ValueKey`); `reason` is a closed code (`Reason`); and `askAbout` is the one fixed English question
  * `questionFor` (questions.ts) builds from `id`, `reason` and `values`, whose only variable parts are those numbers and
@@ -96,6 +101,14 @@ export const VALUE_KINDS: Readonly<Record<ValueKey, ValueKind>> = (() => {
   for (const k of Object.keys(VALUE_KEYS) as ValueKey[]) out[k] = Object.hasOwn(FIXED_KINDS, k) ? FIXED_KINDS[k as FixedKey] : "count";
   return out as Record<ValueKey, ValueKind>;
 })();
+
+/**
+ * The largest value a `ratio` key stores (the export schema's ceiling). A stored ratio is capped here; every verdict is
+ * computed from the exact value, and the cap lies above every ratio threshold, so the stored value stays on its side.
+ */
+export const RATIO_MAX = 1_000;
+/** A ratio as stored: at most `RATIO_MAX`. */
+export const storedRatio = (x: number): number => Math.min(x, RATIO_MAX);
 
 /** A real calendar day "YYYY-MM-DD", years 1970–9999. */
 export function isDay(x: unknown): x is string {

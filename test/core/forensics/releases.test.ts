@@ -41,14 +41,16 @@ describe("checkReleases (C9)", () => {
     expect(c.askAbout).toBe("1 session used a model or tool version more than 2 days before its public release. Did you have early access to it?");
   });
 
-  test("fail needs max(3, 1% of the dated sessions) more than 30 days before the release", () => {
-    const early = (n: number, total: number) => Array.from({ length: total }, (_, i) =>
-      sess(`s${i}`, i < n ? RELEASED - 40 * DAY : RELEASED + DAY, { models: ["model-x"] }));
+  test("fail needs max(3, 1% of the dated sessions) more than 90 days before the release", () => {
+    const early = (n: number, total: number, days = 100) => Array.from({ length: total }, (_, i) =>
+      sess(`s${i}`, i < n ? RELEASED - days * DAY : RELEASED + DAY, { models: ["model-x"] }));
+    // a private early-access period can be longer than 30 days: 60 days early is a warn, never a fail
+    expect([check(early(5, 10, 60)).status, check(early(5, 10, 60)).reason]).toEqual(["warn", "before-release"]);
     const two = check(early(2, 10));
     expect([two.status, two.reason]).toEqual(["warn", "before-release"]);
     const three = check(early(3, 10));
     expect([three.status, three.reason, three.values.longBefore]).toEqual(["fail", "long-before-release", 3]);
-    expect(three.askAbout).toBe("3 sessions used a model or tool version more than 30 days before its public release. Were session times edited, or did you have early access to it?");
+    expect(three.askAbout).toBe("3 sessions used a model or tool version more than 90 days before its public release. Were session times edited, or did you have early access to it?");
     expect(check(early(3, 400)).status).toBe("warn");
     expect(check([sess("a", RELEASED - 20 * DAY, { models: ["model-x"] }), sess("b", RELEASED - 20 * DAY, { models: ["model-x"] }),
       sess("c", RELEASED - 20 * DAY, { models: ["model-x"] })]).status).toBe("warn");

@@ -66,12 +66,12 @@ type Ask = (v: CheckValues) => string | undefined;
 const missingStatsDays: Ask = (v) => {
   const m = num(v, "missingDays");
   return m === undefined ? undefined
-    : `${digits(m)} ${plural(m, "day", "days")} with prompts in the transcripts ${plural(m, "is", "are")} missing from the usage statistics kept for that time. Were transcripts added from somewhere else?`;
+    : `${digits(m)} ${plural(m, "day", "days")} with prompts in the transcripts ${plural(m, "is", "are")} missing from the usage statistics kept for that time. Were these sessions made on another machine and copied here?`;
 };
 const missingThreadRows: Ask = (v) => {
   const m = num(v, "missing");
   return m === undefined ? undefined
-    : `${digits(m)} Codex session ${plural(m, "file has", "files have")} no entry in Codex's own thread index. Were session files copied in from somewhere else?`;
+    : `${digits(m)} Codex session ${plural(m, "file has", "files have")} no entry in Codex's own thread index. Were these sessions made on another machine and copied here?`;
 };
 
 /** The questions C1 and C2 share: their n/a results for ids that exist but cannot be verified. */
@@ -156,7 +156,7 @@ const QUESTIONS: { readonly [I in CheckId]?: { readonly [R in Reason]?: Ask } } 
     "ledger-contradictions": (v) => {
       const c = num(v, "contradictions");
       return c === undefined ? undefined
-        : `The usage-limit readings fell ${digits(c)} times within one limit window, where they only rise. Were traces from more than one account combined here?`;
+        : `The usage-limit readings fell ${digits(c)} times within one limit window, where they only rise. Were traces from more than one machine or account combined here?`;
     },
   },
   C9: {
@@ -168,7 +168,7 @@ const QUESTIONS: { readonly [I in CheckId]?: { readonly [R in Reason]?: Ask } } 
     "long-before-release": (v) => {
       const s = num(v, "longBefore");
       return s === undefined ? undefined
-        : `${digits(s)} ${plural(s, "session", "sessions")} used a model or tool version more than 30 days before its public release. Were session times edited, or did you have early access to it?`;
+        : `${digits(s)} ${plural(s, "session", "sessions")} used a model or tool version more than 90 days before its public release. Were session times edited, or did you have early access to it?`;
     },
   },
   "soft:rhythm": {

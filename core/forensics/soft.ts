@@ -6,7 +6,7 @@ import type { PromptEv } from "../model/events";
 import type { ScanResult } from "../scan";
 import { asked } from "./questions";
 import { forensicScope, type ForensicScope } from "./scope";
-import { roundDown, roundUp, toolsOf, type CheckId, type CheckResult, type CheckValues } from "./types";
+import { roundDown, roundUp, storedRatio, toolsOf, type CheckId, type CheckResult, type CheckValues } from "./types";
 
 /*
  * Soft flags (spec §6.6): patterns genuine histories rarely show, but can — a raised flag is a `note` to ask about,
@@ -44,7 +44,8 @@ function humanPrompts(raw: ScanResult, t: SessionTable, s: ForensicScope): Promp
  * rhythm: per session, the gaps under 30 min between consecutive human prompts; a session with at least 50 such gaps is
  * measured by their coefficient of variation (population sd / mean). Gaps cut off at 30 min have a CV near 1 in ordinary
  * human work, so a single session says little: raised when the median CV over the measured sessions is below 0.6. n/a
- * when no session can be measured (`no-data`), or fewer than 5 (`too-few`: the median of so few is one session). `n` and `values.sessions`: the sessions measured; `values.medianCv` (2 decimals).
+ * when no session can be measured (`no-data`), or fewer than 5 (`too-few`: the median of so few is one session). `n` and `values.sessions`: the sessions measured; `values.medianCv` (2 decimals, capped at 1,000
+ * as every stored ratio is: a median CV of gaps can in principle reach the square root of the gap count).
  */
 function rhythm(prompts: readonly PromptEv[]): CheckResult {
   const bySession = new Map<string, number[]>();
@@ -73,7 +74,7 @@ function rhythm(prompts: readonly PromptEv[]): CheckResult {
   cvs.sort((a, b) => a - b);
   const m = cvs.length >> 1;
   const median = cvs.length % 2 === 1 ? cvs[m]! : (cvs[m - 1]! + cvs[m]!) / 2;
-  const base = { id: "soft:rhythm" as const, n: cvs.length, values: { sessions: cvs.length, medianCv: roundDown(median, 2) } satisfies CheckValues, tools };
+  const base = { id: "soft:rhythm" as const, n: cvs.length, values: { sessions: cvs.length, medianCv: storedRatio(roundDown(median, 2)) } satisfies CheckValues, tools };
   if (median >= RHYTHM_MAX_CV) return { ...base, status: "pass", reason: "ok" };
   return { ...base, status: "note", reason: "regular-rhythm" };
 }
