@@ -11,7 +11,7 @@ import { checkReleases, RELEASES, type ReleaseTable } from "./releases";
 import { forensicScope, type ForensicScope } from "./scope";
 import { softFlags } from "./soft";
 import { asked } from "./questions";
-import { round, type CheckId, type CheckResult, type CheckValues } from "./types";
+import { REASONS, round, VALUE_KEYS, type CheckId, type CheckResult, type CheckValues } from "./types";
 
 export type { ReleaseTable } from "./releases";
 export { questionFor } from "./questions";
@@ -103,6 +103,18 @@ function missingIds(s: ForensicScope, stats: readonly SessionStats[]): CheckResu
 }
 
 /**
+ * The closed vocabularies, checked at run time: every result's reason is in `REASONS` and every `values` key in
+ * `VALUE_KEYS` (a values object built indirectly, e.g. with `Object.fromEntries`, escapes the compiler's check). A
+ * result outside them is a programming error: it throws, naming only the check id.
+ */
+export function guardVocabulary(checks: readonly CheckResult[]): void {
+  for (const c of checks) {
+    if (!Object.hasOwn(REASONS, c.reason)) throw new Error(`forensics: ${c.id} holds a reason outside the closed list`);
+    for (const k of Object.keys(c.values)) if (!Object.hasOwn(VALUE_KEYS, k)) throw new Error(`forensics: ${c.id} holds a value key outside the closed list`);
+  }
+}
+
+/**
  * Every forensic check over a scan result, pure and synchronous: `now` and `timeZone` are the caller's; `releases`
  * defaults to the shipped table. Every check and soft flag reads in-scope data only, through one view of the scan
  * (`forensicScope`): the exclusions in `t` (tools, projects, the date range) and its host copies leave out what they
@@ -119,6 +131,7 @@ export function runForensics(raw: ScanResult, t: SessionTable, stats: readonly S
     checkReleases(t, o.releases ?? RELEASES, raw, scope), provenance(raw, t, scope), ...softFlags(raw, t, o, scope),
   ];
   checks.push(noServerPass(checks), missingIds(scope, stats));
+  guardVocabulary(checks);
   const tools = scope.tools();
 
   const status = new Map(checks.map((c) => [c.id, c.status]));

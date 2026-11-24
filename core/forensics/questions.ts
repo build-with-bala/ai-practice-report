@@ -37,15 +37,16 @@ function decimal(units: number, places: number): string {
 }
 
 /**
- * The value under `k`, read once, when it is valid by the key's kind in `VALUE_KINDS`; else undefined. The call site
+ * The value under `k`, an own property read once, when it is valid by the key's kind in `VALUE_KINDS`; else undefined
+ * (a key inherited through the prototype chain is never read). The call site
  * names only the key: its kind (and so its check) comes from the shared table.
  */
 function num(v: CheckValues, k: Exclude<ValueKey, "date">): number | undefined {
-  const x: unknown = v[k];
+  const x: unknown = Object.hasOwn(v, k) ? v[k] : undefined;
   return isValueOf(VALUE_KINDS[k], x) ? (x as number) : undefined;
 }
 function dayOf(v: CheckValues): string | undefined {
-  const x: unknown = v.date;
+  const x: unknown = Object.hasOwn(v, "date") ? v.date : undefined;
   return isValueOf(VALUE_KINDS.date, x) ? (x as string) : undefined;
 }
 

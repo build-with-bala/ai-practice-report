@@ -388,3 +388,21 @@ describe("wording: every reason and question the forensic checks produce", () =>
     }
   });
 });
+
+describe("runForensics: the closed vocabularies are guarded at run time", () => {
+  test("a result with an unlisted reason or value key throws, naming only the check", async () => {
+    const { guardVocabulary } = await import("../../../core/forensics");
+    const ok: CheckResult = { id: "C6", status: "pass", n: 1, reason: "ok", values: { missing: 0 }, tools: [] };
+    expect(() => guardVocabulary([ok])).not.toThrow();
+    const values = Object.fromEntries([["cwd", 1]]) as CheckResult["values"];
+    expect(() => guardVocabulary([{ ...ok, values }])).toThrow("forensics: C6 holds a value key outside the closed list");
+    expect(() => guardVocabulary([{ ...ok, reason: "made-up" as CheckResult["reason"] }])).toThrow("forensics: C6 holds a reason outside the closed list");
+  });
+
+  test("C1 and C2 never share one tools array", () => {
+    for (const evs of [anchors(), anchors().slice(0, 30), scrambled(anchors(), 3)]) {
+      const f = run(evs);
+      expect(byId(f, "C1").tools === byId(f, "C2").tools).toBe(false);
+    }
+  });
+});

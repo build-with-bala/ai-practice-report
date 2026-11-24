@@ -178,3 +178,27 @@ describe("rounding never crosses a rule's threshold", () => {
     expect(questionFor("C2", "out-of-order", { rho: -0.1234 })).toContain("(rank correlation -0.124)");
   });
 });
+
+describe("every reason that can keep the band from consistent asks a question", () => {
+  /** The reasons that never need a question: a pass, or an n/a that leaves the band alone (or is the info result). */
+  const NONE: Reason[] = ["ok", "ok-history-only", "ok-stats-only", "no-data", "too-few", "classify-only", "no-thread-index", "no-rollouts", "before-index"];
+
+  test("each reason in the closed list has a question for some check, or is on the explicit no-question list", () => {
+    for (const r of Object.keys(REASONS) as Reason[]) {
+      const asks = IDS.some((id) => questionFor(id, r, valid(3)) !== undefined);
+      expect([r, asks]).toEqual([r, !NONE.includes(r)]);
+    }
+  });
+
+  test("values are read only as own properties: a polluted prototype gives no question", () => {
+    const proto = Object.prototype as Record<string, unknown>;
+    proto.missing = 3;
+    try {
+      expect(questionFor("C6", "missing-thread-rows", {})).toBeUndefined();
+    } finally {
+      delete proto.missing;
+    }
+    const inherited = Object.create({ date: "2026-10-01", days: 9 }) as CheckValues;
+    expect(questionFor("C5", "restore-cluster", inherited)).toBeUndefined();
+  });
+});

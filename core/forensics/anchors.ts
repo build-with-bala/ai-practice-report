@@ -244,7 +244,7 @@ const MALFORMED_SHARE = 0.01;
 const MALFORMED_MIN = 2;
 
 function naPair(n: number, reason: Reason, values: CheckValues, tools: CheckResult["tools"]): [CheckResult, CheckResult] {
-  return [{ id: "C1", status: "n/a", n, reason, values: { ...values }, tools }, { id: "C2", status: "n/a", n, reason, values: { ...values }, tools }];
+  return [{ id: "C1", status: "n/a", n, reason, values: { ...values }, tools: [...tools] }, { id: "C2", status: "n/a", n, reason, values: { ...values }, tools: [...tools] }];
 }
 
 function checkKind(anchors: readonly AnchorEv[]): [CheckResult, CheckResult] {
@@ -297,7 +297,7 @@ function combine(rs: readonly CheckResult[]): CheckResult {
   let out = rs[0]!;
   for (const r of rs) if (comboRank(r) > comboRank(out)) out = r;
   const unverifiedKinds = rs.filter((r) => r.status === "n/a" && r.reason !== "too-few").length;
-  return { ...out, values: { ...out.values, unverifiedKinds } };
+  return { ...out, values: { ...out.values, unverifiedKinds }, tools: [...out.tools] };
 }
 
 /**
