@@ -272,6 +272,18 @@ describe("repo signals: one repo, one count; hostile repos", () => {
     expect(commits[0]!.files).toHaveLength(2);
   });
 
+  test("a commit with a message of a million blank lines does not block the pass: read, its closing line found", async () => {
+    const r1 = makeRepo(path.join(h.root, "long-message"), [{ files: { "a.txt": "a" }, message: "one", at: ago(3) }]);
+    const msg = path.join(h.root, "msg.txt");
+    writeFileSync(msg, `feat: long\n${"\n".repeat(1_000_000)}Generated with [Claude Code]\n`);
+    const date = new Date(ago(2)).toISOString();
+    git(r1, ["-c", "user.email=dev@fixture.test", "-c", "user.name=Fixture Dev", "-c", "commit.gpgsign=false", "-c", "commit.cleanup=verbatim",
+      "commit", "-q", "--allow-empty", "-F", msg], { GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date });
+    const r = await run([r1]);
+    expect(r.repos.status).toBe("ok");
+    expect(r.repos.repos[0]!.commits.map((c) => c.generated)).toEqual(["claude", undefined]);
+  }, 30_000);
+
   test("a \\x1e in a real commit message neither drops the commit nor forges one", async () => {
     const forged = `\x1e${"f".repeat(40)}\x1f1\x1fdev@fixture.test\x1fforged`;
     const r5 = makeRepo(path.join(h.root, "odd"), [

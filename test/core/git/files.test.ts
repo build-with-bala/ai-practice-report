@@ -92,6 +92,17 @@ describe("the text scanners: commands found in text, as check kinds only", () =>
     expect(mentionedChecks("an unclosed fence:\n```\npytest -q\n")).toEqual(["test"]);
   });
 
+  test("a line of 400,000 backticks, or of spans, is scanned in linear time (the 30 s guard is the bound)", () => {
+    expect(mentionedChecks("`".repeat(400_000))).toEqual([]);
+    expect(mentionedChecks(`${"``a".repeat(130_000)}`)).toEqual([]);
+    expect(mentionedChecks(`\`npm test\` ${"`".repeat(400_000)}`)).toEqual(["test"]);
+  }, 30_000);
+
+  test("code spans start at the first backtick of a run", () => {
+    expect(mentionedChecks("``npm test``")).toEqual(["test"]);
+    expect(mentionedChecks("```npm test`` x")).toEqual([]);
+  });
+
   test("ciChecks: `run:` values, plain, quoted and block scalars; other keys never", () => {
     const yaml = [
       "jobs:", "  test:", "    steps:", "      - uses: actions/checkout@v4", "      - name: pytest is a name, not a command",

@@ -59,15 +59,24 @@ const checksOfAll = (commands: Iterable<string>): CheckKind[] => {
 };
 
 const FENCE = /^ {0,3}(`{3,}|~{3,})/;
+/** An instruction-file line longer than this (characters) is scanned for commands up to this length only. */
+export const MAX_SCAN_LINE_CHARS = 4_096;
+/**
+ * An inline code span: a run of backticks, text, the same run. A span starts only at the first backtick of a run (the
+ * look-behind): starting inside a run too would retry every backtick of a long run, in time growing with its square.
+ */
+const CODE_SPAN = /(?<!`)(`+)([^`]+?)\1(?!`)/g;
 
 /**
  * The checks an instruction file names as commands (`classifyCommand`): its inline code spans, the lines of its fenced
- * code blocks (an unclosed fence runs to the end), and lines starting with `$ `. Prose is never read as a command.
+ * code blocks (an unclosed fence runs to the end), and lines starting with `$ `. Prose is never read as a command. Each
+ * line is scanned up to MAX_SCAN_LINE_CHARS.
  */
 export function mentionedChecks(text: string): CheckKind[] {
   const commands: string[] = [];
   let fence: string | undefined;
-  for (const line of text.split(/\r?\n/)) {
+  for (const whole of text.split(/\r?\n/)) {
+    const line = whole.length > MAX_SCAN_LINE_CHARS ? whole.slice(0, MAX_SCAN_LINE_CHARS) : whole;
     const f = FENCE.exec(line);
     if (fence !== undefined) {
       if (f && f[1]![0] === fence[0] && f[1]!.length >= fence.length && line.trim() === f[1]) fence = undefined;
@@ -80,7 +89,7 @@ export function mentionedChecks(text: string): CheckKind[] {
     }
     const prompt = /^\s*\$ (.*)$/.exec(line);
     if (prompt) commands.push(prompt[1]!);
-    for (const m of line.matchAll(/(`+)([^`]+?)\1(?!`)/g)) commands.push(m[2]!);
+    for (const m of line.matchAll(CODE_SPAN)) commands.push(m[2]!);
   }
   return checksOfAll(commands);
 }

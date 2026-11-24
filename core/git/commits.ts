@@ -24,7 +24,18 @@ const NAME_LIKE: ReadonlySet<string> = new Set(["claude", "jules", "devin", "amp
  * vendor's domain alone is no sign — the vendor's people use it too.
  */
 const AGENT_ADDRESSES: readonly [local: string, domain: string][] = [["cursoragent", "cursor.com"], ["amp", "ampcode.com"]];
-const CO_AUTHOR = /^\s*co-authored-by:(.*)$/gim;
+/**
+ * A co-author trailer line. Only spaces and tabs may lead it: `\s*` would also cross line ends, and a message of blank
+ * lines then costs time growing with its square.
+ */
+const CO_AUTHOR = /^[ \t]*co-authored-by:(.*)$/gim;
+/** A trailer longer than this (characters) is no real one and is not examined. */
+const MAX_TRAILER_CHARS = 1_000;
+/**
+ * The message text examined at most (characters): a longer message is read as its start and its end (half each), which
+ * keep the subject and the trailer block, so every pattern below runs on bounded text.
+ */
+export const MAX_MESSAGE_CHARS = 16_384;
 const GENERATED: readonly [AiTool, RegExp][] = TOOLS.map(([tool, p]) => [tool, new RegExp(`generated (?:with|by) \\[?(?:${p})\\b`, "i")]);
 const WORDS: readonly [AiTool, string][] = TOOLS.flatMap(([tool, p]) => p.split("|").map((w): [AiTool, string] => [tool, w]));
 
@@ -40,11 +51,33 @@ const AT_DOMAIN = /@[^\s<>,;()]*/g;
 function trailerParts(trailer: string): { name: string; local: string; domain: string } {
   const t = trailer.trim();
   const bracketed = /<([^<>@\s]*)@([^<>\s]*)>/.exec(t);
-  const bare = bracketed ? undefined : /([^\s<>,;()]*)@([^\s<>,;()]*)/.exec(t);
-  const m = bracketed ?? bare;
-  if (!m) return { name: t.replace(AT_DOMAIN, ""), local: "", domain: "" };
-  const name = bracketed ? t.slice(0, m.index) : t.slice(0, m.index) + t.slice(m.index + m[0].length);
-  return { name: name.replace(AT_DOMAIN, ""), local: m[1]!.toLowerCase(), domain: m[2]!.toLowerCase() };
+  if (bracketed) {
+    return { name: t.slice(0, bracketed.index).replace(AT_DOMAIN, ""), local: bracketed[1]!.toLowerCase(), domain: bracketed[2]!.toLowerCase() };
+  }
+  const bare = bareAddress(t);
+  if (!bare) return { name: t.replace(AT_DOMAIN, ""), local: "", domain: "" };
+  const name = t.slice(0, bare.start) + t.slice(bare.end);
+  return { name: name.replace(AT_DOMAIN, ""), local: bare.local.toLowerCase(), domain: bare.domain.toLowerCase() };
+}
+
+/** A character a bare address may hold (any but white space and `<>,;()`). */
+const ADDRESS_CHAR = /[^\s<>,;()]/;
+
+/**
+ * The first bare `local@domain` of `t`, found in linear time: the run of address characters around the first `@`, its
+ * local part up to the run's last `@` — what the pattern `([^\s<>,;()]*)@([^\s<>,;()]*)` matches first, without its
+ * cost (it retries every start of a long run with no `@`, in time growing with the run's square).
+ */
+function bareAddress(t: string): { start: number; end: number; local: string; domain: string } | undefined {
+  const at = t.indexOf("@");
+  if (at === -1) return undefined;
+  let start = at;
+  while (start > 0 && ADDRESS_CHAR.test(t[start - 1]!)) start--;
+  let end = at + 1;
+  while (end < t.length && ADDRESS_CHAR.test(t[end]!)) end++;
+  const run = t.slice(start, end);
+  const last = run.lastIndexOf("@");
+  return { start, end, local: run.slice(0, last), domain: run.slice(last + 1) };
 }
 
 /**
@@ -63,6 +96,7 @@ function botSign(t: { name: string; local: string; domain: string }): boolean {
  * (NAME_LIKE) counts only with a bot sign.
  */
 function coAuthorTool(trailer: string): AiTool | undefined {
+  if (trailer.length > MAX_TRAILER_CHARS) return undefined;
   const t = trailerParts(trailer);
   const bot = botSign(t);
   for (const [tool, word] of WORDS) {
@@ -77,12 +111,15 @@ function coAuthorTool(trailer: string): AiTool | undefined {
 const toolIn = (text: string, list: readonly [AiTool, RegExp][]): AiTool | undefined => list.find(([, re]) => re.test(text))?.[0];
 
 /**
- * What a commit message says, in memory only (the message is dropped): `ai`, the AI tool of its first `Co-authored-by:`
+ * What a commit message says, in memory only (the message is dropped; one longer than MAX_MESSAGE_CHARS is read as its
+ * start and its end): `ai`, the AI tool of its first `Co-authored-by:`
  * trailer that names one (`coAuthorTool`: people are ignored, a person named like a tool included); `generated`, the
  * tool of a "Generated with/by [tool" line; `rework`, from the subject — `Revert "…` (revert), `fixup! `/`squash! `/
  * `amend! ` (fixup), `fix:`/`hotfix:`/`bugfix:` with an optional scope and `!` (fix).
  */
-export function classifyCommit(message: string): Pick<CommitFact, "ai" | "generated" | "rework"> {
+export function classifyCommit(full: string): Pick<CommitFact, "ai" | "generated" | "rework"> {
+  const half = MAX_MESSAGE_CHARS / 2;
+  const message = full.length <= MAX_MESSAGE_CHARS ? full : `${full.slice(0, half)}\n${full.slice(full.length - half)}`;
   const out: Pick<CommitFact, "ai" | "generated" | "rework"> = {};
   for (const m of message.matchAll(CO_AUTHOR)) {
     const tool = coAuthorTool(m[1]!);
