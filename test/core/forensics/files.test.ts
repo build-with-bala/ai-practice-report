@@ -62,9 +62,17 @@ describe("checkFileTimes (C5)", () => {
   test("a file whose last event is at or after the scan's start is still being written: no violation", () => {
     const raw = scanResultOf(files(20, (i) => (i >= 17 ? clean(i, { mtime: T0 + i * DAY }) : clean(i))));
     const start = T0 + 17 * DAY + HOUR;   // files 17 to 19 hold an event at or after the start
-    expect(fileTimesOf({ ...raw, startedAt: start }, UTC).values.violations).toBe(0);
-    expect(fileTimesOf({ ...raw, startedAt: start + DAY }, UTC).values.violations).toBe(1);
-    expect(fileTimesOf({ ...raw, startedAt: T0 + 40 * DAY }, UTC).status).toBe("fail");
+    const end = T0 + 40 * DAY;
+    expect(fileTimesOf({ ...raw, startedAt: start, finishedAt: end }, UTC).values.violations).toBe(0);
+    expect(fileTimesOf({ ...raw, startedAt: start + DAY, finishedAt: end }, UTC).values.violations).toBe(1);
+    expect(fileTimesOf({ ...raw, startedAt: end, finishedAt: end }, UTC).status).toBe("fail");
+  });
+
+  test("a last event dated after the scan's end is not exempt", () => {
+    const raw = scanResultOf(files(20, (i) => (i >= 17 ? clean(i, { mtime: T0 + i * DAY }) : clean(i))));
+    const start = T0 + 17 * DAY + HOUR;
+    expect(fileTimesOf({ ...raw, startedAt: start, finishedAt: start + 2 * DAY }, UTC).values.violations).toBe(0);
+    expect(fileTimesOf({ ...raw, startedAt: start, finishedAt: start }, UTC).values.violations).toBe(2); // files 18 and 19 end after it
   });
 
   test("copied directory: 20 files born in one 10-min window, 30 days of events, are a note with that date", () => {

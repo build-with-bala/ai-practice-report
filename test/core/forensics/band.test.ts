@@ -353,6 +353,12 @@ describe("wording: every reason and question the forensic checks produce", () =>
       k: "ratelimit", tool: "codex", source: "codex.rollouts", ts: T0 + i * MIN, window: "primary", usedPercent: (i % 2) * 50 + i / 10, resetsAt: T0 + 5 * HOUR,
     }) as Ev),
     [sess("m", "claude-code", T0, { models: ["model-x"] })],
+    // three sessions far before the release: the long-before-release fail
+    ["m1", "m2", "m3"].map((id) => sess(id, "claude-code", T0, { models: ["model-x"] })),
+    // ids from another provider: more than 10% without the service's marker
+    anchors().map((e, i) => (i % 6 === 0 ? { ...e, idTail: `zz${e.idTail.slice(2)}` } : e)),
+    // ids that grow while every recorded time is the same: their order cannot be ranked
+    anchors().slice(0, 300).map((e) => ({ ...e, ts: T0 })),
     [
       sess("s", "claude-code", NOW - 3 * DAY, { end: NOW }), cov("claude-code", CC, "detail"),
       ...Array.from({ length: 61 }, (_, i) => prompt("s", NOW - 3 * DAY + i * MIN, "claude-code",
@@ -365,7 +371,9 @@ describe("wording: every reason and question the forensic checks produce", () =>
     ],
   ];
   const releases: ReleaseTable = { version: 1, models: [{ match: "^model-x$", released: "2027-01-01", source: "https://example.com/x" }], tools: {} };
-  const results = scenarios.flatMap((evs) => run(evs, [], releases).checks);
+  const results = [...scenarios.flatMap((evs) => run(evs, [], releases).checks),
+    // a tool that records server ids, with typed turns and no id at all
+    ...run([sess("t")], statsOf([["claude-code", 60]]), releases).checks];
 
   test("every character is in U+0020-00FF or U+2000-206F, or is U+2212", () => {
     for (const c of results) expect(`${c.reason}${c.askAbout ?? ""}`).toMatch(/^[ -ÿ -⁯−]*$/);
@@ -374,7 +382,8 @@ describe("wording: every reason and question the forensic checks produce", () =>
   test("the scenarios reach every question", () => {
     const asked = new Set(results.filter((c) => c.askAbout !== undefined).map((c) => `${c.id}:${c.reason}`));
     expect([...asked].sort()).toEqual([
-      "C1:malformed-ids", "C1:off-time", "C1:scheme-changed", "C2:out-of-order", "C2:scheme-changed", "C3:history-mismatch", "C3:missing-stats-days", "C4:no-match",
+      "C1:malformed-ids", "C1:off-time", "C1:scheme-changed", "C1:unknown-marker", "C2:degenerate", "C2:out-of-order", "C2:scheme-changed",
+      "C2:unknown-marker", "C9:long-before-release", "soft:missing-ids:missing-ids", "C3:history-mismatch", "C3:missing-stats-days", "C4:no-match",
       "C4:several-accounts", "C5:changed-after-write", "C5:file-times", "C5:restore-cluster", "C6:missing-thread-rows", "C7:time-zone-change",
       "C7:uuid-after-name", "C8:ledger-contradictions", "C9:before-release", "soft:new-config:new-config",
       "soft:recent-burst:recent-burst", "soft:repeated-long:repeated-long", "soft:rhythm:regular-rhythm", "soft:unclosed-tools:unclosed-tools",

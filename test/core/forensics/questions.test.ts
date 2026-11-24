@@ -133,6 +133,13 @@ describe("questionFor", () => {
   });
 });
 
+describe("a stored ratio never exceeds the export's ceiling", () => {
+  test("capped at 1,000; below the cap unchanged", async () => {
+    const { RATIO_MAX, storedRatio } = await import("../../../core/forensics/types");
+    expect([RATIO_MAX, storedRatio(1e7), storedRatio(1_000), storedRatio(0.59)]).toEqual([1_000, 1_000, 1_000, 0.59]);
+  });
+});
+
 describe("rounding never crosses a rule's threshold", () => {
   test("below T (C2 rho < 0.99, C3 match < 75%): stored and shown rounded down", () => {
     for (const rho of [0.98996, 0.98995]) {

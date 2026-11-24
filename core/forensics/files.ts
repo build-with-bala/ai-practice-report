@@ -68,8 +68,8 @@ function densest<T>(sorted: readonly T[], at: (x: T) => number): { from: number;
 /**
  * C5 over the trace files' facts in scope (`ForensicScope.files`). Fewer than 5 files → n/a (`too-few`).
  * - Last-write rule: a file violates when its mtime is more than 2 s before its last event. A file whose last event is
- *   at or after the scan's start (`raw.startedAt`) is still being written (a file is stat'ed before it is read to its
- *   end) and is exempt. At least max(2, 1% of the files) violating → fail (`file-times`, `violations`).
+ *   between the scan's start and its end (`raw.startedAt` to `raw.finishedAt`, plus 2 s) is still being written (a
+ *   file is stat'ed before it is read to its end) and is exempt; one dated after the scan's end is not. At least max(2, 1% of the files) violating → fail (`file-times`, `violations`).
  * - Else a restore cluster → note (`restore-cluster`) with its local day (`date`) in `timeZone`, its span (`days`) and
  *   its files (`clusterFiles`).
  * - Else files whose ctime is more than 24 h after their mtime, outside a restore cluster → note
@@ -84,7 +84,10 @@ export function checkFileTimes(raw: ScanResult, t: SessionTable, o: { timeZone: 
   const cluster = restoreCluster(files);
   const changed = files.filter((f) => f.ctime !== undefined && f.ctime - f.mtime > CTIME_GAP_MS && !cluster?.files.has(f))
     .sort((x, y) => x.ctime! - y.ctime!);
-  const violations = files.filter((f) => f.lastTs !== undefined && f.lastTs < raw.startedAt && f.mtime < f.lastTs - MTIME_TOL_MS).length;
+  // a file whose last event lies between the scan's start and its end is still being written; one dated after the
+  // scan's end is not
+  const writing = (last: number): boolean => last >= raw.startedAt && last <= raw.finishedAt + MTIME_TOL_MS;
+  const violations = files.filter((f) => f.lastTs !== undefined && !writing(f.lastTs) && f.mtime < f.lastTs - MTIME_TOL_MS).length;
   const values: CheckValues = { violations };
   const base = { id: "C5" as const, n: files.length, tools };
   if (cluster) {

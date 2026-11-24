@@ -102,6 +102,14 @@ export const VALUE_KINDS: Readonly<Record<ValueKey, ValueKind>> = (() => {
   return out as Record<ValueKey, ValueKind>;
 })();
 
+/**
+ * The largest value a `ratio` key stores (the export schema's ceiling). A stored ratio is capped here; every verdict is
+ * computed from the exact value, and the cap lies above every ratio threshold, so the stored value stays on its side.
+ */
+export const RATIO_MAX = 1_000;
+/** A ratio as stored: at most `RATIO_MAX`. */
+export const storedRatio = (x: number): number => Math.min(x, RATIO_MAX);
+
 /** A real calendar day "YYYY-MM-DD", years 1970–9999. */
 export function isDay(x: unknown): x is string {
   if (typeof x !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(x)) return false;
