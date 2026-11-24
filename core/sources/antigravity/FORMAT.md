@@ -194,7 +194,8 @@ on every line), `workspace` (string), `type` (`slash_command` on slash commands,
 - **PromptEv** (source `antigravity.history`, window `lifetime`, origin `human`) per line, slash commands included (their
   intent is `command`): `sessionId` from `conversationId`; intent, features and `textHash` from `display` in memory;
   `isTaskStart` per conversation (first, or ≥ 30 min since its previous line), state for the 256 most recent conversations.
-  `workspace` is never kept.
+  `projectKey` = the keyed hash of `workspace` (a path, or a `file:` URI read as its path): the key a session of that
+  folder carries; the folder is never kept, nor registered for repo signals.
 - **DailyEv** (source `antigravity.history`, `zone: "local"`, `unit: "prompts"`) per local day, `count` = its
   prompts and slash commands.
 - Drift: `history:not-object`, `history.type:(other)` (the type is never kept), `history.display:missing`, `history.timestamp:missing`,

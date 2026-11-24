@@ -672,6 +672,21 @@ describe("antigravity history: history.jsonl (its own lifetime source)", () => {
     expectNoCanaries([...allEvents(r), r.coverage]);
   });
 
+  test("a history prompt carries the project key a session of the same folder carries, its workspace a path or a file URI; the folder itself never", async () => {
+    const at = fixtureStart();
+    writeSummaries(h, [{ id: P, input: at, modified: at + MIN }]); // its workspace: file://<the canary folder>
+    h.writeJsonl(historyRel, [
+      historyLine({ display: "Refactor the importer", timestamp: at }),
+      { ...historyLine({ display: "Add tests", timestamp: at + MIN }), workspace: `file://${CANARY.path}` },
+      { ...historyLine({ display: "No folder", timestamp: at + 2 * MIN }), workspace: undefined },
+    ]);
+    const r = await run([agCli, agHistory]);
+    const session = r.store.session(sidOf(P))!;
+    expect(session.projectKey).toBe(keyedHash(r.salt, normalizePath(CANARY.path)));
+    expect(byTime(r.store.all("prompt")).map((p) => p.projectKey)).toEqual([session.projectKey, session.projectKey, undefined]);
+    expectNoCanaries([...allEvents(r), r.coverage]);
+  });
+
   test("a history.jsonl that is not a regular file counts not-file", async () => {
     mkdirSync(path.join(h.env.home, historyRel), { recursive: true });
     const r = await run([agHistory]);
