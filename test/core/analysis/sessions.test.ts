@@ -238,3 +238,11 @@ describe("buildSessionTable: detail prompts that name no session", () => {
     expect(v.orphanPrompts).toEqual({ codex: 1 });
   });
 });
+
+describe("buildSessionTable: a session whose times are not finite", () => {
+  test("gets no row, so nothing downstream sees a non-finite start; its events are orphans", () => {
+    const t = buildSessionTable(scanResultOf([sess("ok"), sess("bad", { start: Number.NaN }), sess("worse", { end: Infinity }), prompt("bad", T0)]), opts);
+    expect([...t.rows.keys()]).toEqual(["ok"]);
+    expect(t.orphans.prompt).toBe(1);
+  });
+});

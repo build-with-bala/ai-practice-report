@@ -5,7 +5,7 @@ import { dayEnd, dayKey, dayStart, isoWeek } from "./activity";
 import { promptWindowByTool } from "./promptwindow";
 import { analysisScope, type AnalysisScope } from "./scope";
 import { isTopLevel, type Metric, type SessionTable } from "./types";
-import { isAction } from "./walk";
+import { atRealTime, isAction } from "./walk";
 
 export type Feature = "subagents" | "workflows" | "background-agents" | "plan-mode" | "skills" | "mcp" | "headless" | "parallel-sessions"
   | "model-switching" | "manual-compaction";
@@ -222,7 +222,7 @@ function firstSeen(t: SessionTable, raw: ScanResult, scope: AnalysisScope, first
     for (const e of raw.store.forSession(id, "usage")) take(e.ts);
     for (const e of raw.store.forSession(id, "prompt")) take(e.ts);
     for (const e of raw.store.forSession(id, "turn")) take(e.ts);
-    for (const e of raw.store.forSession(id, "marker")) if (e.proxyTs !== true) take(e.ts);
+    for (const e of raw.store.forSession(id, "marker")) if (atRealTime(e)) take(e.ts);
     return first;
   };
   for (const r of t.rows.values()) {
@@ -244,7 +244,7 @@ function firstSeen(t: SessionTable, raw: ScanResult, scope: AnalysisScope, first
     if (e.category === "mcp" || e.mcpServer !== undefined) see("mcp", e.ts);
   }
   for (const m of raw.store.all("marker")) {
-    if (excluded.has(m.tool) || m.proxyTs === true || !counted(m.sessionId)) continue;
+    if (excluded.has(m.tool) || !atRealTime(m) || !counted(m.sessionId)) continue;
     if (m.kind === "plan-enter" || m.kind === "plan-exit" || m.kind === "plan-artifact") see("plan-mode", m.ts);
     else if (m.kind === "model-switch") see("model-switching", m.ts);
     else if (m.kind === "compact-manual") see("manual-compaction", m.ts);

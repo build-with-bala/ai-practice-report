@@ -104,8 +104,9 @@ export function buildSessionTable(raw: ScanResult, o: { timeZone: string; exclud
   const keepTool = (tool: ToolId): boolean => !toolEx.has(tool);
   const inRange = (ts: number): boolean => ts >= from && ts <= to;
 
+  // a session whose start or end is not finite cannot be placed in time: it gets no row (its events are orphans)
   const sessions = new Map<string, SessionEv>();
-  for (const s of raw.store.all("session")) sessions.set(s.id, s);
+  for (const s of raw.store.all("session")) if (Number.isFinite(s.start) && Number.isFinite(s.end)) sessions.set(s.id, s);
   const parent = parentLinks(sessions, raw);
   const allChildren = new Map<string, string[]>();
   for (const [child, p] of parent) {

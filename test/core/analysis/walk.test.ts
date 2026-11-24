@@ -463,6 +463,12 @@ describe("walk: tiers and tokens (rules 15–16)", () => {
     expect(none.tierPairs).toEqual([]);
   });
 
+  test("cost is the largest running total, whatever the order the totals arrive in", () => {
+    const tot = (usd: number): Ev => ({ k: "totals", tool: "claude-code", source: CC, sessionId: "s", usd });
+    expect(one([sess("s"), prompt("s", T0), tot(2), tot(5), tot(3)]).usd).toBe(5);
+    expect(one([sess("s"), prompt("s", T0), tot(5), tot(2)]).usd).toBe(5);
+  });
+
   test("tokens roll up from children; cost comes from the row's totals", () => {
     const s = one([
       sess("s"), sess("c", { parentId: "s", origin: "subagent" }), prompt("s", T0),
@@ -590,6 +596,16 @@ describe("walk: date range, cross-row keys, fan-out, children's ends and markers
     expect(out.childTypes).toEqual({});
     const inside = one(evs(T0 + 10 * SEC), "s", { exclude: { from: T0 } });
     expect([inside.children, inside.finishedChildren, inside.bgKnown, inside.workflowRuns, inside.maxDepth, inside.actions]).toEqual([1, 1, 1, 1, 2, 6]);
+  });
+
+  test("a proxy-timed marker never puts a cut child in scope: its time is a stand-in", () => {
+    const evs: Ev[] = [
+      sess("s", { start: T0 - 11 * HOUR, end: T0 + HOUR }), prompt("s", T0), tool("s", T0 + SEC),
+      sess("c", { parentId: "s", origin: "subagent", start: T0 - 10 * HOUR, end: T0 + MIN, background: true }),
+      ...reads("c", T0 - 10 * HOUR + SEC, 3), marker("c", T0 + 30 * SEC, "interrupt", { detail: "stopped-by-user", proxyTs: true }),
+    ];
+    const out = one(evs, "s", { exclude: { from: T0 } });
+    expect([out.children, out.bgKnown]).toEqual([0, 0]);
   });
 
   test("a cut direct child with no event in range still groups an in-range grandchild: fan-out 1, its own attributes not counted", () => {

@@ -93,8 +93,14 @@ export function briefScore(f: PromptFeatures): number {
 }
 
 /**
+ * The one rule for a marker's time: a proxy-timed marker (`proxyTs`: a stand-in time, such as a file's modification
+ * time) places the marker, but never counts as activity or puts a row in scope.
+ */
+export const atRealTime = (m: MarkerEv): boolean => m.proxyTs !== true;
+
+/**
  * Whether a session row is in scope of the date range: it lies wholly inside the range, or it has an event inside it
- * (a tool call, usage, a marker of `markersOf`, a prompt or a turn). A row the range cuts with no event inside it is
+ * (a tool call, usage, a marker of `markersOf` at a real time, a prompt or a turn). A row the range cuts with no event inside it is
  * part of the excluded period and counts nowhere — in the walk's children, nor as artifact evidence.
  */
 export function inScope(r: SessionRow, t: SessionTable, store: EventStore, markersOf: (id: string) => readonly MarkerEv[]): boolean {
@@ -102,7 +108,7 @@ export function inScope(r: SessionRow, t: SessionTable, store: EventStore, marke
   if (r.start >= from && r.end <= to) return true;
   const inRange = (ts: number): boolean => ts >= from && ts <= to;
   return store.forSession(r.id, "tool").some((e) => inRange(e.ts)) || store.forSession(r.id, "usage").some((e) => inRange(e.ts))
-    || markersOf(r.id).length > 0 || store.forSession(r.id, "prompt").some((e) => inRange(e.ts))
+    || markersOf(r.id).some(atRealTime) || store.forSession(r.id, "prompt").some((e) => inRange(e.ts))
     || store.forSession(r.id, "turn").some((e) => inRange(e.ts));
 }
 
@@ -293,7 +299,8 @@ function walkRow(row: SessionRow, t: SessionTable, store: EventStore, cx: WalkCt
   // totals carry no time: a row the date range cuts gives no cost, rather than the cost of its excluded part too
   const whole = row.start >= t.scope.from && row.end <= t.scope.to;
   for (const tot of whole ? store.forSession(row.id, "totals") : []) {
-    if (tot.usd !== undefined && !s.usdKnown) { s.usd = tot.usd; s.usdKnown = true; }
+    // a running total: the largest is the session's, whatever order the reports arrived in
+    if (tot.usd !== undefined && Number.isFinite(tot.usd) && (!s.usdKnown || tot.usd > s.usd)) { s.usd = tot.usd; s.usdKnown = true; }
   }
   const buckets = new Set<number>();
   for (const e of seq) {
@@ -318,7 +325,7 @@ function walkRow(row: SessionRow, t: SessionTable, store: EventStore, cx: WalkCt
       const own = store.forSession(id, "tool").filter((e) => inRange(e.ts));
       const usage = store.forSession(id, "usage").filter((u) => inRange(u.ts));
       const marks = cx.markersOf(id);
-      const active = own.length > 0 || usage.length > 0 || marks.length > 0 || inScope(c, t, store, cx.markersOf);
+      const active = own.length > 0 || usage.length > 0 || marks.some(atRealTime) || inScope(c, t, store, cx.markersOf);
       nodes.push({ c, own, usage, marks, active });
       for (const g of c.children) stack.push(g);
     }
