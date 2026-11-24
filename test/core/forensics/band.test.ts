@@ -421,3 +421,36 @@ describe("runForensics: the closed vocabularies are guarded at run time", () => 
     }
   });
 });
+
+describe("runForensics: server-backed and the band agree", () => {
+  const cc = statsOf([["claude-code", 100]]);
+  /** 200 ids in 25 minutes, written up to 4 min late: C1 passes, C2 is not applicable (they span under a day). */
+  const burst = (): AnchorEv[] => anchors().slice(0, 200).map((e, i) => ({ ...e, ts: T0 + i * 7_500 + (i % 5) * 40 * SEC,
+    idTail: `01${enc(3n * 58n ** 11n + BigInt(i * 7_500) * 1_000n, 12)}${e.idTail.slice(14)}` }));
+
+  test("a tool whose server checks are a pass and a not-applicable is backed: the burst reads consistent and fully backed", () => {
+    const f = run(burst(), cc);
+    expect([byId(f, "C1").status, byId(f, "C2").status]).toEqual(["pass", "n/a"]);
+    expect([f.band, f.serverBacked]).toEqual(["consistent", 1]);
+  });
+
+  test("a tool whose every server check is not applicable is not backed", () => {
+    const f = run([...anchors().slice(0, 30), ...claudeDays(10)], cc);
+    expect([byId(f, "C1").status, byId(f, "C2").status]).toEqual(["n/a", "n/a"]);
+    expect([f.band, f.serverBacked]).toEqual(["consistent-with-notes", 0]);
+  });
+
+  test("a tool with a pass on one server check and a fail on another is not backed", () => {
+    const times = anchors().map((e) => e.ts).reverse();
+    const f = run(anchors().map((e, i) => ({ ...e, ts: times[i]! })), cc);
+    expect(byId(f, "C2").status).toBe("fail");
+    expect([f.band, f.serverBacked]).toEqual(["inconsistent", 0]);
+  });
+
+  test("no history reads consistent with a backed share of 0 for its only anchorable tool", () => {
+    for (const evs of [burst(), anchors(), [...anchors().slice(0, 30), ...claudeDays(10)], claudeDays(10), edited(anchors())]) {
+      const f = run(evs, cc);
+      if (f.band === "consistent") expect(f.serverBacked).toBe(1);
+    }
+  });
+});
