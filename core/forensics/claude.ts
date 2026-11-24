@@ -83,7 +83,7 @@ function pasteMatches(prompts: readonly PromptEv[], pasted: readonly PromptEv[])
 export function checkClaudeHistory(raw: ScanResult, t: SessionTable, s: ForensicScope = forensicScope(raw, t)): CheckResult {
   const transcript = s.prompts().filter((p) => p.source === TRANSCRIPTS_SOURCE && s.human(p));
   const history = s.prompts().filter((p) => p.source === HISTORY_SOURCE);
-  const stats = s.daily().filter((d) => d.source === STATS_SOURCE && d.zone === "utc");
+  const stats = s.daily().filter((d) => d.source === STATS_SOURCE && (d.zone === "utc" || d.zone === "either"));
   const tools = toolsOf([...transcript, ...history, ...stats]);
   const values: CheckValues = {};
   const parts: Part[] = [];

@@ -115,9 +115,9 @@ describe("claude-code lifetime: Task 10 scenario", () => {
     buildCcLifetime(h);
     const r = await run([ccStats]);
     expect(r.store.all("daily")).toEqual([
-      { k: "daily", tool: "claude-code", source: "claude-code.stats", day: "2026-01-13", zone: "utc", unit: "messages", count: 120, sessions: 2, toolCalls: 40, models: { [CC_OPUS]: 50_000, [CC_HAIKU]: 4_000 } },
-      { k: "daily", tool: "claude-code", source: "claude-code.stats", day: "2026-01-14", zone: "utc", unit: "messages", count: 80, sessions: 1, toolCalls: 25, models: { [CC_OPUS]: 20_000 } },
-      { k: "daily", tool: "claude-code", source: "claude-code.stats", day: "2026-01-16", zone: "utc", unit: "messages", count: 10, sessions: 1, toolCalls: 0 },
+      { k: "daily", tool: "claude-code", source: "claude-code.stats", day: "2026-01-13", zone: "either", unit: "messages", count: 120, sessions: 2, toolCalls: 40, models: { [CC_OPUS]: 50_000, [CC_HAIKU]: 4_000 } },
+      { k: "daily", tool: "claude-code", source: "claude-code.stats", day: "2026-01-14", zone: "either", unit: "messages", count: 80, sessions: 1, toolCalls: 25, models: { [CC_OPUS]: 20_000 } },
+      { k: "daily", tool: "claude-code", source: "claude-code.stats", day: "2026-01-16", zone: "either", unit: "messages", count: 10, sessions: 1, toolCalls: 0 },
     ] satisfies DailyEv[]);
     expect(r.coverage[0]).toMatchObject({
       source: "claude-code.stats", window: "lifetime", status: "ok", files: 1, records: 5, unknownTypes: {},

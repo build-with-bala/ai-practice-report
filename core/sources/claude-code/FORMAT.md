@@ -288,7 +288,7 @@ Read: `display` (in memory only), `timestamp`, `sessionId`, `project` (in memory
   well-formed time outside the plausible range), `empty` (blank `display`), `bad-record`, `not-file` (a
   `history.jsonl` that is not a regular file). Coverage `from`/`to` = first/last prompt time.
 
-## stats-cache.json (verified locally; semantics per CLI program)
+## stats-cache.json (semantics per CLI program)
 
 One JSON object: `version` (number — the cache format; the CLI program reads 1–5 and writes 5), `lastComputedDate`
 (`YYYY-MM-DD`), `dailyActivity[]` {`date` (`YYYY-MM-DD`), `messageCount`, `sessionCount`, `toolCallCount` (numbers)},
@@ -298,8 +298,9 @@ One JSON object: `version` (number — the cache format; the CLI program reads 1
 `longestSession` {`sessionId`, `duration`, `messageCount`, `timestamp`}, `firstSessionDate` (ISO string),
 `hourCounts` {`<hour>`: number}.
 
-How the CLI fills it (CLI program): a `date` is the **UTC** day (the date part of `toISOString`) — unlike history's
-local days, so the two are not comparable day by day; `messageCount` counts transcript messages of top-level sessions
+How the CLI fills it (CLI program): a `date` is a day key whose zone depends on the release that wrote the entry —
+older releases wrote the UTC date, newer ones the local date — and one cache can hold entries of both, so it is not
+comparable day by day with history's local days; `messageCount` counts transcript messages of top-level sessions
 whoever wrote them, not only typed prompts; `sessionCount` counts sessions that started that day; `toolCallCount` counts
 `tool_use` blocks, subagents included; `tokensByModel` sums input, output and cache tokens per model, subagents
 included; `hourCounts` keys are local hours of session starts. The CLI refreshes the cache now and then, not with
@@ -307,7 +308,7 @@ every session (`lastComputedDate`), so it can lag behind the transcripts.
 
 Read: `version`, `dailyActivity`, `dailyModelTokens`; the rest is parsed with the file and dropped.
 
-- `DailyEv{source:"claude-code.stats", zone:"utc", unit:"messages"}` per `dailyActivity` entry: `day` = `date`,
+- `DailyEv{source:"claude-code.stats", zone:"either", unit:"messages"}` per `dailyActivity` entry: `day` = `date`,
   `count` = `messageCount`, `sessions` = `sessionCount`, `toolCalls` = `toolCallCount`, `models` = that day's
   `tokensByModel` (keys that are not model-id-shaped become `other`; equal keys are summed; a count that is not a
   non-negative safe integer is ignored). An entry whose day lies outside the plausible range (before 2015, or more than
@@ -316,7 +317,7 @@ Read: `version`, `dailyActivity`, `dailyModelTokens`; the rest is parsed with th
 - Drift: `version:missing`, `version:newer` (above 5), `dailyActivity:missing`, `dailyActivity:shape` (an entry
   without a real `YYYY-MM-DD` date or a numeric `messageCount`), `dailyModelTokens:type`, `dailyModelTokens:shape`.
   Coverage `records` = entries read from both arrays; `from`/`to` = start of the first and end of the last
-  `dailyActivity` day, in UTC.
+  `dailyActivity` day, each day taken as a UTC day.
 
 ## Global config (`.claude.json`) — a mixed file (CLI program; the probe's path limit hides these fields)
 
@@ -392,8 +393,9 @@ allowlist; it is never exported raw.
 
 ## Limits (lifetime layer)
 
-- stats-cache days are UTC days of messages and history days local days of prompts (`DailyEv.zone`, `DailyEv.unit`):
-  match them day by day only after bucketing history prompts (`PromptEv.ts`) by UTC day.
+- stats-cache days are days of messages keyed by the UTC or the local date, by release (`DailyEv.zone: "either"`), and
+  history days local days of prompts (`DailyEv.zone`, `DailyEv.unit`): a stats day can match either the UTC or the
+  local day of the same activity.
 - `skillUsage` counts at most one use per minute per name.
 - `lastPlanModeUse` is a single timestamp refreshed at most once a day, not a count.
 - history.jsonl and the transcripts both yield prompts, and history and transcripts both yield `compact-manual`

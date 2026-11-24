@@ -4,7 +4,11 @@ import { readJsonl } from "../../io/jsonl";
 import type { ScanCtx } from "../types";
 import type { Tally } from "./coverage";
 
-/** `read`: the file was read to its end. `size` and `stat` are the file's (link followed) when the path was a regular file. */
+/**
+ * `read`: the file was read to its end. `size` and `stat` are the file's (link followed) when the path was a regular file:
+ * stat'ed again once it was read to its end, so a file appended while it was read never shows a last record after its
+ * recorded modification time (the stream opens the file itself, so the times come from the path, not the handle).
+ */
 export interface StreamResult { read: boolean; size: number; stat?: Stats }
 
 /**
@@ -59,7 +63,9 @@ export async function streamJsonlFile(file: string, ctx: ScanCtx, tally: Tally, 
     return { read: false, size, stat };
   }
   if (stopped || ctx.signal.aborted) return { read: false, size, stat };
+  const end = statPath(file);
+  const final = end.state === "file" ? end.stat : stat; // gone or replaced since: the times it had when it was opened
   tally.files++;
-  tally.bytes += size;
-  return { read: true, size, stat };
+  tally.bytes += final.size;
+  return { read: true, size: final.size, stat: final };
 }

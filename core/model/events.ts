@@ -157,11 +157,12 @@ export interface ConfigEv extends Base { k: "config";
   firstSeen?: number; projectKey?: string }
 
 /**
- * A tool's own per-day totals. `zone`: the day's time zone — `utc`, or `local` (the scanning process's zone);
+ * A tool's own per-day totals. `zone`: the day's time zone — `utc`, `local` (the scanning process's zone), or `either`
+ * (the UTC date or the local date, depending on the release of the tool that wrote the entry: a store can hold both);
  * `unit`: what `count` counts — `prompts` typed at the prompt, or `messages` (every message of the day's sessions,
  * whoever wrote it). Days of different zones never match one to one; counts of different units never add up.
  */
-export interface DailyEv extends Base { k: "daily"; day: string; zone: "local" | "utc"; unit: "prompts" | "messages"; count: number;
+export interface DailyEv extends Base { k: "daily"; day: string; zone: "local" | "utc" | "either"; unit: "prompts" | "messages"; count: number;
   sessions?: number; toolCalls?: number; models?: Record<string, number> }
 export interface EdgeEv extends Base { k: "edge"; parentId: string; childId: string }
 export interface AnchorEv extends Base { k: "anchor"; kind: "cc-msg" | "cc-req"; ts: number; idTail: string;
