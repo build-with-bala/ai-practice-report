@@ -9,7 +9,7 @@ import type { SessionRow, SessionTable } from "./types";
  */
 export interface PromptScope {
   inRange(ts: number): boolean; tools: ReadonlySet<ToolId>; projects: ReadonlySet<string>;
-  rows: ReadonlyMap<string, SessionRow>; hosts: ReadonlySet<string>; inStore(sessionId: string): boolean;
+  rows: { has(sessionId: string): boolean }; hosts: ReadonlySet<string>; inStore(sessionId: string): boolean;
 }
 
 /**

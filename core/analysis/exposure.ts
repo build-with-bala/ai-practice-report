@@ -19,7 +19,8 @@ export type DurationArc = "<10m" | "10-60m" | "1-4h" | ">4h";
  *   when earlier), inclusive, from the lifetime days whenever there are any, else from the detail days (window
  *   `detail`, with the detail sources); `n` = those active days; `to` = the end the value counts to. `activeWeeks`:
  *   each window's active ISO weeks, `n` = its active days. Both read `Activity` only: days with a human prompt (§6.2).
- * - `weekly`: the 52 ISO weeks ending at now's week, oldest first. `activeDays` = the distinct days of the week in the
+ * - `weekly`: the 52 ISO weeks ending at now's week, oldest first, less the weeks that lie wholly outside the date
+ *   range (before the week of its start, after the week of its end). `activeDays` = the distinct days of the week in the
  *   union over tools of each tool's active days in its prompt window (`promptWindowByTool`; a tool with no prompts,
  *   only daily totals, its lifetime days): a union of day sets, never a sum of windows, and no tool gives both.
  *   `detailPrompts` and `lifetimePrompts` = human prompts in scope of the tools whose prompt window is that window, so
@@ -91,7 +92,10 @@ export function exposure(t: SessionTable, raw: ScanResult, o: { now: number; tim
   for (const v of Object.values(a.byTool)) for (const s of v?.lifetimeSources ?? []) lifetimeSources.add(s);
   const detailSources = new Set<string>();
   const windowOf = promptWindowByTool(raw, t);
-  const weekKeys = lastWeeks(nowDay);
+  // the weeks of the date range only: a week wholly outside it is no week of the report, not a week of zeros
+  const firstWeek = Number.isFinite(t.scope.from) ? isoWeek(dayKey(t.scope.from, tz)) : undefined;
+  const lastWeek = Number.isFinite(t.scope.to) ? isoWeek(dayKey(t.scope.to, tz)) : undefined;
+  const weekKeys = lastWeeks(nowDay).filter((w) => (firstWeek === undefined || w >= firstWeek) && (lastWeek === undefined || w <= lastWeek));
   const weekAt = new Map(weekKeys.map((w, i) => [w, i]));
   const weekly = weekKeys.map((week) => ({ week, activeDays: 0, detailPrompts: 0, lifetimePrompts: 0 }));
   const weeklyDays = new Set<string>();

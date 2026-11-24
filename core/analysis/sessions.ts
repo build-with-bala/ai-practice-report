@@ -1,7 +1,7 @@
 import type { Ev, PromptEv, SessionEv } from "../model/events";
 import type { ToolId } from "../model/ids";
 import type { ScanResult } from "../scan";
-import { activityOf, dayKey } from "./activity";
+import { activityOf, dayKey, isoWeek } from "./activity";
 import { dedupe } from "./dedupe";
 import { checkExclusions } from "./exclusions";
 import { promptInScope, type PromptScope } from "./scope";
@@ -9,6 +9,9 @@ import type { Capabilities, Exclusions, SessionRow, SessionTable } from "./types
 
 /** The event kinds that name a session (`sessionId`): an event of these whose session is not in the store is an orphan. */
 const SESSION_KINDS = ["prompt", "tool", "turn", "usage", "totals", "marker", "identity"] as const;
+/** Every event kind but coverage (the scan's coverage list is read for that). */
+const EVENT_KINDS = ["session", "prompt", "tool", "turn", "usage", "totals", "marker", "config", "daily", "edge", "anchor", "identity", "file",
+  "codex-rollout", "codex-thread-row", "ratelimit", "commit"] as const satisfies readonly Exclude<Ev["k"], "coverage">[];
 /** The SessionEv fields a row copies when defined. */
 const COPIED = ["projectKey", "effort", "background", "agentType", "workflowId", "surface", "mode", "approval", "sandbox", "version"] as const;
 
@@ -113,17 +116,16 @@ export function buildSessionTable(raw: ScanResult, o: { timeZone: string; exclud
   }
 
   // exclusions
-  const toolsHit = new Set<ToolId>();
-  const projectsHit = new Set<string>();
   const direct: string[] = [];
+  const directScope: string[] = []; // left out by tool or project, not by date
   for (const [id, s] of sessions) {
     let drop = false;
-    if (toolEx.has(s.tool)) { toolsHit.add(s.tool); drop = true; }
-    if (s.projectKey !== undefined && projEx.has(s.projectKey)) { projectsHit.add(s.projectKey); drop = true; }
+    if (toolEx.has(s.tool) || (s.projectKey !== undefined && projEx.has(s.projectKey))) { directScope.push(id); drop = true; }
     if (s.end < from || s.start > to) drop = true;
     if (drop) direct.push(id);
   }
   const dropped = withDescendants(direct, allChildren);
+  const droppedByScope = withDescendants(directScope, allChildren);
 
   // dedupe: over every detail-window session and every prompt, before any exclusion (a host copy is a fact about the
   // data, not about the scope); a host copy and all its descendants are never counted, whatever is excluded
@@ -212,6 +214,8 @@ export function buildSessionTable(raw: ScanResult, o: { timeZone: string; exclud
   // exclusion (a per-day row carries no project)
   const ps: PromptScope = { inRange, tools: toolEx, projects: projEx, rows, hosts, inStore: (id) => sessions.has(id) };
   const inScope = (p: PromptEv): boolean => isHuman(p) && promptInScope(p, ps);
+  // the same rule at any date: a session left out by date only still counts as kept
+  const anyDate: PromptScope = { ...ps, inRange: () => true, rows: { has: (id) => sessions.has(id) && !droppedByScope.has(id) } };
   const promptSources = new Set<string>();
   for (const p of prompts) if (p.window === "lifetime") promptSources.add(p.source);
   const fromDay = Number.isFinite(from) ? dayKey(from, o.timeZone) : undefined;
@@ -233,6 +237,40 @@ export function buildSessionTable(raw: ScanResult, o: { timeZone: string; exclud
   return {
     rows, detailTop, hosts, repoOf, scope: { from, to, tools: toolEx, projects: projEx }, timeZone: o.timeZone, isHuman, activity, capabilities: capabilitiesOf(raw, (id) => id !== undefined && rows.has(id) && !hosts.has(id)),
     dedupe: { hostSessions: d.hosts.size, pairedPrompts: d.pairedPrompts, relabelled: d.relabelled.size },
-    exclusions: { tools: toolsHit.size, projects: projectsHit.size, sessions: dropped.size }, orphans, orphanPrompts: sortedKeys(orphanPrompts), dailyRowsLeftOut,
+    exclusions: exclusionsRecord(raw, { ex, toolEx, projEx, dropped, inRange, timeZone: o.timeZone, outsideOk: (p) => isHuman(p) && promptInScope(p, anyDate) }), orphans, orphanPrompts: sortedKeys(orphanPrompts), dailyRowsLeftOut,
   };
+}
+
+/**
+ * What the exclusions asked for, whether or not a session row carried it: `tools`, the excluded tools with any event or
+ * a coverage row that is not absent; `projects`, the excluded projects that any session, prompt or config entry
+ * carries; `sessions`, the session rows left out; `dateRange`, a start or an end was given; `weeksOutside`, the distinct
+ * ISO weeks (analysis zone) of human prompts of tools and projects that are not excluded (in any window) that lie
+ * outside the date range's weeks (0 without a range).
+ */
+function exclusionsRecord(raw: ScanResult, c: { ex: Exclusions; toolEx: ReadonlySet<ToolId>; projEx: ReadonlySet<string>; dropped: ReadonlySet<string>;
+  inRange: (ts: number) => boolean; timeZone: string; outsideOk: (p: PromptEv) => boolean }): SessionTable["exclusions"] {
+  const tools = new Set<ToolId>();
+  const projects = new Set<string>();
+  if (c.toolEx.size > 0) {
+    for (const k of EVENT_KINDS) for (const e of raw.store.all(k)) if (c.toolEx.has(e.tool)) tools.add(e.tool);
+    for (const cov of raw.coverage) if (cov.status !== "absent" && c.toolEx.has(cov.tool)) tools.add(cov.tool);
+  }
+  if (c.projEx.size > 0) {
+    for (const k of ["session", "prompt", "config"] as const) {
+      for (const e of raw.store.all(k)) if (e.projectKey !== undefined && c.projEx.has(e.projectKey)) projects.add(e.projectKey);
+    }
+  }
+  const dateRange = c.ex.from !== undefined || c.ex.to !== undefined;
+  const weeks = new Set<string>();
+  if (dateRange) {
+    const first = c.ex.from === undefined ? undefined : isoWeek(dayKey(c.ex.from, c.timeZone));
+    const last = c.ex.to === undefined ? undefined : isoWeek(dayKey(c.ex.to, c.timeZone));
+    for (const p of raw.store.all("prompt")) {
+      if (c.inRange(p.ts) || !c.outsideOk(p)) continue;
+      const w = isoWeek(dayKey(p.ts, c.timeZone));
+      if ((first !== undefined && w < first) || (last !== undefined && w > last)) weeks.add(w);
+    }
+  }
+  return { tools: tools.size, projects: projects.size, sessions: c.dropped.size, dateRange, weeksOutside: weeks.size };
 }

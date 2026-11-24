@@ -65,7 +65,9 @@ export interface SessionTable {
   isHuman(p: PromptEv): boolean;
   activity: Activity; capabilities: Capabilities;
   dedupe: { hostSessions: number; pairedPrompts: number; relabelled: number };
-  exclusions: { tools: number; projects: number; sessions: number }; orphans: Partial<Record<Ev["k"], number>>;
+  /** What the exclusions asked for (see `Analysis.exclusions`). */
+  exclusions: { tools: number; projects: number; sessions: number; dateRange: boolean; weeksOutside: number };
+  orphans: Partial<Record<Ev["k"], number>>;
   orphanPrompts: Partial<Record<ToolId, number>>;
   /** Per-day rows left out because a project exclusion is in force and a per-day row carries no project. */
   dailyRowsLeftOut: number;

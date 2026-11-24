@@ -42,14 +42,18 @@ export interface AnalyzeOptions { reference?: "v0"; bootstrap?: number; seed?: n
  * - `forensics` is display only: it never changes a score, an evidence minimum or a confidence.
  * - `identity`: the distinct `IdentityEv` hashes (sorted) and their count: of kept tools, and for a session-scope hash
  *   that names a session, only when that session is a kept row (not excluded by project or date, no host copy).
- * - `exclusions`: the tools and projects the exclusions hit, and the sessions they dropped. A project exclusion removes
- *   every session, prompt and config entry that carries the project (a prompt or entry carries one when its source
- *   records it). It cannot remove: per-day totals, which carry no project (a source that also supplied prompts is read
- *   from its prompts; any other source's per-day totals are left out of the activity whole under a project exclusion,
- *   counted in `diagnostics.dailyRowsLeftOut`); lifetime prompts of a tool that records no project per prompt and
- *   whose session file is gone; the commits of a repository that still has another folder in the report. `dateRange`: a start or an
- *   end of the date range was given. `weeksOutside`: the number of distinct ISO weeks in which the person was active,
- *   with a tool and project that are not excluded, and that lie outside the date range; 0 when no range was given.
+ * - `exclusions`: what was asked, whether or not a session row carried it. `tools`: the excluded tools that have any
+ *   event or a coverage row that is not absent. `projects`: the excluded projects that any session, prompt or config
+ *   entry carries. `sessions`: the session rows left out. `dateRange`: a start or an end of the date range was given.
+ *   `weeksOutside`: the distinct ISO weeks in which the person was active (a human prompt, in any window, of a tool and
+ *   project that are not excluded) that lie outside the date range; 0 without a range. The weekly series holds no week
+ *   outside the range.
+ *   A project exclusion removes every session, prompt and config entry that carries the project (a prompt or entry
+ *   carries one when its source records it). It cannot remove: per-day totals, which carry no project (a source that
+ *   also supplied prompts is read from its prompts; any other source's per-day totals are left out of the activity
+ *   whole under a project exclusion, counted in `diagnostics.dailyRowsLeftOut`); lifetime prompts of a tool that
+ *   records no project per prompt and whose session file is gone; the commits of a repository that still has another
+ *   folder in the report.
  * - `diagnostics`: orphan events per kind inside the date range, and `orphanPrompts`, the orphan detail prompts per tool
  *   (naming a session the store does not hold, or none); what the cross-tool dedupe found; the scan's warnings, less
  *   those that name an excluded tool; and `dailyRowsLeftOut` (a tool's own per-day totals left out under a project
@@ -60,7 +64,7 @@ export interface Analysis {
   coverage: CoveragePanel; signals: Signals; dimensions: DimensionResult[]; overall: Overall; personas: string[];
   exposure: Exposure; stack: Stack; risk: RiskPosture; config: ConfigPanel; projects: ProjectSummary[]; forensics: Forensics;
   identity: { accounts: number; hashes: string[] }; exclusions: { tools: number; projects: number; sessions: number;
-    dateRange?: boolean; weeksOutside?: number };
+    dateRange: boolean; weeksOutside: number };
   diagnostics: { orphans: Partial<Record<Ev["k"], number>>; dedupe: { hostSessions: number; pairedPrompts: number; relabelled: number }; warnings: Warning[];
     orphanPrompts: Partial<Record<ToolId, number>>; dailyRowsLeftOut: number };
   private: { dayParts: DayParts; config: Array<{ kind: ConfigEv["kind"]; name: string; key: string; provenance: ConfigEv["provenance"]; used: boolean }>;

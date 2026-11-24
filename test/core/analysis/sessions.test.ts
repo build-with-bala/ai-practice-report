@@ -126,13 +126,13 @@ describe("buildSessionTable: exclusions", () => {
   test("a tool exclusion drops that tool's rows; tools without rows are not counted", () => {
     const t = buildSessionTable(scanResultOf(evs()), { ...opts, exclude: { tools: ["codex", "cursor"] } });
     expect([...t.rows.keys()].sort()).toEqual(["cc1", "cc1/sub", "cc2"]);
-    expect(t.exclusions).toEqual({ tools: 1, projects: 0, sessions: 2 });
+    expect(t.exclusions).toEqual({ tools: 1, projects: 0, sessions: 2, dateRange: false, weeksOutside: 0 });
   });
 
   test("a project exclusion drops that project's rows with their descendants", () => {
     const t = buildSessionTable(scanResultOf(evs()), { ...opts, exclude: { projects: ["P1", "P9"] } });
     expect([...t.rows.keys()].sort()).toEqual(["cc2", "cx1", "cx2"]);
-    expect(t.exclusions).toEqual({ tools: 0, projects: 1, sessions: 2 });
+    expect(t.exclusions).toEqual({ tools: 0, projects: 1, sessions: 2, dateRange: false, weeksOutside: 0 });
   });
 
   test("scope.projects holds every excluded key given; empty without one", () => {
@@ -148,7 +148,7 @@ describe("buildSessionTable: exclusions", () => {
     expect(t.exclusions.sessions).toBe(4);
     const u = buildSessionTable(scanResultOf(evs()), { ...opts, exclude: { to: T0 + 10 * DAY } });
     expect([...u.rows.keys()].sort()).toEqual(["cc1", "cc1/sub", "cc2", "cx1"]);
-    expect(u.exclusions).toEqual({ tools: 0, projects: 0, sessions: 1 });
+    expect(u.exclusions).toEqual({ tools: 0, projects: 0, sessions: 1, dateRange: true, weeksOutside: 0 }); // the session it drops has no prompt
   });
 
   test("excluded rows are neither in detailTop nor orphans, and their events are not orphan events", () => {
