@@ -297,7 +297,7 @@ const METRIC = metricOf(num());
  */
 export const SHARE_METRICS: ReadonlySet<MetricKey> = new Set<MetricKey>(["vae", "closure", "parallelShare", "backgroundShare", "correctionRate",
   "healthyInterruptShare", "maintainedShare", "briefScore", "hygiene", "landedShare", "reworkShare", "aiCoauthoredShare", "commitAfterSession",
-  "guardrails"]);
+  "guardrails", "uncheckedCommandShare"]);
 const metricSpec = (k: MetricKey): FieldSpec => (SHARE_METRICS.has(k) ? metricOf(share()) : k === "rho" ? metricOf(bounded(-1, 1)) : METRIC);
 
 /**

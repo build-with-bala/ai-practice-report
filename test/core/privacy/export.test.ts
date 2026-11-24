@@ -805,6 +805,23 @@ describe("exportPayload: nothing is left out silently", () => {
   });
 });
 
+describe("exportPayload: the unchecked-command share", () => {
+  test("a measured value reaches the payload with its window, span and n, like every metric; sources never leave", () => {
+    const a = analyze(personaScan("expert"), UTC);
+    expect(parsed(a).signals).toHaveProperty("uncheckedCommandShare");
+    a.signals.uncheckedCommandShare = { value: 0.25, n: 12, window: "detail", sources: ["codex.rollouts"], from: Date.UTC(2026, 9, 3), to: Date.UTC(2026, 10, 9) };
+    const out = parsed(a);
+    expect((out.signals as Json).uncheckedCommandShare).toEqual({ value: 0.25, n: 12, window: "detail", from: "2026-10", to: "2026-11" });
+    expect(JSON.stringify(out)).not.toContain("codex.rollouts");
+  });
+
+  test("it is a share: a value outside [0, 1] fails the export", () => {
+    const a = analyze(personaScan("expert"), UTC);
+    a.signals.uncheckedCommandShare = { value: 1.5, n: 2, window: "detail", sources: [] };
+    expect(() => exportPayload(a, OPTS)).toThrow("$.signals.uncheckedCommandShare.value");
+  });
+});
+
 describe("exportPayload: provenance", () => {
   test("each component carries its metric's window; the stack and risk panels their window and n; the repo pass its status", () => {
     const a = analyze(personaScan("expert"), UTC);
