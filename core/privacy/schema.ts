@@ -1,4 +1,5 @@
 import type { Feature, DurationArc, PromptArc } from "../analysis/exposure";
+import type { RepoSignals } from "../git/types";
 import type { ConfigEv, CoverageEv } from "../model/events";
 import type { TechCategory, Toolchain, ToolId, Window } from "../model/ids";
 import type { CheckId, CheckStatus, Forensics } from "../forensics/index";
@@ -233,6 +234,7 @@ const FORENSIC_BANDS = keysOf<Forensics["band"]>({ consistent: true, "consistent
 const CHECK_IDS = keysOf<CheckId>({ C1: true, C2: true, C3: true, C4: true, C5: true, C6: true, C7: true, C8: true, C9: true, C10: true,
   "soft:rhythm": true, "soft:repeated-long": true, "soft:recent-burst": true, "soft:unclosed-tools": true, "soft:new-config": true });
 const CHECK_STATUS = keysOf<CheckStatus>({ pass: true, note: true, warn: true, fail: true, "n/a": true, info: true });
+const REPO_STATUS = keysOf<RepoSignals["status"]>({ ok: true, partial: true, off: true, "git-missing": true });
 const ROLES: readonly string[] = Object.freeze([...Object.values(PRACTICE_ROLES), ...Object.values(STACK_ROLES)]);
 
 // ---------- building blocks ----------
@@ -321,6 +323,8 @@ export const AIPROF2: FieldSpec = obj({
   schema: en(["aiprof/2"]),
   core: str(/^(?=.{1,64}$)(?:0|[1-9]\d{0,3})\.(?:0|[1-9]\d{0,3})\.(?:0|[1-9]\d{0,3})(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/, "public"),
   reference: en(["v0"]),
+  /** The repo pass's status: a reader must see a pass that was partial or off. */
+  repoSignals: en(REPO_STATUS),
   coverage: arr(obj({
     tool: TOOL, window: WINDOW, statuses: arr(en(COVERAGE_STATUS), 64), beta: bool("public"), from: opt(MONTH), to: opt(MONTH),
     sessions: int(), prompts: int(), formatChanged: bool(),
@@ -334,7 +338,7 @@ export const AIPROF2: FieldSpec = obj({
     openTail: bool(), confidence: nullable(en(["low", "medium", "high"])), n: int(), needs: int(), part: en(EVIDENCE_PARTS), window: WINDOW,
     components: arr(obj({
       id: en(COMPONENTS.map((c) => c.id)), status: en(["ok", "not-measurable", "not-measured"]), x: nullable(num()), z: nullable(num()), n: int(),
-      weight: share(),
+      weight: share(), window: WINDOW,
     }), 16),
   }), DIMENSION_IDS.length),
   personas: arr(en(ROLES), 3),
@@ -352,10 +356,12 @@ export const AIPROF2: FieldSpec = obj({
     firstSeen: counts(FEATURES, WEEK),
     models: { t: "record", key: MODEL_KEY, of: int(), maxKeys: 64 },
   }),
-  stack: obj({ languages: counts(EDIT_LANGS), toolchains: counts(TOOLCHAINS), techCategories: counts(TECH_CATEGORIES) }),
+  /** The stack, with the window and n of its edit counts (`Stack.meta`). */
+  stack: obj({ languages: counts(EDIT_LANGS), toolchains: counts(TOOLCHAINS), techCategories: counts(TECH_CATEGORIES), window: WINDOW, n: int() }),
+  /** The risk posture, with its window and n (the sessions that gave a mode). */
   risk: obj({
     permission: counts([...RISK_TOKENS.permission, "other"]), approval: counts([...RISK_TOKENS.approval, "other"]),
-    sandbox: counts([...RISK_TOKENS.sandbox, "other"]),
+    sandbox: counts([...RISK_TOKENS.sandbox, "other"]), window: WINDOW, n: int(),
   }),
   config: obj({
     byKind: counts(CONFIG_KINDS, obj({ authored: int(), installed: int(), other: int(), used: int() })),

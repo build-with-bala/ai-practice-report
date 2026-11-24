@@ -161,6 +161,7 @@ function build(a: Analysis, o: ExportOptions): Record<string, unknown> {
     schema: "aiprof/2",
     core: a.meta.core,
     reference: a.meta.reference,
+    repoSignals: a.meta.repoSignals,
     coverage: a.coverage.rows.slice(0, MAX_COVERAGE).map((r) => ({
       tool: r.tool, window: r.window, statuses: r.sources.map((x) => x.status).sort(cmp), beta: r.sources.some((x) => x.beta),
       from: month(r.from), to: month(r.to), sessions: r.sessions, prompts: r.prompts, formatChanged: r.formatChanged,
@@ -169,7 +170,8 @@ function build(a: Analysis, o: ExportOptions): Record<string, unknown> {
     dimensions: a.dimensions.map((d) => ({
       id: d.id, status: d.status, score: d.score, interval: d.interval, openTail: d.openTail, confidence: d.confidence, n: d.n, needs: d.needs,
       part: d.part, window: d.meta.window,
-      components: d.components.map((c) => ({ id: c.id, status: c.status, x: roundOrNull(c.x), z: roundOrNull(c.z), n: c.n, weight: round(c.weight) })),
+      // each component's own window: a dimension may mix detail and lifetime components
+      components: d.components.map((c) => ({ id: c.id, status: c.status, x: roundOrNull(c.x), z: roundOrNull(c.z), n: c.n, weight: round(c.weight), window: c.meta.window })),
     })),
     personas: a.personas,
     signals: Object.fromEntries(METRIC_KEYS.map((k) => [k, metric(a.signals[k])])),
@@ -188,8 +190,14 @@ function build(a: Analysis, o: ExportOptions): Record<string, unknown> {
       firstSeen: firstSeen(a, week),
       models: models(a.private.models),
     },
-    stack: { languages: pick(a.stack.languages, EDIT_LANGS), toolchains: pick(a.stack.toolchains, TOOLCHAINS), techCategories: pick(a.stack.techCategories, TECH_CATEGORIES) },
-    risk: { permission: risk("permission", a.risk.permission), approval: risk("approval", a.risk.approval), sandbox: risk("sandbox", a.risk.sandbox) },
+    stack: {
+      languages: pick(a.stack.languages, EDIT_LANGS), toolchains: pick(a.stack.toolchains, TOOLCHAINS), techCategories: pick(a.stack.techCategories, TECH_CATEGORIES),
+      window: a.stack.meta.window, n: a.stack.meta.n,
+    },
+    risk: {
+      permission: risk("permission", a.risk.permission), approval: risk("approval", a.risk.approval), sandbox: risk("sandbox", a.risk.sandbox),
+      window: a.risk.meta.window, n: a.risk.meta.n,
+    },
     config: {
       byKind: Object.fromEntries(Object.entries(pick(a.config.byKind, CONFIG_KINDS)).map(([k, v]) =>
         [k, { authored: v.authored, installed: v.installed, other: v.other, used: v.used }])),

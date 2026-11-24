@@ -623,7 +623,7 @@ describe("exportPayload: the preview contract and deny by default", () => {
   test("the top level holds exactly the declared parts", () => {
     const out = parsed(analyze(personaScan("intermediate"), UTC));
     expect(Object.keys(out).sort()).toEqual(["config", "core", "coverage", "dimensions", "exclusions", "exposure", "forensics", "identity", "otherProjects",
-      "overall", "personas", "projects", "reference", "risk", "schema", "signals", "stack"]);
+      "overall", "personas", "projects", "reference", "repoSignals", "risk", "schema", "signals", "stack"]);
   });
 
   test("an empty scan exports a valid payload with nothing scored", () => {
@@ -641,7 +641,43 @@ describe("exportPayload: the preview contract and deny by default", () => {
     a.risk.permission = { default: 2, acceptEdits: 1, [CANARY.slug]: 3, weird: 4 };
     a.risk.approval = { never: 1, [CANARY.slug]: 2 };
     a.risk.sandbox = { "workspace-write": 5, other: 1, [CANARY.project]: 1 };
-    expect(parsed(a).risk).toEqual({ permission: { default: 2, acceptEdits: 1, other: 7 }, approval: { never: 1, other: 2 }, sandbox: { "workspace-write": 5, other: 2 } });
+    expect(parsed(a).risk).toEqual({ permission: { default: 2, acceptEdits: 1, other: 7 }, approval: { never: 1, other: 2 }, sandbox: { "workspace-write": 5, other: 2 },
+      window: a.risk.meta.window, n: a.risk.meta.n });
+  });
+});
+
+describe("exportPayload: provenance", () => {
+  test("each component carries its metric's window; the stack and risk panels their window and n; the repo pass its status", () => {
+    const a = analyze(personaScan("expert"), UTC);
+    const out = parsed(a);
+    const dims = out.dimensions as Array<{ components: Json[] }>;
+    const windows = dims.flatMap((d) => d.components.map((c) => c.window));
+    expect(windows).toEqual(a.dimensions.flatMap((d) => d.components.map((c) => c.meta.window)));
+    expect(new Set(windows)).toEqual(new Set(["detail", "lifetime"])); // a dimension can mix them: the reader must see which
+    expect(out.stack).toMatchObject({ window: a.stack.meta.window, n: a.stack.meta.n });
+    expect(out.risk).toMatchObject({ window: a.risk.meta.window, n: a.risk.meta.n });
+    expect(out.repoSignals).toBe(a.meta.repoSignals);
+    for (const status of ["partial", "off", "git-missing"] as const) {
+      const b = structuredClone(a);
+      b.meta.repoSignals = status;
+      expect(parsed(b).repoSignals).toBe(status);
+    }
+  });
+
+  test("a component window, a panel n or a repo status outside its form fails the export", () => {
+    const base = analyze(personaScan("expert"), UTC);
+    for (const [mutate, path] of [
+      [(a: Analysis) => { a.dimensions[0]!.components[0]!.meta.window = hostile("weekly"); }, "$.dimensions[0].components[0].window"],
+      [(a: Analysis) => { a.stack.meta.n = -1; }, "$.stack.n"],
+      [(a: Analysis) => { a.risk.meta.window = hostile("all"); }, "$.risk.window"],
+      [(a: Analysis) => { a.meta.repoSignals = hostile("half"); }, "$.repoSignals"],
+    ] as const) {
+      const a = structuredClone(base);
+      mutate(a);
+      let err: unknown;
+      try { exportPayload(a, OPTS); } catch (e) { err = e; }
+      expect(`${path} ${(err as ExportError | undefined)?.paths?.join(",")}`).toBe(`${path} ${path}`);
+    }
   });
 });
 
