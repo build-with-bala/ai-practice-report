@@ -2,6 +2,7 @@ import pkg from "../package.json" with { type: "json" };
 import { exposure, type Exposure } from "./analysis/exposure";
 import { projectLabels, projects, type ProjectSummary } from "./analysis/labels";
 import { panels, type ConfigPanel, type CoveragePanel, type DayParts, type RiskPosture, type Stack } from "./analysis/panels";
+import { checkExclusions, ExclusionError } from "./analysis/exclusions";
 import { analysisScope } from "./analysis/scope";
 import { buildSessionTable } from "./analysis/sessions";
 import { buildSessionStats } from "./analysis/walk";
@@ -25,8 +26,9 @@ import type { Signals } from "./signals/types";
  * `timeZone`: the IANA zone days and weeks are keyed in (default the process zone, read through `Intl`); `exclude`:
  * tools, projects, and a date range (epoch ms, inclusive) to leave out; `releases`: the release table C9 checks against
  * (default the shipped one). A project is named by its opaque label, matched without regard to letter case ("p-3f2a"
- * names "P-3F2A"), or by its projectKey, matched exactly; an entry that names neither fails closed with an
- * `ExclusionError`, so a typo never silently excludes nothing.
+ * names "P-3F2A"), or by its projectKey, matched exactly. Every exclusion fails closed with an `ExclusionError`, so a
+ * typo never silently excludes nothing: a project entry that names neither, a tool outside the closed tool list, a
+ * `from` or `to` that is not a finite number, or a `from` later than `to` (`checkExclusions`).
  */
 export interface AnalyzeOptions { reference?: "v0"; bootstrap?: number; seed?: number; now?: number; timeZone?: string;
   exclude?: { tools?: ToolId[]; projects?: string[]; from?: number; to?: number }; releases?: ReleaseTable }
@@ -59,14 +61,7 @@ export interface Analysis {
 
 const cmp = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
-/** An `exclude.projects` entry that names no project label or key. Its message quotes the entry only when it has the shape of a label or key. */
-export class ExclusionError extends RangeError {
-  override readonly name = "ExclusionError";
-  constructor(entry: string) {
-    const shown = /^[A-Za-z0-9-]{1,64}$/.test(entry) ? ` "${entry}"` : "";
-    super(`analyze: the project exclusion${shown} matches no project label or key`);
-  }
-}
+export { ExclusionError };
 
 /**
  * The analysis of a scan result (see `Analysis`): pure, synchronous and deterministic. No I/O and no clock: `now`
@@ -93,9 +88,10 @@ export function analyze(raw: ScanResult, o: AnalyzeOptions = {}): Analysis {
   const resolve = (entry: string): string => {
     if (labels.has(entry)) return entry;
     const key = keyOf.get(entry.toUpperCase());
-    if (key === undefined) throw new ExclusionError(entry);
+    if (key === undefined) throw new ExclusionError("projects", "matches no project label or key", entry);
     return key;
   };
+  checkExclusions(o.exclude);
   const ex = o.exclude ?? {};
   const exclude = { ...ex, ...(ex.projects ? { projects: ex.projects.map(resolve) } : {}) };
 

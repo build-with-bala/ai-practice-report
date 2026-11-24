@@ -3,6 +3,7 @@ import type { ToolId } from "../model/ids";
 import type { ScanResult } from "../scan";
 import { activityOf, dayKey } from "./activity";
 import { dedupe } from "./dedupe";
+import { checkExclusions } from "./exclusions";
 import type { Capabilities, Exclusions, SessionRow, SessionTable } from "./types";
 
 /** The event kinds that name a session (`sessionId`): an event of these whose session is not in the store is an orphan. */
@@ -87,6 +88,7 @@ function capabilitiesOf(raw: ScanResult, counted: (sessionId: string | undefined
  * time (the caller's, never the clock's); `timeZone` keys the activity days.
  */
 export function buildSessionTable(raw: ScanResult, o: { now: number; timeZone: string; exclude?: Exclusions }): SessionTable {
+  checkExclusions(o.exclude);
   const ex = o.exclude ?? {};
   const toolEx = new Set<ToolId>(ex.tools ?? []);
   const projEx = new Set<string>(ex.projects ?? []);
