@@ -55,7 +55,7 @@ describe("runGit", () => {
 
   test("the safe arguments and environment", () => {
     expect(GIT_SAFE_ARGS).toEqual(["--no-pager", "-c", "core.fsmonitor=false", "-c", "log.showSignature=false", "-c", "core.quotepath=off", "-c", "color.ui=never",
-      "-c", "protocol.allow=never"]);
+      "-c", "protocol.allow=never", "-c", "i18n.logOutputEncoding=UTF-8"]);
     const env = gitEnv({ PATH: "/bin", HOME: "/h", GIT_DIR: "/x", GIT_CONFIG_GLOBAL: "/y", GIT_EXTERNAL_DIFF: "z", UNSET: undefined });
     expect(env).toEqual({
       PATH: "/bin", HOME: "/h", GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0", GIT_NO_LAZY_FETCH: "1", GIT_ALLOW_PROTOCOL: "none", GIT_CONFIG_NOSYSTEM: "1",

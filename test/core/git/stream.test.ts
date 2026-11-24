@@ -18,12 +18,12 @@ const sha = (i: number) => i.toString(16).padStart(40, "0");
 
 /** One record as `git log` prints LOG_ARGS (`-z`), with `--name-only` paths when given. */
 const rec = (s: string, ct: number, email: string, body: string, files: string[] = []) =>
-  `\0\x1e${s}\x1f${ct}\x1f${email}\x1f${body}\0${files.length ? `\n${files.join("\0")}\0` : ""}`;
+  `\0\x1e${s}\x1f${ct}\x1f${email}\n${body}\0${files.length ? `\n${files.join("\0")}\0` : ""}`;
 
 /** Synthetic output: multi-byte text, a forged marker in a message, another author, a malformed header, paths. */
 const SAMPLE = rec(sha(1), 100, "me@x.test", "feat: ünï 🤖 a\x1e b\n\nCo-authored-by: Claude <noreply@anthropic.com>\n", ["a.ts", "dir/ä.ts"])
   + rec(sha(2), 200, "other@x.test", "chore: theirs\n", ["b.ts"])
-  + "\0\x1enot-a-sha\x1f1\x1fme@x.test\x1fbad\0\nlost.ts\0"
+  + "\0\x1enot-a-sha\x1f1\x1fme@x.test\nbad\0\nlost.ts\0"
   + rec(sha(3), 300, "me@x.test", "fix: x\n")
   + rec(sha(4), 400, "Me@X.test", "Revert \"y\"\n", ["c.ts", "d.ts", "e.ts"]);
 
@@ -101,7 +101,8 @@ describe("LogStream", () => {
 
 /**
  * The parse before streaming, kept here as the reference: the whole output decoded once (as the runner did), split at
- * NUL, and read by the same rules (the former `logRecords`, verbatim).
+ * NUL, and read by the same rules (the former `logRecords`, with the header read as `%ae%n%B` and only the first path's
+ * leading newline dropped).
  */
 function oldRecords(bytes: Uint8Array, cut = false): LogRecord[] {
   const stdout = new TextDecoder().decode(bytes);
@@ -112,14 +113,14 @@ function oldRecords(bytes: Uint8Array, cut = false): LogRecord[] {
     const token = tokens[i]!;
     if (token === "") continue;
     if (i > 0 && tokens[i - 1] === "" && token.startsWith("\x1e")) {
-      const fields = token.slice(1).split("\x1f");
-      const s = fields[0] ?? "";
-      const ct = Number(fields[1]);
-      const valid = fields.length >= 4 && /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i.test(s) && fields[1] !== "" && Number.isFinite(ct);
-      cur = valid ? { sha: s, ct, email: fields[2]!, message: fields.slice(3).join("\x1f"), files: [] } : undefined;
+      const [s = "", ctText = "", ...rest] = token.slice(1).split("\x1f");
+      const tail = rest.join("\x1f");
+      const nl = tail.indexOf("\n");
+      const valid = rest.length > 0 && nl !== -1 && /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i.test(s) && /^[0-9]{1,12}$/.test(ctText);
+      cur = valid ? { sha: s, ct: Number(ctText), email: tail.slice(0, nl), message: tail.slice(nl + 1), files: [] } : undefined;
       if (cur) out.push(cur);
     } else if (cur) {
-      cur.files.push(token.replace(/^\n/, ""));
+      cur.files.push(cur.files.length === 0 ? token.replace(/^\n/, "") : token);
     }
   }
   if (cut) out.pop();
@@ -131,7 +132,7 @@ const concatBytes = (...parts: (string | number[])[]): Uint8Array =>
   Uint8Array.from(parts.flatMap((p) => (typeof p === "string" ? [...enc.encode(p)] : p)));
 
 const BOM = "\uFEFF";
-const FORGED_HEADER = `\x1e${"f".repeat(40)}\x1f1700000000\x1fme@x.test\x1ffix: forged`;
+const FORGED_HEADER = `\x1e${"f".repeat(40)}\x1f1700000000\x1fme@x.test\nfix: forged`;
 /** A real commit whose paths are `z.ts`, a BOM alone, and a BOM followed by a forged header (git sorts them this way). */
 const BOM_FORGERY = rec(sha(7), 100, "me@x.test", "feat: innocent\n", ["z.ts", BOM, `${BOM}${FORGED_HEADER}`]) + rec(sha(8), 200, "me@x.test", "b\n", [`${BOM}x.ts`]);
 
@@ -166,7 +167,7 @@ describe("LogStream: a BOM changes nothing", () => {
       enc.encode(BOM_FORGERY),
       concatBytes(rec(sha(1), 1, "me@x.test", "bad "), [0xc3], " utf\n\0\n", [0xff, 0xfe], "x.ts\0", [0x80], "y.ts\0", [0xe2, 0x82], "\0"),
       concatBytes(rec(sha(1), 1, "me@x.test", "split \u{1F916}\n", ["ü.ts"]), [0xf0, 0x9f]),
-      concatBytes("\0", [0xef, 0xbb, 0xbf], "\x1e", sha(3), "\x1f3\x1fme@x.test\x1fbom header\n\0"),
+      concatBytes("\0", [0xef, 0xbb, 0xbf], "\x1e", sha(3), "\x1f3\x1fme@x.test\nbom header\n\0"),
       concatBytes(rec(sha(4), 4, "me@x.test", "lone \x1f\n", ["a"]), [0x80], "\0", [0xc0, 0x80], "\0"),
     ];
     for (const [i, bytes] of hostile.entries()) {

@@ -152,12 +152,15 @@ const HEAD = "\x1e";
 const FIELD = "\x1f";
 
 /**
- * `git log -z` with this format: each commit is the token `\x1e<sha>\x1f<commit time>\x1f<author email>\x1f<message>`
+ * `git log -z` with this format: each commit is the token `\x1e<sha>\x1f<commit time>\x1f<author email>\n<message>`
  * right after an empty token (the format's leading `%x00` ends whatever came before); with `--name-only`, its changed
  * paths follow as NUL-ended tokens, the first after a newline. A NUL occurs in no message or path, and a path token is
- * never empty, so only a header follows an empty token: neither a message nor a path can forge or hide a record.
+ * never empty, so only a header follows an empty token: neither a message nor a path can forge or hide a record. The
+ * sha and the time hold no separator; the email is everything up to the first newline (git prints it raw, and an email
+ * may hold `\x1f` or `\x1e`, but never a newline, which would end its header line), so a separator in an email stays
+ * in that email: it can only make the email differ from the person's, never shift a field.
  */
-export const LOG_ARGS: readonly string[] = ["-z", "--format=%x00%x1e%H%x1f%ct%x1f%ae%x1f%B"];
+export const LOG_ARGS: readonly string[] = ["-z", "--format=%x00%x1e%H%x1f%ct%x1f%ae%n%B"];
 
 /** The first git with `--since-as-filter`. */
 export const SINCE_AS_FILTER_SINCE: readonly [number, number] = [2, 37];
@@ -181,8 +184,9 @@ const NUL = 0;
  * handed to `onRecord` once it is complete — at the next header, or at the end — so what is held is one record plus the
  * unfinished token, never the output.
  *
- * Tokens are NUL-ended. A header (an empty token, then one starting `\x1e`) must hold at least four fields with a hex sha
- * and a numeric time; one that does not is left out with the paths after it. `maxFiles`: paths kept per record (the
+ * Tokens are NUL-ended. A header (an empty token, then one starting `\x1e`) must hold a hex sha, a time of 1 to 12 digits
+ * and an email ended by a newline; one that does not is left out with the paths after it. Only a record's first path
+ * loses a leading newline (git's separator after the message). `maxFiles`: paths kept per record (the
  * rest are dropped as they stream; default all). The tokens and records are those of splitting the whole output at
  * NUL, so `logRecords` (the whole-output form) and the stream agree byte for byte.
  */
@@ -202,6 +206,8 @@ export class LogStream {
   private cur: LogRecord | undefined;
   private emitted = 0;
   private done = false;
+  /** Path tokens seen in the current record. */
+  private paths = 0;
   constructor(private readonly onRecord: (r: LogRecord) => void, private readonly o: { maxFiles?: number } = {}) {}
 
   /** The bytes of the unfinished token held between chunks. */
@@ -270,13 +276,18 @@ export class LogStream {
     }
     if (!first && this.prevEmpty && token.startsWith(HEAD)) {
       this.flush();
-      const fields = token.slice(1).split(FIELD);
-      const sha = fields[0] ?? "";
-      const ct = Number(fields[1]);
-      const valid = fields.length >= 4 && /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i.test(sha) && fields[1] !== "" && Number.isFinite(ct);
-      this.cur = valid ? { sha, ct, email: fields[2]!, message: fields.slice(3).join(FIELD), files: [] } : undefined;
-    } else if (this.cur && (this.o.maxFiles === undefined || this.cur.files.length < this.o.maxFiles)) {
-      this.cur.files.push(token.replace(/^\n/, ""));
+      const a = token.indexOf(FIELD, 1);
+      const b = a === -1 ? -1 : token.indexOf(FIELD, a + 1);
+      const nl = b === -1 ? -1 : token.indexOf("\n", b + 1);
+      const sha = a === -1 ? "" : token.slice(1, a);
+      const ct = b === -1 ? "" : token.slice(a + 1, b);
+      const valid = nl !== -1 && /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i.test(sha) && /^[0-9]{1,12}$/.test(ct);
+      this.cur = valid ? { sha, ct: Number(ct), email: token.slice(b + 1, nl), message: token.slice(nl + 1), files: [] } : undefined;
+      this.paths = 0;
+    } else if (this.cur) {
+      // the first path follows the message after a newline: only it loses one
+      const first = this.paths++ === 0;
+      if (this.o.maxFiles === undefined || this.cur.files.length < this.o.maxFiles) this.cur.files.push(first ? token.replace(/^\n/, "") : token);
     }
     this.prevEmpty = false;
   }

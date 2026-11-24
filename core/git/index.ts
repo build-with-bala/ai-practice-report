@@ -82,13 +82,14 @@ export const REPO_SIGNALS_DESCRIBE: { reads: string[]; runs: string[] } = {
     "git rev-parse --show-toplevel --git-common-dir",
     "git config --get user.email",
     "git config --get extensions.partialClone, git config --get remote.origin.promisor (git older than 2.44 only)",
-    "git log --all --no-merges --no-renames --since-as-filter=<date> --max-count=<n> --name-only -z (commit metadata only)",
-    "git log -n50 --since-as-filter=<180 days ago> --format=%ct -- <instruction file paths> (commit times only; not for a partial clone read without paths)",
+    "git log --no-mailmap --exclude=refs/stash --all --no-merges --no-renames --since-as-filter=<date> --max-count=<n> --name-only -z (commit metadata only)",
+    "git log --no-mailmap -n50 --since-as-filter=<180 days ago> --format=%ct -- <instruction file paths> (commit times only; not for a partial clone read without paths)",
     "on a git older than 2.37, --since instead of --since-as-filter: there, a commit whose recorded date is older than the window " +
       "hides the ancestors no other branch reaches, so their commits are not read",
     "every git command: started by its absolute path on PATH (never from the repo folder), with no stdin, no pager and no prompt; " +
       "no transport at all (-c protocol.allow=never, GIT_ALLOW_PROTOCOL=none) and GIT_NO_LAZY_FETCH=1, so nothing is " +
-      "fetched whatever the repo config says; fsmonitor and signature checks off; no system config; inherited GIT_* variables removed",
+      "fetched whatever the repo config says; fsmonitor and signature checks off; log output in UTF-8; no .mailmap; no system config; " +
+      "inherited GIT_* variables removed",
   ],
 };
 
@@ -322,7 +323,9 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
     // window start is `--since-as-filter` where git has it; on an older git, `--since` (see `sinceArg`) still lets a
     // commit whose recorded date is older than the window hide the ancestors no other branch reaches.
     const logArgs = (withNames: boolean): string[] => [
-      "log", "--all", "--no-merges", "--no-renames",
+      // `--exclude=refs/stash` before `--all`: a stash is no commit of the person's; `--no-mailmap`: the worktree's
+      // `.mailmap` (a file anyone can commit, or a FIFO) is never opened
+      "log", "--no-mailmap", "--exclude=refs/stash", "--all", "--no-merges", "--no-renames",
       ...(since === undefined ? [] : [sinceArg(since, atLeast(version, SINCE_AS_FILTER_SINCE))]),
       `--max-count=${maxCommits}`, ...(withNames ? ["--name-only"] : []), ...LOG_ARGS,
     ];

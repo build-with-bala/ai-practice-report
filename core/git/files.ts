@@ -359,7 +359,7 @@ export async function readRepoFiles(root: string, cwds: readonly string[], o: Re
     const paths = [...Object.values(INSTRUCTION_FILES), ...subs.flatMap((sub) => SESSION_FOLDER_FILES.map((n) => path.join(sub, n)))]
       .map((p) => `:(literal)${p.split(path.sep).join("/").replace(/\/$/, "")}`);
     try {
-      const r = await o.runner(["log", `-n${HISTORY_MAX}`, sinceArg(since, o.sinceAsFilter ?? false), "--format=%ct", "--", ...paths],
+      const r = await o.runner(["log", "--no-mailmap", `-n${HISTORY_MAX}`, sinceArg(since, o.sinceAsFilter ?? false), "--format=%ct", "--", ...paths],
         { cwd: root, timeoutMs: o.timeoutMs, maxBytes: HISTORY_BYTES, signal: o.signal });
       if (r.timedOut) skip("timeout");
       else if (r.code === 0 && !r.truncated) {

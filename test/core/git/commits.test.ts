@@ -15,7 +15,7 @@ const SHA3 = "fedcba9876543210fedcba9876543210fedcba98";
 
 /** One record as `git log` prints LOG_ARGS (`-z`), with `--name-only` paths when given. */
 const rec = (sha: string, ct: number, email: string, body: string, files: string[] = []) =>
-  `\0\x1e${sha}\x1f${ct}\x1f${email}\x1f${body}\0${files.length ? `\n${files.join("\0")}\0` : ""}`;
+  `\0\x1e${sha}\x1f${ct}\x1f${email}\n${body}\0${files.length ? `\n${files.join("\0")}\0` : ""}`;
 
 describe("classifyCommit", () => {
   const cases: [string, ReturnType<typeof classifyCommit>][] = [
@@ -91,11 +91,11 @@ describe("classifyCommit", () => {
 
 describe("parseLog", () => {
   test("the format asks for sha, commit time, author email and message; records end with NUL (-z)", () => {
-    expect(LOG_ARGS).toEqual(["-z", "--format=%x00%x1e%H%x1f%ct%x1f%ae%x1f%B"]);
+    expect(LOG_ARGS).toEqual(["-z", "--format=%x00%x1e%H%x1f%ct%x1f%ae%n%B"]);
   });
 
   test("a \\x1e (or \\x1f) inside a message neither drops the real commit nor forges a record", () => {
-    const forged = `\x1e${SHA2}\x1f1\x1fme@x.test\x1fforged`;
+    const forged = `\x1e${SHA2}\x1f1\x1fme@x.test\nforged`;
     const out = rec(SHA1, 1, "me@x.test", `feat: a ${forged}\x1f tail\n`, ["a.ts"]) + rec(SHA3, 2, "me@x.test", "b\n");
     const records = logRecords(out);
     expect(records.map((r) => [r.sha, r.files])).toEqual([[SHA1, ["a.ts"]], [SHA3, []]]);
@@ -103,8 +103,26 @@ describe("parseLog", () => {
     expect(parseLog(out, { salt, email: "me@x.test", maxFiles: 200 }).map((c) => c.shaKey)).toEqual([keyedHash(salt, "abc1234"), keyedHash(salt, "fedcba9")]);
   });
 
+  test("an author email holding a field or record separator stays one email: it never reads as the person's", () => {
+    const out = rec(SHA1, 1, "me@x.test\x1fother@x.test", "Co-authored-by: Claude <noreply@anthropic.com>\n")
+      + rec(SHA2, 2, "me@x.test\x1e", "y\n") + rec(SHA3, 3, "me@x.test", "z\n");
+    expect(logRecords(out).map((r) => r.email)).toEqual(["me@x.test\x1fother@x.test", "me@x.test\x1e", "me@x.test"]);
+    expect(parseLog(out, { salt, email: "me@x.test", maxFiles: 200 }).map((c) => c.id)).toEqual([keyedHash(salt, SHA3)]);
+  });
+
+  test("a commit time is 1 to 12 digits: a longer or signed one leaves the record out", () => {
+    const out = rec(SHA1, 1, "me@x.test", "a\n") + `\0\x1e${SHA2}\x1f${"9".repeat(20)}\x1fme@x.test\nb\n\0` + `\0\x1e${SHA3}\x1f-5\x1fme@x.test\nc\n\0`
+      + rec(SHA3, 999_999_999_999, "me@x.test", "d\n");
+    expect(logRecords(out).map((r) => r.ct)).toEqual([1, 999_999_999_999]);
+  });
+
+  test("only the first path of a record loses its leading newline (git's separator); a later path keeps one", () => {
+    const out = rec(SHA1, 1, "me@x.test", "a\n", ["\nx.ts", "\nx.ts"]);
+    expect(logRecords(out)[0]!.files).toEqual(["\nx.ts", "\nx.ts"]);
+  });
+
   test("a changed path shaped like a record is a path, never a record", () => {
-    const hostile = `\x1e${"d".repeat(40)}\x1f1700000001\x1fme@x.test\x1fCo-authored-by: Claude <noreply@anthropic.com>`;
+    const hostile = `\x1e${"d".repeat(40)}\x1f1700000001\x1fme@x.test\nCo-authored-by: Claude <noreply@anthropic.com>`;
     const out = rec(SHA1, 1, "me@x.test", "x\n", ["a.ts", hostile, hostile]) + rec(SHA3, 2, "me@x.test", "y\n", [hostile]);
     expect(logRecords(out).map((r) => [r.sha, r.files.length])).toEqual([[SHA1, 3], [SHA3, 1]]);
     expect(parseLog(out, { salt, email: "me@x.test", maxFiles: 200 }).map((c) => c.ai)).toEqual([undefined, undefined]);
@@ -132,10 +150,10 @@ describe("parseLog", () => {
   });
 
   test("a record without a valid sha, time or field count is left out with its paths; a cut output loses its last record", () => {
-    const out = rec(SHA1, 1, "me@x.test", "x\n") + "\0\x1enot-a-sha\x1f1\x1fme@x.test\x1fy\0\nbad.ts\0" + `\0\x1e${SHA3}\x1f\x1fme@x.test\x1fz\0`
+    const out = rec(SHA1, 1, "me@x.test", "x\n") + "\0\x1enot-a-sha\x1f1\x1fme@x.test\ny\0\nbad.ts\0" + `\0\x1e${SHA3}\x1f\x1fme@x.test\nz\0`
       + `\0\x1e${SHA2}\x1f3\x1fme@x.test\0`;
     expect(logRecords(out).map((r) => [r.sha, r.files])).toEqual([[SHA1, []]]);
-    const cut = rec(SHA1, 1, "me@x.test", "x\n", ["a.ts"]) + `\0\x1e${SHA2}\x1f2\x1fme@x.test\x1fpart`;
+    const cut = rec(SHA1, 1, "me@x.test", "x\n", ["a.ts"]) + `\0\x1e${SHA2}\x1f2\x1fme@x.test\npart`;
     expect(parseLog(cut, { salt, email: "me@x.test", maxFiles: 200, cut: true }).map((c) => c.files.length)).toEqual([1]);
   });
 });

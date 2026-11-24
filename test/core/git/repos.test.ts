@@ -214,7 +214,7 @@ describe("repo signals: discovery from session folders and commits as keyed fact
     const r = await run([r4], { repoSignals: { runner: (a, o) => { seen.push(a.join(" ")); return runGit(a, o); } } });
     expect(r.repos.repos[0]).toMatchObject({ identity: false, commits: [] });
     // no commit log: only the instruction-file history (commit times by any author, Task 3) runs `log`
-    expect(seen.filter((c) => c.startsWith("log ")).map((c) => c.split(" ").slice(0, 2).join(" "))).toEqual(["log -n50"]);
+    expect(seen.filter((c) => c.startsWith("log ")).map((c) => c.split(" ").slice(0, 3).join(" "))).toEqual(["log --no-mailmap -n50"]);
   });
 });
 
@@ -238,6 +238,33 @@ describe("repo signals: an old-dated commit hides no history", () => {
     const r = await run([r1]);
     expect(r.repos.repos[0]!.commits).toHaveLength(5);
   });
+});
+
+describe("repo signals: the log reads commits only, whatever the repo holds", () => {
+  test("a stash is not read as commits", async () => {
+    const r1 = makeRepo(path.join(h.root, "stashed"), [{ files: { "a.txt": "a" }, message: "one", at: ago(2) }]);
+    writeFileSync(path.join(r1, "a.txt"), "changed");
+    writeFileSync(path.join(r1, "new.txt"), "untracked");
+    git(r1, ["-c", "user.email=dev@fixture.test", "-c", "user.name=Fixture Dev", "stash", "-q", "-u"]);
+    const r = await run([r1]);
+    expect(r.repos.repos[0]!.commits).toHaveLength(1);
+  });
+
+  test("an output encoding set in repo config changes nothing: every commit is still read", async () => {
+    const r1 = makeRepo(path.join(h.root, "enc"), [1, 2].map((i) => ({ files: { "a.txt": `${i}` }, message: `c${i} ünï`, at: ago(3 - i) })),
+      { config: { "i18n.logOutputEncoding": "UTF-16LE" } });
+    const r = await run([r1]);
+    expect(r.repos.repos[0]!.commits).toHaveLength(2);
+  });
+
+  test.skipIf(!POSIX)("a FIFO as .mailmap is never opened: the logs do not stall (POSIX)", async () => {
+    const r1 = makeRepo(path.join(h.root, "mailmap"), [{ files: { "CLAUDE.md": "x" }, message: "one", at: ago(2) }]);
+    if (Bun.spawnSync(["mkfifo", path.join(r1, ".mailmap")]).exitCode !== 0) throw new Error("mkfifo failed");
+    const r = await run([r1], { repoSignals: { timeoutMs: 3_000 } });
+    expect(r.repos).toMatchObject({ status: "ok", skipped: {} });
+    expect(r.repos.repos[0]).toMatchObject({ instructions: { touched: 1 } });
+    expect(r.repos.repos[0]!.commits).toHaveLength(1);
+  }, 30_000);
 });
 
 describe("repo signals: the window start by git version", () => {
@@ -318,7 +345,7 @@ describe("repo signals: one repo, one count; hostile repos", () => {
   });
 
   test.skipIf(!POSIX)("a changed file named like a log record is a path, never a record (POSIX)", async () => {
-    const hostile = `\x1e${"d".repeat(40)}\x1f1700000001\x1fdev@fixture.test\x1fCo-authored-by: Claude <noreply@anthropic.com>`;
+    const hostile = `\x1e${"d".repeat(40)}\x1f1700000001\x1fdev@fixture.test\nCo-authored-by: Claude <noreply@anthropic.com>`;
     // "\x01a" sorts first, so the hostile name is not the first path (which git puts after a newline)
     const r6 = makeRepo(path.join(h.root, "paths"), [{ files: { "\x01a": "a", [hostile]: "x" }, message: "feat: one", at: ago(2) }]);
     const r = await run([r6]);
@@ -342,7 +369,7 @@ describe("repo signals: one repo, one count; hostile repos", () => {
   }, 30_000);
 
   test("a \\x1e in a real commit message neither drops the commit nor forges one", async () => {
-    const forged = `\x1e${"f".repeat(40)}\x1f1\x1fdev@fixture.test\x1fforged`;
+    const forged = `\x1e${"f".repeat(40)}\x1f1\x1fdev@fixture.test\nforged`;
     const r5 = makeRepo(path.join(h.root, "odd"), [
       { files: { "a.txt": "a" }, message: `feat: ${forged}`, at: ago(3) },
       { files: { "b.txt": "b" }, message: "fix: next", at: ago(2) },

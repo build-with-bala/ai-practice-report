@@ -20,10 +20,11 @@ export type GitRunner = (args: readonly string[], o: { cwd: string; timeoutMs: n
 /**
  * Put before every subcommand: no pager; and repo config that would run a program, take a lock or change the output is
  * overridden — no fsmonitor hook, no signature check (`log.showSignature` would run `gpg.program`), paths unquoted,
- * no colour.
+ * no colour, no transport, and log output in UTF-8 (`i18n.logOutputEncoding` set to UTF-16 would make every record
+ * unreadable).
  */
 export const GIT_SAFE_ARGS: readonly string[] = ["--no-pager", "-c", "core.fsmonitor=false", "-c", "log.showSignature=false", "-c", "core.quotepath=off", "-c", "color.ui=never",
-  "-c", "protocol.allow=never"];
+  "-c", "protocol.allow=never", "-c", "i18n.logOutputEncoding=UTF-8"];
 
 /**
  * Set on every git child: no optional locks, no prompt, no lazy fetch of a partial clone, no transport at all (so even a
