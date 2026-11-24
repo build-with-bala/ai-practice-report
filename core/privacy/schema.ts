@@ -339,6 +339,11 @@ const MCP_LABEL = str(new RegExp(`^(?:${[...MCP_PUBLIC].map(esc).join("|")}|cust
  * `<family>-other`), or one of its two fixed tokens, "fine-tuned" and "other". No looser shape is accepted.
  */
 const MODEL_KEY: KeyTest = { test: (k) => k === "fine-tuned" || k === "other" || modelExportId(k) === k };
+/**
+ * The core version: three numbers of at most 4 digits, and at most a pre-release tag from a closed set of words
+ * (alpha, beta, rc, dev) with an optional number ("1.0.0", "1.0.0-dev", "2.1.0-rc.2"). No free suffix, no build part.
+ */
+export const VERSION_PATTERN = /^(?:0|[1-9]\d{0,3})\.(?:0|[1-9]\d{0,3})\.(?:0|[1-9]\d{0,3})(?:-(?:alpha|beta|rc|dev)(?:\.(?:0|[1-9]\d{0,3}))?)?$/;
 /** A project's opaque label: "P-" and the upper-case hex of 4, 6, 8 … or 16 digits, the shortest unique in the store. */
 const PROJECT_LABEL = str(/^P-(?:[0-9A-F]{2}){2,8}$/, "pseudonymous");
 /**
@@ -401,7 +406,7 @@ const REVEALED_NAME = str({ test: isRevealedName }, "revealed");
  */
 export const AIPROF2: FieldSpec = obj({
   schema: en(["aiprof/2"]),
-  core: str(/^(?=.{1,64}$)(?:0|[1-9]\d{0,3})\.(?:0|[1-9]\d{0,3})\.(?:0|[1-9]\d{0,3})(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/, "public"),
+  core: str(VERSION_PATTERN, "public"),
   reference: en(["v0"]),
   /** The repo pass's status: a reader must see a pass that was partial or off. */
   repoSignals: en(REPO_STATUS),

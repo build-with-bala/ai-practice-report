@@ -10,7 +10,7 @@ import { detectEnv, type Env } from "../core/env/env";
 import { homesToScan } from "../core/env/paths";
 import { analyze, ExportError, exportPayload, registry, scan, type Analysis, type CoverageEv, type ScanResult } from "../core/index";
 import { safeList, walk } from "../core/io/fs";
-import { CHECK_IDS, FORENSIC_BANDS, PAYLOAD_WORDS } from "../core/privacy/schema";
+import { CHECK_IDS, FORENSIC_BANDS, PAYLOAD_WORDS, VERSION_PATTERN } from "../core/privacy/schema";
 import { DIMENSION_IDS } from "../core/scoring/dimensions";
 import { ccTranscripts } from "../core/sources/claude-code";
 import { SHELL_TOOLS } from "../core/sources/codex/tools";
@@ -203,9 +203,10 @@ const lastSegment = (p: string): string => (p.replaceAll("\\", "/").replace(/\/+
 
 /**
  * The shapes of the payload's own data strings (a month, an ISO week, a day, a project label, a keyed hash, a version,
- * an MCP "custom #n" label): such a string is the payload's, whatever it contains.
+ * an MCP "custom #n" label): such a string is the payload's, whatever it contains. The version is exactly what the
+ * schema's core field accepts (`VERSION_PATTERN`), so no free suffix is exempt.
  */
-const DATA_SHAPES = [/^\d{4}-\d{2}$/, /^\d{4}-w\d{2}$/, /^\d{4}-\d{2}-\d{2}$/, /^p-[0-9a-f]{4,16}$/, /^[0-9a-f]{16}$/, /^\d+\.\d+\.\d+(?:[-+][0-9a-z.+-]+)?$/,
+const DATA_SHAPES = [/^\d{4}-\d{2}$/, /^\d{4}-w\d{2}$/, /^\d{4}-\d{2}-\d{2}$/, /^p-[0-9a-f]{4,16}$/, /^[0-9a-f]{16}$/, VERSION_PATTERN,
   /^custom #\d+$/];
 
 /**

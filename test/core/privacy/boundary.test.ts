@@ -1,6 +1,6 @@
 // The export boundary as a whole, by mutation: a marker planted in every string field of a real scan, and planted
 // values of every shape at every string leaf and record key of rich analyses, never reach the exported bytes or an
-// error's text, but for the few channels the payload declares on purpose.
+// error's text, but for the few channels the payload declares on purpose (an ISO week, a public MCP name).
 import { describe, expect, test } from "bun:test";
 import path from "node:path";
 import { analyze, type Analysis } from "../../../core/analyze";
@@ -136,7 +136,7 @@ describe("the boundary under a marker in every string field of a scan", () => {
 });
 
 describe("the boundary under planted values at every string leaf and record key of an analysis", () => {
-  /** Free text, a path, an email, a hex id, a uuid, an ISO time, a day, a month, a week, label-, model- and slug-shaped words, a semver with text. */
+  /** Free text, a path, an email, a hex id, a uuid, an ISO time, a day, a month, a week, label-, model- and slug-shaped words, a version with a free suffix. */
   const VALUES = ["Free Text Here", "/srv/jdoe/acme", "jdoe@acme.test", "0123456789abcdef0123456789abcdef", "123e4567-e89b-12d3-a456-426614174000",
     "2026-11-02T10:42:07Z", "2026-11-02", "2026-11", "2026-W45", "P-ACME", "gpt-4o-acme", "acme-payroll", "custom #7", "github", "1.2.3-jdoe.acme"];
   const shape = (p: string): string => p.replace(/\[\d+\]/g, "[]");
@@ -193,7 +193,7 @@ describe("the boundary under planted values at every string leaf and record key 
     return { through: through.sort(), inError, runs };
   }
 
-  test("the forensics world: only a semver version, an ISO week and a public MCP name come through, each where the payload declares it", () => {
+  test("the forensics world: only an ISO week and a public MCP name come through, each where the payload declares it", () => {
     const salt = new Uint8Array(32).fill(7);
     const evs = world().map((x) => x.ev).map((e) => (e.k === "identity" ? { ...e, hash: keyedHash(salt, e.hash) } : e)) as Loose[];
     for (const e of evs) if (e.k === "session" && e.tool === "codex") { e.approval = "on-request"; e.sandbox = "workspace-write"; }
@@ -204,15 +204,15 @@ describe("the boundary under planted values at every string leaf and record key 
     expect(runs).toBeGreaterThan(2_000);
     expect(inError).toEqual([]);
     expect(through).toEqual([
-      "$.exposure.weekly[].week (value) ← 2026-W45", "$.meta.core (value) ← 1.2.3-jdoe.acme", "$.private.config[].name (value) ← github",
+      "$.exposure.weekly[].week (value) ← 2026-W45", "$.private.config[].name (value) ← github",
       "$.projects[].lastWeek (value) ← 2026-W45",
     ]);
   }, 60_000);
 
-  test("the expert persona with canaries: only a semver version comes through", () => {
+  test("the expert persona with canaries: nothing planted comes through (a version with a free suffix is refused)", () => {
     const { through, inError, runs } = plant(analyze(personaScan("expert", { canaries: true }), { timeZone: "UTC" }));
     expect(runs).toBeGreaterThan(2_000);
     expect(inError).toEqual([]);
-    expect(through).toEqual(["$.meta.core (value) ← 1.2.3-jdoe.acme"]);
+    expect(through).toEqual([]);
   }, 60_000);
 });
