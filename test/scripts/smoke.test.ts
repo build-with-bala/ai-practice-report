@@ -13,6 +13,7 @@ import { A, B, buildAgentCli, buildCursor } from "../fixtures/cursor";
 import { personaScan } from "../fixtures/personas";
 import { makeRepo } from "../fixtures/repos";
 import { CANARY, expectNoCanaries } from "../kit/canary";
+import { scanResultOf } from "../kit/scanresult";
 import { fakeHome, type FakeHome } from "../kit/home";
 
 const SMOKE = path.join(import.meta.dir, "..", "..", "scripts", "smoke-local.ts");
@@ -31,7 +32,7 @@ const DAY = /\d{4}-\d{2}-\d{2}/;
 const EPOCH_MS_MIN = 1e12;
 const EPOCH_MS_MAX = 1e13;
 /** The analysis lines the smoke prints (Task 16), each a check that passes on a clean synthetic home. */
-const ANALYSIS_CHECKS = ["not-saturated", "metrics-have-window-and-n", "export-no-raw-paths", "export-under-300kb", "forensics-ran"];
+const ANALYSIS_CHECKS = ["dimensions-scored", "not-saturated", "metrics-have-window-and-n", "export-no-raw-paths", "export-under-300kb", "forensics-ran"];
 const skipChmod = process.platform === "win32" || process.getuid?.() === 0;
 
 interface Run { code: number | null; out: string; err: string }
@@ -209,6 +210,71 @@ describe("the smoke's analysis lines (in process)", () => {
       return checkOf("not-saturated", raw, a);
     };
     expect([at(99, true), at(99, false), at(100, true), at(100, false), at(98, false)]).toEqual(["PASS", "FAIL", "FAIL", "FAIL", "PASS"]);
+  });
+
+  /** Detail-window sessions of a scan with at least one typed (human) prompt. */
+  const typedSessions = (raw: ScanResult): number => new Set(raw.store.all("prompt").filter((p) => p.window === "detail" && p.origin === "human" && p.sessionId !== undefined)
+    .map((p) => p.sessionId)).size;
+
+  test("dimensions-scored: no scored dimension fails on a scan of 20 or more typed detail sessions, and passes on a smaller one", () => {
+    const { raw, a } = fresh();
+    expect(typedSessions(raw)).toBeGreaterThanOrEqual(20);
+    expect(checkOf("dimensions-scored", raw, a)).toBe("PASS");
+    for (const d of a.dimensions) Object.assign(d, { status: "insufficient", score: null, interval: null });
+    expect(checkOf("dimensions-scored", raw, a)).toBe("FAIL");
+    const empty = scanResultOf([], { finishedAt: Date.UTC(2026, 10, 16) });
+    const none = analyze(empty, { timeZone: "UTC" });
+    expect(none.dimensions.filter((d) => d.status === "scored")).toEqual([]);
+    expect(checkOf("dimensions-scored", empty, none)).toBe("PASS");
+  });
+
+  test("not-saturated: a scored dimension outside 1 to 99, or every scored one at an edge, fails", () => {
+    const set = (scores: (i: number) => number) => {
+      const { raw, a } = fresh();
+      a.dimensions.filter((d) => d.status === "scored").forEach((d, i) => { d.score = scores(i); d.openTail = d.score === 99; });
+      return checkOf("not-saturated", raw, a);
+    };
+    expect([set(() => 99), set(() => 1), set((i) => (i % 2 === 0 ? 1 : 99)), set(() => 0), set(() => -3), set((i) => (i === 0 ? 50 : 99))])
+      .toEqual(["FAIL", "FAIL", "FAIL", "FAIL", "FAIL", "PASS"]);
+    const { raw, a } = fresh();
+    a.dimensions.find((d) => d.status === "scored")!.score = null;
+    expect(checkOf("not-saturated", raw, a)).toBe("FAIL");
+  });
+
+  test("forensics-ran: missing soft flags fail; so does every check n/a while Claude Code or Codex data is in scope", () => {
+    const { raw, a } = fresh();
+    expect(a.coverage.rows.some((r) => (r.tool === "claude-code" || r.tool === "codex") && r.sessions + r.prompts > 0)).toBe(true);
+    expect(checkOf("forensics-ran", raw, a)).toBe("PASS");
+    const noSoft = structuredClone(a);
+    noSoft.forensics.checks = noSoft.forensics.checks.filter((c) => !c.id.startsWith("soft:"));
+    expect(checkOf("forensics-ran", raw, noSoft)).toBe("FAIL");
+    const allNa = structuredClone(a);
+    for (const c of allNa.forensics.checks) c.status = "n/a";
+    expect(checkOf("forensics-ran", raw, allNa)).toBe("FAIL");
+    // with no Claude Code or Codex data, every check n/a is what an honest run gives
+    const other = structuredClone(allNa);
+    other.coverage.rows = other.coverage.rows.filter((r) => r.tool !== "claude-code" && r.tool !== "codex");
+    expect(checkOf("forensics-ran", raw, other)).toBe("PASS");
+  });
+
+  test("export-no-raw-paths: a session folder's or repo root's name in the export fails; a short name or a payload word does not; only counts print", () => {
+    const raw = personaScan("expert");
+    const a = analyze(raw, { timeZone: "UTC" });
+    const exported = exportOf(a);
+    if (!exported.ok) throw new Error("the persona's export must fit the schema");
+    const run = (json: string, r: ScanResult) => analysisLines(r, a, { ...exported, json }, home).lines;
+    const cwds = new Map([["k", "/home/dev/clients/AcmePayroll"], ["j", "C:\\work\\prompts"], ["s", "/srv/abcd"]]);
+    const roots = new Map([["r", "/srv/code/ledger-svc"]]);
+    const withPaths = { ...raw, cwds, repos: { ...raw.repos, roots } };
+    expect(valuesOf(run(exported.json, withPaths))["export-no-raw-paths"]).toBe("PASS");
+    const leaked = run(`${exported.json}"acmepayroll"`, withPaths);
+    expect(valuesOf(leaked)["export-no-raw-paths"]).toBe("FAIL");
+    expect(valuesOf(leaked)["export-folder-names"]).toBe("1");
+    expect(valuesOf(run(`${exported.json}LEDGER-SVC`, withPaths))["export-no-raw-paths"]).toBe("FAIL");
+    // "prompts" is a word of the payload itself, and "abcd" is under 5 characters: neither counts
+    expect(valuesOf(run(`${exported.json}abcd`, withPaths))).toMatchObject({ "export-no-raw-paths": "PASS", "export-folder-names": "0" });
+    for (const l of [...leaked, ...run(exported.json, withPaths)]) expect(l.toLowerCase()).not.toMatch(/acme|ledger|abcd/);
+    expect(leaked.flatMap(offGrammar)).toEqual([]);
   });
 
   test("a missing dimension: the line still reads /7, and the analysis checks fail", () => {

@@ -241,8 +241,9 @@ export const TECH_CATEGORIES = keysOf<TechCategory>({ data: true, infra: true, s
 export const CONFIG_KINDS = keysOf<ConfigEv["kind"]>({ skill: true, command: true, agent: true, plugin: true, hook: true, "mcp-server": true, "memory-file": true,
   "instruction-file": true, profile: true, feature: true });
 const BANDS = keysOf<Band>({ exceptional: true, strong: true, developing: true, limited: true, insufficient: true });
-const FORENSIC_BANDS = keysOf<Forensics["band"]>({ consistent: true, "consistent-with-notes": true, inconsistent: true, unverifiable: true });
-const CHECK_IDS = keysOf<CheckId>({ C1: true, C2: true, C3: true, C4: true, C5: true, C6: true, C7: true, C8: true, C9: true, C10: true,
+/** The integrity bands, and the checks every analysis runs (C1–C10, then the soft flags): the acceptance script reads these. */
+export const FORENSIC_BANDS = keysOf<Forensics["band"]>({ consistent: true, "consistent-with-notes": true, inconsistent: true, unverifiable: true });
+export const CHECK_IDS = keysOf<CheckId>({ C1: true, C2: true, C3: true, C4: true, C5: true, C6: true, C7: true, C8: true, C9: true, C10: true,
   "soft:rhythm": true, "soft:repeated-long": true, "soft:recent-burst": true, "soft:unclosed-tools": true, "soft:new-config": true });
 const CHECK_STATUS = keysOf<CheckStatus>({ pass: true, note: true, warn: true, fail: true, "n/a": true, info: true });
 const REPO_STATUS = keysOf<RepoSignals["status"]>({ ok: true, partial: true, off: true, "git-missing": true });
