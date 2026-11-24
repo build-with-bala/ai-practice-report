@@ -129,7 +129,7 @@ describe("analyze()", () => {
   test("project keys and labels are keyed hashes, never raw names", () => {
     for (const p of expert.projects) {
       expect(p.key).toMatch(/^[0-9a-f]+$/);
-      expect(p.label).toMatch(/^P-[0-9A-F]{4,6}$/);
+      expect(p.label).toMatch(/^P-(?:[0-9A-F]{2}){2,8}$/);
     }
   });
 
