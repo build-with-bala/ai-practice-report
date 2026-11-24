@@ -85,6 +85,7 @@ export const REPO_SIGNALS_DESCRIBE: { reads: string[]; runs: string[] } = {
     "git --version",
     "git rev-parse --show-toplevel --git-common-dir",
     "git rev-parse --verify --quiet HEAD^{commit} (whether HEAD names a commit, before the instruction-file history)",
+    "git rev-parse --verify --quiet HEAD, git symbolic-ref -q HEAD (only when HEAD names no commit: whether it is truly unborn, or broken)",
     "git config --get user.email",
     "git config --get extensions.partialClone, git config --get remote.origin.promisor (git older than 2.44 only)",
     "git log --no-use-mailmap --exclude=refs/stash --all --no-merges --no-renames --since-as-filter=<date> --max-count=<n> --name-only -z (commit metadata only)",
