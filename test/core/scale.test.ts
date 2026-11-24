@@ -1,87 +1,35 @@
-import { heapStats } from "bun:jsc";
 import { describe, expect, test } from "bun:test";
-import { analyze, type Analysis } from "../../core/analyze";
-import { exportPayload } from "../../core/privacy/export";
-import type { Ev } from "../../core/model/events";
-import type { ScanResult } from "../../core/scan";
-import { synthStore } from "../kit/synth";
+import path from "node:path";
 
 /*
  * The analysis memory budget at scale (global constraint: analysis keeps per-session sufficient statistics, never
- * per-event copies). What the 25% compares: the live heap `analyze` adds and keeps — its result, held, plus anything it
- * leaves attached to the store, such as the store's lazily built per-session index — against the live heap of the
- * store itself. Both are deltas of the post-collection heap size: before the store, after the store, after `analyze`.
- *
- * Measuring it honestly:
- * - The heap is read as `heapStats().heapSize` after a full collection. `process.memoryUsage().heapUsed` does not follow
- *   a full collection reliably in Bun (it stays flat while a multi-MiB index is built, then jumps by more than analyze
- *   keeps), so it can't separate the two deltas.
- * - The synthetic store builds ids with template literals, which JSC keeps as ropes until first hashed. A reader's
- *   `JSON.parse` leaves flat strings, so the test flattens every string of the store before reading its size; otherwise
- *   analyze's first use of each id would shrink the store and the delta would be meaningless.
- * - A warm-up run on a small store comes first, so compiled code and one-time tables are not counted as retention.
- * - JSC scans stacks and registers conservatively: a stale slot can keep analyze's last session table alive after it
- *   returns. Each reading follows two turns of the event loop, and a tiny analyze run after the measured one overwrites
- *   those slots. The result stays reachable through `held` until the last reading.
+ * per-event copies): the live heap `analyze` adds and keeps, against the live heap of the store itself. How it is read
+ * is in test/kit/scale-child.ts. Each reading is taken in a child process of its own: in the test runner's process,
+ * garbage other test files left could be collected between two readings and make a delta negative.
  */
 
-const tick = (): Promise<void> => new Promise((r) => setImmediate(r));
-async function liveHeap(): Promise<number> {
-  await tick();
-  Bun.gc(true);
-  await tick();
-  Bun.gc(true);
-  return heapStats().heapSize;
-}
+const CHILD = path.join(import.meta.dir, "..", "kit", "scale-child.ts");
 
-function flatten(raw: ScanResult): void {
-  const seen = new Set<string>();
-  const walk = (v: unknown): void => {
-    if (typeof v === "string") seen.add(v);
-    else if (v !== null && typeof v === "object") for (const x of Object.values(v)) walk(x);
-  };
-  // every kind the store holds, so a new kind's strings are flattened too and never shrink the store under analyze
-  for (const k of Object.keys(raw.store.count()) as Array<Ev["k"]>) for (const e of raw.store.all(k)) walk(e);
-  walk(raw.repos.repos);
-}
+interface Reading { store: number; retained: number; ms: number; bytes: number }
 
-const opts = (raw: ScanResult) => ({ now: raw.finishedAt, timeZone: "UTC" });
-
-/** Store heap, retained heap, the analyze time and the export size for a synthetic store of `events` events. */
-async function measure(events: number): Promise<{ store: number; retained: number; ms: number; bytes: number }> {
-  const held: { raw?: ScanResult; a?: Analysis } = {};
-  const warm = synthStore(20_000);
-  analyze(warm, opts(warm));
-  const h0 = await liveHeap();
-  (() => {
-    held.raw = synthStore(events);
-    flatten(held.raw);
-  })();
-  const h1 = await liveHeap();
-  let ms = 0;
-  (() => {
-    const t = performance.now();
-    held.a = analyze(held.raw!, opts(held.raw!));
-    ms = performance.now() - t;
-    const tiny = synthStore(1_000);
-    analyze(tiny, opts(tiny));
-  })();
-  const h2 = await liveHeap();
-  const { bytes } = exportPayload(held.a!, { schema: "aiprof/2" });
-  expect(held.a!.meta.now).toBe(held.raw!.finishedAt); // held to here
-  return { store: h1 - h0, retained: h2 - h1, ms, bytes };
+async function measure(events: number): Promise<Reading> {
+  const child = Bun.spawn([process.execPath, CHILD, String(events)], { stdout: "pipe", stderr: "inherit" });
+  const out = await new Response(child.stdout).text();
+  expect(await child.exited).toBe(0);
+  return JSON.parse(out.trim().split("\n").at(-1)!) as Reading;
 }
 
 /** The wall-clock bound: a runaway guard only, the same everywhere, since a slow or busy machine must never fail it. */
 const RUNAWAY_MS = 30_000;
 
 /**
- * The readings are real: analyze keeps something (its result at least), so a retained delta of 0 or less means a
- * reading went wrong; and the store costs a plausible number of bytes per event (about 150 here), so a denominator
- * inflated by garbage a collection left behind, or deflated by a missed one, fails instead of passing silently.
+ * The readings are real: the store costs a plausible number of bytes per event (about 150 here), so a denominator
+ * inflated by garbage a collection left behind, or deflated by a missed one, fails instead of passing silently. The
+ * retained delta is bounded above only: a collector that hands memory back between the two readings can make it zero
+ * or negative, and that is no leak.
  */
-function sane(m: { store: number; retained: number }, events: number): void {
-  expect(m.retained).toBeGreaterThan(0);
+function sane(m: Reading, events: number): void {
+  expect(Number.isFinite(m.retained)).toBe(true);
   expect(m.store / events).toBeGreaterThanOrEqual(50);
   expect(m.store / events).toBeLessThanOrEqual(500);
 }
