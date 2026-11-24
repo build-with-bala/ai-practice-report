@@ -334,8 +334,13 @@ const MCP_LABEL = str(new RegExp(`^(?:${[...MCP_PUBLIC].map(esc).join("|")}|cust
 const MODEL_KEY = new RegExp(`^(?=.{1,64}$)(?:fine-tuned|other|(?:${MODEL_FAMILY_PATTERN})(?:-[a-z0-9.]+)*)$`);
 /** A project's opaque label: "P-" and the upper-case hex of 4, 6, 8 … or 16 digits, the shortest unique in the store. */
 const PROJECT_LABEL = str(/^P-(?:[0-9A-F]{2}){2,8}$/, "pseudonymous");
-/** A project name the person chose to reveal: letters, digits, spaces and ". _ -", 1 to 64 of them, no edge space. */
-const REVEALED_NAME = str(/^[\p{L}\p{N}](?:[\p{L}\p{N} ._-]{0,62}[\p{L}\p{N}])?$/u, "revealed");
+/**
+ * A project name the person chose to reveal, in any script: letters, combining marks, digits, spaces and ". _ -", and
+ * the zero-width non-joiner and joiner (U+200C, U+200D) that some scripts write words with; 1 to 64 code points. It
+ * starts with a letter or digit and ends with a letter, mark or digit (no edge space or joiner). No path separator,
+ * control or format character other than the two joiners, or markup character can appear.
+ */
+const REVEALED_NAME = str(/^[\p{L}\p{N}](?:[\p{L}\p{M}\p{N} ._\u200C\u200D-]{0,62}[\p{L}\p{M}\p{N}])?$/u, "revealed");
 
 /**
  * The `aiprof/2` payload: every field the export may hold, with its type and sensitivity class (spec §6.7, Task 14's

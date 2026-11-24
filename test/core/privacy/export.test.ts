@@ -222,6 +222,19 @@ describe("exportPayload: projects and reveal", () => {
     expect((out.projects as Json[])[0]!.name).toBe("second");
   });
 
+  test("a revealed name may be written in any script: combining marks and the zero-width (non-)joiner inside a name", () => {
+    const label = a.projects[0]!.label;
+    const ok = (name: string): boolean => {
+      try { return (parsed(a, { ...OPTS, reveal: [{ label, name }] }).projects as Json[])[0]!.name === name; } catch { return false; }
+    };
+    const accepted = ["\u0939\u093f\u0902\u0926\u0940", "\u0ba4\u0bae\u0bbf\u0bb4\u0bcd", "\u0645\u064e\u0643\u0652\u062a\u064e\u0628\u064e\u0629",
+      "cafe\u0301", "cafe\u0301 lib", "\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645", "\u0915\u094d\u200d\u0937", "my-lib_2.0"];
+    const refused = ["a/b", "a\\b", "x\n", "<script>", " lead", "trail ", "\u0301abc", "abc\u200d", "\u200dabc", "\u200c", "a\u0000b", "a:b", "x".repeat(65),
+      "a\u202eb"];
+    expect(accepted.map((n) => `${JSON.stringify(n)} ${ok(n)}`)).toEqual(accepted.map((n) => `${JSON.stringify(n)} true`));
+    expect(refused.map((n) => `${JSON.stringify(n)} ${ok(n)}`)).toEqual(refused.map((n) => `${JSON.stringify(n)} false`));
+  });
+
   test("labels are P- and 4, 6, 8 … 16 upper-case hex; reveal matches one label exactly, never a prefix", () => {
     const b = structuredClone(a);
     expect(b.projects.length).toBeGreaterThanOrEqual(3);
