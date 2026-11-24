@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import os from "node:os";
-import { detectEnv } from "../../../core/env/env";
+import { fakeHome } from "../../kit/home";
 import { readJsonlStream } from "../../../core/io/jsonl";
 import { maybeYield, SLICE_MS } from "../../../core/io/yield";
 import { scan } from "../../../core/scan";
@@ -99,7 +99,12 @@ describe("maybeYield", () => {
       scan: async () => { busy(SLICE_MS + 10); order.push(id); },
     });
     setTimeout(() => order.push("timer"), 0);
-    await scan({ env: detectEnv({ tmp: os.tmpdir(), wslHomes: [] }), plugins: [sync("a"), sync("b"), sync("c")], concurrency: 1 });
+    const h = fakeHome();
+    try {
+      await scan({ env: h.env, plugins: [sync("a"), sync("b"), sync("c")], concurrency: 1 });
+    } finally {
+      h.cleanup();
+    }
     expect(order).toContain("timer"); // it ran during the scan, not after it
     expect(order.indexOf("timer")).toBeLessThan(order.indexOf("c"));
   });
