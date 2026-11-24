@@ -11,7 +11,7 @@ describe("langOfExt", () => {
   });
 
   const table: [EditLang, string][] = [
-    ["js", "ts tsx js jsx mjs cjs vue svelte astro css scss sass less html"],
+    ["js", "ts tsx js jsx mjs cjs vue svelte astro scss sass less"],
     ["py", "py pyi ipynb"],
     ["go", "go"],
     ["rust", "rs"],
@@ -31,6 +31,8 @@ describe("langOfExt", () => {
 
   test("any other extension is code of no listed toolchain; case does not matter; no extension has no language", () => {
     expect(["sql", "proto", "lua", "zig", "ex", "tf", "r", "graphql"].map((e) => langOfExt(e))).toEqual(Array(8).fill("any"));
+    // templates and styles of any stack: a test of that stack verifies them
+    expect(["html", "css"].map((e) => langOfExt(e))).toEqual(["any", "any"]);
     expect([langOfExt("TSX"), langOfExt("Md"), langOfExt("PY")]).toEqual(["js", "doc", "py"]);
     expect(langOfExt("")).toBeUndefined();
   });

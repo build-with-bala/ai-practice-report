@@ -220,7 +220,8 @@ CLI's EventMsg tags (`exec_command_end`, `mcp_tool_call_end`, `collab_*`, `realt
   trimmed text) as for Claude Code; `isTaskStart` = first human prompt or ≥ 30 min since the thread's last line.
 - **ToolEv** (`cxToolCalls`), one per call, or per file for apply_patch:
   - shell tools (`exec_command`, `shell`, `shell_command`, `local_shell`): `classifyCommand` of the command line (a
-    `[<shell>, -c…, <script>]` argv is unwrapped to the script), as for Claude Code's shell tools — category, checks
+    `[<shell>, -c…, <script>]` argv is unwrapped to the script by the classifier's own `shellScript`, the rule that
+    also unwraps `bash -lc "<script>"` given as one string), as for Claude Code's shell tools — category, checks
     and the `toolchain` of the command that produced the first check; it recognises reading (`cat`, `head`, `tail`,
     `ls`, …) and searching (`rg`, `grep`, `find`, …) behind every other category. `parsed_cmd` is not read. A shell
     call whose command, as argv or as a string, starts with the word `apply_patch` is the CLI's patch tool run

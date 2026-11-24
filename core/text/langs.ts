@@ -3,9 +3,12 @@ import type { Toolchain } from "../model/ids";
 /** The language of an edited file: a toolchain's code, or `doc` — prose, data, configuration, lock files and images. */
 export type EditLang = Toolchain | "doc";
 
-/** Extensions by language; any extension not listed is code of no listed toolchain (`any`). */
+/**
+ * Extensions by language; any extension not listed is code of no listed toolchain (`any`). Plain `html` and `css` are
+ * `any` on purpose: templates and styles of any stack (Django, Rails, PHP, Go), so a test of that stack verifies them.
+ */
 const EXTENSIONS: Readonly<Record<EditLang, string>> = {
-  js: "ts tsx js jsx mjs cjs vue svelte astro css scss sass less html",
+  js: "ts tsx js jsx mjs cjs vue svelte astro scss sass less",
   py: "py pyi ipynb",
   go: "go",
   rust: "rs",

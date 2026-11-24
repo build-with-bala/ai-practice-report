@@ -49,5 +49,7 @@ describe("reader text patterns take linear time on adversarial trace text", () =
     expect(line.length).toBeGreaterThanOrEqual(N);
     expect(classifyCommand(line).checks).toEqual(["test"]);
     expect(classifyCommand(`${"A=1 ".repeat(N / 4)}cargo test`).checks).toEqual(["test"]);
+    expect(classifyCommand(`${"bash ".repeat(N / 5)}-c 'npm test'`).checks).toEqual([]);
+    expect(classifyCommand(`bash -c '${"(".repeat(N)}npm test'`).checks).toEqual(["test"]);
   });
 });
