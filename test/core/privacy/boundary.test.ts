@@ -24,8 +24,6 @@ type Json = Record<string, unknown>;
 type Loose = Record<string, any>;
 
 describe("the boundary under a marker in every string field of a scan", () => {
-  const KINDS = ["session", "prompt", "tool", "turn", "usage", "totals", "marker", "config", "daily", "edge", "anchor", "identity", "file", "codex-rollout",
-    "codex-thread-row", "ratelimit", "commit", "coverage"] as const;
   /** Three marker shapes: upper-case text, hex (the shape of the one raw channel, identity hashes), and a lower slug. */
   const STYLES: Array<(s: string) => string> = [(s) => `${s}ZZMARKER`, (s) => `${s}c0ffee5eedbead`, (s) => `${s}-zzmark`];
   const MARKS = ["ZZMARKER", "c0ffee5eedbead", "zzmark"];
@@ -54,7 +52,10 @@ describe("the boundary under a marker in every string field of a scan", () => {
       });
       const r = await scan({ env: h.env });
       expect(r.repos.repos.length).toBe(2);
-      const events: Ev[] = KINDS.flatMap((k) => r.store.all(k) as Ev[]);
+      // every kind the store holds, from the store itself: a new kind is planted without being listed here
+      const kinds = Object.keys(r.store.count()) as Array<Ev["k"]>;
+      expect(kinds.length).toBeGreaterThanOrEqual(18);
+      const events: Ev[] = kinds.flatMap((k) => r.store.all(k) as Ev[]);
 
       // the units to mutate: every string field (and string list, and record's keys) per event kind, the repo facts, the warnings
       const inGroup = new Map<string, string>();
