@@ -33,7 +33,8 @@ const CO_AUTHOR = /^[ \t]*co-authored-by:(.*)$/gim;
 const MAX_TRAILER_CHARS = 1_000;
 /**
  * The message text examined at most (characters): a longer message is read as its start and its end (half each), which
- * keep the subject and the trailer block, so every pattern below runs on bounded text.
+ * keep the subject and the trailer block, so every pattern below runs on bounded text. What it can miss, in a message
+ * that long: a co-author trailer standing far before the end, and a generated-with line in the middle.
  */
 export const MAX_MESSAGE_CHARS = 16_384;
 const GENERATED: readonly [AiTool, RegExp][] = TOOLS.map(([tool, p]) => [tool, new RegExp(`generated (?:with|by) \\[?(?:${p})\\b`, "i")]);
@@ -169,7 +170,9 @@ export const SINCE_AS_FILTER_SINCE: readonly [number, number] = [2, 37];
  * The window start of a `git log` (epoch ms, formatted here): `--since-as-filter` on a git that has it (`asFilter`), which
  * walks the whole history and leaves out only the commits older than the window; `--since` otherwise. Plain `--since`
  * stops walking at a commit whose recorded date is older than the window, so on a git before 2.37 such a commit (a
- * skewed clock, a rebase that keeps old dates) hides its ancestors that no other branch reaches.
+ * skewed clock, a rebase that keeps old dates) hides its ancestors that no other branch reaches. The price of
+ * `--since-as-filter`: it walks the whole history, so on a very large one without a commit-graph a log can end by its
+ * timeout — which reads as `partial`, with a cut list (`commitsReach`).
  */
 export const sinceArg = (ms: number, asFilter: boolean): string => `${asFilter ? "--since-as-filter" : "--since"}=${new Date(ms).toISOString()}`;
 
