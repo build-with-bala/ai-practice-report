@@ -24,7 +24,7 @@ const HIST = "claude-code.history";
 
 const stat = (id: string, over: Partial<SessionStats> = {}): SessionStats => ({
   id, tool: "claude-code", source: CC, origin: "human", start: T0, end: T0 + HOUR, scripted: false, days: [],
-  turns: 0, stickySum: 0, actions: 0, successRuns: {}, gatedVae: true, editTurns: 0, editWeight: 0, verifiedWeight: 0,
+  turns: 0, stickySum: 0, actions: 0, successRuns: {}, gatedVae: true, editTurns: 0, editWeight: 0, verifiedWeight: 0, uncheckedEditTurns: 0, uncheckedCommandTurns: 0,
   failingChecks: 0, closedChecks: 0, fixCycles: {}, episodes: 0, followUps: 0, briefs: 0, correctedBriefs: 0, briefScoreSum: 0,
   interrupts: 0, healthyInterrupts: 0, workEpisodes: 0, turnsPerWorkSum: 0, queued: 0,
   children: 0, finishedChildren: 0, bgKnown: 0, bgChildren: 0, childTypes: {}, workflowRuns: 0, maxDepth: 0,
@@ -74,6 +74,15 @@ describe("computeSignals: the sample formulas", () => {
     expect(s.briefScore.value).toBeCloseTo(0.6, 12);
     expect(s.briefScore.n).toBe(5);
     expect([s.landedShare.value, s.landedShare.n]).toEqual([0.75, 4]);
+  });
+
+  test("unchecked-command share: over the unchecked edit turns of gated rows, with their rows' sources and span", () => {
+    const u = computeSignals([{ ...a, uncheckedEditTurns: 4, uncheckedCommandTurns: 1 }, { ...b, uncheckedEditTurns: 0 }], globals()).uncheckedCommandShare;
+    expect(u).toEqual({ window: "detail", sources: [CC], from: T0, to: T0 + HOUR, n: 4, value: 0.25 });
+    const none = computeSignals([a, b], globals()).uncheckedCommandShare;
+    expect([none.value, none.n, none.reason]).toEqual([null, 0, "no-data"]);
+    const ungated = computeSignals([{ ...b }], globals()).uncheckedCommandShare;
+    expect(ungated.reason).toBe("not-captured");
   });
 
   test("percentiles, the fix-cycle median, hygiene, rho and cost per landed unit", () => {

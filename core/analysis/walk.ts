@@ -20,7 +20,9 @@ export type Hist = Record<number, number>;
  * - `turns`: typed turns (walk rule 3); `stickySum` = Σ s_t·log2(1 + A_t); `actions`: every action of the row and its
  *   descendants; `successRuns`: A_t of the turns with s_t = 1, capped at 1,000.
  * - VAE (rule 8): `gatedVae` = the row's tool reports check outcomes; `editTurns`, `editWeight` and `verifiedWeight` are
- *   0 when it does not.
+ *   0 when it does not. `uncheckedEditTurns`: the gated edit turns no recognised check verified; `uncheckedCommandTurns`:
+ *   those of them in which a command ran after the last edit that the command classifier gave no check kind (an action
+ *   of category shell, package or container with no checks).
  * - Closure (rule 9): `failingChecks`, `closedChecks`, `fixCycles` (the failures each closing pass closed, capped at 50).
  * - Steering (rules 10–12): `followUps` = typed turns that start no episode; `briefs`, `correctedBriefs`,
  *   `briefScoreSum`; `interrupts` (the person's, not proxy-timed) and `healthyInterrupts`; `workEpisodes` (episodes with
@@ -48,7 +50,7 @@ export interface SessionStats {
   id: string; tool: ToolId; source: string; origin: Origin; start: number; end: number; repoKey?: string; scripted: boolean;
   days: string[];
   turns: number; stickySum: number; actions: number; successRuns: Hist;
-  gatedVae: boolean; editTurns: number; editWeight: number; verifiedWeight: number;
+  gatedVae: boolean; editTurns: number; editWeight: number; verifiedWeight: number; uncheckedEditTurns: number; uncheckedCommandTurns: number;
   failingChecks: number; closedChecks: number; fixCycles: Hist;
   episodes: number; followUps: number; briefs: number; correctedBriefs: number; briefScoreSum: number;
   interrupts: number; healthyInterrupts: number; workEpisodes: number; turnsPerWorkSum: number; queued: number;
@@ -109,6 +111,10 @@ const ranCheck = (e: ToolEv): boolean => isAction(e) && e.checks !== undefined &
 /** A person's interrupt (detail `user`, `replaced` or none) at a real time. */
 const personInterrupt = (m: MarkerEv): boolean =>
   m.kind === "interrupt" && m.proxyTs === undefined && (m.detail === undefined || m.detail === "user" || m.detail === "replaced");
+/** Categories of a command line run in a shell, a package manager or a container. */
+const COMMAND_CATEGORIES: ReadonlySet<ToolEv["category"]> = new Set<ToolEv["category"]>(["shell", "package", "container"]);
+/** A command that ran and that the classifier gave no check kind. */
+const unrecognisedCommand = (e: ToolEv): boolean => isAction(e) && COMMAND_CATEGORIES.has(e.category) && (e.checks === undefined || e.checks.length === 0);
 /** Two checks' toolchains match when either is unknown or `any`, or they are equal. */
 const chainsMatch = (a: Toolchain | undefined, b: Toolchain | undefined): boolean => a === undefined || b === undefined || a === "any" || b === "any" || a === b;
 const linesOf = (e: ToolEv): number => (e.linesAdded ?? 0) + (e.linesRemoved ?? 0);
@@ -254,7 +260,7 @@ function walkRow(row: SessionRow, t: SessionTable, store: EventStore, cx: WalkCt
   const s: SessionStats = {
     id: row.id, tool: row.tool, source: row.source, origin: row.origin, start, end, scripted,
     days: [], turns: 0, stickySum: 0, actions: actPrefix[n]!, successRuns: {},
-    gatedVae: cx.gated.has(row.tool), editTurns: 0, editWeight: 0, verifiedWeight: 0,
+    gatedVae: cx.gated.has(row.tool), editTurns: 0, editWeight: 0, verifiedWeight: 0, uncheckedEditTurns: 0, uncheckedCommandTurns: 0,
     failingChecks: 0, closedChecks: 0, fixCycles: {},
     episodes: 0, followUps: 0, briefs: 0, correctedBriefs: 0, briefScoreSum: 0,
     interrupts: 0, healthyInterrupts: 0, workEpisodes: 0, turnsPerWorkSum: 0, queued: 0,
@@ -480,9 +486,17 @@ function walkRow(row: SessionRow, t: SessionTable, store: EventStore, cx: WalkCt
     const weight = Math.log2(2 + lines);
     s.editTurns++;
     s.editWeight += weight;
+    let verified = false;
+    let unknownCommand = false;
     for (let k = lastEdit + 1; k < work.length; k++) {
       const e = work[k]!;
-      if (ranCheck(e) && toolchainMatches(e.toolchain, langs)) { s.verifiedWeight += weight; break; }
+      if (ranCheck(e) && toolchainMatches(e.toolchain, langs)) { verified = true; break; }
+      if (unrecognisedCommand(e)) unknownCommand = true;
+    }
+    if (verified) s.verifiedWeight += weight;
+    else {
+      s.uncheckedEditTurns++;
+      if (unknownCommand) s.uncheckedCommandTurns++;
     }
   }
 

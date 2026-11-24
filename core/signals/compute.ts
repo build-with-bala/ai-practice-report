@@ -101,6 +101,7 @@ const minimum = (m: Metric, min: number): Metric => {
 export function computeSignals(sample: readonly SessionStats[], g: Globals): Signals {
   const turnsSpan = new Span();
   const vaeSpan = new Span();
+  const uncheckedSpan = new Span();
   const closureSpan = new Span();
   const runSpan = new Span();
   const bgSpan = new Span();
@@ -116,7 +117,7 @@ export function computeSignals(sample: readonly SessionStats[], g: Globals): Sig
   const landedSpan = new Span();
 
   let turns = 0, sticky = 0, actions = 0, sessions = 0;
-  let editTurns = 0, editWeight = 0, verifiedWeight = 0, gatedRows = 0;
+  let editTurns = 0, editWeight = 0, verifiedWeight = 0, gatedRows = 0, uncheckedTurns = 0, uncheckedCommands = 0;
   let failing = 0, closed = 0;
   let episodes = 0, followUps = 0, briefs = 0, corrected = 0, briefSum = 0;
   let interrupts = 0, healthy = 0, workEpisodes = 0, perWork = 0;
@@ -144,6 +145,7 @@ export function computeSignals(sample: readonly SessionStats[], g: Globals): Sig
     if (r.gatedVae) {
       gatedRows++;
       if (r.editTurns > 0) { editTurns += r.editTurns; editWeight += r.editWeight; verifiedWeight += r.verifiedWeight; vaeSpan.add(r); }
+      if (r.uncheckedEditTurns > 0) { uncheckedTurns += r.uncheckedEditTurns; uncheckedCommands += r.uncheckedCommandTurns; uncheckedSpan.add(r); }
     }
     if (r.failingChecks > 0) { failing += r.failingChecks; closed += r.closedChecks; closureSpan.add(r); }
     if (merge(runs, r.successRuns)) runSpan.add(r);
@@ -222,7 +224,7 @@ export function computeSignals(sample: readonly SessionStats[], g: Globals): Sig
     landedShare,
     reworkShare: g.reworkShare, prsPerWeek: g.prsPerWeek, aiCoauthoredShare: g.aiCoauthoredShare, commitAfterSession: g.commitAfterSession,
     guardrails: g.guardrails, headlessPerWeek: g.headlessPerWeek,
-    uncheckedCommandShare: d(new Span(), 0, null), // not computed yet: a null detail metric
+    uncheckedCommandShare: d(uncheckedSpan, uncheckedTurns, ratio(uncheckedCommands, uncheckedTurns), captured(gatedRows > 0)),
     evidence, repoSignals: g.repoSignals,
   };
 }

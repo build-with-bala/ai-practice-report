@@ -284,6 +284,22 @@ describe("walk: VAE (rule 8)", () => {
     expect(s.verifiedWeight).toBeCloseTo(w6, 12);
   });
 
+  test("unchecked edit turns, and those where a command the classifier did not know ran after the last edit", () => {
+    const shell = (ts: number, over: Partial<ToolEv> = {}): ToolEv => tool("s", ts, { name: "Bash", category: "shell", ok: true, ...over });
+    const s = one([
+      sess("s"), outcomesFor("s", T0 - SEC),
+      prompt("s", T0), edit("s", T0 + SEC, "ts", 3), shell(T0 + 2 * SEC), // unchecked, an unknown command after the edit
+      prompt("s", T0 + MIN), shell(T0 + MIN + SEC), edit("s", T0 + MIN + 2 * SEC, "ts", 3), // unchecked, the command came before
+      prompt("s", T0 + 2 * MIN), edit("s", T0 + 2 * MIN + SEC, "ts", 3), check("s", T0 + 2 * MIN + 2 * SEC, true), // checked
+      prompt("s", T0 + 3 * MIN), edit("s", T0 + 3 * MIN + SEC, "ts", 3), shell(T0 + 3 * MIN + 2 * SEC, { ok: undefined, outcome: "denied" }), // denied: never ran
+      prompt("s", T0 + 4 * MIN), edit("s", T0 + 4 * MIN + SEC, "ts", 3), tool("s", T0 + 4 * MIN + 2 * SEC, { name: "Bash", category: "container", ok: true }),
+    ]);
+    expect([s.editTurns, s.uncheckedEditTurns, s.uncheckedCommandTurns]).toEqual([5, 4, 2]);
+    const ungated = one([sess("s", { tool: "cursor" }), prompt("s", T0, { tool: "cursor" }), edit("s", T0 + SEC, "ts", 3, 0, { tool: "cursor" }),
+      tool("s", T0 + 2 * SEC, { tool: "cursor", category: "shell" })]);
+    expect([ungated.uncheckedEditTurns, ungated.uncheckedCommandTurns]).toEqual([0, 0]);
+  });
+
   test(".md-only edits make no edit turn", () => {
     const s = one([sess("s"), prompt("s", T0), edit("s", T0 + SEC, "md", 40), edit("s", T0 + 2 * SEC, "json", 4), edit("s", T0 + 3 * SEC, undefined as never, 4), check("s", T0 + 4 * SEC, true)]);
     expect([s.editTurns, s.editWeight, s.editEpisodes]).toEqual([0, 0, 0]);

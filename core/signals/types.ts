@@ -37,8 +37,9 @@ export interface Signals {
    * since such a history does not use them.
    */
   /**
-   * Among the code-edit turns that count as not checked, the share in which a shell command ran after the last edit
-   * that the command classifier did not recognise as a check; unscored.
+   * Among the code-edit turns that count as not checked (gated rows only, as VAE), the share in which a command ran
+   * after the last edit that the command classifier gave no check kind; `n` = those unchecked edit turns. Unscored: it
+   * says how much of a low Verification may be checks the classifier does not know.
    */
   uncheckedCommandShare: Metric;
   evidence: Evidence; repoSignals: RepoSignals["status"];
