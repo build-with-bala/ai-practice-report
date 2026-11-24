@@ -95,7 +95,7 @@ export function analyze(raw: ScanResult, o: AnalyzeOptions = {}): Analysis {
   const ex = o.exclude ?? {};
   const exclude = { ...ex, ...(ex.projects ? { projects: ex.projects.map(resolve) } : {}) };
 
-  const t = buildSessionTable(raw, { now, timeZone, exclude });
+  const t = buildSessionTable(raw, { timeZone, exclude });
   const stats = buildSessionStats(t, raw.store, raw.repos, { timeZone });
   const g = computeGlobals(t, stats, raw, { now });
   const signals = computeSignals(stats, g);

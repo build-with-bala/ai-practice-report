@@ -84,10 +84,10 @@ function capabilitiesOf(raw: ScanResult, counted: (sessionId: string | undefined
 /**
  * The session table: the first stage of analysis, pure and synchronous (no clock, no I/O). Rows are the store's sessions
  * placed in their tree; the exclusions drop whole tools, projects (with every descendant session) and sessions that lie
- * outside the date range (with their descendants too: a subagent is part of its session's work). `now` is the analysis
- * time (the caller's, never the clock's); `timeZone` keys the activity days.
+ * outside the date range (with their descendants too: a subagent is part of its session's work). `timeZone` keys the
+ * activity days. The table reads no clock and no analysis time.
  */
-export function buildSessionTable(raw: ScanResult, o: { now: number; timeZone: string; exclude?: Exclusions }): SessionTable {
+export function buildSessionTable(raw: ScanResult, o: { timeZone: string; exclude?: Exclusions; /** Unread; kept so older callers still type-check. */ now?: number }): SessionTable {
   checkExclusions(o.exclude);
   const ex = o.exclude ?? {};
   const toolEx = new Set<ToolId>(ex.tools ?? []);

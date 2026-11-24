@@ -21,7 +21,7 @@ interface Scored { signals: Signals; dims: DimensionResult[]; overall: Overall }
 /** The pipeline by hand (no `analyze()` yet): session table → walk → globals and signals → dimensions → bootstrap → overall. */
 function score(raw: ScanResult, timeZone = "UTC"): Scored {
   const now = raw.finishedAt;
-  const t = buildSessionTable(raw, { now, timeZone });
+  const t = buildSessionTable(raw, { timeZone });
   const stats = buildSessionStats(t, raw.store, raw.repos, { timeZone });
   const g = computeGlobals(t, stats, raw, { now });
   const signals = computeSignals(stats, g);
