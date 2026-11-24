@@ -165,6 +165,15 @@ describe("exportPayload: raw channels", () => {
     expect((parsed(a).exposure as Json).models).toEqual({ "claude-3-5-sonnet-20241022": 6 });
   });
 
+  test("a public revision token (v and one or two digits) is allowed once per id, and adds nothing else", () => {
+    for (const [id, out] of [
+      ["claude-3-5-sonnet-v2@20241022", "claude-3-5-sonnet-v2"], ["claude-3-5-sonnet-v2", "claude-3-5-sonnet-v2"], ["claude-v2", "claude-v2"],
+      ["gpt-4o-v12", "gpt-4o-v12"], ["anthropic.claude-3-5-sonnet-v2-v1:0", "claude-3-5-sonnet-v2"],
+      ["claude-v2-v3", "claude-other"], ["claude-v123", "claude-other"], ["claude-v0", "claude-other"], ["claude-v02", "claude-other"], ["claude-vx", "claude-other"],
+      ["claude-v", "claude-other"], ["claude-v2a", "claude-other"], ["gpt-4o-v2-acme", "gpt-other"], ["claude-v2-4-5-6", "claude-other"],
+    ] as const) expect(`${id} → ${modelExportId(id)}`).toBe(`${id} → ${out}`);
+  });
+
   test("150 model ids give 64 keys: the 63 most used and other with the summed rest", () => {
     const a = analyze(personaScan("expert"), UTC);
     const raw: Record<string, number> = { "acme-model": 5 };
