@@ -8,7 +8,7 @@ import { ccConfig, ccHistory, ccStats } from "../../../core/sources/claude-code"
 import { commandMarker } from "../../../core/sources/claude-code/history";
 import { registry } from "../../../core/sources/registry";
 import type { SourcePlugin } from "../../../core/sources/types";
-import { keyedHash } from "../../../core/text/hash";
+import { keyedHash, normalizePath } from "../../../core/text/hash";
 import { CANARY, expectNoCanaries } from "../../kit/canary";
 import { fakeHome, type FakeHome } from "../../kit/home";
 import { buildCcLifetime, CC_H1, CC_H2, CC_HAIKU, CC_OPUS, ccHistoryLine, ccSid, nzdt } from "../../fixtures/claude-code";
@@ -115,9 +115,9 @@ describe("claude-code lifetime: Task 10 scenario", () => {
     buildCcLifetime(h);
     const r = await run([ccStats]);
     expect(r.store.all("daily")).toEqual([
-      { k: "daily", tool: "claude-code", source: "claude-code.stats", day: "2026-01-13", zone: "utc", unit: "messages", count: 120, sessions: 2, toolCalls: 40, models: { [CC_OPUS]: 50_000, [CC_HAIKU]: 4_000 } },
-      { k: "daily", tool: "claude-code", source: "claude-code.stats", day: "2026-01-14", zone: "utc", unit: "messages", count: 80, sessions: 1, toolCalls: 25, models: { [CC_OPUS]: 20_000 } },
-      { k: "daily", tool: "claude-code", source: "claude-code.stats", day: "2026-01-16", zone: "utc", unit: "messages", count: 10, sessions: 1, toolCalls: 0 },
+      { k: "daily", tool: "claude-code", source: "claude-code.stats", day: "2026-01-13", zone: "either", unit: "messages", count: 120, sessions: 2, toolCalls: 40, models: { [CC_OPUS]: 50_000, [CC_HAIKU]: 4_000 } },
+      { k: "daily", tool: "claude-code", source: "claude-code.stats", day: "2026-01-14", zone: "either", unit: "messages", count: 80, sessions: 1, toolCalls: 25, models: { [CC_OPUS]: 20_000 } },
+      { k: "daily", tool: "claude-code", source: "claude-code.stats", day: "2026-01-16", zone: "either", unit: "messages", count: 10, sessions: 1, toolCalls: 0 },
     ] satisfies DailyEv[]);
     expect(r.coverage[0]).toMatchObject({
       source: "claude-code.stats", window: "lifetime", status: "ok", files: 1, records: 5, unknownTypes: {},
@@ -290,12 +290,18 @@ describe("claude-code history: mapping", () => {
     expect(r.store.count()).toEqual({ coverage: 1 }); // no event of any other kind
   });
 
+  test("a history.jsonl that is not a regular file counts not-file", async () => {
+    mkdirSync(path.join(h.env.home, ".claude", "history.jsonl"), { recursive: true });
+    const r = await run([ccHistory]);
+    expect(r.coverage[0]).toMatchObject({ status: "empty", files: 0, skipped: { "not-file": 1 } });
+  });
+
   test.skipIf(skipChmod)("an unreadable history file counts as io-error", async () => {
     const file = h.writeJsonl(".claude/history.jsonl", [ccHistoryLine("hello", nzdt("2026-02-01", "10:00"), CC_H1)]);
     chmodSync(file, 0o000);
     try {
       const logs: string[] = [];
-      const r = await scan({ env: h.env, plugins: [ccHistory], onLog: (_l, code) => logs.push(code) });
+      const r = await scan({ env: h.env, plugins: [ccHistory], onLog: (_l, code) => { if (code !== "scan.gc") logs.push(code); } });
       expect(r.coverage[0]).toMatchObject({ status: "empty", files: 0, skipped: { "io-error": 1 } });
       expect(logs).toEqual(["cc.io-error"]);
     } finally {
@@ -409,7 +415,7 @@ describe("claude-code config: mapping", () => {
     ]);
   });
 
-  test("MCP server names come from the global table and every project; definitions and project paths are never read", async () => {
+  test("MCP server names come from the global table and every project, a project's with its project key; definitions and project paths are never read", async () => {
     mkdirSync(path.join(h.env.home, ".claude"), { recursive: true });
     claudeJson({
       mcpServers: { [CANARY.mcp]: { command: CANARY.path, args: [CANARY.secret], env: { TOKEN: CANARY.token } } },
@@ -421,7 +427,8 @@ describe("claude-code config: mapping", () => {
       oauthAccount: { emailAddress: CANARY.email, organizationUuid: "org-1" },
     });
     const r = await run([ccConfig]);
-    expect(configs(r, "mcp-server").map((c) => c.name)).toEqual([CANARY.mcp, "proj-only"]);
+    const key = keyedHash(r.salt, normalizePath(CANARY.path));
+    expect(configs(r, "mcp-server").map((c) => [c.name, c.projectKey])).toEqual([[CANARY.mcp, undefined], [CANARY.mcp, key], ["proj-only", key]]);
     expect(r.store.all("identity")).toEqual([]);                        // no accountUuid: nothing else in oauthAccount is used
     expectNoCanaries([r.store, r.coverage], { allow: ["mcp"] });
   });
@@ -439,6 +446,75 @@ describe("claude-code config: mapping", () => {
       ["PreToolUse", "authored", ["lint", "typecheck"]], ["PreToolUse", "authored", []], ["other", "authored", ["test"]], ["UserPromptSubmit", "authored", undefined],
     ]);
     expectNoCanaries([r.store, r.coverage]);
+  });
+
+  test("disableAllHooks: no hook event, one hooks-disabled feature, the entries left out counted; skills keep their firstSeen", async () => {
+    h.writeJson(".claude/settings.json", {
+      disableAllHooks: true,
+      hooks: {
+        PostToolUse: [{ matcher: "Edit|Write", hooks: [{ type: "command", command: "bun test" }, { type: "command", command: `echo ${CANARY.secret}` }] }],
+        Stop: [{ hooks: [{ type: "command", command: "pytest -q" }] }, "not a group"],
+      },
+    });
+    skill("still-listed");
+    const r = await run([ccConfig]);
+    expect(configs(r, "hook")).toEqual([]);
+    expect(configs(r, "feature")).toEqual([
+      { k: "config", tool: "claude-code", source: "claude-code.config", kind: "feature", name: "hooks-disabled", provenance: "authored" },
+    ]);
+    expect(r.coverage[0]).toMatchObject({ skipped: { "hooks-disabled": 3 }, unknownTypes: { "hooks:shape": 1 }, records: 2 });
+    const st = statSync(path.join(h.env.home, ".claude/skills/still-listed"));
+    expect(configs(r, "skill")[0]!.firstSeen).toBe(st.birthtimeMs > 0 ? Math.floor(st.birthtimeMs) : undefined);
+    expectNoCanaries([r.store, r.coverage]);
+  });
+
+  test("disableAllHooks false, or of another type, leaves the hooks as they are (another type is drift); true with no hooks is the feature alone", async () => {
+    const hook = { Stop: [{ hooks: [{ type: "command", command: "make test" }] }] };
+    for (const [value, drift] of [[false, {}], ["yes", { "disableAllHooks:type": 1 }]] as const) {
+      h.writeJson(".claude/settings.json", { disableAllHooks: value, hooks: hook });
+      const r = await run([ccConfig]);
+      expect(configs(r, "hook").map((c) => [c.name, c.checks])).toEqual([["Stop", ["test"]]]);
+      expect(configs(r, "feature")).toEqual([]);
+      expect([r.coverage[0]!.skipped, r.coverage[0]!.unknownTypes]).toEqual([{}, drift]);
+    }
+    h.writeJson(".claude/settings.json", { disableAllHooks: true });
+    const r = await run([ccConfig]);
+    expect(configs(r, "feature").map((c) => [c.name, c.provenance])).toEqual([["hooks-disabled", "authored"]]);
+    expect(r.coverage[0]!.skipped).toEqual({});
+  });
+
+  test("firstSeen: skill folders, command and agent files, and a plugin's cache folder, by stat; nothing on disk, no firstSeen", async () => {
+    skill("own");
+    h.write(".claude/commands/review.md", CANARY.prompt);
+    h.write(".claude/agents/helper.md", CANARY.prompt);
+    h.writeJson(".claude/plugins/installed_plugins.json", { version: 2, plugins: { "alpha@market": [{ scope: "user" }], "beta@market": [{ scope: "user" }], "../up@market": [{}] } });
+    h.writeJson(".claude/plugins/cache/market/alpha/1.0.0/.claude-plugin/plugin.json", { name: "alpha" });
+    h.write(".claude/plugins/cache/up/x", "a cache entry outside the plugin's own folder");
+    claudeJson({ skillUsage: { "usage-only": { usageCount: 1 } }, pluginUsage: { "gamma@market": { usageCount: 2 } } });
+    const r = await run([ccConfig]);
+    const born = (rel: string) => { const st = statSync(path.join(h.env.home, rel)); return st.birthtimeMs > 0 ? Math.floor(st.birthtimeMs) : undefined; };
+    expect(r.store.all("config").filter((c) => c.kind !== "plugin").map((c) => [c.kind, c.name, c.firstSeen])).toEqual([
+      ["skill", "own", born(".claude/skills/own")], ["skill", "usage-only", undefined],
+      ["command", "review", born(".claude/commands/review.md")], ["agent", "helper", born(".claude/agents/helper.md")],
+    ]);
+    expect(configs(r, "plugin").map((c) => [c.name, c.firstSeen])).toEqual([
+      ["../up@market", undefined], ["alpha@market", born(".claude/plugins/cache/market/alpha")], ["beta@market", undefined], ["gamma@market", undefined],
+    ]);
+    expectNoCanaries([r.store, r.coverage]);
+  });
+
+  test.skipIf(process.platform === "win32")("firstSeen follows links: a linked skill folder or command file takes its target's birth", async () => {
+    h.write("dotfiles/skills/linked/SKILL.md", "x");
+    h.write("dotfiles/commands/linked-cmd.md", "x");
+    mkdirSync(path.join(h.env.home, ".claude", "skills"), { recursive: true });
+    mkdirSync(path.join(h.env.home, ".claude", "commands"), { recursive: true });
+    symlinkSync(path.join(h.env.home, "dotfiles/skills/linked"), path.join(h.env.home, ".claude/skills/linked"));
+    symlinkSync(path.join(h.env.home, "dotfiles/commands/linked-cmd.md"), path.join(h.env.home, ".claude/commands/linked-cmd.md"));
+    const r = await run([ccConfig]);
+    const born = (rel: string) => { const st = statSync(path.join(h.env.home, rel)); return st.birthtimeMs > 0 ? Math.floor(st.birthtimeMs) : undefined; };
+    expect(r.store.all("config").map((c) => [c.kind, c.name, c.firstSeen])).toEqual([
+      ["skill", "linked", born("dotfiles/skills/linked")], ["command", "linked-cmd", born("dotfiles/commands/linked-cmd.md")],
+    ]);
   });
 
   test("CLAUDE_CONFIG_DIR: the global config is the one inside that directory", async () => {
@@ -544,5 +620,27 @@ describe("claude-code lifetime: plugins and coverage", () => {
     expect(r.coverage.map((c) => [c.source, c.status])).toEqual([
       ["claude-code.history", "absent"], ["claude-code.stats", "absent"], ["claude-code.config", "absent"],
     ]);
+  });
+});
+
+describe("claude-code: events say which project or session they belong to", () => {
+  test("a history prompt carries the project key a session of the same folder carries; the folder itself never", async () => {
+    const { CcTranscript, slug } = await import("../../fixtures/claude-code");
+    const { ccTranscripts } = await import("../../../core/sources/claude-code");
+    const sid = ccSid("PK");
+    new CcTranscript(sid, { cwd: CANARY.path }).prompt("Fix the importer").text("Done.").write(h, `.claude/projects/${slug(CANARY.path)}/${sid}.jsonl`);
+    h.writeJsonl(".claude/history.jsonl", [ccHistoryLine("Fix the importer", Date.now() - 60_000, sid), { display: "No folder", timestamp: Date.now() - 30_000 }]);
+    const r = await run([ccHistory, ccTranscripts]);
+    const session = r.store.all("session")[0]!;
+    const prompts = r.store.all("prompt").filter((p) => p.source === ccHistory.id);
+    expect(session.projectKey).toBeDefined();
+    expect(prompts.map((p) => p.projectKey)).toEqual([session.projectKey, undefined]);
+    expect(session.projectKey).toBe(keyedHash(r.salt, normalizePath(CANARY.path)));
+    // anchors and file facts name their session
+    const anchors = r.store.all("anchor");
+    expect(anchors.length).toBeGreaterThan(0);
+    expect(new Set(anchors.map((a) => a.sessionId))).toEqual(new Set([session.id]));
+    expect(r.store.all("file").map((f) => f.sessionId)).toEqual([session.id]);
+    expectNoCanaries([r.store, r.coverage], { allow: [] });
   });
 });

@@ -1,12 +1,13 @@
 import type { RoDb } from "../../io/sqlite";
 import { toEpochMs } from "../../io/time";
+import { TASK_GAP_MS } from "../../model/constants";
 import type { PromptEv, SessionEv } from "../../model/events";
 import { classifyIntent } from "../../text/intent";
 import { promptFeatures } from "../../text/structure";
 import type { Tally } from "../common/coverage";
 import { isObj, safeModel, str } from "../common/guards";
 import type { ScanCtx } from "../types";
-import { cuSessionId, IDE_SOURCE, TASK_GAP_MS, TOOL } from "./diskkv";
+import { cuSessionId, IDE_SOURCE, TOOL } from "./ids";
 
 /**
  * The only `ItemTable` keys ever read, each by exact key and only when `cursorDiskKV` holds no composers (older
@@ -23,55 +24,68 @@ const dec = new TextDecoder();
 
 /**
  * The legacy keys of the stores of one Cursor user folder (the global store, then each workspace store): sessions
- * from the composer index and the chat tabs, timed prompts from the generation list. A generation seen in an earlier
- * store (by `generationUUID`) counts once.
+ * from the composer index and the chat tabs (the detail tally), timed prompts from the generation list. The generation
+ * list links no session, so it is a prompt log, like Claude Code's history file: its prompts are lifetime prompts and
+ * are counted in the lifetime tally (`life`). A generation seen in an earlier store (by `generationUUID`) counts once.
  */
 export class LegacyKeys {
   private readonly generations = new Set<string>();
 
-  constructor(private readonly ctx: ScanCtx, private readonly tally: Tally) {}
+  constructor(private readonly ctx: ScanCtx, private readonly tally: Tally, private readonly life: Tally) {}
 
   read(db: RoDb, tables: ReadonlySet<string>): void {
     if (!tables.has("ItemTable")) return;
     const have = new Set(db.columns("ItemTable"));
     for (const c of ["key", "value"]) if (!have.has(c)) this.tally.unknownKey(`missing-column:${c}`);
     if (!have.has("key") || !have.has("value")) return;
-    // the prompt list has no times (and repeats what the generations hold): its presence only
-    if (db.get(PRESENCE_SQL, "aiService.prompts") !== undefined) this.tally.records++;
+    // the prompt list has no times (and repeats what the generations hold): its presence only, in the prompt log's window
+    if (db.get(PRESENCE_SQL, "aiService.prompts") !== undefined) this.life.records++;
     for (const key of LEGACY_KEYS) {
       if (key === "aiService.prompts" || this.ctx.signal.aborted) continue;
-      const value = this.value(db, key);
-      if (value !== undefined) this.map(key, value);
+      const tally = this.tallyOf(key);
+      const row = this.row(db, key, tally);
+      if (row === undefined) continue;
+      // a value read is one record; the generation list's records are its entries, one per request, so that a blank
+      // entry (skipped `empty`) is counted in the same units as `records`
+      tally.records += key === "aiService.generations" && Array.isArray(row.value) ? row.value.length : 1;
+      if (row.value !== undefined) this.map(key, row.value);
     }
   }
 
-  /** The parsed value of `key`; undefined when absent, too large or not JSON (the last two counted). */
-  private value(db: RoDb, key: LegacyKey): unknown {
-    const row = db.get<{ n: unknown; value: unknown }>(VALUE_SQL, VALUE_MAX, key);
-    if (row === undefined) return undefined;
-    this.tally.records++;
-    const raw = row.value;
+  /** The tally a key's records count in: the generation list is the lifetime prompt log, the rest are detail sessions. */
+  private tallyOf(key: LegacyKey): Tally {
+    return key === "aiService.generations" ? this.life : this.tally;
+  }
+
+  /**
+   * The row of `key`, undefined when absent; its `value` is the parsed JSON, undefined when too large or not JSON (both
+   * counted in `tally`).
+   */
+  private row(db: RoDb, key: LegacyKey, tally: Tally): { value: unknown } | undefined {
+    const got = db.get<{ n: unknown; value: unknown }>(VALUE_SQL, VALUE_MAX, key);
+    if (got === undefined) return undefined;
+    const raw = got.value;
     if (raw === null || raw === undefined) {
-      if (typeof row.n === "number" && row.n > VALUE_MAX) {
-        this.tally.note = "too-large";
-        this.tally.skip("too-large");
+      if (typeof got.n === "number" && got.n > VALUE_MAX) {
+        tally.note = "too-large";
+        tally.skip("too-large");
       }
-      return undefined;
+      return { value: undefined };
     }
     const text = typeof raw === "string" ? raw : raw instanceof Uint8Array ? dec.decode(raw) : undefined;
     if (text !== undefined) {
       try {
-        return JSON.parse(text);
+        return { value: JSON.parse(text) };
       } catch {
         /* counted below */
       }
     }
-    this.tally.skip("parse");
-    return undefined;
+    tally.skip("parse");
+    return { value: undefined };
   }
 
   private map(key: LegacyKey, v: unknown): void {
-    if (key === "aiService.generations") return Array.isArray(v) ? this.prompts(v) : this.tally.unknownKey(`${key}:shape`);
+    if (key === "aiService.generations") return Array.isArray(v) ? this.prompts(v) : this.life.unknownKey(`${key}:shape`);
     if (key === "composer.composerData") {
       const heads = Array.isArray(v) ? v : isObj(v) && Array.isArray(v.allComposers) ? v.allComposers : undefined;
       return heads === undefined ? this.tally.unknownKey(`${key}:shape`) : this.heads(heads);
@@ -85,28 +99,36 @@ export class LegacyKeys {
 
   /**
    * `aiService.generations`: one entry per request the person made ({`unixMs`, `generationUUID`, `type`,
-   * `textDescription`, or `text` in some versions}) → a PromptEv (no session: the list does not link one), in time order.
+   * `textDescription`, or `text` in some versions}) → a lifetime PromptEv (no session: the list does not link one), in
+   * time order.
+   * An entry with neither text field is drift `missing-field:text` (a renamed field, as for a bubble); one whose text is
+   * blank is skipped `empty`.
    */
   private prompts(list: unknown[]): void {
     const timed: { ts: number; text: string; id?: string }[] = [];
     for (const e of list) {
       if (!isObj(e)) {
-        this.tally.skip("bad-record");
+        this.life.skip("bad-record");
         continue;
       }
       const id = str(e.generationUUID);
       if (id !== undefined && this.generations.has(id)) {
-        this.tally.skip("duplicate");
+        this.life.skip("duplicate");
         continue;
       }
       const ts = toEpochMs(e.unixMs, this.ctx.now);
       if (ts === undefined) {
-        this.tally.skip("no-ts");
+        this.life.noTime(e.unixMs);
         continue;
       }
-      const text = [e.textDescription, e.text].find((x): x is string => typeof x === "string" && x.trim() !== "");
+      const texts = [e.textDescription, e.text].filter((x): x is string => typeof x === "string");
+      if (texts.length === 0) {
+        this.life.unknownKey("missing-field:text");
+        continue;
+      }
+      const text = texts.find((x) => x.trim() !== "");
       if (text === undefined) {
-        this.tally.skip("empty");
+        this.life.skip("empty");
         continue;
       }
       if (id !== undefined) this.generations.add(id);
@@ -117,11 +139,11 @@ export class LegacyKeys {
     for (const g of timed) {
       const isTaskStart = prev === undefined || g.ts - prev.ts >= TASK_GAP_MS;
       const ev: PromptEv = {
-        k: "prompt", tool: TOOL, source: IDE_SOURCE, ts: g.ts, window: "detail", origin: "human", intent: classifyIntent(g.text),
+        k: "prompt", tool: TOOL, source: IDE_SOURCE, ts: g.ts, window: "lifetime", origin: "human", intent: classifyIntent(g.text),
         features: promptFeatures(g.text, { isTaskStart, prevText: prev?.text }), textHash: this.ctx.hash(g.text.trim()),
       };
       this.ctx.emit(ev);
-      this.tally.span(g.ts);
+      this.life.span(g.ts);
       prev = g;
     }
   }
@@ -141,7 +163,8 @@ export class LegacyKeys {
       this.add("inline-message", Array.isArray(head.conversation) ? head.conversation.length : 0);
       const model = isObj(head.modelConfig) ? str(head.modelConfig.modelName) : undefined;
       const agent = head.isAgentic === true || head.unifiedMode === "agent";
-      this.session(raw, toEpochMs(head.createdAt, this.ctx.now), toEpochMs(head.lastUpdatedAt, this.ctx.now), agent, model === undefined ? [] : [safeModel(model)]);
+      this.session(raw, toEpochMs(head.createdAt, this.ctx.now), toEpochMs(head.lastUpdatedAt, this.ctx.now), agent, model === undefined ? [] : [safeModel(model)],
+        [head.createdAt, head.lastUpdatedAt]);
     }
   }
 
@@ -160,13 +183,14 @@ export class LegacyKeys {
       }
       this.add("inline-message", messages);
       const ts = toEpochMs(tab.lastSendTime, this.ctx.now);
-      this.session(raw, ts, ts, false, []);
+      this.session(raw, ts, ts, false, [], [tab.lastSendTime]);
     }
   }
 
-  private session(raw: string, created: number | undefined, updated: number | undefined, agent: boolean, models: string[]): void {
+  /** `rawTimes`: the values the times came from, so a time outside the plausible range counts `bad-ts`, not `no-ts`. */
+  private session(raw: string, created: number | undefined, updated: number | undefined, agent: boolean, models: string[], rawTimes: unknown[]): void {
     const start = created ?? updated;
-    if (start === undefined) return this.tally.skip("no-ts");
+    if (start === undefined) return this.tally.noTime(...rawTimes);
     const end = Math.max(start, updated ?? start);
     const s: SessionEv = {
       k: "session", tool: TOOL, source: IDE_SOURCE, id: cuSessionId(raw, this.ctx), window: "detail", origin: "human", start, end, models,

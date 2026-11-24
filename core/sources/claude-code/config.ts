@@ -1,35 +1,34 @@
-import { realpathSync, statSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import path from "node:path";
 import type { Env } from "../../env/env";
-import { readJsonSmallResult, safeStat } from "../../io/fs";
+import { bornAt, isFile, readJsonSmallResult, safeStat } from "../../io/fs";
 import { toEpochMs } from "../../io/time";
 import type { ConfigEv, IdentityEv, MarkerEv } from "../../model/events";
-import { classifyCommand } from "../../text/commands";
 import { listDir, readSidecar, Tally } from "../common/coverage";
 import { isObj, num, type Obj } from "../common/guards";
+import { parseHooks } from "../common/hooks";
+import { projectKeyOf } from "../common/project";
 import type { Candidate, ScanCtx } from "../types";
 
 export const CONFIG_SOURCE = "claude-code.config";
 const TOOL = "claude-code";
 /** Older CLIs keep per-project data in the global config, so it may be large. */
 const GLOBAL_CONFIG_MAX = 64 * 1024 * 1024;
-/** Hook event names as the CLI spells them (`PreToolUse`, `Stop`, …); any other key is reported as `other`. */
-const HOOK_EVENT = /^[A-Z][A-Za-z]{2,40}$/;
 
 type Out = (ev: ConfigEv | MarkerEv | IdentityEv) => void;
 interface Usage { uses: number; lastUsed?: number }
 /** The allowlisted usage tables of the global config. */
-interface GlobalUsage { skills: Map<string, Usage>; plugins: Map<string, number>; mcpServers: Set<string>; firstStart?: number }
+/**
+ * `mcpServers`: the user-level server names; `projectServers`: per project key (the keyed hash of the project's folder,
+ * the key its sessions carry), the names that project's entry lists.
+ */
+interface GlobalUsage { skills: Map<string, Usage>; plugins: Map<string, number>; mcpServers: Set<string>;
+  projectServers: Map<string, Set<string>>; firstStart?: number }
 
 const isNum = (x: unknown): x is number => typeof x === "number" && Number.isFinite(x);
 const isStr = (x: unknown): x is string => typeof x === "string";
-const isFile = (p: string): boolean => {
-  try {
-    return statSync(p).isFile(); // follows symlinks: installers link skill folders into place
-  } catch {
-    return false;
-  }
-};
+/** One path segment: a plugin id's parts name folders of the plugin cache only when they cannot step out of it. */
+const SEGMENT = /^(?!\.{1,2}$)[^\\/]+$/;
 const realpathOf = (p: string): string | undefined => {
   try {
     return realpathSync(p);
@@ -44,6 +43,16 @@ const byName = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 function cfg(kind: ConfigEv["kind"], provenance: ConfigEv["provenance"], name?: string): ConfigEv {
   const ev: ConfigEv = { k: "config", tool: TOOL, source: CONFIG_SOURCE, kind, provenance };
   if (name !== undefined) ev.name = name;
+  return ev;
+}
+
+/**
+ * The event, with `firstSeen` = when the artifact at `p` appeared, when it is there and the file system gives a plausible
+ * birth time (`bornAt`: stat, links followed, never opened).
+ */
+function seen(ev: ConfigEv, p: string | undefined, now: number): ConfigEv {
+  const born = p === undefined ? undefined : bornAt(p, now);
+  if (born !== undefined) ev.firstSeen = born;
   return ev;
 }
 
@@ -78,7 +87,8 @@ function usageTable(table: Obj | undefined, label: string, tally: Tally, ctx: Sc
 /**
  * The global config is a mixed file (account, MCP definitions with secrets, project paths): it is parsed in memory and
  * only these fields are read — oauthAccount.accountUuid, promptQueueUseCount, lastPlanModeUse, firstStartTime,
- * skillUsage, pluginUsage, and MCP server names (the keys of `mcpServers`, globally and per project).
+ * skillUsage, pluginUsage, and MCP server names (the keys of `mcpServers`, globally and per project; a project's
+ * entries carry its project key, the project's path itself is never kept).
  */
 function readGlobalConfig(file: string, ctx: ScanCtx, tally: Tally, out: Out): GlobalUsage | undefined {
   const r = readJsonSmallResult(file, GLOBAL_CONFIG_MAX);
@@ -111,42 +121,41 @@ function readGlobalConfig(file: string, ctx: ScanCtx, tally: Tally, out: Out): G
   const plugins = new Map<string, number>();
   for (const [id, u] of usageTable(field(v, "pluginUsage", isObj, tally), "pluginUsage", tally, ctx)) plugins.set(id, u.uses);
   const mcpServers = new Set(Object.keys(field(v, "mcpServers", isObj, tally) ?? {}));
-  for (const project of Object.values(field(v, "projects", isObj, tally) ?? {})) { // project paths (the keys) are never read
+  const projectServers = new Map<string, Set<string>>();
+  // a project's path (its key in `projects`) is read in memory only, to give its entries the project's key; it is never kept
+  for (const [folder, project] of Object.entries(field(v, "projects", isObj, tally) ?? {})) {
     if (!isObj(project)) continue;
-    for (const name of Object.keys(field(project, "mcpServers", isObj, tally, "projects.mcpServers") ?? {})) mcpServers.add(name);
+    const names = Object.keys(field(project, "mcpServers", isObj, tally, "projects.mcpServers") ?? {});
+    if (names.length === 0 || folder === "") continue;
+    const key = projectKeyOf(ctx, folder);
+    const set = projectServers.get(key) ?? new Set<string>();
+    for (const name of names) set.add(name);
+    projectServers.set(key, set);
   }
-  const g: GlobalUsage = { skills: usageTable(field(v, "skillUsage", isObj, tally), "skillUsage", tally, ctx), plugins, mcpServers };
+  const g: GlobalUsage = { skills: usageTable(field(v, "skillUsage", isObj, tally), "skillUsage", tally, ctx), plugins, mcpServers, projectServers };
   const first = toEpochMs(field(v, "firstStartTime", isStr, tally), ctx.now);
   if (first !== undefined) g.firstStart = first;
   return g;
 }
 
-/** settings.json hooks: one event per hook entry; a command hook's command is classified in memory and never kept. */
+/**
+ * settings.json hooks (`parseHooks`): one event per hook entry; a command hook's command is classified in memory and
+ * never kept. With `disableAllHooks: true` the CLI runs none of them: no hook event, one `hooks-disabled` feature, and
+ * each entry left out skipped `hooks-disabled`.
+ */
 function hooks(settings: Obj | undefined, tally: Tally, out: Out): void {
-  const table = settings ? field(settings, "hooks", isObj, tally) : undefined;
-  for (const [event, groups] of Object.entries(table ?? {})) {
-    const name = HOOK_EVENT.test(event) ? event : "other";
-    if (!Array.isArray(groups)) {
-      tally.unknownKey("hooks:shape");
-      continue;
-    }
-    for (const group of groups) {
-      const list = isObj(group) && Array.isArray(group.hooks) ? group.hooks : undefined;
-      if (!list) {
-        tally.unknownKey("hooks:shape");
-        continue;
-      }
-      for (const hook of list) {
-        if (!isObj(hook)) {
-          tally.unknownKey("hooks:shape");
-          continue;
-        }
-        const ev = cfg("hook", "authored", name);
-        if (typeof hook.command === "string") ev.checks = classifyCommand(hook.command).checks;
-        out(ev);
-      }
-    }
+  const parsed = parseHooks(settings, (key) => tally.unknownKey(key));
+  if (parsed.disabled) {
+    out(cfg("feature", "authored", "hooks-disabled"));
+    for (let i = 0; i < parsed.entries; i++) tally.skip("hooks-disabled");
+    return;
   }
+  parsed.events.forEach((name, i) => {
+    const ev = cfg("hook", "authored", name);
+    const checks = parsed.entryChecks[i];
+    if (checks !== undefined) ev.checks = checks;
+    out(ev);
+  });
 }
 
 /** Skill names in `~/.agents/.skill-lock.json` (only the keys of `skills`): empty without a lock, undefined when it cannot be read. */
@@ -168,7 +177,7 @@ function markdownStems(dir: string, tally: Tally): string[] {
  * it is a skill found nowhere on disk — installed when the skill lock lists it or it carries a `<plugin>:` prefix,
  * unknown otherwise (bundled with the CLI, project-level, or removed).
  */
-function artifacts(c: Candidate, usage: GlobalUsage | undefined, tally: Tally, out: Out): void {
+function artifacts(c: Candidate, usage: GlobalUsage | undefined, tally: Tally, out: Out, now: number): void {
   const lock = lockedSkills(c.home, tally);
   const cache = realpathOf(path.join(c.root, "plugins", "cache"));
   const dir = path.join(c.root, "skills");
@@ -177,9 +186,10 @@ function artifacts(c: Candidate, usage: GlobalUsage | undefined, tally: Tally, o
     if (name.startsWith(".") || !isFile(path.join(dir, name, "SKILL.md"))) continue;
     const real = realpathOf(path.join(dir, name));
     const installed = lock?.has(name) || (cache !== undefined && real !== undefined && real.startsWith(cache + path.sep));
-    skills.set(name, cfg("skill", installed ? "installed" : lock === undefined ? "unknown" : "authored", name));
+    skills.set(name, seen(cfg("skill", installed ? "installed" : lock === undefined ? "unknown" : "authored", name), path.join(dir, name), now));
   }
-  const commands = new Map(markdownStems(path.join(c.root, "commands"), tally).map((n) => [n, cfg("command", "authored", n)] as const));
+  const cmdDir = path.join(c.root, "commands");
+  const commands = new Map(markdownStems(cmdDir, tally).map((n) => [n, seen(cfg("command", "authored", n), path.join(cmdDir, `${n}.md`), now)] as const));
   for (const [name, u] of usage?.skills ?? []) {
     let ev = skills.get(name) ?? commands.get(name);
     if (!ev) skills.set(name, (ev = cfg("skill", lock?.has(name) || name.includes(":") ? "installed" : "unknown", name)));
@@ -190,16 +200,30 @@ function artifacts(c: Candidate, usage: GlobalUsage | undefined, tally: Tally, o
     if (usage) ev.uses ??= 0;
     out(ev);
   }
-  for (const name of markdownStems(path.join(c.root, "agents"), tally)) out(cfg("agent", "authored", name));
+  const agentDir = path.join(c.root, "agents");
+  for (const name of markdownStems(agentDir, tally)) out(seen(cfg("agent", "authored", name), path.join(agentDir, `${name}.md`), now));
 }
 
-/** Installed plugin ids (keys of installed_plugins.json `plugins`) and every id with usage, with pluginUsage counts. */
-function plugins(c: Candidate, usage: GlobalUsage | undefined, tally: Tally, out: Out): void {
+/**
+ * A plugin's folder in the CLI's plugin cache: `<root>/plugins/cache/<marketplace>/<plugin>/` for the id
+ * `<plugin>@<marketplace>`; undefined for an id of another shape.
+ */
+function cacheFolder(root: string, id: string): string | undefined {
+  const at = id.lastIndexOf("@");
+  const [plugin, market] = [id.slice(0, at), id.slice(at + 1)];
+  return at > 0 && SEGMENT.test(plugin) && SEGMENT.test(market) ? path.join(root, "plugins", "cache", market, plugin) : undefined;
+}
+
+/**
+ * Installed plugin ids (keys of installed_plugins.json `plugins`) and every id with usage, with pluginUsage counts;
+ * `firstSeen` from the plugin's cache folder, when it is there.
+ */
+function plugins(c: Candidate, usage: GlobalUsage | undefined, tally: Tally, out: Out, now: number): void {
   const installed = readSidecar(resolved(path.join(c.root, "plugins", "installed_plugins.json")), tally);
   const ids = new Set(Object.keys((installed && field(installed, "plugins", isObj, tally, "installed_plugins.plugins")) ?? {}));
   for (const id of usage?.plugins.keys() ?? []) ids.add(id);
   for (const id of [...ids].sort(byName)) {
-    const ev = cfg("plugin", "installed", id);
+    const ev = seen(cfg("plugin", "installed", id), cacheFolder(c.root, id), now);
     if (usage) ev.uses = usage.plugins.get(id) ?? 0;
     out(ev);
   }
@@ -223,9 +247,16 @@ export async function scanConfig(c: Candidate, ctx: ScanCtx): Promise<void> {
   };
   const usage = readGlobalConfig(resolved(globalConfigPath(c, ctx.env)), ctx, tally, out);
   hooks(readSidecar(resolved(path.join(c.root, "settings.json")), tally), tally, out);
-  artifacts(c, usage, tally, out);
-  plugins(c, usage, tally, out);
+  artifacts(c, usage, tally, out, ctx.now);
+  plugins(c, usage, tally, out, ctx.now);
   for (const name of [...(usage?.mcpServers ?? [])].sort(byName)) out(cfg("mcp-server", "unknown", name));
+  for (const [key, names] of [...(usage?.projectServers ?? [])].sort(([a], [b]) => byName(a, b))) {
+    for (const name of [...names].sort(byName)) {
+      const ev = cfg("mcp-server", "unknown", name);
+      ev.projectKey = key;
+      out(ev);
+    }
+  }
   memoryFiles(c.root, tally, out);
   const cov = tally.coverage();
   if (usage?.firstStart !== undefined) cov.from = usage.firstStart;

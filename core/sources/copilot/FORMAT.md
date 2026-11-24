@@ -4,16 +4,23 @@ Readers: `copilot.vscode` (`index.ts`, `journal.ts`, `map.ts`, `install.ts`; the
 `copilot.cli` (`cli.ts`, beta: built from the CLI's documentation, no CLI store verified), `copilot.jetbrains`
 (`index.ts`, beta).
 
-Evidence: **(verified locally)** = confirmed on this machine with the structure probe (`scripts/probe.ts`) or with
-count-only checks run by the reader's author. **(VS Code program)** = read from VS Code 1.138's own workbench code (its
+Evidence: **(verified locally)** = confirmed against real stores with the structure probe (`scripts/probe.ts`, which
+prints names and value types, never values) or with count-only checks run by the reader's author. **(VS Code program)** = read from VS Code 1.138's own workbench code (its
 chat session serializer, journal reader and response model). **(extension program)** = read from the bundled GitHub
 Copilot Chat extension 0.66 (its `package.json` and code). **(unverified)** = from the extension's code and the CLI's
 published event list only, not verified against a real store. This file records names and value types only, never values.
 
-**Zero-yield.** A coverage window that read records but yielded none of its reader's primary events is drift
-`zero-yield` (set by the scan), so a renamed field never passes as a quiet store. Primary events: `copilot.vscode` and
-`copilot.cli` (`detail`) — a session, prompt or tool call; their `lifetime` windows (the session stores) are checked
-by their columns instead, and `copilot.jetbrains` reads no records.
+**Zero-yield.** A coverage window that read records, or found files whose lines it could not use (skipped `parse` or
+`oversize`), but yielded none of its reader's primary events is drift `zero-yield` (set by the scan), except records
+skipped as `copied` or `empty`, and coverage stamped `aborted`, so a renamed field or a changed container never passes
+as a quiet store; files with no lines at all stay `empty`; so does a
+file whose only unusable line is its last line with no line end (skipped `partial`: a record still being written). Primary events: `copilot.vscode` and `copilot.cli`
+(`detail`) — a session, prompt or tool call; their `lifetime` windows (the session stores) are checked by their
+columns instead, and `copilot.jetbrains` reads no records.
+
+**io-error.** A file or store that cannot be opened or read counts as skipped `io-error`, and so does a never-opened
+file — a credential, token or key file, by its name or by the name of the file behind a link (`core/io/observe.ts`):
+the engine refuses it before it is opened, so it reads as unreadable.
 
 ## Layout
 
@@ -161,8 +168,8 @@ Built-in tool ids (VS Code program and extension program): see `VSCODE_TOOLS` in
   - Name: the built-in tool id (`VSCODE_TOOLS`), `mcp` for MCP tools (`mcpServer` = `source.serverLabel`, else
     `source.label`; raw, export-allowlisted later), else `other` (extension tools and unknown ids).
   - Category from the tool table; terminal tools (`run_in_terminal`, `copilot_runInTerminal`, `send_to_terminal`) take
-    `classifyCommand` of the command that ran (category and checks), `exit` from `terminalCommandState.exitCode` and `ms`
-    from its `duration`; `runTests` checks `test`.
+    `classifyCommand` of the command that ran (category, checks, toolchain), `exit` from
+    `terminalCommandState.exitCode` and `ms` from its `duration`; `runTests` checks `test`.
   - A tool that did not run (its `isConfirmed`) has an `outcome` and no `ok` or `exit`: kind 0 (VS Code's Denied;
     older files `false`) → `denied`, and a `denial` marker (`detail: "user"`) — but in a request that was cancelled
     (`modelState.value` 2, or `isCanceled`) a tool left waiting for its confirmation was dropped: `cancelled`, no
@@ -179,7 +186,9 @@ Built-in tool ids (VS Code program and extension program): see `VSCODE_TOOLS` in
   0 and 4 have not ended: no turn), else `isCanceled` true → interrupted, else `result.errorDetails` → failed, else
   completed (a request with neither response nor result has no turn). `ms` = `elapsedMs`, else
   `result.timings.totalElapsed`, else `modelState.completedAt` − (`responseTimestamp` or `timestamp`); never
-  `timeSpentWaiting`. `ts` = `completedAt`, else request time + `ms`, else the request time. `model` = the request's model.
+  `timeSpentWaiting`; each duration counts only when it is a finite, non-negative number of ms of at most a day (else
+  the next one is tried). `ts` = `completedAt`, else request time + `ms`, else the request time; a `ts` outside the
+  plausible range drops the turn, skipped `bad-ts`. `model` = the request's model.
 - **MarkerEv** `interrupt` per cancelled request (`detail: "user"`), at `completedAt` (else the request time); `denial`
   per denied tool, at the request's time.
 - **Session store** (`globalStorage/github.copilot-chat/session-store.db`): lifetime sessions and turns, as below; they
@@ -189,13 +198,20 @@ Built-in tool ids (VS Code program and extension program): see `VSCODE_TOOLS` in
     journal lines and legacy documents; `versions` = extension versions; `from`/`to` = first/last event time. Drift:
     `journal-kind:<n>`, `part:(other)`, `version:newer` (a session `version` above 3), `requests:missing`,
     `request:not-object`, `session:not-object`, `modelState:<value>`, `request.message:shape` (a `message` that is neither a
-    string nor {`text`}), `request.timestamp:shape` (a request whose `timestamp` is absent or not a time; its prompt
-    and tools are skipped `no-ts`). A store whose session files are all empty (`empty-session`) is `empty`, not `ok`.
-    Skipped: `no-ts`, `bad-ts`, `duplicate`, `empty-session`,
-    `bad-record`, `parse`, `oversize`, `too-large`, `io-error`.
+    string nor {`text`}), `request.timestamp:shape` (a request whose `timestamp` is absent or not a time). A store whose
+    session files are all empty (`empty-session`) is `empty`, not `ok`. Skipped: `no-ts` (a request of
+    `request.timestamp:shape`: it is dropped with its prompt and tools), `bad-ts` (a request whose `timestamp` is a
+    well-formed time outside the plausible range: dropped with its prompt and tools, and counted once, never also
+    `no-ts`), `duplicate`, `empty-session`, `bad-record`, `parse`, `oversize`, `too-large`, `io-error`.
   - `lifetime` (the session store): `files`/`bytes` = the store; `records` = its rows; `from`/`to` = its sessions and
-    turns. Drift: `store.missing-table:<t>`, `store.missing-column:<c>`. Skipped: `bad-row`, `no-ts`, `io-error`,
-    `bad-record`. `absent` without a store; `error` (`note: "unreadable"`) when the store is there but cannot be read.
+    turns. Drift: `store.missing-table:<t>`, `store.missing-column:<c>`, `store.table-unreadable:<t>` (a table whose first
+    page fails other than busy), `store.page-stalled:<t>` (a full page whose last rowid cannot place the next one: the
+    rows read stay, the table ends). Skipped: `bad-row`, `no-ts`, `io-error` (a store that cannot be opened — warn
+    `cp.db-unopenable` — or that fails while read — warn `cp.db-unreadable` —, a busy page — warn `cp.db-busy` —, a later
+    page that fails — warn `cp.db-query`), `too-large` (a locked store whose private copy — the store and its `-wal` —
+    would exceed `MAX_COPY_BYTES`: never copied, `note: "too-large"`, warn `cp.db-too-large`), `bad-record`. `absent`
+    without a store; `error` (`note: "unreadable"`) when the store is there but cannot be read — a store too large to
+    copy keeps `note: "too-large"` instead.
 
 **Install detection** (`install.ts`, names only): a bundled `copilot*` extension — macOS `/Applications/<app>.app/Contents/
 Resources/app/extensions` and `~/Applications/…`, Windows `%LOCALAPPDATA%\Programs\Microsoft VS Code[ Insiders]\resources\
@@ -210,14 +226,14 @@ keeps a store of the same name. Tables: `sessions` (`id` TEXT primary key, `cwd`
 `turn_index`, `user_message`, `assistant_response`, `timestamp` TEXT ISO), `checkpoints`, `session_files` (`file_path`,
 `tool_name`, …), `session_refs` (`ref_type`, `ref_value`, …), `schema_version`, and an FTS5 `search_index`.
 
-- Columns read: `sessions.id`, `cwd`, `host_type`, `created_at`, `updated_at`; `turns.session_id`, `timestamp` — in rowid
-  pages, explicit column lists checked against the table first (a missing one is drift). Never selected: turn texts,
-  `summary`, `repository`, `branch`, the agent fields; never read: `checkpoints`, `session_files`, `session_refs`, the
-  search index.
+- Columns read: `sessions.id`, `cwd`, `created_at`, `updated_at`; `turns.session_id`, `timestamp` — in rowid pages,
+  explicit column lists checked against the table first (a missing one is drift). Never selected: turn texts, `summary`,
+  `repository`, `branch`, `host_type` (in the CLI's store it names the repository's host, not a client), the agent
+  fields; never read: `checkpoints`, `session_files`, `session_refs`, the search index.
 - **SessionEv** (`lifetime`) per session row with a creation time: `start` = `created_at`, `end` = `updated_at` (never
-  before `start`), origin `human`, `surface` = `host_type` when a value the programs write — `vscode` (the extension's copy)
-  or `github` (the CLI's store, where it names the repository's host) — else `other`, `projectKey` from `cwd`.
-  **TurnEv** (`lifetime`) per turn row with a time, no status or duration.
+  before `start`), origin `human`, `surface` = the client whose store it is — `vscode` for the extension's copy, `cli`
+  for the CLI's own store —, `projectKey` from `cwd`. **TurnEv** (`lifetime`) per turn row with a time, no status or
+  duration.
 
 ## Copilot CLI (`copilot.cli`) (unverified)
 
@@ -249,9 +265,9 @@ other type is drift `event:(other)` (the type itself is never kept).
   ended, or one never started, ends nothing; an exchange whose call never ended (the file stops mid-call) has no turn.
 - `tool.execution_start` {`toolCallId`, `toolName`, `arguments`, `mcpServerName`?, `mcpToolName`?, `parentToolCallId`?}
   and `tool.execution_complete` {`toolCallId`, `success`, `result` {`content`}, `error` {`code`, `message`}} → ToolEv
-  (`CLI_TOOLS`): `bash`/`powershell` → `classifyCommand(arguments.command)`, `exit` from the result's trailing
-  `<exited with exit code N>`; `edit`, `str_replace`, `insert`, `create`, `str_replace_editor` → edit/write with `editExt`
-  from `arguments.path`; MCP tools → `mcp` with `mcpServer`; `think`, `report_intent` (written on every turn),
+  (`CLI_TOOLS`): `bash`/`powershell` → `classifyCommand(arguments.command)` (category, checks, toolchain), `exit` from
+  the result's trailing `<exited with exit code N>`; `edit`, `str_replace`, `insert`, `create`, `str_replace_editor` →
+  edit/write with `editExt` from `arguments.path`; MCP tools → `mcp` with `mcpServer`; `think`, `report_intent` (written on every turn),
   `report_progress`, `task_complete`, `ask_user` and `tool_search_tool_regex` are `meta`. `ok` = exit code 0 when known,
   else `success`; `ms` = completion − start. A call still running at an `abort` was interrupted: `outcome:
   "interrupted"`, no `ok`. The CLI's permission results are not mapped yet (their names differ between versions of its
@@ -259,9 +275,11 @@ other type is drift `event:(other)` (the type itself is never kept).
 - SessionEv (`detail`, origin `human`, `surface: "cli"`); session id = the `session-state` folder name (UUID verbatim,
   else hashed). The session store is read as above.
 - **Coverage**, one per window: `detail` = `session-state/*/events.jsonl` (`absent` without `session-state/`),
-  `lifetime` = `session-store.db` (`absent` without it; `error`, `note: "unreadable"`, when it cannot be read).
+  `lifetime` = `session-store.db` (`absent` without it; `error`, `note: "unreadable"`, when it cannot be read; a store
+  too large to copy keeps `note: "too-large"`, as above).
   Drift in `detail`, beyond unknown event types: `event.timestamp:shape` (an event whose `timestamp` is absent or not a
-  time; a well-formed one outside the plausible range is skipped `bad-ts`, an event without one `no-ts`),
+  time: what it carries is dropped, skipped `no-ts`; a well-formed time outside the plausible range is skipped `bad-ts`
+  instead, counted once and never also `no-ts`),
   `user.message.content:shape` (no string `content`), `tool.execution_start:shape` (a call without its id or tool
   name), `session-state:layout` (an entry of `session-state/` that is not a folder holding `events.jsonl`, such as a
   bare `<id>.jsonl`), `layout:history-session-state` (the older layout's folder is there).

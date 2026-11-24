@@ -14,7 +14,7 @@ import type { SourcePlugin } from "../../../core/sources/types";
 import { keyedHash, normalizePath } from "../../../core/text/hash";
 import { classifyIntent } from "../../../core/text/intent";
 import { CANARY, expectNoCanaries, findCanaries } from "../../kit/canary";
-import { fakeHome, type FakeHome } from "../../kit/home";
+import { fakeHome, lockAboveCopyLimit, type FakeHome } from "../../kit/home";
 import { pbEncode } from "../../kit/pb";
 import { fixtureStart, MIN } from "../../fixtures/claude-code";
 import {
@@ -87,6 +87,9 @@ function rowsOf(file: string, sql: string): Record<string, unknown>[] {
 }
 
 describe("antigravity: Task 15 scenario", () => {
+  /** Each test builds and scans the whole scenario: on a stalled CI runner one has needed more than the default 5 s. */
+  const SCENARIO_TIMEOUT = 20_000;
+
   test("5 sessions (3 CLI, 2 IDE), a subagent with parent and depth, a kill, 5 tools by category, an error, 2 prompts, 2 usage, 2 plan artifacts; no canaries", async () => {
     const fx = buildAntigravity(h);
     const sql = observe();
@@ -112,7 +115,7 @@ describe("antigravity: Task 15 scenario", () => {
     expectNoCanaries([...allEvents(r), r.coverage, r.warnings]);
     expect(r.warnings).toEqual([]);
     expect(r.tempClean).toBe(true);
-  });
+  }, SCENARIO_TIMEOUT);
 
   test("CLI sessions: lifetime rows, the detail span of the steps and transcript merged in; the first workspace as the project", async () => {
     const fx = buildAntigravity(h);
@@ -128,7 +131,7 @@ describe("antigravity: Task 15 scenario", () => {
     expect(r.store.session(sidOf(P))!.parentId).toBeUndefined();
     expect(r.store.session(sidOf(P))!.spawnDepth).toBeUndefined();
     expect(markers(r, "interrupt").map((m) => [m.ts - fx.t0, m.detail, m.proxyTs])).toEqual([[31 * MIN, "killed", true]]); // stamped by the row's last change
-  });
+  }, SCENARIO_TIMEOUT);
 
   test("prompts and usage from the transcript: text in memory only (intent, features, keyed hash), token counts", async () => {
     const fx = buildAntigravity(h);
@@ -144,7 +147,7 @@ describe("antigravity: Task 15 scenario", () => {
       { k: "usage", tool: "antigravity", source: "antigravity.cli", ts: fx.t0 + MIN + 30_000, sessionId: sidOf(P), model: "other", inTok: 1200, outTok: 300, cacheR: 9000, cacheW: 0 },
       { k: "usage", tool: "antigravity", source: "antigravity.cli", ts: fx.t0 + 11 * MIN, sessionId: sidOf(P), model: "other", inTok: 800, outTok: 120, cacheR: 0, cacheW: 0 },
     ]);
-  });
+  }, SCENARIO_TIMEOUT);
 
   test("tools from the steps: step names, status as the outcome; the error marker for the step with error details", async () => {
     const fx = buildAntigravity(h);
@@ -156,7 +159,7 @@ describe("antigravity: Task 15 scenario", () => {
       [5 * MIN, sidOf(P), "grep_search", "search", false, undefined, undefined],
       [6 * MIN, sidOf(P), "open_browser_url", "browser", true, undefined, undefined],
     ]);
-  });
+  }, SCENARIO_TIMEOUT);
 
   test("IDE sessions and brain markers; coverage of every source", async () => {
     const fx = buildAntigravity(h);
@@ -185,7 +188,7 @@ describe("antigravity: Task 15 scenario", () => {
       window: "lifetime", status: "ok", files: 1, bytes: statSync(fx.ideFile).size, records: 2, from: fx.t0 + 40 * MIN, to: fx.t0 + 61 * MIN, skipped: {}, unknownTypes: {},
     });
     expect(covOf(r, "antigravity.brain")).toMatchObject({ window: "lifetime", status: "ok", files: 0, bytes: 0, records: 2, skipped: {}, unknownTypes: {} });
-  });
+  }, SCENARIO_TIMEOUT);
 });
 
 describe("antigravity cli: conversation_summaries.db", () => {
@@ -485,9 +488,9 @@ describe("antigravity cli: conversations/<id>.db steps", () => {
       { type: STEP.RUN_COMMAND, metadata: call({ CommandLine: "npm run lint" }), payload: runPayload({ cmd: "cargo build" }) },
     ]);
     const r = await run([agCli]);
-    expect(tools(r).map((t) => [t.name, t.category, t.checks])).toEqual([
-      ["run_command", "test", ["test"]], ["run_command", "shell", undefined], ["run_command", "shell", undefined], ["write_file", "write", undefined],
-      ["run_command", "lint", ["lint"]], ["run_command", "build", ["build"]],
+    expect(tools(r).map((t) => [t.name, t.category, t.checks, t.toolchain])).toEqual([
+      ["run_command", "test", ["test"], "py"], ["run_command", "shell", undefined, undefined], ["run_command", "shell", undefined, undefined],
+      ["write_file", "write", undefined, undefined], ["run_command", "lint", ["lint"], "js"], ["run_command", "build", ["build"], "rust"],
     ]);
     expectNoCanaries([...allEvents(r), r.coverage]);
   });
@@ -514,10 +517,12 @@ describe("antigravity cli: conversations/<id>.db steps", () => {
       ["blaze_test_targets", "test", ["test"], true, undefined, undefined], ["compile", "build", ["build"], false, undefined, undefined],
       ["lint_applet", "lint", ["lint"], true, undefined, undefined],
     ]);
+    // a run command's checks carry its toolchain; a typed check step names no command, so it has none
+    expect(tools(r).map((t) => t.toolchain)).toEqual(["js", "js", "js", undefined, undefined, undefined]);
     expect(markers(r, "denial").map((m) => [m.detail, m.ts - at])).toEqual([["user", 0]]);
   });
 
-  test("times from the step metadata: without metadata or a creation time no-ts; metadata that is not protobuf is drift; errors only with a time", async () => {
+  test("times from the step metadata: without metadata or a creation time no-ts, an implausible one bad-ts; metadata that is not protobuf is drift; errors only with a time", async () => {
     const at = t0();
     writeSteps(h, P, [
       { type: STEP.VIEW_FILE, ts: at },
@@ -532,7 +537,8 @@ describe("antigravity cli: conversations/<id>.db steps", () => {
     expect(tools(r).map((t) => t.ts - at)).toEqual([0]);
     expect(markers(r, "error").map((m) => m.ts - at)).toEqual([1_000]);
     const cov = covOf(r, "antigravity.cli");
-    expect([cov.skipped, cov.unknownTypes]).toEqual([{ "no-ts": 3 }, { "steps.metadata:shape": 2 }]);
+    // a creation time of 7 s after the epoch is a time, but implausible: bad-ts
+    expect([cov.skipped, cov.unknownTypes]).toEqual([{ "no-ts": 2, "bad-ts": 1 }, { "steps.metadata:shape": 2 }]);
     expectNoCanaries([...allEvents(r), r.coverage]);
   });
 
@@ -624,7 +630,7 @@ describe("antigravity cli: transcript.jsonl", () => {
     const r = await run([agCli]);
     expect([r.store.all("prompt").length, r.store.all("usage").length]).toEqual([1, 1]);
     expect(r.store.session(sidOf(P))).toMatchObject({ window: "detail", origin: "human", surface: "cli", start: at, end: at + 1_000 });
-    expect(covOf(r, "antigravity.cli")).toMatchObject({ records: 2, skipped: { parse: 1 }, files: 1 });
+    expect(covOf(r, "antigravity.cli")).toMatchObject({ records: 2, skipped: { partial: 1 }, files: 1 }); // the cut-off last line
   });
 });
 
@@ -665,6 +671,27 @@ describe("antigravity history: history.jsonl (its own lifetime source)", () => {
     expect(cov.unknownTypes).toEqual({ "history.type:(other)": 1, "history.display:missing": 1, "history.timestamp:missing": 1, "history:not-object": 1 });
     expectNoCanaries([...allEvents(r), r.coverage]);
   });
+
+  test("a history prompt carries the project key a session of the same folder carries, its workspace a path or a file URI; the folder itself never", async () => {
+    const at = fixtureStart();
+    writeSummaries(h, [{ id: P, input: at, modified: at + MIN }]); // its workspace: file://<the canary folder>
+    h.writeJsonl(historyRel, [
+      historyLine({ display: "Refactor the importer", timestamp: at }),
+      { ...historyLine({ display: "Add tests", timestamp: at + MIN }), workspace: `file://${CANARY.path}` },
+      { ...historyLine({ display: "No folder", timestamp: at + 2 * MIN }), workspace: undefined },
+    ]);
+    const r = await run([agCli, agHistory]);
+    const session = r.store.session(sidOf(P))!;
+    expect(session.projectKey).toBe(keyedHash(r.salt, normalizePath(CANARY.path)));
+    expect(byTime(r.store.all("prompt")).map((p) => p.projectKey)).toEqual([session.projectKey, session.projectKey, undefined]);
+    expectNoCanaries([...allEvents(r), r.coverage]);
+  });
+
+  test("a history.jsonl that is not a regular file counts not-file", async () => {
+    mkdirSync(path.join(h.env.home, historyRel), { recursive: true });
+    const r = await run([agHistory]);
+    expect(covOf(r, "antigravity.history")).toMatchObject({ status: "empty", files: 0, skipped: { "not-file": 1 } });
+  });
 });
 
 describe("antigravity cli: stores", () => {
@@ -678,6 +705,22 @@ describe("antigravity cli: stores", () => {
     // the readable transcript is enough for the source; each window says how its own stores fared
     expect(covOf(r, "antigravity.cli")).toMatchObject({ status: "ok", files: 1, skipped: { "io-error": 1 } });
     expect(summariesCov(r)).toMatchObject({ status: "error", note: "unreadable", files: 0, skipped: { "io-error": 1 } });
+  });
+
+  test.skipIf(process.platform === "win32")("the only store, locked and above the copy limit: no error — too-large note, warning and log", async () => {
+    const file = writeSummaries(h, [{ id: C }]);
+    const release = lockAboveCopyLimit(file);
+    const logs: string[] = [];
+    let r: Result;
+    try {
+      r = await scan({ env: h.env, plugins: [agCli], onLog: (level, code) => { if (code !== "scan.gc") logs.push(`${level} ${code}`); } });
+    } finally {
+      release();
+    }
+    expect(summariesCov(r)).toMatchObject({ status: "empty", note: "too-large", files: 0, skipped: { "too-large": 1 } });
+    expect(covOf(r, "antigravity.cli").status).toBe("absent"); // no conversation store
+    expect(r.warnings.map((w) => [w.code, w.source])).toEqual([["too-large", "antigravity.cli"]]);
+    expect(logs).toEqual(["warn ag.db-too-large"]);
   });
 
   test("no CLI folder: absent; a folder without stores: absent in both windows, history empty", async () => {

@@ -1,10 +1,13 @@
-import { constants, Database } from "bun:sqlite";
-import { closeSync, copyFileSync, existsSync, openSync, readSync, statSync } from "node:fs";
+import { constants, Database, type Statement } from "bun:sqlite";
+import { closeSync, copyFileSync, existsSync, lstatSync, openSync, readSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import type { TempDirs } from "../sources/types";
+import { statPath } from "./fs";
+import { noteOpen } from "./observe";
 
 export const MAX_COPY_BYTES = 2_147_483_648;
 
+/** A read-only store. `all` and `get` run reads only (`readOnly`): any other statement throws ReadOnlyQueryError. */
 export interface RoDb {
   all<T>(sql: string, ...p: unknown[]): T[];
   get<T>(sql: string, ...p: unknown[]): T | undefined;
@@ -14,6 +17,11 @@ export interface RoDb {
   readonly copied: boolean;
   /** Opened with `immutable=1`: a WAL store without a `-wal` (its writer closed it), so there is no WAL content to miss. */
   readonly immutable: boolean;
+  /**
+   * A private copy made without the store's `-wal`, because that companion is a link (never followed): rows that live
+   * only in the WAL are missing from it. The caller counts it (skip `linked-wal`).
+   */
+  readonly walSkipped?: boolean;
 }
 
 let observer: ((sql: string) => void) | undefined;
@@ -42,15 +50,51 @@ export function isBusyError(e: unknown): boolean {
   return BUSY.test(String(err?.message ?? "")) || BUSY.test(String(err?.code ?? ""));
 }
 
+/** A statement an RoDb refused to run: only reads run on a store (`readOnly`). */
+export class ReadOnlyQueryError extends Error {}
+
+/** The PRAGMAs the readers query, in their read form `PRAGMA name(arg)` (inside a SELECT they run as `pragma_<name>(?)`). */
+const READ_PRAGMA = /^PRAGMA\s+(?:table_info|index_list|index_xinfo)\s*\([^;=()]*\)$/i;
+
+/**
+ * Only reads run on a store: one SELECT or WITH statement, or one of the readers' PRAGMAs (READ_PRAGMA), and no `;`, so
+ * never a second statement. Anything else throws ReadOnlyQueryError before it runs: ATTACH, which would open a file the
+ * open observer never sees; DETACH; VACUUM, whose INTO form writes a copy even through a read-only handle; writes, schema
+ * changes and every other PRAGMA. The filter reads only a statement's first word: a write behind a WITH (`WITH x AS (…)
+ * DELETE …`) passes it, and is refused by the read-only connection itself (an SQLite error, not ReadOnlyQueryError).
+ */
+function readOnly(sql: string): void {
+  const s = sql.trim();
+  if (!s.includes(";") && (/^(?:SELECT|WITH)\b/i.test(s) || READ_PRAGMA.test(s))) return;
+  throw new ReadOnlyQueryError("only a read runs on a store");
+}
+
 class Handle implements RoDb {
-  constructor(private db: Database, readonly copied: boolean, readonly immutable = false) {}
+  /** The connection: a true private field, so no cast reaches it and every statement goes through `readOnly`. */
+  readonly #db: Database;
+  /**
+   * Every statement this handle prepared, by its SQL text: all are finalized on `close`, whatever their number (the
+   * runtime's own cache finalizes only the few it still holds, and a live statement keeps the file open, which on
+   * Windows means it cannot be removed).
+   */
+  readonly #statements = new Map<string, Statement>();
+  constructor(db: Database, readonly copied: boolean, readonly immutable = false, readonly walSkipped = false) {
+    this.#db = db;
+  }
+  #statement(sql: string): Statement {
+    let st = this.#statements.get(sql);
+    if (st === undefined) this.#statements.set(sql, (st = this.#db.prepare(sql)));
+    return st;
+  }
   all<T>(sql: string, ...p: unknown[]): T[] {
     observer?.(sql);
-    return this.db.query(sql).all(...(p as never[])) as T[];
+    readOnly(sql);
+    return this.#statement(sql).all(...(p as never[])) as T[];
   }
   get<T>(sql: string, ...p: unknown[]): T | undefined {
     observer?.(sql);
-    return (this.db.query(sql).get(...(p as never[])) ?? undefined) as T | undefined;
+    readOnly(sql);
+    return (this.#statement(sql).get(...(p as never[])) ?? undefined) as T | undefined;
   }
   tables(): string[] {
     return this.all<{ name: string }>("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").map((r) => r.name);
@@ -59,8 +103,16 @@ class Handle implements RoDb {
     return this.all<{ name: string }>("SELECT name FROM pragma_table_info(?)", table).map((r) => r.name);
   }
   close(): void {
+    for (const st of this.#statements.values()) {
+      try {
+        st.finalize();
+      } catch {
+        /* already finalized */
+      }
+    }
+    this.#statements.clear();
     try {
-      this.db.close();
+      this.#db.close();
     } catch {
       /* already closed */
     }
@@ -84,6 +136,7 @@ function closeQuietly(db: Database): void {
 }
 
 function tryOpen(file: string, opener: (uri: string) => Database, params = "mode=ro"): Database {
+  noteOpen(file, "sqlite");
   const db = opener(`${sqliteUri(file)}?${params}`);
   try {
     db.query("PRAGMA schema_version").get();
@@ -96,6 +149,7 @@ function tryOpen(file: string, opener: (uri: string) => Database, params = "mode
 
 /** The database header says WAL mode: its file format write and read versions (bytes 18 and 19) are both 2. */
 function walMode(file: string): boolean {
+  noteOpen(file, "header");
   let fd: number | undefined;
   try {
     fd = openSync(file, "r");
@@ -114,39 +168,99 @@ function walMode(file: string): boolean {
   }
 }
 
+/** A file's size, following symlinks as a copy does; 0 when it is not there. */
+function sizeOf(file: string): number {
+  try {
+    return statSync(file).size;
+  } catch {
+    return 0;
+  }
+}
+
 /**
- * Opens a store read-only; null when it cannot be opened. How is decided before opening, from the file itself:
+ * The path a store is read by: the one its `-wal` and `-shm` sit beside. For a link that is its target, resolved once:
+ * SQLite on unix resolves a linked store itself and keeps them there, even for a writer that opened the link. Only when
+ * the `-wal` sits beside the link and not beside the target (a writer whose SQLite names it after the path as given) is
+ * the link read as it is. Any other path is read as given: through linked folders, `<path>-wal` already names the store's
+ * own. Null when nothing is there.
+ */
+export function storePath(file: string): string | null {
+  try {
+    if (!lstatSync(file).isSymbolicLink()) return file;
+    const target = realpathSync(file);
+    return existsSync(file + "-wal") && !existsSync(target + "-wal") ? file : target;
+  } catch {
+    return null;
+  }
+}
+
+/** The bytes a private copy of a store's own file takes (see `copyBytes`). */
+const storeBytes = (store: string): number => sizeOf(store) + sizeOf(store + "-wal");
+
+/**
+ * The bytes a private copy of a store takes: the store and its `-wal`, which holds a live writer's uncheckpointed work and
+ * can outgrow the store itself. (The `-shm`, an index of the `-wal`, is copied too but is a small fraction of it.) A
+ * linked store's `-wal` is the one beside the path it is read by (`storePath`).
+ */
+export function copyBytes(file: string): number {
+  return storeBytes(storePath(file) ?? file);
+}
+
+/**
+ * Opens a store read-only; null when it cannot be opened. A linked store is read by the path its `-wal` and `-shm` sit
+ * beside, its target as a rule (`storePath`): every check, the open and a copy below use that one path. How is decided
+ * before opening, from the file itself:
  * - a WAL store (by its header) without a `-wal` — its writer closed it — opens with `immutable=1`: there is no WAL
  *   content to miss, and an immutable open never writes `-wal`/`-shm` beside the store, which a plain read-only open
  *   does on some SQLite builds (others refuse to open such a store at all). If a `-wal` appears while it opens (a writer
  *   started), the store is reopened as below;
- * - any other store opens with `mode=ro`, and a busy one falls back to a private copy.
+ * - any other store opens with `mode=ro`, and a busy one falls back to a private copy — unless the copy would take more
+ *   than `o.maxCopyBytes` (default MAX_COPY_BYTES; `copyBytes`: the store and its `-wal`), when it is null.
+ * A never-opened store (`noteOpen`) is refused at its first open, the header read: null, and nothing of it is read.
+ * Anything at the path that is not a regular file (a folder, a pipe, a device; links followed) is null before any open,
+ * so a pipe never blocks the read. A private copy never follows a linked `-wal` or `-shm` (SQLite itself refuses a linked
+ * companion); one that is no file at all makes the copy fail. Read-only is the store's own file and `-wal`: with a `-wal`
+ * present (a writer is or was there), SQLite may create or rewrite the `-shm` index beside the store, as any reader does.
  */
-export function openRo(file: string, temp: TempDirs, opener: (uri: string) => Database = defaultOpener): RoDb | null {
-  if (!existsSync(file)) return null;
-  if (walMode(file) && !existsSync(file + "-wal")) {
+export function openRo(file: string, temp: TempDirs, opener: (uri: string) => Database = defaultOpener, o?: { maxCopyBytes?: number }): RoDb | null {
+  const store = storePath(file);
+  if (store === null || statPath(store).state !== "file") return null;
+  let wal: boolean;
+  try {
+    wal = walMode(store);
+  } catch {
+    return null; // refused: a never-opened store
+  }
+  if (wal && !existsSync(store + "-wal")) {
     let db: Database;
     try {
-      db = tryOpen(file, opener, "mode=ro&immutable=1");
+      db = tryOpen(store, opener, "mode=ro&immutable=1");
     } catch {
       return null;
     }
-    if (!existsSync(file + "-wal")) return new Handle(db, false, true);
+    if (!existsSync(store + "-wal")) return new Handle(db, false, true);
     closeQuietly(db);
   }
   try {
-    return new Handle(tryOpen(file, opener), false);
+    return new Handle(tryOpen(store, opener), false);
   } catch (e) {
     if (!isBusyError(e)) return null;
   }
   try {
-    if (statSync(file).size > MAX_COPY_BYTES) return null;
+    if (storeBytes(store) > (o?.maxCopyBytes ?? MAX_COPY_BYTES)) return null;
     const dir = temp.dir();
-    const dest = path.join(dir, path.basename(file));
+    const dest = path.join(dir, path.basename(store));
+    let walSkipped = false;
     for (const suffix of ["", "-wal", "-shm"]) {
-      if (existsSync(file + suffix)) copyFileSync(file + suffix, dest + suffix);
+      if (!existsSync(store + suffix)) continue;
+      if (suffix !== "" && lstatSync(store + suffix).isSymbolicLink()) { // a linked companion is never followed
+        if (suffix === "-wal") walSkipped = true;
+        continue;
+      }
+      noteOpen(store + suffix, "copy");
+      copyFileSync(store + suffix, dest + suffix);
     }
-    return new Handle(tryOpen(dest, opener), true);
+    return new Handle(tryOpen(dest, opener), true, false, walSkipped);
   } catch {
     return null;
   }

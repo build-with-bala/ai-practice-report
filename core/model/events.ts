@@ -1,5 +1,5 @@
 import type {
-  CheckKind, Intent, MarkerKind, Origin, TechCategory, ToolCategory, ToolId, Window,
+  CheckKind, Intent, MarkerKind, Origin, TechCategory, ToolCategory, Toolchain, ToolId, Window,
 } from "./ids";
 
 /*
@@ -32,10 +32,17 @@ import type {
  * - `SessionEv.parentId` (child → parent session) is the delegation link every tool with subagents fills.
  *   `ToolEv.delegateTo` (the delegating call → the child's session) exists only for Claude Code, and `EdgeEv`
  *   (parent → child thread) only for Codex's thread index.
+ *
+ * Orphan events. An event whose `sessionId` names no session in the store is an orphan: analysis counts it per kind and
+ * leaves it out of the per-session walk (lifetime counts may still take it). Claude Code's workflow-run totals are
+ * orphans by design: a `TotalsEv` per workflow run, keyed `claude-code:wf:<keyed hash of the run>`, names no session,
+ * since a workflow run has no transcript of its own (its agents' transcripts are sessions with `workflowId`).
  */
 
+/** What a prompt's text shows, computed in memory (`promptFeatures`). `chars`: the UTF-16 length of the trimmed prompt. */
 export interface PromptFeatures { words: number; lenBucket: 0 | 1 | 2 | 3 | 4; hasContext: boolean; fileRefs: number;
-  listLines: number; constraintTerms: number; isTaskStart: boolean; techCats: Partial<Record<TechCategory, number>>; simToPrev?: number }
+  listLines: number; constraintTerms: number; isTaskStart: boolean; techCats: Partial<Record<TechCategory, number>>; simToPrev?: number;
+  chars?: number }
 interface Base { tool: ToolId; source: string }   // source = plugin id
 
 /**
@@ -43,8 +50,9 @@ interface Base { tool: ToolId; source: string }   // source = plugin id
  * id the store merges them (store.ts): the detail-window report decides the fields below, the other fills the gaps.
  * - `surface`: the client the session ran in, as the tool names it — Claude Code's `entrypoint` (`cli`, `sdk-cli`, …),
  *   Codex's `source` (`cli`, `vscode`, `exec`, `mcp`, `custom`, `internal`, `unknown`, `subagent`, else `other`),
- *   `cli`/`ide`/`battle` (Antigravity), `vscode`/`cli` (Copilot; its session stores' `host_type`, `vscode` or `github`,
- *   else `other`), `ide` (Cursor). Every value but Claude Code's comes from an allowlist.
+ *   `cli`/`ide`/`battle` (Antigravity), `vscode`/`cli` (Copilot: the client whose files or session store the session
+ *   comes from — the VS Code extension's or the CLI's), `ide` (Cursor). Every value but Claude Code's comes from an
+ *   allowlist.
  * - `mode`: the interaction mode, for tools whose sessions are either an autonomous agent run or a chat (Copilot VS
  *   Code, Cursor): `agent` when any request of the session ran in agent mode, else `chat`. Absent where a tool has one
  *   mode only (Claude Code, Codex, the CLIs: agent runs).
@@ -54,8 +62,13 @@ export interface SessionEv extends Base { k: "session"; id: string; window: Wind
   background?: boolean; workflowId?: string; inRepo?: boolean; approval?: string; sandbox?: string;
   effort?: string;    // the session's reasoning effort level, when the tool records one per session (shape-guarded)
   mode?: "agent" | "chat" }
+/**
+ * One prompt. `projectKey`: the keyed hash of the project the prompt was typed in (the key a session of that project
+ * carries in `SessionEv.projectKey`), set when the source records the project per prompt; a prompt that names a session
+ * takes its project from the session.
+ */
 export interface PromptEv extends Base { k: "prompt"; ts: number; sessionId?: string; window: Window; origin: Origin; intent: Intent;
-  features: PromptFeatures; textHash: string; hasPaste?: boolean }
+  features: PromptFeatures; textHash: string; hasPaste?: boolean; projectKey?: string }
 
 /**
  * One tool call (or, for a patch, one file of it).
@@ -68,10 +81,12 @@ export interface PromptEv extends Base { k: "prompt"; ts: number; sessionId?: st
  *   `interrupted` (stopped while it ran). With an outcome, `ok` and `exit` are absent: a denied `npm test` is no
  *   failing check. A denial is also a `denial` marker.
  * - `exit`: the command's exit code, when the tool records one.
+ * - `toolchain`: the toolchain of the command that produced the call's first check (`classifyCommand`); absent without a
+ *   checking command, or when the table names no toolchain for it.
  */
 export interface ToolEv extends Base { k: "tool"; ts: number; sessionId: string; callId?: string; name: string; category: ToolCategory;
   checks?: CheckKind[]; ok?: boolean; outcome?: "denied" | "cancelled" | "interrupted"; exit?: number; ms?: number; editExt?: string;
-  linesAdded?: number; linesRemoved?: number; mcpServer?: string; delegateTo?: string }
+  linesAdded?: number; linesRemoved?: number; mcpServer?: string; delegateTo?: string; toolchain?: Toolchain }
 
 /**
  * One exchange that ended: an input — a prompt, a queued message, a subagent's brief — and the agent's work on it, all
@@ -106,7 +121,8 @@ export interface TotalsEv extends Base { k: "totals"; sessionId: string; linesAd
  * | denial                                | who refused a tool call: `user`, `rule` (a permission rule), `auto` (an  |
  * |                                       | automatic permission check), `other`                                      |
  * | pr-link                               | keyed hash of the pull request (its URL, else repo#number)               |
- * | commit                                | keyed hash of the commit sha, when known                                 |
+ * | commit                                | keyed hash of the sha's first 7 hex digits, lower-cased (the key repo    |
+ * |                                       | signals give the same commit), when known                                 |
  * | plan-artifact                         | the artifact: `task`, `implementation_plan`, `walkthrough`               |
  * | model-switch                          | the family named: `opus`, `sonnet`, `haiku`, `fable`, `other`; none when |
  * |                                       | the picker was opened                                                     |
@@ -118,35 +134,50 @@ export interface TotalsEv extends Base { k: "totals"; sessionId: string; linesAd
  * | plan-enter, plan-exit, queue, error   |                                                                           |
  *
  * `queue` is one prompt the person queued while the agent worked (a lifetime count of queue use is a ConfigEv
- * `feature`). `proxyTs`: `ts` is a stand-in, not when the thing happened — a file's modification time (`plan-artifact`)
- * or the conversation's last change (Antigravity's `killed`): it places the marker, but never counts as activity.
+ * `feature`). `proxyTs`: `ts` is a stand-in, not when the thing happened — a file's modification time
+ * (`plan-artifact`), the conversation's last change (Antigravity's `killed`) or the session's last record (Claude
+ * Code's `stopped-by-user`): it places the marker, but never counts as activity.
  */
 export interface MarkerEv extends Base { k: "marker"; ts: number; sessionId?: string; kind: MarkerKind; detail?: string; proxyTs?: true }
 
 /**
  * Configuration measured by use. `name` holds the raw config name (skill, command, agent, plugin, MCP server, hook
- * event) for the export allowlist and is never exported raw — except for `feature`, a CLI feature counted by the CLI
- * itself, whose name is a fixed token (`prompt-queue`: times the input queue went from empty to non-empty).
+ * event) for the export allowlist and is never exported raw — except for `feature`, a feature of the CLI whose name is a
+ * fixed token: `prompt-queue` (`uses`: times the input queue went from empty to non-empty, as the CLI counts them),
+ * `hooks-disabled` (the settings turn every hook off, so none runs).
+ * `firstSeen`: when the artifact appeared — its file or folder's birth time by stat (absent where the file system
+ * records none, or it is implausible; never the change time), never opened, or an install time the tool records. It never counts as activity (spec §6.2: file times never
+ * make a day active).
+ * `projectKey`: the keyed hash of the project the entry belongs to (a per-project server, a project's own settings,
+ * hooks, skills or agents); absent for a user-level entry.
  */
 export interface ConfigEv extends Base { k: "config";
   kind: "skill" | "command" | "agent" | "plugin" | "hook" | "mcp-server" | "memory-file" | "instruction-file" | "profile" | "feature";
-  name?: string; provenance: "authored" | "installed" | "bundled" | "unknown"; uses?: number; lastUsed?: number; checks?: CheckKind[] }
+  name?: string; provenance: "authored" | "installed" | "bundled" | "unknown"; uses?: number; lastUsed?: number; checks?: CheckKind[];
+  firstSeen?: number; projectKey?: string }
 
 /**
- * A tool's own per-day totals. `zone`: the day's time zone — `utc`, or `local` (the scanning process's zone);
+ * A tool's own per-day totals. `zone`: the day's time zone — `utc`, `local` (the scanning process's zone), or `either`
+ * (the UTC date or the local date, depending on the release of the tool that wrote the entry: a store can hold both);
  * `unit`: what `count` counts — `prompts` typed at the prompt, or `messages` (every message of the day's sessions,
  * whoever wrote it). Days of different zones never match one to one; counts of different units never add up.
  */
-export interface DailyEv extends Base { k: "daily"; day: string; zone: "local" | "utc"; unit: "prompts" | "messages"; count: number;
+export interface DailyEv extends Base { k: "daily"; day: string; zone: "local" | "utc" | "either"; unit: "prompts" | "messages"; count: number;
   sessions?: number; toolCalls?: number; models?: Record<string, number> }
 export interface EdgeEv extends Base { k: "edge"; parentId: string; childId: string }
-export interface AnchorEv extends Base { k: "anchor"; kind: "cc-msg" | "cc-req"; ts: number; idTail: string }
+export interface AnchorEv extends Base { k: "anchor"; kind: "cc-msg" | "cc-req"; ts: number; idTail: string;
+  /** The session the event belongs to, when the reader knows it; scope rules treat the event like its session. */
+  sessionId?: string }
 export interface IdentityEv extends Base { k: "identity"; scope: "session" | "config"; hash: string; sessionId?: string }
-export interface FileFactEv extends Base { k: "file"; pathHash: string; bytes: number; mtime: number; birth?: number; ctime?: number; firstTs?: number; lastTs?: number }
+export interface FileFactEv extends Base { k: "file"; pathHash: string; bytes: number; mtime: number; birth?: number; ctime?: number; firstTs?: number; lastTs?: number;
+  /** The session the event belongs to, when the reader knows it; scope rules treat the event like its session. */
+  sessionId?: string }
 export interface RolloutFactEv extends Base { k: "codex-rollout"; threadId: string; uuidTs?: number; fileTs?: number }
 export interface ThreadRowEv extends Base { k: "codex-thread-row"; threadId: string; createdAt?: number }
 export interface RateLimitEv extends Base { k: "ratelimit"; ts: number; window: "primary" | "secondary"; windowMinutes?: number; usedPercent: number; resetsAt?: number;
-  bucket?: string }   // keyed hash of the provider's rate-limit bucket id, when the trace names one
+  bucket?: string;   // keyed hash of the provider's rate-limit bucket id, when the trace names one
+  /** The session the event belongs to, when the reader knows it; scope rules treat the event like its session. */
+  sessionId?: string }
 export interface CommitFactEv extends Base { k: "commit"; ts: number; aiLines?: number; humanLines?: number; repoKey?: string }
 
 /**

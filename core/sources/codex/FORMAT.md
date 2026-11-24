@@ -3,13 +3,22 @@
 Readers: `codex.rollouts` (`rollouts.ts`, `tools.ts`, `uuid.ts`, `origin.ts`, `effort.ts`); the lifetime layer (thread
 index, turn history, prompt history, configuration) is documented in the second half of this file.
 
-Evidence: **(verified locally)** = the type or field was confirmed on this machine with the structure probe
-(`scripts/probe.ts`) or with count-only checks run by the reader's author. **(CLI program)** = read from the installed
-CLI program's own type tables (0.169.0), not seen locally. This file records names and value types only, never values.
+Evidence: **(verified locally)** = the type or field was confirmed against real rollouts and stores with the structure
+probe (`scripts/probe.ts`, which prints names and value types, never values) or with count-only checks run by the
+reader's author. **(CLI program)** = read from the CLI program's own type tables (0.169.0), not confirmed with the
+probe. This file records names and value types only, never values.
 
-**Zero-yield.** A coverage window that read records but yielded none of its reader's primary events is drift
-`zero-yield` (set by the scan), so a renamed field never passes as a quiet store. Primary events: `codex.rollouts` — a session, prompt or
-tool call; `codex.threads` — a session, turn or spawn edge; `codex.history` — a prompt; `codex.config` — a setting.
+**Zero-yield.** A coverage window that read records, or found files whose lines it could not use (skipped `parse` or
+`oversize`), but yielded none of its reader's primary events is drift `zero-yield` (set by the scan), except records
+skipped as `copied` or `empty`, and coverage stamped `aborted`, so a renamed field or a changed container never passes
+as a quiet store; files with no lines at all stay `empty`; so does a
+file whose only unusable line is its last line with no line end (skipped `partial`: a record still being written). Primary events: `codex.rollouts` — a session, prompt or
+tool call; `codex.threads` — a session, turn or spawn edge; `codex.history` — a prompt. `codex.config` is not guarded:
+its records are its own events, so it cannot read one without yielding one.
+
+**io-error.** A file or store that cannot be opened or read counts as skipped `io-error`, and so does a never-opened
+file — a credential, token or key file, by its name or by the name of the file behind a link (`core/io/observe.ts`):
+the engine refuses it before it is opened, so it reads as unreadable.
 
 ## Layout
 
@@ -188,14 +197,17 @@ CLI's EventMsg tags (`exec_command_end`, `mcp_tool_call_end`, `collab_*`, `realt
   (or of the item id for nested calls).
 - **SessionEv** per rollout (origin rules in `origin.ts`, shared with the thread index reader so the two cannot
   diverge): origin from `source` — `exec` → scripted; `mcp` (Codex run through its MCP server,
-  driven by another client or agent) → peer; `{subagent: …}` → subagent (`parentId` from
+  driven by another client or agent) → peer; `internal` (the CLI's own work) → system; `{subagent: …}` → subagent (`parentId` from
   `thread_spawn.parent_thread_id`, else `parent_thread_id`; `spawnDepth` = `depth`; `agentType` = the role when
-  built in, else its keyed hash); any other string, or no source → human; `originator` exactly `Claude Code` → peer,
+  built in, else its keyed hash); an object with one key that is another source name (`{internal: …}`, `{custom: …}`)
+  → as that name, its data never read; another string the CLI writes, or no source → human; a string it is not known to
+  write → system and drift `session_meta.source:(other)` (a future automated source never counts as typed prompts); `originator` exactly `Claude Code` → peer,
   whatever the string source (a subagent source wins: its subagents inherit the originator and stay subagents).
   `surface` = the source when the CLI writes it (`cli`, `vscode`, `exec`, `mcp`, `custom`, `internal`, `unknown`; CLI
   program), else `other`, or `subagent`; `version` = `cli_version`;
   `projectKey` from `cwd`; `inRepo` = `git` present; `models` = distinct `turn_context` models; `start`/`end` =
-  first/last own line time. A source object without `subagent` is drift `session_meta.source:shape`.
+  first/last own line time. Any other shape (an array, an object with another key or several, a number) is system and
+  drift `session_meta.source:shape`: nothing of unknown shape is ever a human.
 - **Copied history is skipped**: lines with `ordinal` below `subagent_history_start_ordinal` — whatever the source —
   yield nothing, so the parent's prompts, tools, turns and usage are not counted twice; the token totals and rate
   limits they reach are the baselines the thread's own `token_count`s are compared with, so the fork point's re-emitted
@@ -212,10 +224,15 @@ CLI's EventMsg tags (`exec_command_end`, `mcp_tool_call_end`, `collab_*`, `realt
   trimmed text) as for Claude Code; `isTaskStart` = first human prompt or ≥ 30 min since the thread's last line.
 - **ToolEv** (`cxToolCalls`), one per call, or per file for apply_patch:
   - shell tools (`exec_command`, `shell`, `shell_command`, `local_shell`): `classifyCommand` of the command line (a
-    `[<shell>, -c…, <script>]` argv is unwrapped to the script), as for Claude Code's shell tools; it recognises
-    reading (`cat`, `head`, `tail`, `ls`, …) and searching (`rg`, `grep`, `find`, …) behind every other category.
-    `parsed_cmd` is not read.
+    `[<shell>, -c…, <script>]` argv is unwrapped to the script by the classifier's own `shellScript`, the rule that
+    also unwraps `bash -lc "<script>"` given as one string), as for Claude Code's shell tools — category, checks
+    and the `toolchain` of the command that produced the first check; it recognises reading (`cat`, `head`, `tail`,
+    `ls`, …) and searching (`rg`, `grep`, `find`, …) behind every other category. `parsed_cmd` is not read. A shell
+    call whose command, as argv or as a string, starts with the word `apply_patch` is the CLI's patch tool run
+    through the shell: read as `apply_patch` (below), the patch taken from `argv[1]`, or — of a string — from the
+    heredoc its first line opens with `<<` (`<<-`, quoted delimiters), else from the rest of the string.
   - `apply_patch` → `edit` per file, `editExt` from the path, `linesAdded`/`linesRemoved` from the file's `+`/`-` lines;
+    a `*** Delete File:` section holds none of the file's lines: `linesAdded` 0 and no `linesRemoved` (unknown);
     `FileChange` items → the same per changed file (update: the diff's lines; add/delete: the content's lines).
   - `update_plan` → plan; `view_image`/`ImageView` → read; `web_search_call`, `web_search`, the `web` namespace and
     `Extension web.search` → web (`name:"web_search"`); the multi-agent tools (and v1 `wait` with agent ids) and
@@ -229,10 +246,12 @@ CLI's EventMsg tags (`exec_command_end`, `mcp_tool_call_end`, `collab_*`, `realt
     Commands the person ran (`source: user_shell`) are not tool events.
   - A call waits for the item with its `call_id`: `ok` = exit code 0 (else from `status`), `exit`, `ms` from
     `duration`; an item `declined` by the person never ran: `outcome: "denied"`, no `ok` or `exit`, and a `denial`
-    marker (`detail: "user"`). A linked shell call that classified as plain `shell` takes the category and checks of
-    the command that ran. Items without such a call are their own events, timed by `started_at_ms`; an item id is counted once, so the
+    marker (`detail: "user"`). A linked shell call that classified as plain `shell` takes the category, checks and
+    toolchain of the command that ran. Items without such a call are their own events, timed by `started_at_ms`; an item id is counted once, so the
     same item again, or its call arriving after it, adds nothing. Calls no item completes are emitted at the end of
-    the file.
+    the file. Items are told apart by id; shape never dedupes: two `FileChange` items with different ids both count,
+    even when they have the same shape (the same extensions and line counts), and so does the same patch applied
+    again later in the turn.
   - Input sent to a running command (`CommandExecution` with `source: unified_exec_interaction`) never makes a command
     event: it completes the call with its id, else it is skipped (`exec-interaction`).
   - An item recorded for another thread (`item_completed.thread_id`, or a `CollabAgentToolCall`'s `sender_thread_id`,
@@ -245,17 +264,20 @@ CLI's EventMsg tags (`exec_command_end`, `mcp_tool_call_end`, `collab_*`, `realt
 - **RateLimitEv** per window (`primary`, `secondary`) present with a numeric `used_percent`: `windowMinutes`,
   `resetsAt` (`resets_at` in s or ms, else line time + `resets_in_seconds`), `bucket` = the keyed hash of `limit_id`
   (a server-issued id, never kept raw; absent without one); a snapshot equal to the previous one of its bucket and
-  window in the same rollout is not repeated. Rate limits belong to the account: the event has no session.
+  window in the same rollout is not repeated. Rate limits belong to the account, but the reading names the rollout it
+  came from (`sessionId`), so a session left out of the analysis takes its readings with it.
 - **MarkerEv**: `interrupt` per `turn_aborted`, `detail` by its `reason` — the person's: `interrupted` → `user`,
   `replaced` → `replaced` (new input replaced the turn); the tool's own: `review_ended` → `review-ended`,
   `budget_limited` → `budget-limited`; any other reason, or none → `other`. `denial` per declined item.
   `compact-auto` per `compacted` line.
 - **RolloutFactEv** per fully read rollout: `threadId` = the session id, `uuidTs` = the thread id's UUIDv7 time,
-  `fileTs` = the file name's local time; **FileFactEv** likewise.
+  `fileTs` = the file name's local time; **FileFactEv** likewise, naming its session (`sessionId`).
 - **CoverageEv**: `files`/`bytes` of fully read rollouts, `records` = parsed lines; skipped `sniffed`, `oversize`,
-  `parse`, `io-error`, `duplicate`, `foreign-item`, `exec-interaction`, `bad-record` (also logged once per root as
-  `warn cx.bad-record`), `bad-ts` (a well-formed time outside the plausible range), `no-ts` (an event whose line gives
-  no time; markers and command items take the latest earlier one when there is one); drift, beyond unknown types:
+  `parse`, `io-error`, `duplicate`, `foreign-item`, `exec-interaction`, `empty-patch` (a patch call — the `apply_patch`
+  tool, or a shell call starting `apply_patch` — with no file section: no edit), `bad-record` (also logged once per root as
+  `warn cx.bad-record`), `bad-ts` (a line whose time is well-formed but outside the plausible range, counted once and
+  never also `no-ts` for what it holds), `no-ts` (an event whose line gives no time, absent or shapeless; markers and
+  command items take the latest earlier one when there is one); drift, beyond unknown types:
   `timestamp:shape` (a line whose `timestamp` is absent or not a time), `<type>.payload:shape` (a `session_meta`,
   `turn_context`, `response_item` or `event_msg` line whose `payload` is not an object), `user.content:shape` (a user
   message whose `content` is neither a string nor a list holding an `input_*` part); `versions` = `cli_version`s; `from`/`to` = first/last event time. Once per root the
@@ -394,7 +416,9 @@ The SQL names only the columns below, validated against `pragma_table_info` firs
   `missing-table:<name>`. Without `threads.id`, `thread_turns.thread_id`/`status` or either edge column that table is
   skipped. Tables are read in rowid pages of 5,000 rows (`WHERE rowid > ? ORDER BY rowid LIMIT ?`). A table that
   cannot be paged — declared `WITHOUT ROWID` (checked in `sqlite_master.sql` before paging), or whose first page fails
-  for any reason but a busy store — is drift `table-unreadable:<name>` and is skipped.
+  for any reason but a busy store — is drift `table-unreadable:<name>` and is skipped. A full page whose last rowid is
+  not a safe integer above the page's start (it could not place the next page) ends that table as drift
+  `page-stalled:<name>`; the rows already read stay.
 - **Ids**: `codex:<thread id>`, the id verbatim when UUID-shaped, else its keyed hash — the same form as the rollouts'
   session ids and `RolloutFactEv.threadId`, so index rows and rollouts join and their sessions merge in the store:
   start = earliest, end = latest, models = the sorted union, a non-human origin wins (subagent > peer > scripted >
@@ -408,10 +432,12 @@ The SQL names only the columns below, validated against `pragma_table_info` firs
   count is drift `threads.tokens_used:shape`; null emits nothing.
 - **SessionEv** (window `lifetime`) per thread with a creation time (else skipped `no-ts`): `start` = created,
   `end` = updated (never before `start`); origin, `surface`, `parentId`, `spawnDepth`, `agentType` from `source` and
-  `originator` by the rollouts' rules (`origin.ts`: `exec` → scripted, `mcp` → peer, a subagent source → subagent,
-  `originator` exactly `Claude Code` → peer unless the source is a subagent one, else human). `source` text that starts
-  with `{`, `[` or `"` is parsed as JSON; JSON that does not parse, or a source that is neither a string nor a subagent
-  object, is drift `threads.source:shape` (surface `other`). `models` = [`model`] (model-id-shaped, else `other`);
+  `originator` by the rollouts' rules (`origin.ts`: `exec` → scripted, `mcp` → peer, `internal` → system, an object
+  keyed by one source name → as that name, a subagent source → subagent,
+  `originator` exactly `Claude Code` → peer unless the source is a subagent one; a source string the CLI is not known
+  to write → system and drift `threads.source:(other)`; else human). `source` text that starts
+  with `{`, `[` or `"` is parsed as JSON; JSON that does not parse, or a source of any other shape, is system and drift
+  `threads.source:shape` (surface `other`). `models` = [`model`] (model-id-shaped, else `other`);
   `effort` = `reasoning_effort` by the CLI's levels (`effort.ts`, shared with the rollouts' turns: `none`, `minimal`,
   `low`, `medium`, `high`, `xhigh`, `max`, `ultra`; any other string → `other`; null → none);
   `version` = `cli_version` (version-shaped); `projectKey` from `cwd`; `inRepo` = any git column set; `approval` =
@@ -429,9 +455,11 @@ The SQL names only the columns below, validated against `pragma_table_info` firs
 - **Coverage**: `files`/`bytes` = stores read (main file size); `records` = rows read; skipped `no-ts`,
   `in-progress`, `bad-row`, `bad-record` (a row the mapping failed on; warn log `cx.bad-record` once with the count),
   `io-error` (a store that cannot be opened — warn `cx.db-unopenable` — or fails while read, a busy page, a later page
-  that fails); `versions` = `cli_version`s; `from`/`to` = earliest/latest session start or end and turn time. Each store
+  that fails), `too-large` (a locked store whose private copy — the store and its `-wal` — would exceed
+  `MAX_COPY_BYTES`: never copied, `note: "too-large"`, warn `cx.db-too-large`); `versions` = `cli_version`s; `from`/`to` = earliest/latest session start or end and turn time. Each store
   is read on its own: one that fails does not stop the other. Only when every store present fails does the reader
-  throw, making the coverage `error`.
+  throw, making the coverage `error` — unless a store was too large to copy: then the coverage keeps
+  `note: "too-large"`.
 
 ## history.jsonl (verified locally)
 
@@ -475,7 +503,8 @@ Tables (CLI program): `[features]`, `[tui]`, `[tui.<k>]`, `[notice.<k>]`, `[plug
   inside); a config id `<plugin>@<marketplace>` names the same plugin. Only folder names are read; hidden entries are
   skipped; manifests are never opened.
 - **skill**: one per `skills/<name>/` folder holding a `SKILL.md` (symlinked folders followed; hidden ones skipped,
-  among them `.system`, which holds the bundled skills and a `.codex-system-skills.marker`). Provenance `installed` when
+  among them `.system`, which holds the bundled skills and a `.codex-system-skills.marker`); `firstSeen` = the folder's
+  birth time by stat (links followed), when the file system records one and it is plausible; never the change time. Provenance `installed` when
   `<home>/.agents/.skill-lock.json` lists the name (only the keys of its `skills` are read), `unknown` when that lock
   exists but cannot be read, else `authored`. The lock is read only when there is at least one skill.
 - **memory-file**: one per `*.md` file directly in `memories/` (the CLI writes `MEMORY.md`, `memory_summary.md`,

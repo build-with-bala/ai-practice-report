@@ -1,0 +1,148 @@
+import pkg from "../package.json" with { type: "json" };
+import { exposure, type Exposure } from "./analysis/exposure";
+import { projectLabels, projects, type ProjectSummary } from "./analysis/labels";
+import { panels, type ConfigPanel, type CoveragePanel, type DayParts, type RiskPosture, type Stack } from "./analysis/panels";
+import { checkExclusions, ExclusionError } from "./analysis/exclusions";
+import { identityHashes } from "./analysis/scope";
+import { buildSessionTable } from "./analysis/sessions";
+import { buildSessionStats } from "./analysis/walk";
+import { runForensics, type Forensics, type ReleaseTable } from "./forensics/index";
+import type { RepoSignals } from "./git/types";
+import type { ConfigEv, Ev } from "./model/events";
+import type { ToolId } from "./model/ids";
+import type { ScanResult, Warning } from "./scan";
+import { bootstrap, DEFAULT_B, DEFAULT_SEED } from "./scoring/bootstrap";
+import { overall, type Overall } from "./scoring/overall";
+import { loadReference } from "./scoring/reference";
+import { roles } from "./scoring/roles";
+import { scoreDimensions, type DimensionResult } from "./scoring/score";
+import { computeSignals } from "./signals/compute";
+import { computeGlobals } from "./signals/globals";
+import type { Signals } from "./signals/types";
+
+/**
+ * How to analyze. `reference`: the reference table (v0, the only one); `bootstrap` and `seed`: the bootstrap's replicate
+ * count (default 200) and seed (default 0x5eed); `now`: the analysis time (default `raw.finishedAt`, never the clock);
+ * `timeZone`: the IANA zone days and weeks are keyed in (default the process zone, read through `Intl`); `exclude`:
+ * tools, projects, and a date range (epoch ms, inclusive) to leave out; `releases`: the release table C9 checks against
+ * (default the shipped one). A project is named by its opaque label, matched without regard to letter case ("p-3f2a"
+ * names "P-3F2A"), or by its projectKey, matched exactly. Every exclusion fails closed with an `ExclusionError`, so a
+ * typo never silently excludes nothing: a project entry that names neither, a tool outside the closed tool list, a
+ * `from` or `to` that is not a finite number, or a `from` later than `to` (`checkExclusions`).
+ */
+export interface AnalyzeOptions { reference?: "v0"; bootstrap?: number; seed?: number; now?: number; timeZone?: string;
+  exclude?: { tools?: ToolId[]; projects?: string[]; from?: number; to?: number }; releases?: ReleaseTable }
+
+/**
+ * The complete analysis of a scan result: plain JSON data (no Map, Set, class instance or function) holding only finite
+ * numbers. Nothing outside `private` holds free text: projects are keyed hashes with opaque labels, and raw config
+ * names and model ids sit only under `private`, which exports read through allowlists only.
+ * - `meta`: the core version and the options in force; `repoSignals` is the scan's repo-signal status.
+ * - `dimensions` carry the bootstrap's intervals; `overall` its interval; `personas` = `roles(dimensions, stack)`.
+ * - `forensics` is display only: it never changes a score, an evidence minimum or a confidence.
+ * - `identity`: the distinct `IdentityEv` hashes (sorted) and their count: of kept tools, and for a session-scope hash
+ *   that names a session, only when that session is a kept row (not excluded by project or date, no host copy).
+ * - `exclusions`: what was asked, whether or not a session row carried it. `tools`: the excluded tools that have any
+ *   event or a coverage row that is not absent. `projects`: the excluded projects that any session, prompt or config
+ *   entry carries. `sessions`: the session rows left out. `dateRange`: a start or an end of the date range was given.
+ *   `weeksOutside`: the distinct ISO weeks in which the person was active (a human prompt, in any window, of a tool and
+ *   project that are not excluded) that lie outside the date range; 0 without a range. The weekly series holds no week
+ *   outside the range.
+ *   A project exclusion removes every session (with its descendants and host copies), prompt and config entry that
+ *   carries the project (a prompt or entry carries one when its source records it), the events of those sessions, its
+ *   repository's commits (a repository with no kept session counts nowhere) and its dates (coverage spans then follow
+ *   the in-scope sessions and prompts). It cannot remove: per-day totals, which carry no project (a source that also
+ *   supplied prompts is read from its prompts; any other source's per-day totals are left out of the activity whole
+ *   under a project exclusion, counted in `diagnostics.dailyRowsLeftOut`); per-project memory files (their folder name
+ *   cannot be turned back into a project); lifetime prompts of a tool that records no project per prompt and whose
+ *   session file is gone; the commits of a repository that still has another folder in the report.
+ * - `diagnostics`: orphan events per kind inside the date range, and `orphanPrompts`, the orphan detail prompts per tool
+ *   (naming a session the store does not hold, or none); what the cross-tool dedupe found; the scan's warnings, less
+ *   those that name an excluded tool; and `dailyRowsLeftOut` (a tool's own per-day totals left out under a project
+ *   exclusion, since they carry no project); `cutCommitLists`, the repositories of kept rows whose commit list was cut
+ *   short (their delivery and commit metrics read only the part read, from its reach).
+ */
+export interface Analysis {
+  meta: { core: string; reference: "v0"; bootstrap: number; seed: number; now: number; timeZone: string; repoSignals: RepoSignals["status"] };
+  coverage: CoveragePanel; signals: Signals; dimensions: DimensionResult[]; overall: Overall; personas: string[];
+  exposure: Exposure; stack: Stack; risk: RiskPosture; config: ConfigPanel; projects: ProjectSummary[]; forensics: Forensics;
+  identity: { accounts: number; hashes: string[] }; exclusions: { tools: number; projects: number; sessions: number;
+    dateRange: boolean; weeksOutside: number };
+  diagnostics: { orphans: Partial<Record<Ev["k"], number>>; dedupe: { hostSessions: number; pairedPrompts: number; relabelled: number }; warnings: Warning[];
+    orphanPrompts: Partial<Record<ToolId, number>>; dailyRowsLeftOut: number; cutCommitLists: number };
+  private: { dayParts: DayParts; config: Array<{ kind: ConfigEv["kind"]; name: string; key: string; provenance: ConfigEv["provenance"]; used: boolean }>;
+    models: Record<string, number> };
+}
+
+const cmp = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+/** The largest epoch-ms time a Date can hold (±100,000,000 days). */
+const MAX_DATE_MS = 8.64e15;
+
+export { ExclusionError };
+
+/**
+ * The analysis of a scan result (see `Analysis`): pure, synchronous and deterministic. No I/O and no clock: `now`
+ * defaults to `raw.finishedAt`, and all randomness is the seeded bootstrap's. The order of work is fixed: labels and the
+ * project exclusions, the session table, the per-session statistics, the globals, the signals, the dimensions, the
+ * bootstrap (over the same statistics and globals as the point estimate), the overall, exposure and the panels, the
+ * projects, the personas, forensics and identity. `now` must be a finite time a date can hold, `seed` finite (`meta.seed`
+ * is the seed the generator uses: truncated, modulo 2^32), and `reference` a known table; each is a RangeError
+ * otherwise, as an unknown zone is (from `Intl`).
+ */
+export function analyze(raw: ScanResult, o: AnalyzeOptions = {}): Analysis {
+  const reference = o.reference ?? "v0";
+  const B = o.bootstrap ?? DEFAULT_B;
+  const given = o.seed ?? DEFAULT_SEED;
+  if (!Number.isFinite(given)) throw new RangeError("analyze: seed must be a finite number");
+  const seed = given >>> 0; // what the generator uses (mulberry32): truncated, modulo 2^32
+  const now = o.now ?? raw.finishedAt;
+  if (!Number.isFinite(now) || Math.abs(now) > MAX_DATE_MS) throw new RangeError("analyze: now must be a finite epoch-ms time a date can hold");
+  const timeZone = o.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const ref = loadReference(reference);
+
+  // labels over every project key of the store (sessions, prompts, config entries), so a label names the same project
+  // whatever is excluded, and an exclusion may name any of them
+  const keys: string[] = [];
+  for (const k of ["session", "prompt", "config"] as const) for (const e of raw.store.all(k)) if (e.projectKey !== undefined) keys.push(e.projectKey);
+  const labels = projectLabels(raw.salt, keys);
+  const keyOf = new Map<string, string>();
+  for (const [key, label] of labels) keyOf.set(label.toUpperCase(), key);
+  const resolve = (entry: string): string => {
+    if (labels.has(entry)) return entry;
+    const key = keyOf.get(entry.toUpperCase());
+    if (key === undefined) throw new ExclusionError("projects", "matches no project label or key", entry);
+    return key;
+  };
+  checkExclusions(o.exclude);
+  const ex = o.exclude ?? {};
+  const exclude = { ...ex, ...(ex.projects ? { projects: ex.projects.map(resolve) } : {}) };
+
+  const t = buildSessionTable(raw, { timeZone, exclude });
+  const stats = buildSessionStats(t, raw.store, raw.repos, { timeZone });
+  const g = computeGlobals(t, stats, raw, { now });
+  const signals = computeSignals(stats, g);
+  const dimensions = scoreDimensions(signals, ref);
+  const boot = bootstrap(stats, g, ref, overall(dimensions, null).included, { B, seed });
+  for (const d of dimensions) d.interval = boot.intervals[d.id] ?? null;
+  const total = overall(dimensions, boot.overall);
+  const exp = exposure(t, raw, { now, timeZone, ...(g.firstParallelBucket === undefined ? {} : { firstParallelBucket: g.firstParallelBucket }) });
+  const p = panels(t, raw, { timeZone });
+  const projectList = projects(t, labels);
+  const personas = roles(dimensions, p.stack);
+  const forensics = runForensics(raw, t, stats, { now, timeZone, ...(o.releases ? { releases: o.releases } : {}) });
+  const hashes = identityHashes(raw, t);
+  // repos of kept rows whose commit list was cut short (`commitsReach`): delivery and commit metrics read only its newest part
+  const keptRepos = new Set([...t.rows.values()].filter((r) => r.repoKey !== undefined && !t.hosts.has(r.id)).map((r) => r.repoKey!));
+  const cutLists = raw.repos.repos.filter((r) => r.commitsReach !== undefined && keptRepos.has(r.repoKey)).length;
+
+  return {
+    meta: { core: pkg.version, reference, bootstrap: boot.B, seed, now, timeZone, repoSignals: raw.repos.status },
+    coverage: p.coverage, signals, dimensions, overall: total, personas,
+    exposure: exp, stack: p.stack, risk: p.risk, config: p.config, projects: projectList, forensics,
+    identity: { accounts: hashes.length, hashes },
+    exclusions: { ...t.exclusions },
+    diagnostics: { orphans: { ...t.orphans }, dedupe: { ...t.dedupe }, warnings: raw.warnings.filter((w) => w.tool === "scan" || !t.scope.tools.has(w.tool)).map((w) => ({ ...w })),
+      orphanPrompts: { ...t.orphanPrompts }, dailyRowsLeftOut: t.dailyRowsLeftOut, cutCommitLists: cutLists },
+    private: { dayParts: p.dayParts, config: p.privateConfig, models: p.privateModels },
+  };
+}

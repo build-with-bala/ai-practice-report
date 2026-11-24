@@ -1,54 +1,185 @@
-import { existsSync } from "node:fs";
+import { fileState } from "./fs";
+import { noteOpen } from "./observe";
 import { maybeYield } from "./yield";
 
 export const MAX_LINE_BYTES = 33_554_432;
 
+export interface GcPacerOptions {
+  /** Bytes streamed between two looks at the RSS. */
+  checkEvery: number;
+  /** No collection while the RSS is at or below this: a small scan pays nothing. */
+  minRss: number;
+  /** The RSS growth over the baseline that a collection waits for. */
+  slack: number;
+  /**
+   * The fallback's step: while RSS is no measure of live memory, a collection at least every this many bytes (default
+   * 16 MiB). The garbage one step leaves fills the kept pages, so a smaller step means a lower peak, at the price of
+   * more full collections.
+   */
+  fallbackEvery?: number;
+}
+
 /**
- * Runs `collect` once per `step` bytes reported, while the process RSS is above `minRss` (a small scan pays nothing).
- * Parsed lines leave garbage faster than the engine reclaims it on its own while the event store grows: measured on a
- * full scan of several GiB of JSONL, peak RSS reached 0.9–1.1 GiB at any scan concurrency, and stayed at 0.6–0.7 GiB
- * with a full collection per 64 MiB streamed, for 1–3 s more.
+ * Collects garbage as the process grows. Parsed lines leave garbage faster than the engine reclaims it on its own while
+ * the event store grows, so without help a long scan's peak RSS climbs with the bytes it streams.
+ *
+ * The adaptive rule. Every `checkEvery` bytes reported, the pacer reads the RSS. Above `minRss`, and more than `slack`
+ * over the baseline, it runs `collect` and takes the RSS after it as the new baseline (the first look sets the first
+ * baseline). Every look also lowers the baseline to the RSS it reads when that is lower, so after the RSS falls (a
+ * scan's store released, pages returned) growth is measured from the low mark, never from a stale high one. A heap that
+ * holds steady is never collected; one whose garbage the allocator hands back is collected about once per `slack` of
+ * growth.
+ *
+ * Why RSS alone is not enough. The allocator keeps the pages a collection frees, so RSS after a collection is no
+ * measure of live memory: often it does not fall at all. The baseline then sits at the high mark, the next garbage
+ * fills the kept pages unseen, and a collection comes only once RSS has climbed `slack` past that mark — the peak
+ * ratchets up by `slack` per collection, while far fewer collections run than the stream needs.
+ *
+ * The fallback. A collection "did not fall" when its RSS fell by less than half of the growth it answered
+ * (`rss before − baseline`; any collection with no growth to answer). A partial fall below that half counts as not
+ * falling. From the first collection that did not fall, the pacer also collects every `fallbackEvery` bytes streamed
+ * since its last collection, above `minRss`, and keeps doing so until a new phase begins: a look that finds RSS at or
+ * below `minRss` (memory really handed back), or `newPhase()`, which a scan calls when it starts (`holdStreamGc`). A
+ * later collection that does fall does not turn it off within the phase, since a fall can be garbage that filled kept
+ * pages unseen, freed again, while RSS still says nothing of live memory. A scan starts on the adaptive rule only when
+ * no other scan holds the pacer (`newPhase` runs on the first hold); and a new phase keeps the baseline the phase before
+ * it left, so a long-lived process that scans again and again can grow by up to one `slack` per scan before a
+ * collection of its own does not fall and the fallback starts. A scan that stays under `minRss` pays nothing.
  */
 export class GcPacer {
+  /** False: `add` does nothing (no look at the RSS, no collection). */
+  enabled = true;
   private bytes = 0;
+  private sinceCollect = 0;
+  private baseline: number | undefined;
+  private fallback = false;
+  private count = 0;
+  private readonly fallbackEvery: number;
   constructor(
-    private readonly step: number,
-    private readonly minRss: number,
+    private readonly opts: GcPacerOptions,
     private readonly collect: () => void,
     private readonly rss: () => number = () => process.memoryUsage().rss,
-  ) {}
+  ) {
+    this.fallbackEvery = opts.fallbackEvery ?? 16 * 1024 * 1024;
+  }
+
+  /** The collections run so far. */
+  get collections(): number {
+    return this.count;
+  }
+
+  /** A new phase (a scan starts): the fallback ends, until a collection of this phase does not fall. */
+  newPhase(): void {
+    this.fallback = false;
+  }
+
+  /**
+   * The end of a phase (a scan's reading is over): one collection when enabled and above `minRss`, so what follows
+   * reuses the pages the phase's garbage holds instead of growing RSS past them. The baseline becomes the RSS after it.
+   */
+  settle(): void {
+    if (!this.enabled) return;
+    const now = this.rss();
+    if (now <= this.opts.minRss) return;
+    this.collect();
+    this.count++;
+    this.baseline = Math.min(this.baseline ?? Infinity, this.rss());
+    this.sinceCollect = 0;
+  }
 
   add(n: number): void {
+    if (!this.enabled) return;
     this.bytes += n;
-    if (this.bytes < this.step) return;
+    this.sinceCollect += n;
+    if (this.bytes < this.opts.checkEvery) return;
     this.bytes = 0;
-    if (this.rss() > this.minRss) this.collect();
+    const now = this.rss();
+    if (this.baseline === undefined) {
+      this.baseline = now;
+      return;
+    }
+    this.baseline = Math.min(this.baseline, now);
+    if (now <= this.opts.minRss) {
+      this.fallback = false;
+      return;
+    }
+    const grew = now - this.baseline > this.opts.slack;
+    const due = this.fallback && this.sinceCollect >= this.fallbackEvery;
+    if (!grew && !due) return;
+    this.collect();
+    this.count++;
+    const after = this.rss();
+    const answered = now - this.baseline;
+    this.fallback ||= answered <= 0 || (now - after) * 2 < answered;
+    this.baseline = after;
+    this.sinceCollect = 0;
   }
 }
 
-/** The pacer every JSONL stream reports to, process-wide (concurrent readers share one memory budget). */
-export const STREAM_GC = new GcPacer(64 * 1024 * 1024, 384 * 1024 * 1024, () => Bun.gc(true));
+const MiB = 1024 * 1024;
+/** The pacer every JSONL stream and git's log streams report to, process-wide (concurrent readers share one memory budget). */
+export const STREAM_GC = new GcPacer({ checkEvery: 8 * MiB, minRss: 384 * MiB, slack: 128 * MiB }, () => Bun.gc(true));
+
+/** The holds on STREAM_GC: every one held, and how many of them asked for `auto`. */
+let holds = 0;
+let autoHolds = 0;
+/** STREAM_GC.enabled as it was when the first of the current holds was taken. */
+let enabledBefore = true;
+
+/**
+ * Sets STREAM_GC for a scan and returns its release (idempotent). STREAM_GC is shared by every scan in the process, and
+ * scans can overlap, so the holds are counted: while any hold is held, the pacer is on if any of them asked for `auto`,
+ * and off only while every one of them asked for `off` (an auto scan's memory protection is never traded for another
+ * scan's preference: a collection costs only CPU). Every take and release recomputes that from the holds still held, so
+ * an off scan that joins or ends never turns the pacer off under a running auto scan, and once the last auto scan ends
+ * the pacer is off for the off scans still running. The last release restores the state that was there before the first
+ * hold; a value set by hand on `STREAM_GC.enabled` while a hold is held is overwritten at the next take or release.
+ */
+export function holdStreamGc(mode: "auto" | "off"): () => void {
+  if (holds === 0) {
+    enabledBefore = STREAM_GC.enabled;
+    STREAM_GC.newPhase();
+  }
+  holds++;
+  if (mode === "auto") autoHolds++;
+  STREAM_GC.enabled = autoHolds > 0;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    holds--;
+    if (mode === "auto") autoHolds--;
+    STREAM_GC.enabled = holds === 0 ? enabledBefore : autoHolds > 0;
+  };
+}
 
 export type JsonlItem =
   | { n: number; value: unknown }
-  | { n: number; skip: "oversize" | "parse" | "sniffed"; bytes: number };
+  | { n: number; skip: "oversize" | "parse" | "partial" | "sniffed"; bytes: number };
 
 export interface JsonlOpts {
   sniffSkip?: (head: string) => boolean;
   headBytes?: number; // default 512
   maxLineBytes?: number; // default MAX_LINE_BYTES
   signal?: AbortSignal;
+  /** Told the size of each chunk read, so a caller can count the bytes it read. */
+  onBytes?: (n: number) => void;
 }
 
 /**
- * Stream a JSONL file with bounded memory. Bad *content* never throws (malformed lines yield
- * `{skip:"parse"}`). A genuinely missing path yields nothing; any other I/O failure
- * (EACCES, EISDIR, mid-read errors) throws so callers can record a coverage error.
+ * Stream a JSONL file with bounded memory, links followed. Bad *content* never throws (malformed lines yield
+ * `{skip:"parse"}`; a last line with no line end that does not parse yields `{skip:"partial"}`: a record being written
+ * as the file was read). Only a missing path (`fileState` `missing`) yields nothing; any other path that is not a regular
+ * file (a folder, a device, a path that cannot be stat'ed: EACCES, ELOOP) and any I/O failure while reading throws, so
+ * callers can record a coverage error; so does a never-opened file, refused unopened (`noteOpen`: NeverOpenedError).
  * Between chunks the stream lets the event loop run (`maybeYield`), so a signal or an abort is seen mid-file; once
  * `signal` is aborted it ends early, and the caller must not count the file as fully read.
  */
 export async function* readJsonl(path: string, opts: JsonlOpts = {}): AsyncGenerator<JsonlItem> {
-  if (!existsSync(path)) return;
+  const state = fileState(path);
+  if (state === "missing") return;
+  if (state !== "file") throw new Error(state === "error" ? "the path cannot be stat'ed" : `not a regular file (${state})`);
+  noteOpen(path, "stream");
   yield* readJsonlStream(Bun.file(path).stream() as ReadableStream<Uint8Array>, opts);
 }
 
@@ -66,7 +197,7 @@ export async function* readJsonlStream(
   let discarding = false;
   let n = 0;
 
-  function* finish(tail: Uint8Array): Generator<JsonlItem> {
+  function* finish(tail: Uint8Array, last = false): Generator<JsonlItem> {
     n++;
     const line = parts.length === 0 ? tail : concat(parts, tail, carry + tail.length);
     parts = [];
@@ -82,7 +213,7 @@ export async function* readJsonlStream(
     try {
       yield { n, value: JSON.parse(text) };
     } catch {
-      yield { n, skip: "parse", bytes };
+      yield { n, skip: last ? "partial" : "parse", bytes };
     }
   }
 
@@ -95,6 +226,7 @@ export async function* readJsonlStream(
       if (r.done) break;
       const chunk = r.value;
       STREAM_GC.add(chunk.length);
+      opts.onBytes?.(chunk.length);
       let pos = 0;
       while (pos < chunk.length) {
         if (opts.signal?.aborted) return;
@@ -129,7 +261,7 @@ export async function* readJsonlStream(
       n++;
       yield { n, skip: "oversize", bytes: carry };
     } else if (carry > 0) {
-      yield* finish(new Uint8Array(0));
+      yield* finish(new Uint8Array(0), true);
     }
   } finally {
     try {

@@ -1,4 +1,4 @@
-import type { CheckKind, ToolCategory } from "../../model/ids";
+import type { CheckKind, ToolCategory, Toolchain } from "../../model/ids";
 import { classifyCommand } from "../../text/commands";
 import { extOfPath, isObj } from "../common/guards";
 
@@ -21,6 +21,27 @@ const FIXED = new Map<string, ToolCategory>([
 ]);
 /** Tools whose `input.command` is a shell command line (PowerShell is the Windows counterpart of Bash). */
 export const SHELL = new Set(["Bash", "PowerShell"]);
+/**
+ * The CLI's other built-in tools (CLI program: its own list of built-in tool names, and older names it still knows): no
+ * category of their own (`other`), but a built-in name, so a tool event keeps it. FORMAT.md lists them.
+ */
+const OTHER_BUILTINS = [
+  "Artifact", "ArtifactCheck", "ArtifactComments", "ArtifactData", "BashOutput", "ClaudeDesign", "CronDelete", "CronList",
+  "EndConversation", "EnterWorktree", "ExitWorktree", "ListAgents", "ListMcpResourcesTool", "LSP", "NotebookRead", "OfferChromeSetup",
+  "Projects", "propose_skills", "PushNotification", "ReadMcpResourceDirTool", "ReadMcpResourceTool", "ReadNotifications", "RemoteTrigger",
+  "ReportFindings", "SendFeedback", "SendMessage", "SendUserFile", "SendUserMessage", "SetGoal", "ShareOnboardingGuide",
+  "ShowOnboardingRolePicker", "SubagentHandback", "TaskGet", "TaskList", "TaskOutput", "TaskStop", "WaitForMcpServers",
+];
+/**
+ * The tool names a ToolEv keeps (any other name becomes `other`, so a name the person chose never leaves as a tool
+ * name): every name `ccToolCategory` maps, and the CLI's other built-in tools.
+ */
+export const CC_BUILTIN_TOOLS: ReadonlySet<string> = new Set([...FIXED.keys(), ...SHELL, ...OTHER_BUILTINS]);
+/** Agent types the CLI ships; any other agent type is a config name and is kept only as a keyed hash. */
+export const BUILTIN_AGENTS: ReadonlySet<string> = new Set([
+  "general-purpose", "Explore", "Plan", "claude", "fork", "statusline-setup", "output-style-setup", "claude-code-guide",
+  "comment-thread-analyst", "workflow-subagent",
+]);
 const MCP = /^mcp__(.+?)__(.+)$/;
 
 /** Server part of an `mcp__<server>__<tool>` name; undefined for any other tool. */
@@ -35,12 +56,9 @@ function extOf(input: unknown): string | undefined {
   return p === undefined ? undefined : extOfPath(p);
 }
 
-export function ccToolCategory(name: string, input: unknown): { category: ToolCategory; checks: CheckKind[]; editExt?: string } {
-  if (SHELL.has(name)) {
-    const cmd = isObj(input) && typeof input.command === "string" ? input.command : "";
-    const { category, checks } = classifyCommand(cmd);
-    return { category, checks };
-  }
+/** A tool call's category and checks — a shell call's by its command line, with that command's toolchain — and an edit's extension. */
+export function ccToolCategory(name: string, input: unknown): { category: ToolCategory; checks: CheckKind[]; editExt?: string; toolchain?: Toolchain } {
+  if (SHELL.has(name)) return classifyCommand(isObj(input) && typeof input.command === "string" ? input.command : "");
   if (mcpServerOf(name) !== undefined) return { category: "mcp", checks: [] };
   const category = FIXED.get(name) ?? "other";
   const out: { category: ToolCategory; checks: CheckKind[]; editExt?: string } = { category, checks: [] };

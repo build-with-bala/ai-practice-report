@@ -1,7 +1,7 @@
-// Synthetic Antigravity stores. Table, column and JSON field names follow the stores as the structure probe showed them on the
-// fixture author's machine; protobuf field numbers and enum numbers follow the Antigravity programs' own type tables (see
-// FORMAT.md) and are written out here independently of the reader — except the trajectory summary, which is encoded with the
-// reader's `TRAJ_FIELDS` (pinned to the program's numbers by a test). Every value is invented.
+// Synthetic Antigravity stores. Table, column and JSON field names follow the stores' structure as FORMAT.md records it
+// (confirmed with the structure probe); protobuf field numbers and enum numbers follow the Antigravity programs' own type
+// tables (see FORMAT.md) and are written out here independently of the reader — except the trajectory summary, which is
+// encoded with the reader's `TRAJ_FIELDS` (pinned to the program's numbers by a test). Every value is invented.
 import { Database } from "bun:sqlite";
 import path from "node:path";
 import { vscodeUser } from "../../core/env/paths";

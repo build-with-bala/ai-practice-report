@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync, createWriteStream } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, createWriteStream } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { once } from "node:events";
-import { GcPacer, readJsonl, readJsonlStream, STREAM_GC, type JsonlItem } from "../../../core/io/jsonl";
+import { readJsonl, readJsonlStream, STREAM_GC, type JsonlItem } from "../../../core/io/jsonl";
 
 let dir: string;
 beforeAll(() => {
@@ -92,6 +92,18 @@ describe("readJsonl", () => {
       chmodSync(p, 0o600);
     }
   });
+  test.skipIf(process.platform === "win32" || process.getuid?.() === 0)("a file inside an unreadable folder throws: it is not missing", async () => {
+    const locked = path.join(dir, "locked-dir");
+    mkdirSync(locked);
+    const p = path.join(locked, "x.jsonl");
+    writeFileSync(p, '{"a":1}\n');
+    chmodSync(locked, 0o000);
+    try {
+      await expect(collect(p)).rejects.toThrow();
+    } finally {
+      chmodSync(locked, 0o700);
+    }
+  });
 
   describe("splitter is chunk-size independent", () => {
     const fixture =
@@ -163,27 +175,7 @@ describe("readJsonl", () => {
   }, 120_000);
 });
 
-describe("GcPacer", () => {
-  test("collects once per step of bytes, and only while RSS is above its floor", () => {
-    let rss = 60;
-    let collections = 0;
-    const pacer = new GcPacer(100, 50, () => collections++, () => rss);
-    pacer.add(99);
-    expect(collections).toBe(0);
-    pacer.add(1); // the step is reached
-    expect(collections).toBe(1);
-    pacer.add(250); // one collection however far past the step, and the count starts again
-    expect(collections).toBe(2);
-    pacer.add(99);
-    expect(collections).toBe(2);
-    rss = 40; // below the floor: the step passes without a collection
-    pacer.add(1);
-    expect(collections).toBe(2);
-    rss = 60;
-    pacer.add(100);
-    expect(collections).toBe(3);
-  });
-
+describe("STREAM_GC", () => {
   test("readJsonl reports every byte it streams to the process-wide pacer", async () => {
     const p = put("paced.jsonl", `${'{"a":1}\n'.repeat(5000)}{"tail":true}`);
     let streamed = 0;

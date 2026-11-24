@@ -1,17 +1,18 @@
-import { statSync } from "node:fs";
 import path from "node:path";
 import type { Env } from "../../env/env";
 import { joinFor, vscodeUser } from "../../env/paths";
-import { readJsonSmallResult, safeList, safeStat } from "../../io/fs";
-import { readJsonl } from "../../io/jsonl";
+import { isDir, readJsonSmallResult, safeList, safeStat } from "../../io/fs";
 import type { CoverageEv } from "../../model/events";
 import { listDir, readSidecar, Tally } from "../common/coverage";
 import { isObj, str } from "../common/guards";
+import { streamJsonlFile } from "../common/stream";
+import { uriToPath } from "../common/uri";
 import type { Candidate, ScanCtx, SourcePlugin } from "../types";
 import { CLI_SOURCE, cliRoots, readSessionStore, scanCli, windowCoverage } from "./cli";
+import { TOOL } from "./ids";
 import { copilotInstalled, installDirs, VS_APPS, type VsApp } from "./install";
 import { Journal } from "./journal";
-import { mapSession, rawSessionId, TOOL, uriToPath, VSCODE_SOURCE } from "./map";
+import { mapSession, rawSessionId, VSCODE_SOURCE } from "./map";
 
 export const JETBRAINS_SOURCE = "copilot.jetbrains";
 /**
@@ -23,14 +24,6 @@ const LEGACY_MAX_BYTES = 64 * 1024 * 1024;
 const OAUTH_FILES = new Set(["apps.json", "hosts.json"]);
 const CHAT_STORE_DIR = /^chat-.+-sessions$/;
 const NITRITE = /nitrite\.db$/;
-
-const isDir = (p: string): boolean => {
-  try {
-    return statSync(p).isDirectory();
-  } catch {
-    return false;
-  }
-};
 
 // ---- VS Code ----
 
@@ -72,47 +65,20 @@ function sessionFiles(userDir: string, tally: Tally): SessionFile[] {
 /** A session object read from one file; `complete` = the whole file was read and every line of it applied. */
 interface SessionRead { root: unknown; complete: boolean }
 
+/** Everything a tally has counted as skipped or as drift. */
+const losses = (t: Tally): number => [...Object.values(t.skipped), ...Object.values(t.unknownTypes)].reduce((a, b) => a + b, 0);
+
 /**
  * Replays a journal line by line into its session object (nothing else of the file is kept). The read is complete only
  * when the file was read to its end and no line was skipped or failed to apply: a write cut off mid-line, an I/O error
- * or a corrupt record leave a partial session.
+ * or a corrupt record leave a partial session. (While the file streams, only its own lines are counted in `tally`: a
+ * line lost in any way is a skip or drift there.)
  */
 async function readJournal(file: string, ctx: ScanCtx, tally: Tally): Promise<SessionRead | undefined> {
-  const st = safeStat(file);
-  if (!st?.isFile()) return undefined;
-  let lost = 0;
-  const journal = new Journal((key) => {
-    lost++;
-    if (key === "bad-record") tally.skip(key);
-    else tally.unknownKey(key);
-  });
-  let complete = true;
-  try {
-    for await (const item of readJsonl(file, { signal: ctx.signal })) {
-      if ("skip" in item) {
-        lost++;
-        tally.skip(item.skip);
-        continue;
-      }
-      tally.records++;
-      try {
-        journal.apply(item.value);
-      } catch {
-        lost++;
-        tally.skip("bad-record");
-      }
-    }
-  } catch {
-    complete = false;
-    tally.skip("io-error");
-    ctx.log("warn", "cp.io-error");
-  }
-  if (ctx.signal.aborted) complete = false;
-  if (complete) {
-    tally.files++;
-    tally.bytes += st.size;
-  }
-  return journal.root === undefined ? undefined : { root: journal.root, complete: complete && lost === 0 };
+  const journal = new Journal((key) => (key === "bad-record" ? tally.skip(key) : tally.unknownKey(key)));
+  const before = losses(tally);
+  const r = await streamJsonlFile(file, ctx, tally, (v) => journal.apply(v), { ioLog: "cp.io-error" });
+  return journal.root === undefined ? undefined : { root: journal.root, complete: r.read && losses(tally) === before };
 }
 
 /** A legacy session file (one JSON document, so read whole or not at all); too large, unreadable or invalid files are counted and skipped. */
@@ -205,7 +171,7 @@ async function scanVscode(c: Candidate, ctx: ScanCtx): Promise<void> {
   }
   const store = path.join(c.root, "globalStorage", "github.copilot-chat", "session-store.db");
   const hasStore = safeStat(store)?.isFile() ?? false;
-  const storeRead = !ctx.signal.aborted && hasStore && readSessionStore(store, VSCODE_SOURCE, ctx, life);
+  const storeRead = !ctx.signal.aborted && hasStore && (await readSessionStore(store, VSCODE_SOURCE, "vscode", ctx, life));
   const bad = (tally.skipped["bad-record"] ?? 0) + (life.skipped["bad-record"] ?? 0);
   if (bad > 0) ctx.log("warn", "cp.bad-record", bad); // a mapping bug must not look like a healthy source
   const installed = copilotInstalled(installDirs(ctx.env, appOf(ctx.env, c.root)));
@@ -279,7 +245,7 @@ export const cpVscode: SourcePlugin = {
       "<VS Code user>/workspaceStorage/*/chatSessions/*.json — older chat sessions, one JSON document each (up to 64 MiB)",
       "<VS Code user>/globalStorage/emptyWindowChatSessions/*.{jsonl,json} — chat sessions of windows without a folder",
       "<VS Code user>/workspaceStorage/*/workspace.json — the folder of the workspace, kept only as a keyed project hash",
-      "<VS Code user>/globalStorage/github.copilot-chat/session-store.db — sessions: id, cwd, host type, created and updated times; turns: session id and time",
+      "<VS Code user>/globalStorage/github.copilot-chat/session-store.db — sessions: id, cwd, created and updated times; turns: session id and time",
       "VS Code's bundled extensions/copilot* and ~/.vscode/extensions/github.copilot* — folder names only, to tell whether Copilot is installed",
     ],
     neverReads: [
@@ -298,13 +264,13 @@ export const cpCli: SourcePlugin = {
   tool: "copilot",
   id: CLI_SOURCE,
   tier: "P0",
-  beta: true, // built from the CLI's documentation and the extension's code: no CLI store was there to verify it
+  beta: true, // built from the CLI's documentation and the extension's code: not verified against a real CLI store yet
   windows: ["detail", "lifetime"],
   primary: { detail: ["session", "prompt", "tool"] },
   describe: {
     reads: [
       "<home>/.copilot/session-state/*/events.jsonl — Copilot CLI session events: session start, user messages, turns, tool executions, aborts, models",
-      "<home>/.copilot/session-store.db — sessions: id, cwd, host type, created and updated times; turns: session id and time",
+      "<home>/.copilot/session-store.db — sessions: id, cwd, created and updated times; turns: session id and time",
     ],
     neverReads: [
       "message content, tool arguments and results are parsed in memory; only intent, features, a keyed hash, command categories, exit codes and file extensions are kept",

@@ -1,4 +1,5 @@
 import path from "node:path";
+import { plausible } from "../../io/time";
 import type { DailyEv } from "../../model/events";
 import { readSidecar, Tally } from "../common/coverage";
 import { isObj, num, safeModel, type Obj } from "../common/guards";
@@ -11,12 +12,17 @@ const KNOWN_VERSION = 5;
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
 const DAY_MS = 86_400_000;
 
-/** Start of a `YYYY-MM-DD` day in UTC, the zone the CLI keys its stats days in; undefined when not a real date. */
+/**
+ * Start of a `YYYY-MM-DD` day taken as a UTC day (for the plausible range and the coverage span: the CLI's releases
+ * keyed the day by the UTC date, later ones by the local date); undefined when not a real date.
+ */
 function dayStart(v: unknown): number | undefined {
   if (typeof v !== "string" || !DAY.test(v)) return undefined;
   const ms = Date.parse(`${v}T00:00:00Z`);
   return Number.isFinite(ms) ? ms : undefined;
 }
+
+const isCount = (n: number): boolean => Number.isSafeInteger(n) && n >= 0;
 
 /** Tokens per model and day from `dailyModelTokens`; model ids are shape-checked, non-id keys merge into `other`. */
 function tokensByDay(v: Obj, tally: Tally): Map<string, Map<string, number>> {
@@ -36,7 +42,7 @@ function tokensByDay(v: Obj, tally: Tally): Map<string, Map<string, number>> {
     const models = out.get(day) ?? new Map<string, number>();
     for (const [model, n] of Object.entries(e.tokensByModel)) {
       const tokens = num(n);
-      if (tokens === undefined || tokens < 0) continue;
+      if (tokens === undefined || !isCount(tokens)) continue;
       const key = safeModel(model);
       models.set(key, (models.get(key) ?? 0) + tokens);
     }
@@ -63,11 +69,20 @@ export async function scanStats(c: Candidate, ctx: ScanCtx): Promise<void> {
           tally.unknownKey("dailyActivity:shape");
           continue;
         }
-        const day = e.date as string;
-        // the CLI keys its stats by UTC day and counts every message of the day's sessions, not only typed prompts
-        const ev: DailyEv = { k: "daily", tool: TOOL, source: STATS_SOURCE, day, zone: "utc", unit: "messages", count: messages };
+        if (plausible(start, ctx.now) === undefined) {
+          tally.skip("bad-ts"); // a real date outside the plausible range
+          continue;
+        }
         const sessions = num(e.sessionCount);
         const toolCalls = num(e.toolCallCount);
+        if (!isCount(messages) || (sessions !== undefined && !isCount(sessions)) || (toolCalls !== undefined && !isCount(toolCalls))) {
+          tally.skip("bad-count"); // a count that is not a non-negative safe integer: the row is not trusted
+          continue;
+        }
+        const day = e.date as string;
+        // older releases keyed a day by its UTC date, newer ones by its local date, and one cache can hold both: the
+        // zone is `either`. The count is every message of the day's sessions, not only typed prompts.
+        const ev: DailyEv = { k: "daily", tool: TOOL, source: STATS_SOURCE, day, zone: "either", unit: "messages", count: messages };
         if (sessions !== undefined) ev.sessions = sessions;
         if (toolCalls !== undefined) ev.toolCalls = toolCalls;
         const models = tokens.get(day);

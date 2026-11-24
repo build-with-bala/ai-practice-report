@@ -7,6 +7,11 @@ export type Origin = "human" | "scripted" | "subagent" | "scheduled" | "peer" | 
 export type Intent = "spec" | "question" | "ack" | "correction" | "redirect" | "command" | "continuation";
 export type CheckKind = "test" | "build" | "lint" | "typecheck";
 /**
+ * The toolchain a check command belongs to (`classifyCommand`): a language's tools, `native` (cmake, ctest), `shell`
+ * (shellcheck), or `any` for a task runner that runs whatever the project names (make, just, pre-commit, bazel, nix).
+ */
+export type Toolchain = "js" | "py" | "go" | "rust" | "jvm" | "dotnet" | "ruby" | "php" | "swift" | "dart" | "native" | "shell" | "any";
+/**
  * What a tool call does. `meta` = bookkeeping and talk with the person, no work on the task itself: thinking aloud,
  * asking or notifying the person, reporting progress, intent or completion, switching modes, reading the clock,
  * waiting, finishing — counted apart from actions, the same way for every tool.

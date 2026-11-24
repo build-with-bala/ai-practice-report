@@ -1,5 +1,12 @@
 import { expect, test } from "bun:test";
-import { techCategories } from "../../../core/text/tech";
+import { TECH_TERMS, techCategories } from "../../../core/text/tech";
+
+test("TECH_TERMS: the term list per category, as the consent preview shows it", () => {
+  expect(TECH_TERMS.frontend).toContain("react");
+  expect(Object.keys(TECH_TERMS).sort()).toEqual(["ai", "architecture", "data", "frontend", "infra", "mobile", "security", "systems", "testing"]);
+  // every listed term is counted, in its own category
+  for (const [cat, terms] of Object.entries(TECH_TERMS)) for (const term of terms) expect([term, techCategories(term)[cat as keyof typeof TECH_TERMS]]).toEqual([term, 1]);
+});
 
 test("unique terms per category, case-insensitive", () => {
   const r = techCategories("Postgres and postgres, plus Redis; OAuth with JWT");

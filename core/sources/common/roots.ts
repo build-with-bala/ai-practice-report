@@ -1,15 +1,7 @@
-import { statSync } from "node:fs";
 import type { Env } from "../../env/env";
 import { joinFor } from "../../env/paths";
+import { isDir } from "../../io/fs";
 import type { Candidate } from "../types";
-
-function isDir(p: string): boolean {
-  try {
-    return statSync(p).isDirectory(); // follows a symlinked config dir
-  } catch {
-    return false;
-  }
-}
 
 /**
  * A CLI's config root per home: `$<envVar>` for the scanning user's home when set, else `<home>/<dirName>`

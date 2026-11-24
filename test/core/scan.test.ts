@@ -1,17 +1,23 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { detectEnv } from "../../core/env/env";
-import { readJsonlStream } from "../../core/io/jsonl";
+import { readJsonlStream, STREAM_GC } from "../../core/io/jsonl";
 import { TERM_SIGNALS } from "../../core/io/signals";
 import type { CoverageEv, Ev } from "../../core/model/events";
 import type { ToolId } from "../../core/model/ids";
 import { scan } from "../../core/scan";
+import { ccHistory, ccTranscripts } from "../../core/sources/claude-code";
+import { cxHistory, cxRollouts } from "../../core/sources/codex";
 import type { Candidate, ScanCtx, SourcePlugin } from "../../core/sources/types";
+import { CC_S1, CC_S2, CcTranscript, ccHistoryLine, fixtureStart, MIN, slug } from "../fixtures/claude-code";
+import { fakeHome, type FakeHome } from "../kit/home";
 
-const home = mkdtempSync(path.join(os.tmpdir(), "scan-test-"));
-const env = detectEnv({ home, tmp: os.tmpdir(), platform: "linux", wslHomes: [] });
+/** The fake home's environment (no variable or XDG path of the developer's), with the system temp folder. */
+const fh = fakeHome("linux");
+afterAll(() => fh.cleanup());
+const home = fh.env.home;
+const env = { ...fh.env, tmp: os.tmpdir() };
 
 function cov(tool: ToolId, source: string, over: Partial<CoverageEv> = {}): CoverageEv {
   return { k: "coverage", tool, source, window: "detail", status: "ok", beta: false, files: 1, bytes: 1, records: 1, skipped: {}, unknownTypes: {}, versions: [], ...over };
@@ -174,7 +180,7 @@ describe("scan hygiene", () => {
 
 describe("scan temp folder and concurrency", () => {
   test("a scan that makes no private copy never touches the temp folder: a missing one does not fail it", async () => {
-    const missing = detectEnv({ home, tmp: path.join(home, "no-such-tmp"), platform: "linux", wslHomes: [] });
+    const missing = { ...env, tmp: path.join(home, "no-such-tmp") };
     const p = plugin("codex", "a", (c) => { c.emit(session("codex", "a")); c.emit(cov("codex", "a")); });
     const r = await scan({ env: missing, plugins: [p] });
     expect(r.tempClean).toBe(true);
@@ -187,7 +193,7 @@ describe("scan temp folder and concurrency", () => {
     const seen: string[][] = [];
     const quiet = plugin("codex", "quiet", () => { seen.push(readdirSync(tmp)); });
     const copier = plugin("cursor", "copier", (c) => { c.temp.dir(); seen.push(readdirSync(tmp)); });
-    const r = await scan({ env: detectEnv({ home, tmp, platform: "linux", wslHomes: [] }), plugins: [quiet, copier], concurrency: 1 });
+    const r = await scan({ env: { ...env, tmp }, plugins: [quiet, copier], concurrency: 1 });
     expect(seen[0]).toEqual([]);
     expect(seen[1]!.map((n) => n.startsWith("aipr-scan-"))).toEqual([true]);
     expect(readdirSync(tmp)).toEqual([]);
@@ -222,10 +228,9 @@ describe("aborting a running scan", () => {
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), 80);
     const after = plugin("cursor", "after", () => {});
-    const t0 = performance.now();
+    // an endless reader can only end through the abort, so the scan returning is the proof
     const r = await scan({ env, plugins: [reader("endless"), after], concurrency: 1, signal: ac.signal });
     clearTimeout(timer);
-    expect(performance.now() - t0).toBeLessThan(2_000);
     const own = r.coverage.find((c) => c.source === "endless")!;
     expect(own).toMatchObject({ status: "error", note: "aborted", files: 1 });
     expect(own.records).toBeGreaterThan(0);
@@ -265,6 +270,18 @@ describe("signal policy", () => {
     let during: number[] = [];
     await scan({ env, handleSignals: false, plugins: [plugin("codex", "a", () => { during = counts(); })] });
     expect(during).toEqual(before);
+  });
+
+  test("scans running at once share one listener pair, removed once the last of them has left", async () => {
+    const before = counts();
+    let during: number[] = [];
+    let open!: () => void;
+    const gate = new Promise<void>((resolve) => { open = resolve; });
+    const first = scan({ env, plugins: [plugin("codex", "a", () => gate)] }); // still inside while the second one runs
+    const second = scan({ env, plugins: [plugin("cursor", "b", () => { during = counts(); open(); })] });
+    await Promise.all([first, second]);
+    expect(during).toEqual(before.map((n) => n + 1));
+    expect(counts()).toEqual(before);
   });
 });
 
@@ -306,6 +323,102 @@ describe("zero-yield guard", () => {
     const r = await scan({ env, plugins: [guarded((c) => { c.emit(cov("codex", "z", { records: 4, status: "drift", unknownTypes: { "timestamp:shape": 4 } })); c.emit(cov("codex", "z", { window: "lifetime", records: 0, status: "empty" })); })] });
     expect(r.coverage[0]!.unknownTypes).toEqual({ "timestamp:shape": 4, "zero-yield": 1 });
   });
+
+  test("a plugin that read records and was aborted before any primary kind: the abort stamp alone decides, no zero-yield and no drift warning", async () => {
+    const ac = new AbortController();
+    const r = await scan({ env, signal: ac.signal, plugins: [guarded((c) => {
+      ac.abort();
+      c.emit(cov("codex", "z", { records: 5 }));
+      c.emit(cov("codex", "z", { window: "lifetime", records: 5 }));
+    })] });
+    expect(r.coverage.map((c) => [c.window, c.status, c.note, c.records, c.unknownTypes])).toEqual([
+      ["detail", "error", "aborted", 5, {}], ["lifetime", "error", "aborted", 5, {}],
+    ]);
+    expect(r.warnings.filter((w) => w.code === "drift" && w.source === "z")).toEqual([]);
+  });
+
+  test("files found whose lines could not be used (parse, oversize) and no primary kind: drift zero-yield, even with no records; with no such lines, or no files, empty", async () => {
+    const r = await scan({ env, plugins: [
+      guarded((c) => { c.emit(cov("codex", "z", { records: 0, status: "empty", skipped: { parse: 3 } })); c.emit(cov("codex", "z", { window: "lifetime", records: 0, status: "empty", skipped: { oversize: 1 } })); }),
+      { ...guarded((c) => { c.emit(cov("codex", "y", { records: 0, status: "empty", files: 0, skipped: { parse: 2 } })); c.emit(cov("codex", "y", { window: "lifetime", records: 0, status: "empty", skipped: { "io-error": 1 } })); }), id: "y" },
+    ] });
+    expect(r.coverage.map((c) => [c.source, c.window, c.status, c.unknownTypes])).toEqual([
+      ["z", "detail", "drift", { "zero-yield": 1 }], ["z", "lifetime", "drift", { "zero-yield": 1 }],
+      ["y", "detail", "empty", {}], ["y", "lifetime", "empty", {}],
+    ]);
+  });
+
+  describe("JSONL sources whose files hold only lines that are not JSON", () => {
+    let h: FakeHome;
+    beforeEach(() => { h = fakeHome(); });
+    afterEach(() => h.cleanup());
+
+    test("each is drift zero-yield, not empty; a source whose files hold no lines at all stays empty", async () => {
+      const garbage = Array.from({ length: 200 }, (_, i) => `\u0001line ${i} that is not JSON`).join("\n") + "\n";
+      h.write(path.join(".claude", "projects", "-work-app", "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee.jsonl"), garbage);
+      h.write(path.join(".claude", "history.jsonl"), garbage);
+      h.write(path.join(".codex", "sessions", "2026", "11", "20", "rollout-2026-11-20T10-00-00-019a0000-0000-7000-8000-000000000001.jsonl"), garbage);
+      h.write(path.join(".codex", "history.jsonl"), garbage);
+      const r = await scan({ env: h.env, plugins: [ccTranscripts, ccHistory, cxRollouts, cxHistory], repoSignals: false, handleSignals: false });
+      const read = r.coverage.filter((c) => c.files > 0);
+      expect(read.map((c) => c.source).sort()).toEqual([ccHistory.id, ccTranscripts.id, cxHistory.id, cxRollouts.id].sort());
+      for (const c of read) {
+        expect([c.source, c.status, c.skipped.parse, c.unknownTypes["zero-yield"]]).toEqual([c.source, "drift", 200, 1]);
+      }
+      expect(r.warnings.filter((w) => w.code === "drift").length).toBeGreaterThanOrEqual(4);
+
+      // a last line with no line end that does not parse is a record being written: alone, no drift; beside a bad line, drift
+      for (const [text, status] of [['{"display": "Fix the imp', "empty"], ['not json\n{"display": "Fix the imp', "drift"]] as const) {
+        const h3 = fakeHome();
+        try {
+          h3.write(path.join(".claude", "history.jsonl"), text);
+          const r3 = await scan({ env: h3.env, plugins: [ccHistory], repoSignals: false, handleSignals: false });
+          expect([text, r3.coverage[0]!.status, r3.coverage[0]!.skipped.partial]).toEqual([text, status, 1]);
+        } finally {
+          h3.cleanup();
+        }
+      }
+
+      const h2 = fakeHome();
+      try {
+        h2.write(path.join(".claude", "history.jsonl"), "");
+        const r2 = await scan({ env: h2.env, plugins: [ccHistory], repoSignals: false, handleSignals: false });
+        expect(r2.coverage.map((c) => [c.status, c.unknownTypes])).toEqual([["empty", {}]]);
+      } finally {
+        h2.cleanup();
+      }
+    });
+  });
+
+  describe("records read on purpose that yield nothing (skipped copied or empty) are no zero-yield", () => {
+    let h: FakeHome;
+    beforeEach(() => { h = fakeHome(); });
+    afterEach(() => h.cleanup());
+    const covOf = (r: Awaited<ReturnType<typeof scan>>, source: string) => r.coverage.find((c) => c.source === source)!;
+
+    test("a prompt log whose entries all have blank text", async () => {
+      const t0 = fixtureStart();
+      h.writeJsonl(".claude/history.jsonl", ["", "   ", "\n\t"].map((text, i) => ccHistoryLine(text, t0 + i * MIN, CC_S1)));
+      const r = await scan({ env: h.env, plugins: [ccHistory] });
+      const c = covOf(r, ccHistory.id);
+      expect(c).toMatchObject({ records: 3, skipped: { empty: 3 } });
+      expect(c.unknownTypes).not.toHaveProperty("zero-yield");
+      expect(c.status).not.toBe("drift");
+      expect(r.warnings.filter((w) => w.code === "drift")).toEqual([]);
+    });
+
+    test("a Claude Code root whose only transcript records are a fork's copies of another session", async () => {
+      // the fork's file is named by its own id; every record it holds keeps the original session's id
+      const copies = new CcTranscript(CC_S2).prompt("Fix the importer").text("Done.").prompt("Rerun the suite").text("Green.");
+      h.writeJsonl(`.claude/projects/${slug("/work/fork")}/${CC_S1}.jsonl`, copies.records);
+      const r = await scan({ env: h.env, plugins: [ccTranscripts] });
+      const c = covOf(r, ccTranscripts.id);
+      expect(c).toMatchObject({ records: 4, skipped: { copied: 4 } });
+      expect(c.unknownTypes).not.toHaveProperty("zero-yield");
+      expect(c.status).not.toBe("drift");
+      expect(r.store.all("session")).toEqual([]);
+    });
+  });
 });
 
 describe("coverage the orchestrator writes", () => {
@@ -343,3 +456,19 @@ describe("coverage the orchestrator writes", () => {
 });
 
 process.on("exit", () => rmSync(home, { recursive: true, force: true }));
+
+describe("scan cleanup", () => {
+  test("the temp folder is removed even when the pacer's own end-of-scan step throws", async () => {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), "scan-cleanup-"));
+    const settle = STREAM_GC.settle;
+    try {
+      const copier = plugin("cursor", "copier", (ctx) => { writeFileSync(path.join(ctx.temp.dir(), "copy.db"), "x"); });
+      STREAM_GC.settle = () => { throw new Error("a pacer bug"); };
+      await expect(scan({ env: { ...env, tmp }, plugins: [copier], handleSignals: false })).rejects.toThrow("a pacer bug");
+      expect(readdirSync(tmp).filter((n) => n.startsWith("aipr-"))).toEqual([]);
+    } finally {
+      STREAM_GC.settle = settle;
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});

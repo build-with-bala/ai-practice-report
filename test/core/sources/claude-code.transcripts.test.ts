@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, statSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, statSync, symlinkSync, utimesSync } from "node:fs";
 import path from "node:path";
 import type { CoverageEv, Ev, ToolEv } from "../../../core/model/events";
 import { scan } from "../../../core/scan";
 import { ccTranscripts } from "../../../core/sources/claude-code";
 import { ccPromptOrigin, unknownProvenance } from "../../../core/sources/claude-code/origin";
-import { ccToolCategory } from "../../../core/sources/claude-code/tools";
+import { BUILTIN_AGENTS, CC_BUILTIN_TOOLS, ccToolCategory } from "../../../core/sources/claude-code/tools";
 import type { ScanCtx, PluginCoverage } from "../../../core/sources/types";
 import { keyedHash } from "../../../core/text/hash";
 import { classifyIntent } from "../../../core/text/intent";
@@ -46,6 +46,8 @@ describe("claude-code transcripts: Task 9 scenario", () => {
     expect(tools).toHaveLength(11);                                 // 5 main + 4 subagent + 2 workflow
     const tests = tools.filter(t => t.checks?.includes("test"));
     expect(tests.map(t => t.ok)).toEqual([false, true]);
+    expect(tests.map(t => t.toolchain)).toEqual(["js", "js"]);         // Bash `bun test`: the command's toolchain
+    expect(tools.filter(t => t.toolchain !== undefined)).toHaveLength(2); // a call without checks has none
     expect(tools.find(t => t.category === "edit")).toMatchObject({ editExt: "ts", linesAdded: 3, linesRemoved: 1 });
     expect(tools.find(t => t.category === "delegate")!.delegateTo).toBe(sub.id);
     const kinds = r.store.all("marker").map(m => m.kind);
@@ -309,6 +311,31 @@ describe("claude-code transcripts: record mapping", () => {
     expectNoCanaries(allEvents(r));
   });
 
+  test("a commit marker's detail keys the sha's first 7 hex digits, lower-cased; a sha without them gives none", async () => {
+    const t = top("P23").prompt("commit it");
+    const committed = (sha: string) => ({ stdout: "", stderr: "", interrupted: false, gitOperation: { commit: { sha, kind: "commit", branch: "main" } } });
+    t.tool("toolu_k1", "Bash", { command: "git commit -m one" }, { content: "[main ABC1234] one", toolUseResult: committed("ABC1234def") })
+      .tool("toolu_k2", "Bash", { command: "git commit -m two" }, { content: "[main] two", toolUseResult: committed(`${CANARY.project}`) });
+    t.write(h, topFile("P23"));
+    const r = await run();
+    // the key repo signals give the same commit: a 7-hex prefix, whatever length and case the CLI recorded
+    expect(r.store.all("marker").filter((m) => m.kind === "commit").map((m) => m.detail)).toEqual([keyedHash(r.salt, "abc1234"), undefined]);
+    expectNoCanaries(allEvents(r));
+  });
+
+  test("tool names: a built-in keeps its name, an MCP tool is mcp, any other name is other", async () => {
+    const t = top("P24").prompt("go");
+    t.tool("toolu_n1", CANARY.project, { x: 1 }, { content: "ok" })
+      .tool("toolu_n2", "Read", { file_path: "a.ts" }, { content: "ok" })
+      .tool("toolu_n3", "TaskStop", { task_id: "b1" }, { content: "ok" }) // a built-in without a category of its own
+      .tool("toolu_n4", `mcp__${CANARY.mcp}__lookup`, {}, { content: "ok" });
+    t.write(h, topFile("P24"));
+    const r = await run();
+    const tools = r.store.all("tool");
+    expect(tools.map((x) => [x.name, x.category])).toEqual([["other", "other"], ["Read", "read"], ["TaskStop", "other"], ["mcp", "mcp"]]);
+    expectNoCanaries(tools, { allow: ["mcp"] }); // the server name, in mcpServer only
+  });
+
   test("every toolDenialKind: refusals are denied with who refused; interrupted and cancelled calls are no denial", async () => {
     const t = top("P14").prompt("run it");
     const kinds = ["user-rejected", "permission-rule", "automode-blocked", "automode-unavailable", "automode-parsing-error", "interrupted", "cancelled", "voice-veto"];
@@ -407,7 +434,8 @@ describe("claude-code transcripts: record mapping", () => {
     t.write(h, topFile("P11"));
     const r = await run();
     const tools = r.store.all("tool");
-    expect(tools.map(x => [x.callId, x.ok, x.linesAdded])).toEqual([["toolu_d1", true, undefined], ["toolu_d2", true, undefined], ["toolu_d3", false, undefined]]);
+    const k = (id: string) => keyedHash(r.salt, id);
+    expect(tools.map(x => [x.callId, x.ok, x.linesAdded])).toEqual([[k("toolu_d1"), true, undefined], [k("toolu_d2"), true, undefined], [k("toolu_d3"), false, undefined]]);
   });
 
   test("usage stays one per message beyond the in-memory message window", async () => {
@@ -434,7 +462,7 @@ describe("claude-code transcripts: record mapping", () => {
       .user({ sessionId: "OLD", message: { role: "user", content: "copied from another session" }, promptSource: "typed" });
     t.write(h, topFile("P13"));
     const logs: [string, string, number | undefined][] = [];
-    const r = await scan({ env: h.env, plugins: [ccTranscripts], onLog: (level, code, n) => logs.push([level, code, n]) });
+    const r = await scan({ env: h.env, plugins: [ccTranscripts], onLog: (level, code, n) => { if (code !== "scan.gc") logs.push([level, code, n]); } });
     expect(logs).toEqual([["debug", "cc.heavy-parsed", 1], ["debug", "cc.foreign-session-files", 1]]);
     expect(r.coverage[0]).toMatchObject({ status: "ok", unknownTypes: {} });
     expect(r.coverage[0]!.skipped).toEqual({ copied: 1 });
@@ -461,6 +489,34 @@ describe("claude-code transcripts: record mapping", () => {
     expect(cov.skipped["bad-record"]).toBe(2);
     expect(logs).toEqual([["warn", "cc.bad-record", 2]]);
     expect(events.filter(e => e.k === "prompt")).toHaveLength(1);       // "fine" still mapped after the failure
+  });
+
+  test("a record whose time is well-formed but implausible counts once, as bad-ts; one without a time is drift and no-ts", async () => {
+    const t = top("BT").prompt("Fix the importer");
+    const stamp = (at: unknown) => { const rec = t.records.at(-1)!; if (at === undefined) delete rec.timestamp; else rec.timestamp = at; };
+    t.prompt("a prompt stamped 1990"); stamp("1990-01-01T00:00:00.000Z");
+    t.text("a reply stamped 1990"); stamp(631152000000);
+    t.system("turn_duration", { durationMs: 900 }); stamp("1990-01-01T00:00:00.000Z");
+    t.prompt("a prompt without a time"); stamp(undefined);
+    t.prompt("And add a test");
+    t.write(h, topFile("BT"));
+    const r = await run();
+    const cov = r.coverage[0]!;
+    expect(cov.skipped).toEqual({ "bad-ts": 3, "no-ts": 1 });
+    expect(cov.unknownTypes).toEqual({ "timestamp:shape": 1 });
+    expect(r.store.all("prompt")).toHaveLength(2);
+    expect([r.store.all("usage"), r.store.all("turn")]).toEqual([[], []]);
+  });
+
+  test("a tool call whose record time is implausible takes the file's clock; with none yet, it counts once, as bad-ts", async () => {
+    const early = top("BU");
+    early.tool("toolu_b1", "Bash", { command: "pytest" }, {}); early.records[0]!.timestamp = "1990-01-01T00:00:00.000Z";
+    early.prompt("now go on");
+    early.write(h, topFile("BU"));
+    const r = await run();
+    expect(r.coverage[0]!.skipped).toEqual({ "bad-ts": 1 });
+    expect(r.store.all("tool")).toEqual([]);
+    expect(r.store.all("usage")).toEqual([]);
   });
 
   test("record type names the reader does not know are bucketed, never copied", async () => {
@@ -541,6 +597,31 @@ describe("claude-code transcripts: subagents", () => {
     expectNoCanaries([...allEvents(r), r.coverage]);
   });
 
+  test("agent types: a built-in one is kept, any other is hashed — whatever the meta's isBuiltIn says", async () => {
+    parent("S4", "toolu_U").write(h, topFile("S4"));
+    child("S4", "x1").write(h, `${sessDir("S4")}/subagents/agent-x1.jsonl`);
+    h.writeJson(`${sessDir("S4")}/subagents/agent-x1.meta.json`, { agentType: CANARY.project, isBuiltIn: true, toolUseId: "toolu_U" });
+    child("S4", "x2").write(h, `${sessDir("S4")}/subagents/agent-x2.jsonl`);
+    h.writeJson(`${sessDir("S4")}/subagents/agent-x2.meta.json`, { agentType: "Explore", isBuiltIn: true });
+    const r = await run();
+    const custom = r.store.session(sidOf("S4", "agent-x1"))!.agentType;
+    expect(custom).toMatch(/^[0-9a-f]{16}$/);
+    expect(custom).toBe(keyedHash(r.salt, CANARY.project));
+    expect(r.store.session(sidOf("S4", "agent-x2"))!.agentType).toBe("Explore");
+    expectNoCanaries([...allEvents(r), r.coverage]);
+  });
+
+  test("the stopped-by-user interrupt stands at the session's last record: a stand-in time (proxyTs); a typed interrupt keeps its own", async () => {
+    parent("S3", "toolu_T").user({ message: { role: "user", content: [{ type: "text", text: "[Request interrupted by user]" }] } }).write(h, topFile("S3"));
+    child("S3", "w3").write(h, `${sessDir("S3")}/subagents/agent-w3.jsonl`);
+    h.writeJson(`${sessDir("S3")}/subagents/agent-w3.meta.json`, { agentType: "general-purpose", toolUseId: "toolu_T", stoppedByUser: true });
+    const r = await run();
+    const sub = r.store.session(sidOf("S3", "agent-w3"))!;
+    const interrupts = r.store.all("marker").filter((m) => m.kind === "interrupt");
+    expect(interrupts.map((m) => [m.sessionId, m.detail, m.proxyTs])).toEqual([[sidOf("S3"), "user", undefined], [sub.id, "stopped-by-user", true]]);
+    expect(interrupts[1]!.ts).toBe(sub.end);
+  });
+
   test("an invalid meta.json counts as parse; the subagent session is still read", async () => {
     parent("S6", "toolu_W").write(h, topFile("S6"));
     child("S6", "v1").write(h, `${sessDir("S6")}/subagents/agent-v1.jsonl`);
@@ -591,6 +672,21 @@ describe("claude-code transcripts: locate and coverage", () => {
     expect(r.store.all("session").map(s => s.id)).toEqual([sidOf("A1")]);
     expect(r.coverage[0]).toMatchObject({ status: "ok", retentionDays: 45 });
     expectNoCanaries(r.coverage);
+  });
+
+  test("a top-level transcript that is a link is read like the file it points to, with no session folder beside it", async () => {
+    const target = top("L1").prompt("kept in a dotfiles folder").write(h, "dotfiles/l1.jsonl");
+    const at = path.join(h.env.home, topFile("L1"));
+    mkdirSync(path.dirname(at), { recursive: true });
+    try {
+      symlinkSync(target, at);
+    } catch (e) {
+      if (process.platform !== "win32") throw e;
+      return; // where no link can be made, there is nothing to read through
+    }
+    const r = await run();
+    expect(r.store.all("session").map((s) => s.id)).toEqual([sidOf("L1")]);
+    expect(r.coverage[0]).toMatchObject({ status: "ok", files: 1, bytes: statSync(target).size });
   });
 
   test.skipIf(skipChmod)("an unreadable transcript counts as io-error and the scan goes on", async () => {
@@ -659,7 +755,7 @@ describe("ccPromptOrigin", () => {
 });
 
 describe("ccToolCategory", () => {
-  const cases: [string, unknown, { category: string; checks: string[]; editExt?: string }][] = [
+  const cases: [string, unknown, { category: string; checks: string[]; editExt?: string; toolchain?: string }][] = [
     ["Read", { file_path: "/a/b.ts" }, { category: "read", checks: [] }],
     ["Grep", { pattern: "x" }, { category: "search", checks: [] }],
     ["Glob", { pattern: "*" }, { category: "search", checks: [] }],
@@ -668,13 +764,14 @@ describe("ccToolCategory", () => {
     ["NotebookEdit", { notebook_path: "n.ipynb" }, { category: "edit", checks: [], editExt: "ipynb" }],
     ["Write", { file_path: "Makefile" }, { category: "write", checks: [] }],
     ["Write", { file_path: "/x/y/notes.md" }, { category: "write", checks: [], editExt: "md" }],
-    ["Bash", { command: "bun test" }, { category: "test", checks: ["test"] }],
+    ["Bash", { command: "bun test" }, { category: "test", checks: ["test"], toolchain: "js" }],
+    ["Bash", { command: "cd api && uv run pytest -q" }, { category: "test", checks: ["test"], toolchain: "py" }],
     ["Bash", { command: "git status" }, { category: "git", checks: [] }],
     ["Bash", { command: "ls -la" }, { category: "read", checks: [] }],
     ["Bash", { command: "rg -n needle src" }, { category: "search", checks: [] }],
     ["Bash", { command: "python3 scripts/gen.py" }, { category: "shell", checks: [] }],
     ["Bash", {}, { category: "shell", checks: [] }],
-    ["PowerShell", { command: "npm run lint" }, { category: "lint", checks: ["lint"] }],
+    ["PowerShell", { command: "npm run lint" }, { category: "lint", checks: ["lint"], toolchain: "js" }],
     ["Agent", { subagent_type: "Explore" }, { category: "delegate", checks: [] }],
     ["Task", {}, { category: "delegate", checks: [] }],
     ["Workflow", {}, { category: "workflow", checks: [] }],
@@ -696,4 +793,78 @@ describe("ccToolCategory", () => {
     ["Read", null, { category: "read", checks: [] }],
   ];
   for (const [name, input, want] of cases) test(`${name} ${JSON.stringify(input)}`, () => expect(ccToolCategory(name, input)).toEqual(want as never));
+
+  test("every name it maps is a built-in name a tool event keeps; FORMAT.md lists every built-in tool and agent type", () => {
+    const mapped = cases.map(([name]) => name).filter((name) => !name.startsWith("mcp__") && name !== "BrandNewTool");
+    expect(mapped.filter((name) => !CC_BUILTIN_TOOLS.has(name))).toEqual([]);
+    const doc = readFileSync(path.join(import.meta.dir, "..", "..", "..", "core", "sources", "claude-code", "FORMAT.md"), "utf8");
+    expect([...CC_BUILTIN_TOOLS, ...BUILTIN_AGENTS].filter((name) => !doc.includes(`\`${name}\``))).toEqual([]);
+  });
+});
+
+describe("claude-code transcripts: one session in two project folders", () => {
+  const build = () => top("D").prompt("Fix the importer").tool("toolu_01D", "Bash", { command: "bun test" }).text("Done.");
+  const counts = (r: Awaited<ReturnType<typeof run>>) => {
+    const c = r.store.count();
+    return { session: c.session, prompt: c.prompt, tool: c.tool, usage: c.usage, anchor: c.anchor, file: c.file };
+  };
+
+  test("a copy and a link of one transcript: read once, the other counted duplicate", async () => {
+    const once = build();
+    const first = once.write(h, topFile("D"));
+    const single = counts(await run());
+    expect(single).toEqual({ session: 1, prompt: 1, tool: 1, usage: 2, anchor: 4, file: 1 });
+
+    // a copy, modified later: it is the one read
+    const copyRel = `${proj("/work/moved")}/${ccSid("D")}.jsonl`;
+    const copy = once.write(h, copyRel);
+    const later = new Date(statSync(first).mtimeMs + 60_000);
+    utimesSync(copy, later, later);
+    let r = await run();
+    expect(counts(r)).toEqual(single);
+    expect(r.coverage[0]!.skipped.duplicate).toBe(1);
+    expect(r.store.all("file")[0]!.pathHash).toBe(keyedHash(r.salt, path.join(h.env.home, copyRel)));
+
+    // a link to the first file: the same file twice, read once
+    h.cleanup();
+    h = fakeHome();
+    const target = build().write(h, topFile("D"));
+    const link = path.join(h.env.home, `${proj("/work/linked")}/${ccSid("D")}.jsonl`);
+    mkdirSync(path.dirname(link), { recursive: true });
+    try {
+      symlinkSync(target, link);
+    } catch (e) {
+      if (process.platform !== "win32") throw e;
+      return; // where no link can be made there is no linked copy
+    }
+    r = await run();
+    expect(counts(r)).toEqual(single);
+    expect(r.coverage[0]!.skipped.duplicate).toBe(1);
+  });
+});
+
+describe("claude-code transcripts: tool call ids", () => {
+  test("a tool_use id is kept only as a keyed hash: a path or a token in it never reaches an event", async () => {
+    const id = `toolu_${CANARY.path}_${CANARY.secret}`;
+    top("K").prompt("Run the tests").tool(id, "Bash", { command: "bun test" }).write(h, topFile("K"));
+    const r = await run();
+    const tool = r.store.all("tool")[0]!;
+    expect(tool.callId).toBe(keyedHash(r.salt, id));
+    expectNoCanaries([...allEvents(r), r.coverage, r.warnings]);
+  });
+});
+
+describe("claude-code transcripts: anchor ids", () => {
+  test("a message or request id that is not shaped like a server id gives no anchor, and is skipped bad-anchor: a path in it never reaches an event", async () => {
+    const t = top("A").prompt("Fix it");
+    t.assistant([{ type: "text", text: "ok" }], { requestId: `req_${CANARY.path}` });
+    t.assistant([{ type: "text", text: "ok" }], { requestId: `req_${"a".repeat(129)}` });
+    t.assistant([{ type: "text", text: "ok" }], { requestId: "req_011CAbc_d-9" });
+    t.write(h, topFile("A"));
+    const r = await run();
+    const req = r.store.all("anchor").filter((a) => a.kind === "cc-req");
+    expect(req.map((a) => a.idTail)).toEqual(["011CAbc_d-9"]);
+    expect(r.coverage[0]!.skipped["bad-anchor"]).toBe(2);
+    expectNoCanaries([...allEvents(r), r.coverage]);
+  });
 });

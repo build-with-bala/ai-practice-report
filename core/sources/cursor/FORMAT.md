@@ -10,10 +10,20 @@ published by third parties. Where a name is backed by a single source it says **
 named by two or more independent sources. Where sources disagree, both shapes are read. This file records names and
 value types only, never values.
 
-**Zero-yield.** A coverage window that read records but yielded none of its reader's primary events is drift
-`zero-yield` (set by the scan), so a renamed field never passes as a quiet store. Primary events: `cursor.ide` (`detail`) — a
-session, prompt or tool call (its `lifetime` window is checked by its columns); `cursor.tracking` — a commit;
-`cursor.agent-cli` reads no records.
+**Zero-yield.** A coverage window that read records, or found files whose lines it could not use (skipped `parse` or
+`oversize`), but yielded none of its reader's primary events is drift `zero-yield` (set by the scan), except records
+skipped as `copied` or `empty`, and coverage stamped `aborted`, so a renamed field or a changed container never passes
+as a quiet store; files with no lines at all stay `empty`; so does a
+file whose only unusable line is its last line with no line end (skipped `partial`: a record still being written). Primary events: `cursor.ide` (`detail`) — a session, prompt
+or tool call (its `lifetime` window is checked by its columns); `cursor.tracking` — a commit; `cursor.agent-cli` reads
+no records.
+
+**Times.** Wherever this file says an item without a time is skipped `no-ts`, an item whose time is well-formed but
+outside the plausible range (before 2015, or more than two days ahead) is skipped `bad-ts` instead.
+
+**io-error.** A file or store that cannot be opened or read counts as skipped `io-error`, and so does a never-opened
+file — a credential, token or key file, by its name or by the name of the file behind a link (`core/io/observe.ts`):
+the engine refuses it before it is opened, so it reads as unreadable.
 
 ## Layout
 
@@ -34,8 +44,8 @@ not read: <user>/globalStorage/state.vscdb.backup, <user>/globalStorage/conversa
 
 `state.vscdb` grows very large — users report tens of GB, up to about a hundred, mostly bubble rows. It is never
 copied while it can be read in place: `openRo` reads it with `mode=ro` (or `immutable=1` for a WAL store whose writer
-closed it), and a locked store above `MAX_COPY_BYTES` is not copied at all (coverage `note: "too-large"`, warning
-`too-large`). No query reads a whole table or a whole value except where stated.
+closed it), and a locked store whose private copy — the store and its `-wal` — would exceed `MAX_COPY_BYTES` is not
+copied at all (coverage `note: "too-large"`, warning `too-large`, warn log `cu.db-too-large`). No query reads a whole table or a whole value except where stated.
 
 ## state.vscdb
 
@@ -136,7 +146,10 @@ conversations live in `cursorDiskKV`.
   composer by key, and those outside the window are read but not mapped), and records drift `no-key-index:cursorDiskKV`;
   a table that then has no rowid either (`WITHOUT ROWID`) is drift `table-unreadable:cursorDiskKV`. The first query of
   a pass that fails for any reason but a busy store is drift `table-unreadable:cursorDiskKV`; a busy store or any later
-  failure is an io-error. Either ends the pass.
+  failure is an io-error. Either ends the pass. So does a full page whose last row cannot place the next one — a rowid
+  that is not a safe integer above the page's start, or a key that does not sort after the page's start key inside the
+  range asked for (Bun reads a key that is not valid UTF-8 as other text) —, as drift `page-stalled:cursorDiskKV`
+  (`page-stalled:scored_commits` for the tracking store); the rows already read stay.
 - **Listed bubbles only.** Just before a composer's bubble range is read, its listed bubble ids are looked up by its
   key: `SELECT <ids of fullConversationHeadersOnly>, <ids of conversation> FROM cursorDiskKV AS kv WHERE kv.key = ? AND
   json_valid(kv.value)`, each a `json_group_array` of `json_extract(h.value, '$.bubbleId')` over `json_each` of the
@@ -187,8 +200,8 @@ conversations live in `cursorDiskKV`.
   - **ToolEv** per assistant (type-2) bubble with `toolFormerData`: `name` = the built-in name (above), else the name the numeric `tool`
     stands for, else `mcp` for an `mcp_`/`mcp-` name, else `other`; `callId` = keyed hash of `toolCallId`. Terminal
     tools (`run_terminal_cmd`, `run_terminal_command`, `run_terminal_command_v2`, `Shell`) take `classifyCommand` of
-    `params.command` (else `rawArgs.command`) — category and checks — and `exit` from `result.exitCodeV2`, else
-    `result.exitCode`. File tools (`edit_file`, `edit_file_v2`, `search_replace`, `write`, `delete_file`, `reapply`,
+    `params.command` (else `rawArgs.command`) — category, checks and toolchain — and `exit` from `result.exitCodeV2`,
+    else `result.exitCode`. File tools (`edit_file`, `edit_file_v2`, `search_replace`, `write`, `delete_file`, `reapply`,
     `StrReplace`, `Write`, `Delete`) take `editExt` from the target file (extension only; the path never leaves memory);
     deleting a file is an `edit`. MCP tools: `name: "mcp"`, `mcpServer` = `server` from the params or arguments (raw,
     export-allowlisted later), else none — never parsed out of a tool name. A tool that did not run to an end of its
@@ -203,27 +216,33 @@ conversations live in `cursorDiskKV`.
   read), the four legacy keys are read — by exact key, parameterized (`WHERE key = ?`), from the global store's
   `ItemTable` and then each workspace store's. A value longer than 64 Mi characters is never loaded: skipped
   `too-large` (`note: "too-large"`). `aiService.prompts` is checked for presence only. `aiService.generations` → a
-  PromptEv per entry with a time and text (`textDescription`, else `text`; no session; a `generationUUID` seen in an
-  earlier store is skipped `duplicate`), in time order per store for `isTaskStart`/`simToPrev`. `composer.composerData`
+  PromptEv per entry with a time and text (`textDescription`, else `text`; a `generationUUID` seen in an earlier store
+  is skipped `duplicate`; an entry with neither text field is drift `missing-field:text`, one whose text is blank is
+  skipped `empty`), in time order per store for `isTaskStart`/`simToPrev`. The list links no session, so it is a
+  prompt log, like Claude Code's history file: its prompts are `window: "lifetime"` with no `sessionId`, and the
+  prompt list and the generation list are counted in the `lifetime` coverage. `composer.composerData`
   → a SessionEv per entry (`createdAt`/`lastUpdatedAt`, `surface: "ide"` and `mode` as above, `modelConfig.modelName`; drafts
   skipped `draft`; inline messages counted `inline-message`). `chatdata` → a SessionEv (`mode: "chat"`) per tab with messages at
   its `lastSendTime` (tabs without messages `empty-session`; their messages `inline-message`). A value of another shape
   is drift `<key>:shape`; one that is not JSON `parse`.
 - **Coverage**, one per window; no versions (the stores name none). The source is an error when every store present
   fails to open or read, unless a store was too large to copy.
-  - `lifetime` — the composer index, every conversation: `files`/`bytes` = the global store; `records` = composer rows
-    read; `from`/`to` = the span of every composer's session, both windows'. Skipped: `parse`, `duplicate`,
-    `empty-session`, `no-ts`, `bad-record` (a session the mapping failed on), `io-error`, `too-large`. `absent` without
-    a global store.
-  - `detail` — the bubbles of the composers inside the window, and the legacy keys: `files`/`bytes` = stores whose tables
-    were listed (main file size); `records` = bubble rows read, plus legacy values; `from`/`to` = first/last time of its
-    events and detail sessions. Skipped: `parse`, `orphan`, `duplicate`, `unlisted`, `missing-bubbles`, `no-ts`,
-    `empty`, `empty-session`, `outside-window` (a composer whose bubbles are not read), `inline-message`, `draft`,
-    `bad-record` (a row or prompt the mapping failed on; the warn log `cu.bad-record` counts both windows'), `io-error`,
-    `too-large`. `absent` when there is no store at all.
+  - `lifetime` — the composer index, every conversation, and the legacy prompt log: `files`/`bytes` = the global store;
+    `records` = composer rows read, plus the prompt list's presence and the generation list's entries (one record
+    each); `from`/`to` = the span of every composer's session, both windows', and of the legacy prompts. Skipped:
+    `parse`, `duplicate`, `empty-session`, `no-ts`, `empty`, `bad-record` (a session or prompt the mapping failed on),
+    `io-error`, `too-large`. `absent` without a global store, unless a workspace store holds a prompt log.
+  - `detail` — the bubbles of the composers inside the window, and the legacy session keys: `files`/`bytes` = stores
+    whose tables were listed (main file size); `records` = bubble rows read, plus legacy composer-index and chat-tab
+    values read; `from`/`to` = first/last time of its events and detail sessions.
+    Skipped: `parse`, `orphan`, `duplicate`, `unlisted`, `missing-bubbles`, `no-ts`, `empty`, `empty-session`,
+    `outside-window` (a composer whose bubbles are not read), `inline-message`, `draft`, `bad-record` (a row or prompt
+    the mapping failed on; the warn log `cu.bad-record` counts both windows'), `io-error`, `too-large`. `absent` when
+    there is no store at all.
   - Drift of the store itself (`missing-column:<name>`, `missing-table:<name>`, `no-key-index:cursorDiskKV`,
     `table-unreadable:cursorDiskKV`) is in both windows; `missing-bubbles:cursorDiskKV`, `missing-field:text`,
-    `bubble-type:<n>` and `<legacy key>:shape` in the detail window.
+    `bubble-type:<n>` and `<legacy key>:shape` in the detail window (`aiService.generations:shape` and the generations'
+    `missing-field:text` in the lifetime window).
 
 ## ai-code-tracking.db (`cursor.tracking`)
 
@@ -248,7 +267,7 @@ strings are both accepted). One machine reported every line column of `scored_co
   never kept. No `repoKey`: the table names no repository. Rows without a time: `no-ts`.
 - **Coverage** (window `lifetime`): `files`/`bytes` = the store, `records` = rows read, `from`/`to` = first/last
   commit time. A store that cannot be opened makes the source an error, unless it is a locked store above
-  `MAX_COPY_BYTES` (`note: "too-large"`).
+  `MAX_COPY_BYTES` (`note: "too-large"`, warn `cu.db-too-large`).
 
 ## cursor-agent CLI (`cursor.agent-cli`, beta)
 
@@ -276,8 +295,9 @@ strings are both accepted). One machine reported every line column of `scored_co
 ## Limits
 
 - Nothing here was verified against a real Cursor store; field names follow public descriptions and can be wrong or
-  out of date. Unknown bubble types, schema changes and a renamed bubble `text` or `createdAt` surface as drift;
-  another renamed field surfaces only as missing data, unless nothing in the window is left to map (`zero-yield`).
+  out of date. Unknown bubble types, schema changes, a renamed bubble `text` or `createdAt` and a renamed generation
+  text surface as drift; another renamed field surfaces only as missing data, unless nothing in the window is left to
+  map (`zero-yield`).
 - The store is live while Cursor runs, and pages are read one query at a time. Read by key, a row is read at most
   once (a rewrite keeps its key), but a row written behind the read position during the scan — a new message in a
   conversation already read — is missed. In the rowid fallback, a rewritten row moves to a new rowid, so it can be read
@@ -290,5 +310,6 @@ strings are both accepted). One machine reported every line column of `scored_co
 - Token counts (zero in current versions), the context meter and request ids are not mapped; neither are the
   timings Cursor keeps per bubble in some versions.
 - Composers have no project: the workspace index is not read.
-- Legacy generations have no session, and legacy chat-tab messages and inline composer messages no time.
+- Legacy generations have no session (so they are lifetime prompts), and legacy chat-tab messages and inline composer
+  messages no time.
 - cursor-agent sessions are not decoded, so the CLI's activity is not in the report yet.

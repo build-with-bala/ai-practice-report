@@ -11,7 +11,7 @@ import { registry } from "../../../core/sources/registry";
 import type { ScanCtx, SourcePlugin, PluginCoverage } from "../../../core/sources/types";
 import { keyedHash } from "../../../core/text/hash";
 import { CANARY, expectNoCanaries } from "../../kit/canary";
-import { fakeHome, type FakeHome } from "../../kit/home";
+import { fakeHome, lockAboveCopyLimit, type FakeHome } from "../../kit/home";
 import { fixtureStart } from "../../fixtures/claude-code";
 import {
   buildCodexIndex, CX_MAX, CX_MINI, cxHistoryLine, CxRollout, localTime, MANAGED_SANDBOX, THREAD_COLUMNS, threadRow, turnRow, uuidV7,
@@ -35,6 +35,8 @@ const covOf = (r: Result, source: string) => r.coverage.find((c) => c.source ===
 const tally = (xs: (string | undefined)[]) => xs.reduce<Record<string, number>>((m, x) => ({ ...m, [String(x)]: (m[String(x)] ?? 0) + 1 }), {});
 const skipChmod = process.platform === "win32" || process.getuid?.() === 0;
 const MIN = 60_000;
+/** A path's birth time by stat, links followed; its ctime where the file system records none. */
+const born = (rel: string): number | undefined => { const st = statSync(path.join(h.env.home, rel)); return st.birthtimeMs > 0 ? Math.floor(st.birthtimeMs) : undefined; };
 
 /**
  * What each SELECT may name, by the table it reads: the columns the thread reader is allowed to select (written out here,
@@ -219,9 +221,14 @@ describe("codex threads: thread index and turn history", () => {
       ["cli", "Claude Code", "peer", "cli"],
       [JSON.stringify({ subagent: "review" }), null, "subagent", "subagent"],
       [spawn("not-a-uuid", CANARY.project), "Claude Code", "subagent", "subagent"],
-      [CANARY.prompt, null, "human", "other"],
-      [JSON.stringify(["subagent"]), null, "human", "other"],
-      ["{not json", null, "human", "other"],
+      [CANARY.prompt, null, "system", "other"], // a source the CLI is not known to write: never a human
+      ["desktop", "Claude Code", "peer", "other"],
+      ["internal", null, "system", "internal"], // the CLI's own work
+      [JSON.stringify({ internal: CANARY.project }), null, "system", "internal"], // a known name holding data: its data never read
+      [JSON.stringify({ custom: CANARY.prompt }), null, "human", "custom"],
+      [JSON.stringify({ cli: 1, exec: 2 }), null, "system", "other"], // several keys
+      [JSON.stringify(["subagent"]), null, "system", "other"], // a shape the CLI is not known to write: never a human
+      ["{not json", null, "system", "other"],
     ];
     const ids = cases.map((_, i) => uuidV7(at - 1000, 0xd0 + i));
     writeStateDb(h, ".codex/state_5.sqlite", cases.map(([source, originator], i) => threadRow(ids[i]!, at + i * MIN, { source, originator })));
@@ -231,7 +238,7 @@ describe("codex threads: thread index and turn history", () => {
     expect(r.store.session(sidOf(ids[7]!))).toMatchObject({
       parentId: sidOf(keyedHash(r.salt, "not-a-uuid")), spawnDepth: 2, agentType: keyedHash(r.salt, CANARY.project),
     });
-    expect(covOf(r, "codex.threads").unknownTypes).toEqual({ "threads.source:shape": 2 });
+    expect(covOf(r, "codex.threads").unknownTypes).toEqual({ "threads.source:shape": 3, "threads.source:(other)": 2 });
     expectNoCanaries([r.store, r.coverage, r.warnings]);
   });
 
@@ -343,6 +350,22 @@ describe("codex threads: thread index and turn history", () => {
     r = await run([cxThreads]);
     expect(r.store.all("session")).toHaveLength(1);
     expect(covOf(r, "codex.threads")).toMatchObject({ status: "ok", files: 1, skipped: { "io-error": 1 } });
+  });
+
+  test.skipIf(process.platform === "win32")("the only store, locked and above the copy limit: no error — too-large note, warning and log", async () => {
+    const at = fixtureStart();
+    const file = writeStateDb(h, ".codex/state_5.sqlite", [threadRow(uuidV7(at - 1000, 0xf2), at)]);
+    const release = lockAboveCopyLimit(file);
+    const logs: string[] = [];
+    let r: Result;
+    try {
+      r = await scan({ env: h.env, plugins: [cxThreads], onLog: (level, code) => { if (code !== "scan.gc") logs.push(`${level} ${code}`); } });
+    } finally {
+      release();
+    }
+    expect(r.coverage).toEqual([expect.objectContaining({ source: "codex.threads", status: "empty", note: "too-large", files: 0, skipped: { "too-large": 1 } })]);
+    expect(r.warnings.map((w) => [w.code, w.source])).toEqual([["too-large", "codex.threads"]]);
+    expect(logs).toEqual(["warn cx.db-too-large"]);
   });
 
   test("a WITHOUT ROWID table cannot be paged: drift table-unreadable, and it is never queried", async () => {
@@ -574,7 +597,7 @@ describe("codex config", () => {
       { ...base, kind: "mcp-server", name: CANARY.mcp, provenance: "unknown" },
       { ...base, kind: "plugin", name: "demo@market", provenance: "installed" },
       { ...base, kind: "plugin", name: "other@market", provenance: "installed" },
-      { ...base, kind: "skill", name: "review-helper", provenance: "authored" },
+      { ...base, kind: "skill", name: "review-helper", provenance: "authored", firstSeen: born(".codex/skills/review-helper") },
       { ...base, kind: "memory-file", provenance: "authored" },
       { ...base, kind: "memory-file", provenance: "authored" },
     ]);
@@ -621,6 +644,8 @@ describe("codex config", () => {
     h.writeJson(".agents/.skill-lock.json", { version: 3, skills: { "from-lock": { source: "acme/skills", sourceUrl: `https://${CANARY.host}/x.git` } } });
     let r = await run([cxConfig]);
     expect(configs(r, "skill").map((c) => [c.name, c.provenance])).toEqual([["from-lock", "installed"], ["linked", "authored"], ["mine", "authored"]]);
+    // when each skill folder appeared, by stat (a linked folder: its target's); never opened
+    expect(configs(r, "skill").map((c) => c.firstSeen)).toEqual([born(".codex/skills/from-lock"), born("dotfiles/linked"), born(".codex/skills/mine")]);
     expect(covOf(r, "codex.config")).toMatchObject({ files: 1, bytes: statSync(path.join(h.env.home, ".agents/.skill-lock.json")).size });
 
     h.write(".agents/.skill-lock.json", "{ not json");

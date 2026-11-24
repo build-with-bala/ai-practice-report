@@ -1,44 +1,21 @@
-import type { Platform } from "../../env/env";
-import { toEpochMs } from "../../io/time";
+import { plausible, timeIssue, toEpochMs } from "../../io/time";
+import { TASK_GAP_MS } from "../../model/constants";
 import type { Ev, MarkerEv, PromptEv, SessionEv, ToolEv, TurnEv } from "../../model/events";
-import { sid, type CheckKind, type Origin, type ToolCategory } from "../../model/ids";
+import type { CheckKind, Origin, ToolCategory } from "../../model/ids";
 import { classifyCommand } from "../../text/commands";
 import { classifyIntent } from "../../text/intent";
 import { promptFeatures } from "../../text/structure";
 import { typeKey, type Tally } from "../common/coverage";
-import { extOfPath, idPart, isObj, num, safeModel, str, UUID, VERSION, type Obj } from "../common/guards";
+import { extOfPath, isObj, num, str, VERSION, type Obj } from "../common/guards";
+import { uriToPath } from "../common/uri";
 import type { ScanCtx } from "../types";
+import { cpModel, cpSessionId, TOOL } from "./ids";
 
 export const VSCODE_SOURCE = "copilot.vscode";
-export const TOOL = "copilot";
-export const TASK_GAP_MS = 30 * 60_000;
 
-/** A Copilot session id, `copilot:<id>`: the tool's own id verbatim when UUID-shaped, else its keyed hash. */
-export const cpSessionId = (raw: string, ctx: ScanCtx): string => sid(TOOL, idPart(raw, UUID, ctx));
-
-const VENDOR = /^[a-z][a-z0-9-]{0,31}\/(.+)$/;
-/** A model id as VS Code records it (`<vendor>/<id>`, e.g. `copilot/<id>`): the vendor prefix dropped, then the shared guard. */
-export function cpModel(raw: string | undefined): string | undefined {
-  return raw === undefined ? undefined : safeModel(VENDOR.exec(raw)?.[1] ?? raw);
-}
-
-/** The path of a `file:` or `vscode-remote:` URI (a Windows drive or UNC path on win32); undefined for other URIs. */
-export function uriToPath(uri: string, platform: Platform): string | undefined {
-  let u: URL;
-  let p: string;
-  try {
-    u = new URL(uri);
-    p = decodeURIComponent(u.pathname);
-  } catch {
-    return undefined;
-  }
-  if ((u.protocol !== "file:" && u.protocol !== "vscode-remote:") || p === "") return undefined;
-  if (u.protocol === "file:" && platform === "win32") {
-    p = u.host ? `//${u.host}${p}` : p.replace(/^\/([A-Za-z]:)/, "$1");
-    p = p.replace(/\//g, "\\");
-  }
-  return p;
-}
+const MAX_TURN_MS = 86_400_000;
+/** A turn's duration: a finite, non-negative number of ms of at most a day; anything else is ignored. */
+const turnMs = (ms: number | undefined): number | undefined => (ms !== undefined && Number.isFinite(ms) && ms >= 0 && ms <= MAX_TURN_MS ? ms : undefined);
 
 /** Response part kinds VS Code writes (its serializer and response model, 1.138, plus kinds older versions wrote); any other kind is drift. */
 const PART_KINDS: ReadonlySet<string> = new Set([
@@ -203,9 +180,11 @@ class SessionMapper {
       this.prompt(r, ts);
       this.tools(r, ts, cancelledRequest(r));
     } else {
-      // every request carries its time: without one the field moved, and its prompt and tools are dropped (counted)
+      // every request carries its time, and without a usable one its prompt and tools are dropped: a well-formed time
+      // outside the plausible range is bad data, counted once (`bad-ts`); a missing or shapeless one means the field
+      // moved, drift with the request skipped `no-ts`
       this.tally.badTime(r.timestamp, "request.timestamp");
-      this.tally.skip("no-ts");
+      if (timeIssue(r.timestamp) === "shape") this.tally.skip("no-ts");
     }
     const ended = this.turn(r, ts, model);
     const last = ended ?? ts;
@@ -298,9 +277,10 @@ class SessionMapper {
     if (id !== undefined && TERMINAL_TOOLS.has(id) && tsd?.kind === "terminal") {
       const cmd = terminalCommand(tsd);
       if (cmd !== undefined) {
-        const { category, checks } = classifyCommand(cmd);
+        const { category, checks, toolchain } = classifyCommand(cmd);
         ev.category = category;
         if (checks.length > 0) ev.checks = checks;
+        if (toolchain !== undefined) ev.toolchain = toolchain;
       }
       const state = isObj(tsd.terminalCommandState) ? tsd.terminalCommandState : undefined;
       const exit = num(state?.exitCode);
@@ -341,12 +321,18 @@ class SessionMapper {
     else return undefined;
     const completedAt = state ? toEpochMs(state.completedAt, this.ctx.now) : undefined;
     const started = toEpochMs(r.responseTimestamp, this.ctx.now) ?? ts;
-    const elapsed = num(r.elapsedMs);
-    const total = isObj(r.result) && isObj(r.result.timings) ? num(r.result.timings.totalElapsed) : undefined;
-    let ms = elapsed !== undefined && elapsed >= 0 ? elapsed : total !== undefined && total >= 0 ? total : undefined;
-    if (ms === undefined && completedAt !== undefined && started !== undefined && completedAt >= started) ms = completedAt - started;
-    const at = completedAt ?? (ts !== undefined && ms !== undefined ? ts + ms : ts);
-    if (at === undefined) return undefined;
+    const elapsed = turnMs(num(r.elapsedMs));
+    const total = turnMs(isObj(r.result) && isObj(r.result.timings) ? num(r.result.timings.totalElapsed) : undefined);
+    let ms = elapsed ?? total;
+    if (ms === undefined && completedAt !== undefined && started !== undefined && completedAt >= started) ms = turnMs(completedAt - started);
+    const raw = completedAt ?? (ts !== undefined && ms !== undefined ? ts + ms : ts);
+    if (raw === undefined) return undefined;
+    // a time built from parts goes through the same bound as every parsed time
+    const at = plausible(raw, this.ctx.now);
+    if (at === undefined) {
+      this.tally.skip("bad-ts");
+      return undefined;
+    }
     if (status === "interrupted") {
       const m: MarkerEv = { k: "marker", tool: TOOL, source: VSCODE_SOURCE, ts: completedAt ?? ts ?? at, sessionId: this.id, kind: "interrupt", detail: "user" };
       this.out(m);

@@ -1,25 +1,28 @@
-import { statSync } from "node:fs";
 import path from "node:path";
 import type { Env } from "../../env/env";
 import { joinFor } from "../../env/paths";
-import { safeStat } from "../../io/fs";
-import { readJsonl } from "../../io/jsonl";
-import { pbTryNested, type PbField } from "../../io/protobuf";
-import { isBusyError, openRo, type RoDb } from "../../io/sqlite";
+import { isDir, isFile } from "../../io/fs";
+import { pbStr, pbTime, pbTimeRaw, pbTryNested, type PbField } from "../../io/protobuf";
+import type { RoDb } from "../../io/sqlite";
 import { toEpochMs } from "../../io/time";
+import { TASK_GAP_MS } from "../../model/constants";
 import type { Ev, MarkerEv, PromptEv, SessionEv, ToolEv, UsageEv } from "../../model/events";
-import { sid, type MarkerKind, type Origin, type ToolCategory } from "../../model/ids";
+import type { MarkerKind, Origin, ToolCategory } from "../../model/ids";
 import { classifyCommand } from "../../text/commands";
 import { classifyIntent } from "../../text/intent";
 import { promptFeatures } from "../../text/structure";
 import { listDir, Tally } from "../common/coverage";
-import { idPart, isObj, num, safeModel, str, UUID, type Obj } from "../common/guards";
-import { uriToPath } from "../copilot/map";
+import { isObj, num, safeModel, str, type Obj } from "../common/guards";
+import { eachRow, Pass, q, readStore } from "../common/sqlite";
+import { streamJsonlFile } from "../common/stream";
+import { uriToPath } from "../common/uri";
 import type { Candidate, ScanCtx } from "../types";
+import { agSessionId, TOOL } from "./ids";
 
-export const TOOL = "antigravity";
 export const CLI_SOURCE = "antigravity.cli";
-export const TASK_GAP_MS = 30 * 60_000;
+/** Go's zero time (`0001-01-01 …`), written for a time column never set. */
+const isGoZero = (v: unknown): boolean => typeof v === "string" && v.trimStart().startsWith("0001-01-01");
+
 /** Summary rows per query. */
 const SUMMARY_PAGE = 1_000;
 /**
@@ -34,25 +37,7 @@ const WITHOUT_ROWID = /\bWITHOUT\s+ROWID\b/i;
 /** An enum name the program does not know, as a drift key: never echoed. */
 const enumKey = (v: unknown): string => (typeof v !== "string" ? "(none)" : "(other)");
 
-/** An Antigravity session id, `antigravity:<id>`: the conversation's own id verbatim when UUID-shaped, else its keyed hash. */
-export const agSessionId = (raw: string, ctx: ScanCtx): string => sid(TOOL, idPart(raw, UUID, ctx));
-
 // ---- protobuf fields ----
-
-const utf8 = new TextDecoder("utf-8", { fatal: true });
-
-/** A length-delimited field as UTF-8 text; undefined when absent, of another wire type, or not valid UTF-8. */
-export function pbStr(f: PbField | undefined): string | undefined {
-  if (f?.wire !== 2) return undefined;
-  try {
-    return utf8.decode(f.v);
-  } catch {
-    return undefined;
-  }
-}
-
-/** A varint field as a number; undefined when absent or of another wire type. */
-export const pbNum = (f: PbField | undefined): number | undefined => (f?.wire === 0 ? Number(f.v) : undefined);
 
 /**
  * The complete leading fields of a blob's first bytes (cut short inside SQL). Decoding runs from the start, so the longest
@@ -64,15 +49,6 @@ function leadingFields(head: Uint8Array): ReadonlyMap<number, PbField[]> | null 
     if (fields) return fields;
   }
   return null;
-}
-
-/** A `google.protobuf.Timestamp` field (`seconds` = 1, `nanos` = 2) as epoch ms; undefined when absent, malformed or implausible. */
-export function pbTime(f: PbField | undefined, now: number): number | undefined {
-  if (f?.wire !== 2) return undefined;
-  const t = pbTryNested(f.v);
-  const seconds = pbNum(t?.get(1)?.[0]);
-  if (seconds === undefined) return undefined;
-  return toEpochMs(seconds * 1000 + Math.floor((pbNum(t!.get(2)?.[0]) ?? 0) / 1e6), now);
 }
 
 // ---- step types (the CLI program's `CortexStepType`, also the transcript's `type` names) ----
@@ -197,16 +173,6 @@ function callCommand(call: Fields | null): string | undefined {
 
 class CliStoresUnreadable extends Error {}
 
-const q = (name: string): string => `"${name}"`;
-const isDir = (p: string): boolean => {
-  try {
-    return statSync(p).isDirectory(); // follows a symlinked folder
-  } catch {
-    return false;
-  }
-};
-const isFile = (p: string): boolean => safeStat(p)?.isFile() ?? false;
-
 /** `<home>/.gemini/antigravity-cli` per home (WSL homes included) when it exists. */
 export function cliRoots(env: Env, homes: string[]): Candidate[] {
   const out: Candidate[] = [];
@@ -215,33 +181,6 @@ export function cliRoots(env: Env, homes: string[]): Candidate[] {
     if (isDir(root)) out.push({ root, home, wsl: home !== env.home });
   }
   return out;
-}
-
-/**
- * Opens and reads one store on its own; it counts as read once its tables are listed, and is always closed. A store that
- * cannot be opened (warn `ag.db-unopenable`), or fails while read (warn `ag.db-unreadable`), is an io-error. True when listed.
- */
-function readStore(file: string, ctx: ScanCtx, tally: Tally, body: (db: RoDb, tables: Set<string>) => void): boolean {
-  const db = openRo(file, ctx.temp);
-  if (!db) {
-    tally.skip("io-error");
-    ctx.log("warn", "ag.db-unopenable");
-    return false;
-  }
-  let listed = false;
-  try {
-    const tables = new Set(db.tables());
-    listed = true;
-    tally.files++;
-    tally.bytes += safeStat(file)?.size ?? 0;
-    body(db, tables);
-  } catch {
-    tally.skip("io-error");
-    ctx.log("warn", "ag.db-unreadable");
-  } finally {
-    db.close();
-  }
-  return listed;
 }
 
 /**
@@ -264,39 +203,15 @@ function pageable(db: RoDb, tables: ReadonlySet<string>, table: string, wanted: 
 }
 
 /**
- * Rows of `table` in rowid order, `page` per query. A first page that fails other than busy means the query can never work
- * on this table: drift `table-unreadable:<name>`. A busy store, or a later page that fails, is an io-error. Either ends the table.
+ * Maps every row of `table` in rowid order, `page` per query, on the shared pager (`Pass`): a first page that fails other
+ * than busy is drift `table-unreadable:<name>`; a busy store, or a later page that fails, is an io-error; either ends the
+ * table. A row the mapping fails on is a bad-record and the others go on.
  */
-// TODO(Plan 2 Task 0): this pager is synchronous and never yields to the event loop, so a signal or an abort waits
-// for the whole table. Move it onto the shared async pager (common/sqlite.ts) that awaits maybeYield() between pages.
-function* pages(db: RoDb, table: string, select: string[], page: number, tally: Tally, ctx: ScanCtx): Generator<Obj[]> {
+async function eachPagedRow(db: RoDb, table: string, select: string[], page: number, map: (r: Obj) => void, ctx: ScanCtx, tally: Tally): Promise<void> {
   const sql = `SELECT rowid AS rid, ${select.join(", ")} FROM ${q(table)} WHERE rowid > ? ORDER BY rowid LIMIT ?`;
-  let after = Number.MIN_SAFE_INTEGER;
-  for (let first = true; ; first = false) {
-    if (ctx.signal.aborted) return;
-    let rows: Obj[];
-    try {
-      rows = db.all<Obj>(sql, after, page);
-    } catch (e) {
-      if (first && !isBusyError(e)) tally.unknownKey(`table-unreadable:${table}`);
-      else tally.skip("io-error");
-      ctx.log("warn", "ag.db-query");
-      return;
-    }
-    tally.records += rows.length;
-    if (rows.length > 0) yield rows;
-    if (rows.length < page) return;
-    after = rows[rows.length - 1]!.rid as number;
-  }
-}
-
-/** Maps one row or record; one the mapping fails on is a bad-record and the others go on. */
-export function each(map: () => void, tally: Tally): void {
-  try {
-    map();
-  } catch {
-    tally.skip("bad-record");
-  }
+  await new Pass(db, table, tally, ctx, "ag.db-query", { page }).byRowid(sql, (rows) => {
+    for (const r of rows) eachRow(() => map(r), tally);
+  });
 }
 
 // ---- conversation_summaries.db ----
@@ -380,7 +295,8 @@ function summary(r: Obj, convs: Map<string, Conv>, ctx: ScanCtx, tally: Tally): 
   convs.set(raw, conv);
   if (r.step_count === 0) return tally.skip("empty-session");
   const times = [toEpochMs(r.last_user_input_time, ctx.now), toEpochMs(r.last_modified_time, ctx.now)].filter((t): t is number => t !== undefined);
-  if (times.length === 0) return tally.skip("no-ts");
+  // Go's zero time means never set: no time, not bad data
+  if (times.length === 0) return tally.noTime(...[r.last_user_input_time, r.last_modified_time].filter((t) => !isGoZero(t)));
   const id = agSessionId(raw, ctx);
   const s: SessionEv = {
     k: "session", tool: TOOL, source: CLI_SOURCE, id, window: "lifetime", origin: conv.origin, start: Math.min(...times), end: Math.max(...times),
@@ -400,7 +316,7 @@ function summary(r: Obj, convs: Map<string, Conv>, ctx: ScanCtx, tally: Tally): 
   }
 }
 
-function readSummaries(db: RoDb, tables: Set<string>, convs: Map<string, Conv>, ctx: ScanCtx, tally: Tally): void {
+async function readSummaries(db: RoDb, tables: Set<string>, convs: Map<string, Conv>, ctx: ScanCtx, tally: Tally): Promise<void> {
   const have = pageable(db, tables, "conversation_summaries", [...SUMMARY_COLUMNS, ...TESTED_COLUMNS], tally);
   if (!have?.has("conversation_id")) return;
   const select = SUMMARY_COLUMNS.filter((c) => have.has(c)).map(q);
@@ -409,9 +325,7 @@ function readSummaries(db: RoDb, tables: Set<string>, convs: Map<string, Conv>, 
     select.push(`(COALESCE(${q("winning_conversation_id")}, '') NOT IN ('', ${q("conversation_id")})) AS battle_loser`);
   }
   if (have.has("source")) select.push(SOURCE_SQL);
-  for (const rows of pages(db, "conversation_summaries", select, SUMMARY_PAGE, tally, ctx)) {
-    for (const r of rows) each(() => summary(r, convs, ctx, tally), tally);
-  }
+  await eachPagedRow(db, "conversation_summaries", select, SUMMARY_PAGE, (r) => summary(r, convs, ctx, tally), ctx, tally);
 }
 
 // ---- one conversation: conversations/<id>.db and its transcript ----
@@ -474,7 +388,7 @@ class Conversation {
     this.out(m);
   }
 
-  readSteps(db: RoDb, tables: Set<string>): void {
+  async readSteps(db: RoDb, tables: Set<string>): Promise<void> {
     const have = pageable(db, tables, "steps", STEP_COLUMNS, this.tally);
     if (!have?.has("step_type")) return;
     const [type, meta, payload] = [q("step_type"), q("metadata"), q("step_payload")];
@@ -488,9 +402,7 @@ class Conversation {
       select.push(`CASE WHEN ${type} = ${RUN_COMMAND} AND length(${payload}) <= ${BLOB_CAP} THEN ${payload} END AS payload`,
         `(${type} = ${RUN_COMMAND} AND length(${payload}) > ${BLOB_CAP}) AS pbig`);
     }
-    for (const rows of pages(db, "steps", select, STEP_PAGE, this.tally, this.ctx)) {
-      for (const r of rows) each(() => this.step(r), this.tally);
-    }
+    await eachPagedRow(db, "steps", select, STEP_PAGE, (r) => this.step(r), this.ctx, this.tally);
   }
 
   /**
@@ -515,7 +427,7 @@ class Conversation {
     }
     const ts = fields ? pbTime(fields.get(1)?.[0], this.ctx.now) : undefined;
     if (ts === undefined || !fields) {
-      this.tally.skip("no-ts");
+      this.tally.noTime(fields ? pbTimeRaw(fields.get(1)?.[0]) : undefined);
       return undefined;
     }
     return { ts, fields };
@@ -552,9 +464,10 @@ class Conversation {
       const run: ReturnType<typeof runCommand> = type === RUN_COMMAND ? runCommand(r.payload) : {};
       const cmd = run.cmd ?? callCommand(call);
       if (cmd !== undefined) {
-        const { category, checks } = classifyCommand(cmd);
+        const { category, checks, toolchain } = classifyCommand(cmd);
         ev.category = category;
         if (checks.length > 0) ev.checks = checks;
+        if (toolchain !== undefined) ev.toolchain = toolchain;
       }
       if (run.rejected) outcome = "denied";
       exit = run.exit;
@@ -598,7 +511,7 @@ class Conversation {
     const origin = this.conv?.origin ?? "human";
     if (origin === "subagent") return;
     if (this.conv?.battleCopy) return this.tally.skip("battle-copy");
-    if (ts === undefined) return this.tally.skip("no-ts");
+    if (ts === undefined) return this.tally.noTime(v.created_at);
     const text = v.content;
     if (typeof text !== "string") return this.tally.unknownKey("transcript.content:missing");
     if (text.trim() === "") return this.tally.skip("empty");
@@ -615,7 +528,7 @@ class Conversation {
   }
 
   private usage(v: Obj, ts: number | undefined, model: string | undefined): void {
-    if (ts === undefined) return this.tally.skip("no-ts");
+    if (ts === undefined) return this.tally.noTime(v.created_at);
     const ev: UsageEv = {
       k: "usage", tool: TOOL, source: CLI_SOURCE, ts, sessionId: this.id, model: model ?? "other", inTok: tokens(v.input_tokens) ?? 0,
       outTok: tokens(v.output_tokens) ?? 0, cacheR: tokens(v.cache_read_tokens) ?? 0, cacheW: tokens(v.cache_write_tokens) ?? 0,
@@ -644,30 +557,6 @@ const tokens = (v: unknown): number | undefined => {
   return n !== undefined && n >= 0 ? n : undefined;
 };
 
-/** Streams a JSONL file into `line`; counted as read (files, bytes) only when read to its end. True when it was. */
-export async function readLines(file: string, ctx: ScanCtx, tally: Tally, line: (v: unknown) => void): Promise<boolean> {
-  const st = safeStat(file);
-  if (!st?.isFile()) return false;
-  try {
-    for await (const item of readJsonl(file, { signal: ctx.signal })) {
-      if ("skip" in item) {
-        tally.skip(item.skip);
-        continue;
-      }
-      tally.records++;
-      each(() => line(item.value), tally);
-    }
-  } catch {
-    tally.skip("io-error");
-    ctx.log("warn", "ag.io-error");
-    return false;
-  }
-  if (ctx.signal.aborted) return false;
-  tally.files++;
-  tally.bytes += st.size;
-  return true;
-}
-
 // ---- the CLI store ----
 
 /**
@@ -675,7 +564,8 @@ export async function readLines(file: string, ctx: ScanCtx, tally: Tally, line: 
  * then per conversation its step store and transcript (the detail window: tools, errors, prompts, usage, its detail
  * session). One CoverageEv per window, last — `absent` for a window with no store, `error` (note `unreadable`) for one
  * whose stores are all unreadable. Each store is read on its own; only when every store present fails is the source an
- * error. (The CLI's prompt log is `antigravity.history`.)
+ * error. A locked store above MAX_COPY_BYTES keeps its reason instead: its window notes `too-large`, and it is no error
+ * of the source. (The CLI's prompt log is `antigravity.history`.)
  */
 export async function scanCli(c: Candidate, ctx: ScanCtx): Promise<void> {
   const tally = new Tally(TOOL, CLI_SOURCE);
@@ -688,7 +578,7 @@ export async function scanCli(c: Candidate, ctx: ScanCtx): Promise<void> {
   let summariesRead = false;
   if (hasSummaries) {
     present++;
-    summariesRead = readStore(summaries, ctx, life, (db, tables) => readSummaries(db, tables, convs, ctx, life));
+    summariesRead = await readStore(summaries, ctx, life, "ag", (db, tables) => readSummaries(db, tables, convs, ctx, life));
     if (summariesRead) read++;
   }
   let conversations = 0;
@@ -704,24 +594,25 @@ export async function scanCli(c: Candidate, ctx: ScanCtx): Promise<void> {
     if (isFile(db)) {
       present++;
       conversations++;
-      if (readStore(db, ctx, tally, (d, tables) => conv.readSteps(d, tables))) conversationsRead++;
+      if (await readStore(db, ctx, tally, "ag", (d, tables) => conv.readSteps(d, tables))) conversationsRead++;
     }
     const transcript = path.join(brainDir, raw, ".system_generated", "logs", "transcript.jsonl");
     if (isFile(transcript)) {
       present++;
       conversations++;
-      if (await readLines(transcript, ctx, tally, (v) => conv.record(v))) conversationsRead++;
+      if ((await streamJsonlFile(transcript, ctx, tally, (v) => conv.record(v), { ioLog: "ag.io-error" })).read) conversationsRead++;
     }
-    each(() => conv.finish(), tally);
+    eachRow(() => conv.finish(), tally);
   }
   read += conversationsRead;
-  if (present > 0 && read === 0) throw new CliStoresUnreadable("no Antigravity CLI store could be read");
+  const tooLarge = tally.note === "too-large" || life.note === "too-large";
+  if (present > 0 && read === 0 && !tooLarge) throw new CliStoresUnreadable("no Antigravity CLI store could be read");
   const bad = (tally.skipped["bad-record"] ?? 0) + (life.skipped["bad-record"] ?? 0);
   if (bad > 0) ctx.log("warn", "ag.bad-record", bad); // a mapping bug must not look like a healthy source
   for (const [t, has, readable] of [[tally, conversations > 0, conversationsRead > 0], [life, hasSummaries, summariesRead]] as const) {
     const cov = t.coverage();
     if (!has) cov.status = "absent";
-    else if (!readable) {
+    else if (!readable && t.note !== "too-large") {
       cov.status = "error";
       cov.note = "unreadable";
     }

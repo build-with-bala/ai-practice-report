@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { localDay, toEpochMs } from "../../../core/io/time";
+import { withTz } from "../../kit/tz";
 
 describe("toEpochMs", () => {
   test("seconds, ms, numeric strings, ISO", () => {
@@ -8,6 +9,15 @@ describe("toEpochMs", () => {
     expect(toEpochMs("1773212906")).toBe(1773212906000);
     expect(toEpochMs("2026-11-17T01:55:29.000Z")).toBe(Date.parse("2026-11-17T01:55:29.000Z"));
   });
+  test("a date-time with no zone is read in the process zone; a date alone is that day's start in UTC", () => {
+    const now = Date.UTC(2026, 11, 1);
+    expect(withTz("UTC", () => toEpochMs("2026-11-20T10:00:00", now))).toBe(Date.UTC(2026, 10, 20, 10));
+    expect(withTz("Asia/Kolkata", () => toEpochMs("2026-11-20T10:00:00", now))).toBe(Date.UTC(2026, 10, 20, 4, 30));
+    expect(withTz("America/Los_Angeles", () => toEpochMs("2026-11-20T10:00:00", now))).toBe(Date.UTC(2026, 10, 20, 18));
+    for (const tz of ["UTC", "Asia/Kolkata", "America/Los_Angeles"]) expect(withTz(tz, () => toEpochMs("2026-11-20", now))).toBe(Date.UTC(2026, 10, 20));
+    expect(withTz("Asia/Kolkata", () => toEpochMs("2026-11-20T10:00:00Z", now))).toBe(Date.UTC(2026, 10, 20, 10));
+  });
+
   test("rejects implausible values", () => {
     expect(toEpochMs(0)).toBeUndefined();
     expect(toEpochMs("garbage")).toBeUndefined();
@@ -27,22 +37,6 @@ describe("toEpochMs", () => {
 
 /** The process zone when this file started, before any test changed process.env.TZ. */
 const startZone = new Intl.DateTimeFormat().resolvedOptions().timeZone;
-
-/**
- * Runs `f` with `process.env.TZ = tz`, then restores the zone by assignment: TZ's previous value, or — when it was unset —
- * the zone that was in effect (`bun test` runs in UTC with TZ unset; assigning "" would switch to the system zone instead).
- * Never `delete process.env.TZ`: in Bun 1.3 that removes the variable's setter, so the zone stays at its last value and
- * later assignments are ignored for the rest of the process, every later test file included.
- */
-function withTz(tz: string, f: () => void): void {
-  const saved = process.env.TZ ?? new Intl.DateTimeFormat().resolvedOptions().timeZone;
-  try {
-    process.env.TZ = tz;
-    f();
-  } finally {
-    process.env.TZ = saved;
-  }
-}
 
 describe("localDay", () => {
   const ms = Date.UTC(2026, 10, 16, 12, 30);

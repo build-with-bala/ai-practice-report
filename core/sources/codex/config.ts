@@ -1,8 +1,7 @@
-import { realpathSync, statSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import path from "node:path";
-import { safeStat } from "../../io/fs";
+import { bornAt, isDir, isFile, readTextLines, safeStat } from "../../io/fs";
 import { MAX_LINE_BYTES } from "../../io/jsonl";
-import { maybeYield } from "../../io/yield";
 import type { ConfigEv } from "../../model/events";
 import { isTypeName, listDir, readSidecar, Tally } from "../common/coverage";
 import { isObj } from "../common/guards";
@@ -189,33 +188,6 @@ export class TomlHeaders {
   }
 }
 
-/** Lines of a text file, streamed; a line longer than MAX_LINE_BYTES characters ends the read with a RangeError. */
-async function* textLines(file: string, signal: AbortSignal): AsyncGenerator<string> {
-  const decoder = new TextDecoder();
-  let pending: string[] = []; // pieces of the current line, joined once its newline arrives
-  let pendingLength = 0;
-  for await (const chunk of Bun.file(file).stream()) {
-    const pause = maybeYield();
-    if (pause) await pause;
-    if (signal.aborted) return;
-    const text = decoder.decode(chunk, { stream: true });
-    let start = 0;
-    for (let nl = text.indexOf("\n"); nl >= 0; nl = text.indexOf("\n", start)) {
-      pending.push(text.slice(start, nl));
-      yield pending.join("");
-      pending = [];
-      pendingLength = 0;
-      start = nl + 1;
-    }
-    pending.push(text.slice(start));
-    pendingLength += text.length - start;
-    if (pendingLength > MAX_LINE_BYTES) throw new RangeError("line too long");
-  }
-  pending.push(decoder.decode());
-  const last = pending.join("");
-  if (last !== "") yield last;
-}
-
 // ---- configuration inventory ----
 
 type Out = (ev: ConfigEv) => void;
@@ -231,16 +203,6 @@ function resolved(p: string): string {
     return p;
   }
 }
-/** Follows symlinks: skill folders and marketplaces may be linked into place. */
-function statOf(p: string): ReturnType<typeof statSync> | undefined {
-  try {
-    return statSync(p);
-  } catch {
-    return undefined;
-  }
-}
-const isFile = (p: string): boolean => statOf(p)?.isFile() ?? false;
-const isDir = (p: string): boolean => statOf(p)?.isDirectory() ?? false;
 
 function cfg(kind: ConfigEv["kind"], provenance: ConfigEv["provenance"], name?: string): ConfigEv {
   const ev: ConfigEv = { k: "config", tool: TOOL, source: CONFIG_SOURCE, kind, provenance };
@@ -262,7 +224,7 @@ async function configTables(file: string, ctx: ScanCtx, tally: Tally): Promise<T
   }
   const toml = new TomlHeaders();
   try {
-    for await (const line of textLines(file, ctx.signal)) {
+    for await (const line of readTextLines(file, { maxBytes: MAX_LINE_BYTES, signal: ctx.signal })) {
       const [table, name] = toml.line(line)?.keys ?? [];
       if (name === undefined) continue;
       if (table === "profiles") found.profiles.add(name);
@@ -307,13 +269,21 @@ function lockedSkills(home: string, tally: Tally): Set<string> | undefined {
   return new Set();
 }
 
-/** `<codex>/skills/<name>/` folders holding a SKILL.md (hidden ones — `.system`, the bundled skills — are skipped); never opened. */
-function skills(c: Candidate, tally: Tally, out: Out): void {
+/**
+ * `<codex>/skills/<name>/` folders holding a SKILL.md (hidden ones — `.system`, the bundled skills — are skipped); never
+ * opened. `firstSeen`: when the folder appeared (`bornAt`: a plausible birth time, links followed; none without one).
+ */
+function skills(c: Candidate, tally: Tally, out: Out, now: number): void {
   const dir = path.join(c.root, "skills");
   const names = listDir(dir, tally).filter((n) => !n.startsWith(".") && isFile(path.join(dir, n, "SKILL.md")));
   if (names.length === 0) return;
   const lock = lockedSkills(c.home, tally);
-  for (const name of names) out(cfg("skill", lock === undefined ? "unknown" : lock.has(name) ? "installed" : "authored", name));
+  for (const name of names) {
+    const ev = cfg("skill", lock === undefined ? "unknown" : lock.has(name) ? "installed" : "authored", name);
+    const born = bornAt(path.join(dir, name), now);
+    if (born !== undefined) ev.firstSeen = born;
+    out(ev);
+  }
 }
 
 /** One event per Markdown file directly in `<codex>/memories/` (the CLI's memory files), without a name; never opened. */
@@ -336,7 +306,7 @@ export async function scanCxConfig(c: Candidate, ctx: ScanCtx): Promise<void> {
   for (const name of sorted(tables.profiles)) out(cfg("profile", "authored", isTypeName(name) ? name : undefined));
   for (const name of sorted(tables.servers)) out(cfg("mcp-server", "unknown", name));
   for (const id of sorted(new Set([...tables.plugins, ...cachedPlugins(c.root, tally)]))) out(cfg("plugin", "installed", id));
-  skills(c, tally, out);
+  skills(c, tally, out, ctx.now);
   memoryFiles(c.root, tally, out);
   ctx.emit(tally.coverage());
 }

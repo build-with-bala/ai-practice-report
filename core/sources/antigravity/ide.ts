@@ -1,16 +1,15 @@
-import { statSync } from "node:fs";
 import path from "node:path";
 import type { Env } from "../../env/env";
 import { vscodeUser } from "../../env/paths";
-import { safeStat } from "../../io/fs";
-import { b64ToBytes, pbTryNested, type PbField } from "../../io/protobuf";
-import { MAX_COPY_BYTES, openRo } from "../../io/sqlite";
+import { isDir, safeStat } from "../../io/fs";
+import { b64ToBytes, pbNum, pbStr, pbTime, pbTimeRaw, pbTryNested, type PbField } from "../../io/protobuf";
 import type { SessionEv } from "../../model/events";
 import { Tally } from "../common/coverage";
 import { str } from "../common/guards";
-import { uriToPath } from "../copilot/map";
+import { readStore } from "../common/sqlite";
+import { uriToPath } from "../common/uri";
 import type { Candidate, ScanCtx } from "../types";
-import { agSessionId, pbNum, pbStr, pbTime, TOOL } from "./cli";
+import { agSessionId, TOOL } from "./ids";
 
 export const IDE_SOURCE = "antigravity.ide";
 /** The Antigravity apps whose user folders (`vscodeUser(env, app)`) keep a `globalStorage/state.vscdb`. */
@@ -35,14 +34,6 @@ const WORKSPACE_FOLDER = 1;
 
 /** The store exists but cannot be opened or read: the source has nothing to say. */
 class IdeStoreUnreadable extends Error {}
-
-const isDir = (p: string): boolean => {
-  try {
-    return statSync(p).isDirectory(); // follows a symlinked user folder
-  } catch {
-    return false;
-  }
-};
 
 /** The user folder of each Antigravity app that exists (the scanning user's only, as for VS Code). */
 export function ideRoots(env: Env): Candidate[] {
@@ -77,7 +68,7 @@ function entry(f: PbField, ctx: ScanCtx, tally: Tally): Entry {
   const updated = pbTime(summary.get(TRAJ_FIELDS.updated)?.[0], ctx.now);
   const start = pbTime(summary.get(TRAJ_FIELDS.created)?.[0], ctx.now) ?? updated;
   if (start === undefined) {
-    tally.skip("no-ts");
+    tally.noTime(pbTimeRaw(summary.get(TRAJ_FIELDS.created)?.[0]), pbTimeRaw(summary.get(TRAJ_FIELDS.updated)?.[0]));
     return "skipped";
   }
   const s: SessionEv = {
@@ -134,34 +125,14 @@ export async function scanIde(c: Candidate, ctx: ScanCtx): Promise<void> {
   const tally = new Tally(TOOL, IDE_SOURCE, "lifetime");
   const file = path.join(c.root, "globalStorage", "state.vscdb");
   if (safeStat(file)?.isFile()) {
-    const db = openRo(file, ctx.temp);
-    if (!db && (safeStat(file)?.size ?? 0) > MAX_COPY_BYTES) {
-      tally.note = "too-large";
-      tally.skip("too-large");
-    } else if (!db) {
-      throw new IdeStoreUnreadable("the Antigravity store could not be opened");
-    } else {
-      let listed = false;
-      try {
-        const tables = new Set(db.tables());
-        listed = true;
-        tally.files++;
-        tally.bytes += safeStat(file)?.size ?? 0;
-        if (!tables.has("ItemTable")) tally.unknownKey("missing-table:ItemTable");
-        else {
-          const have = new Set(db.columns("ItemTable"));
-          for (const col of ["key", "value"]) if (!have.has(col)) tally.unknownKey(`missing-column:${col}`);
-          const row = have.has("key") && have.has("value") ? db.get<{ value: unknown }>(VALUE_SQL, TRAJ_KEY) : undefined;
-          if (row !== undefined) readTopic(row.value, ctx, tally);
-        }
-      } catch {
-        tally.skip("io-error");
-        ctx.log("warn", "ag.db-unreadable");
-      } finally {
-        db.close();
-      }
-      if (!listed) throw new IdeStoreUnreadable("the Antigravity store could not be read");
-    }
+    const read = await readStore(file, ctx, tally, "ag", (db, tables) => {
+      if (!tables.has("ItemTable")) return tally.unknownKey("missing-table:ItemTable");
+      const have = new Set(db.columns("ItemTable"));
+      for (const col of ["key", "value"]) if (!have.has(col)) tally.unknownKey(`missing-column:${col}`);
+      const row = have.has("key") && have.has("value") ? db.get<{ value: unknown }>(VALUE_SQL, TRAJ_KEY) : undefined;
+      if (row !== undefined) readTopic(row.value, ctx, tally);
+    });
+    if (!read && tally.note !== "too-large") throw new IdeStoreUnreadable("the Antigravity store could not be read");
   }
   const bad = tally.skipped["bad-record"] ?? 0;
   if (bad > 0) ctx.log("warn", "ag.bad-record", bad);

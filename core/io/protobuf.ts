@@ -1,3 +1,5 @@
+import { toEpochMs } from "./time";
+
 // Minimal protobuf wire-format reader (no schema). Wire types 0, 1, 2, 5 only.
 export type PbField =
   | { no: number; wire: 0 | 1; v: bigint }
@@ -72,6 +74,36 @@ export function pbTryNested(bytes: Uint8Array): Map<number, PbField[]> | null {
   } catch {
     return null;
   }
+}
+
+const utf8 = new TextDecoder("utf-8", { fatal: true });
+
+/** A length-delimited field as UTF-8 text; undefined when absent, of another wire type, or not valid UTF-8. */
+export function pbStr(f: PbField | undefined): string | undefined {
+  if (f?.wire !== 2) return undefined;
+  try {
+    return utf8.decode(f.v);
+  } catch {
+    return undefined;
+  }
+}
+
+/** A varint field as a number; undefined when absent or of another wire type. */
+export const pbNum = (f: PbField | undefined): number | undefined => (f?.wire === 0 ? Number(f.v) : undefined);
+
+/** A `google.protobuf.Timestamp` field (`seconds` = 1, `nanos` = 2) as epoch ms, unbounded; undefined when absent or malformed. */
+export function pbTimeRaw(f: PbField | undefined): number | undefined {
+  if (f?.wire !== 2) return undefined;
+  const t = pbTryNested(f.v);
+  const seconds = pbNum(t?.get(1)?.[0]);
+  if (seconds === undefined) return undefined;
+  return seconds * 1000 + Math.floor((pbNum(t!.get(2)?.[0]) ?? 0) / 1e6);
+}
+
+/** A `google.protobuf.Timestamp` field as epoch ms; undefined when absent, malformed or implausible (`pbTimeRaw` tells which). */
+export function pbTime(f: PbField | undefined, now: number): number | undefined {
+  const ms = pbTimeRaw(f);
+  return ms === undefined ? undefined : toEpochMs(ms, now);
 }
 
 export function b64ToBytes(s: string): Uint8Array {

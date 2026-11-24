@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionEv, ToolEv } from "../../../core/model/events";
 import { sid, type Origin, type Window } from "../../../core/model/ids";
-import { EventStore } from "../../../core/model/store";
+import { EventStore, mergeSessions } from "../../../core/model/store";
 
 const sess = (over: Partial<SessionEv>): SessionEv => ({
   k: "session", tool: "codex", source: "t", id: "x", window: "detail", origin: "human",
@@ -130,6 +130,46 @@ describe("EventStore", () => {
     expect(results[0]).toMatchObject({ source: "c.rollouts", window: "detail", origin: "scripted", start: 10, end: 40, models: ["a", "b"], surface: "cli", approval: "never", version: "1.2.3" });
   });
 
+  /** Every arrival order of `xs`. */
+  const orders = <T>(xs: readonly T[]): T[][] => (xs.length <= 1 ? [[...xs]] : xs.flatMap((x, i) => orders([...xs.slice(0, i), ...xs.slice(i + 1)]).map((o) => [x, ...o])));
+
+  test("three reports, all 6 arrival orders: one session; a field the detail report lacks comes from the first source in rank order", () => {
+    const r1 = sess({ window: "detail", source: "codex.rollouts", surface: "cli", version: "2.0.0", projectKey: "pd" });
+    const r2 = sess({ window: "lifetime", source: "codex.threads", approval: "on-request", surface: "vscode", version: "1.0.0", projectKey: "p2" });
+    const r3 = sess({ window: "lifetime", source: "codex.zz", approval: "never", surface: "exec", version: "0.1.0", projectKey: "p3" });
+    const results = orders([r1, r2, r3]).map((o) => merged(...o));
+    expect(results).toHaveLength(6);
+    for (const m of results) expect(m).toEqual(results[0]!);
+    expect(results[0]!.approval).toBe("on-request");
+    expect(results[0]).toMatchObject({ source: "codex.rollouts", window: "detail", surface: "cli", version: "2.0.0", projectKey: "pd" });
+  });
+
+  test("mergeSessions gives the same session for any order of the reports", () => {
+    const a = sess({ window: "detail", source: "s.b", origin: "human", start: 20, end: 30, models: ["m2"], surface: "cli" });
+    const b = sess({ window: "lifetime", source: "s.a", origin: "peer", start: 10, end: 25, models: ["m1"], approval: "never", surface: "exec" });
+    const c = sess({ window: "lifetime", source: "s.a", start: 15, end: 40, models: ["m2", "m0"], approval: "on-request", effort: "high" });
+    const all = orders([a, b, c]).map((o) => mergeSessions(o));
+    for (const m of all) expect(m).toEqual(all[0]!);
+    expect(all[0]).toEqual({
+      k: "session", tool: "codex", id: "x", source: "s.b", window: "detail", origin: "peer", start: 10, end: 40, models: ["m0", "m1", "m2"],
+      surface: "cli", approval: "never", effort: "high",
+    });
+  });
+
+  test("many reports of one session cost one merge: 20,000 reports, then a read, equal mergeSessions of them all", () => {
+    const s = new EventStore();
+    const reports = Array.from({ length: 20_000 }, (_, i) => sess({ id: "one", window: i % 2 ? "lifetime" : "detail", source: `s.${i % 7}`, start: 1_000 + (i * 37) % 5_000, end: 9_000 + i, models: [`m${i % 5}`] }));
+    for (const r of reports) s.add(r);
+    s.add(sess({ id: "two" }));
+    expect(s.all("session")).toHaveLength(2);
+    expect(s.session("one")).toEqual(mergeSessions(reports));
+    expect(s.all("session")[0]).toEqual(mergeSessions(reports));
+    // a report added after a read is merged on the next one
+    const late = sess({ id: "one", window: "lifetime", source: "a.first", start: 1, end: 2, models: ["z"] });
+    s.add(late);
+    expect(s.session("one")).toEqual(mergeSessions([...reports, late]));
+  });
+
   test("a merge replaces the session in place: the session list keeps one entry per id, in first-arrival order", () => {
     const s = new EventStore();
     s.add(sess({ id: "a" }));
@@ -147,5 +187,45 @@ describe("EventStore", () => {
     s.add(sess({})); s.add(sess({ start: 5, end: 15, models: ["b"] }));
     s.add(tool("x", 1)); s.add(tool("x", 2)); s.add(tool("y", 3));
     expect(s.count()).toEqual({ session: 1, tool: 3 });
+  });
+});
+
+describe("forSession: the compact index", () => {
+  test("for every kind and a spread of sessions, exactly the events a filter over all(kind) gives: same order, same objects", async () => {
+    const { synthStore } = await import("../../kit/synth");
+    const r = synthStore(30_000);
+    const ids = r.store.all("session").map((s) => s.id).filter((_, i) => i % 7 === 0);
+    ids.push("claude-code:no-such-session"); // unknown
+    r.store.add({ k: "session", tool: "claude-code", source: "t", id: "claude-code:empty", window: "detail", origin: "human", start: 0, end: 1, models: [] });
+    ids.push("claude-code:empty"); // a session with no events
+    const kinds = Object.keys(r.store.count()) as Array<keyof ReturnType<EventStore["count"]>>;
+    expect(kinds.length).toBeGreaterThan(5);
+    let compared = 0;
+    for (const k of kinds) {
+      for (const id of ids) {
+        const want = r.store.all(k).filter((e) => (e as { sessionId?: string }).sessionId === id);
+        const got = r.store.forSession(id, k);
+        expect(got.length).toBe(want.length);
+        for (let i = 0; i < want.length; i++) expect(got[i]).toBe(want[i]!);
+        compared += want.length;
+      }
+    }
+    expect(compared).toBeGreaterThan(1_000);
+    for (const k of kinds) {
+      expect(r.store.forSession("claude-code:empty", k)).toEqual([]);
+      expect(r.store.forSession("claude-code:no-such-session", k)).toEqual([]);
+    }
+  });
+
+  test("a session first seen in a later kind, and an add after the index is built", () => {
+    const s = new EventStore();
+    s.add({ k: "marker", tool: "codex", source: "t", ts: 1, sessionId: "a", kind: "error" });
+    s.add(tool("b", 2)); s.add(tool("a", 3)); s.add(tool("b", 4));
+    expect(s.forSession("b", "tool").map((e) => e.ts)).toEqual([2, 4]);
+    expect(s.forSession("a", "tool").map((e) => e.ts)).toEqual([3]);
+    expect(s.forSession("b", "marker")).toEqual([]);
+    const late = tool("a", 5);
+    s.add(late);
+    expect(s.forSession("a", "tool").at(-1)).toBe(late);
   });
 });

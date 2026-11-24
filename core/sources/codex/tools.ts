@@ -1,13 +1,15 @@
-import type { CheckKind, ToolCategory } from "../../model/ids";
-import { classifyCommand } from "../../text/commands";
+import type { CheckKind, ToolCategory, Toolchain } from "../../model/ids";
+import { classifyCommand, shellScript } from "../../text/commands";
 import { extOfPath, isObj, num, str } from "../common/guards";
 
 /**
  * One tool action: per call, or per file for patches. Names are the CLI's built-in tool names, `mcp`, or `other`.
  * `commandLine` is set on shell commands only: whether a command line was found to classify (never on other actions).
+ * `toolchain`: a shell command's, from `classifyCommand`. `removed` is absent when the patch does not hold the lines (a
+ * deleted file).
  */
 export interface CxToolCall { name: string; category: ToolCategory; checks: CheckKind[]; editExt?: string; added?: number; removed?: number; mcpServer?: string;
-  commandLine?: boolean }
+  commandLine?: boolean; toolchain?: Toolchain }
 /** How an action ended, from the item that completed it: `denied` when the person declined it (it never ran). */
 export interface CxOutcome { ok?: boolean; exit?: number; ms?: number; outcome?: "denied" }
 
@@ -32,11 +34,9 @@ const FIXED: ReadonlyMap<string, ToolCategory> = new Map<string, ToolCategory>([
 ]);
 /** Namespaces of the CLI's own tools; a tool in any other namespace is not a built-in, whatever its name. */
 const OWN_NAMESPACES = new Set(["collaboration", "clock", "image_gen", "web"]);
-/** Tools whose arguments carry a command line (`cmd`, or `command` as argv or string). */
-const SHELL_TOOLS = new Set(["exec_command", "shell", "shell_command", "container.exec", "local_shell"]);
+/** Tools whose arguments carry a command line (`cmd`, or `command` as argv or string): the CLI's shell-command tools. */
+export const SHELL_TOOLS: ReadonlySet<string> = new Set(["exec_command", "shell", "shell_command", "container.exec", "local_shell"]);
 /** Shells whose last argument after a `-c`-style flag is the script (`["/bin/zsh", "-lc", "<script>"]`). */
-const SHELLS = new Set(["bash", "zsh", "sh", "dash", "fish", "ksh", "pwsh", "powershell", "cmd"]);
-const SCRIPT_FLAG = /^(?:-[A-Za-z]*c|\/c|-Command)$/i;
 const MCP_NAME = /^mcp__(.+?)__(.+)$/;
 const MCP_NAMESPACE = /^mcp__(.+?)(?:__)?$/;
 /** Older CLIs named MCP tools `<server>__<tool>`. */
@@ -47,41 +47,85 @@ const NOT_AGENT_COMMANDS = new Set(["user_shell", "unified_exec_interaction"]);
 const plain = (name: string, category: ToolCategory): CxToolCall => ({ name, category, checks: [] });
 const mcp = (server: string | undefined): CxToolCall => (server === undefined ? plain("mcp", "mcp") : { ...plain("mcp", "mcp"), mcpServer: server });
 
-/** The command line of `cmd`/`command`: a string as is; argv joined, or a shell's `-c` script unwrapped. */
+/**
+ * The command line of `cmd`/`command`: a string as is; argv joined, or a shell's script unwrapped by the classifier's
+ * own rule (`shellScript`), so a command reads the same here as in every other tool.
+ */
 function commandLine(cmd: unknown): string {
   if (typeof cmd === "string") return cmd;
   if (!Array.isArray(cmd) || !cmd.every((x) => typeof x === "string")) return "";
   const argv = cmd as string[];
-  const shell = (argv[0] ?? "").split(/[\\/]/).pop()!.toLowerCase().replace(/\.exe$/, "");
-  if (argv.length >= 3 && SHELLS.has(shell) && SCRIPT_FLAG.test(argv[argv.length - 2]!)) return argv[argv.length - 1]!;
-  return argv.join(" ");
+  return shellScript(argv) ?? argv.join(" ");
 }
 
-/** A command's category and checks: `classifyCommand` of its command line, and whether it had one. */
-function command(name: string, cmd: unknown): CxToolCall {
+/** `apply_patch` as a command's first word: the CLI's own patch tool, run through the shell. */
+const APPLY_PATCH = /^\s*apply_patch(?=\s|$)/;
+/** A heredoc on a command's first line: `<<WORD`, `<<-WORD`, `<<'WORD'` or `<<"WORD"` (not a `<<<` here-string). */
+const HEREDOC = /(?<!<)<<(?!<)(-?)[ \t]*(?:'([^']+)'|"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*))/;
+
+/**
+ * The patch a shell call applies with the CLI's `apply_patch` — its command, as argv or as a string, starts with that
+ * word: `argv[1]` of an argv; of a string (a shell's `-c` script included), the heredoc's body when its first line opens
+ * one with `<<`, else the rest of the string. Undefined for any other command.
+ */
+function shellPatch(cmd: unknown): string | undefined {
+  if (Array.isArray(cmd) && cmd.every((x) => typeof x === "string") && cmd[0] === "apply_patch") return (cmd[1] as string | undefined) ?? "";
   const line = commandLine(cmd);
-  const { category, checks } = classifyCommand(line);
-  return { name, category, checks, commandLine: line.trim() !== "" };
+  const word = APPLY_PATCH.exec(line);
+  if (!word) return undefined;
+  const rest = line.slice(word[0].length);
+  const nl = rest.indexOf("\n");
+  const doc = HEREDOC.exec(nl < 0 ? rest : rest.slice(0, nl));
+  if (!doc) return rest;
+  const end = doc[2] ?? doc[3] ?? doc[4]!;
+  const body: string[] = [];
+  for (const raw of nl < 0 ? [] : rest.slice(nl + 1).split("\n")) {
+    const l = raw.replace(/\r$/, "");
+    if ((doc[1] ? l.replace(/^\t+/, "") : l) === end) break;
+    body.push(raw);
+  }
+  return body.join("\n");
 }
 
-function edit(ext: string | undefined, added: number, removed: number): CxToolCall {
-  const c: CxToolCall = { ...plain("apply_patch", "edit"), added, removed };
+/**
+ * A shell call: a patch through the CLI's `apply_patch` (one edit per file, as the apply_patch tool), else a command with
+ * the category, checks and toolchain `classifyCommand` gives its command line, and whether it had one.
+ */
+function command(name: string, cmd: unknown): CxToolCall[] {
+  const patch = shellPatch(cmd);
+  if (patch !== undefined) return patchCalls(patch);
+  const line = commandLine(cmd);
+  const { category, checks, toolchain } = classifyCommand(line);
+  const c: CxToolCall = { name, category, checks, commandLine: line.trim() !== "" };
+  if (toolchain !== undefined) c.toolchain = toolchain;
+  return [c];
+}
+
+function edit(ext: string | undefined, added: number, removed: number | undefined): CxToolCall {
+  const c: CxToolCall = { ...plain("apply_patch", "edit"), added };
+  if (removed !== undefined) c.removed = removed;
   if (ext !== undefined) c.editExt = ext;
   return c;
 }
 
-/** Files and their added/removed line counts in apply_patch text (`*** Add|Update|Delete File: <path>` sections). */
-export function patchFiles(patch: string): { ext?: string; added: number; removed: number }[] {
-  const out: { ext?: string; added: number; removed: number }[] = [];
-  let cur: { ext?: string; added: number; removed: number } | undefined;
+/** A file of a patch: its extension and the lines the patch adds and removes (`removed` absent when not in the patch). */
+export interface PatchFile { ext?: string; added: number; removed?: number }
+
+/**
+ * Files and their added/removed line counts in apply_patch text (`*** Add|Update|Delete File: <path>` sections). A
+ * deleted file's lines are not in the patch: it adds 0, and its removed count is unknown — absent, never 0.
+ */
+export function patchFiles(patch: string): PatchFile[] {
+  const out: PatchFile[] = [];
+  let cur: PatchFile | undefined;
   for (const line of patch.split(/\r?\n/)) {
-    const header = /^\*\*\* (?:Add|Update|Delete) File: (.+)$/.exec(line);
+    const header = /^\*\*\* (Add|Update|Delete) File: (.+)$/.exec(line);
     if (header) {
-      cur = { added: 0, removed: 0 };
-      const ext = extOfPath(header[1]!.trim());
+      cur = header[1] === "Delete" ? { added: 0 } : { added: 0, removed: 0 };
+      const ext = extOfPath(header[2]!.trim());
       if (ext !== undefined) cur.ext = ext;
       out.push(cur);
-    } else if (cur && !line.startsWith("*** ")) {
+    } else if (cur?.removed !== undefined && !line.startsWith("*** ")) { // a deleted file's section holds none of its lines
       if (line.startsWith("+")) cur.added++;
       else if (line.startsWith("-")) cur.removed++;
     }
@@ -147,7 +191,7 @@ function callOf(name: string | undefined, args: unknown, namespace: string | und
   if (namespace !== undefined && !OWN_NAMESPACES.has(namespace)) return [plain("other", "other")];
   if (namespace === "web") return [plain("web_search", "web")]; // the CLI's web tool (searches and opens pages)
   if (name === "apply_patch") return patchCalls(isObj(args) && typeof args.input === "string" ? args.input : "");
-  if (SHELL_TOOLS.has(name)) return [command(name, isObj(args) ? (args.cmd ?? args.command) : undefined)];
+  if (SHELL_TOOLS.has(name)) return command(name, isObj(args) ? (args.cmd ?? args.command) : undefined);
   const fixed = FIXED.get(name);
   if (fixed !== undefined) return [plain(name, fixed)];
   const server = MCP_NAME.exec(name)?.[1] ?? SERVER_TOOL.exec(name)?.[1];
@@ -155,11 +199,27 @@ function callOf(name: string | undefined, args: unknown, namespace: string | und
 }
 
 /**
+ * Whether a response_item payload applies a patch — the `apply_patch` tool, or a shell call whose command starts with
+ * `apply_patch` — so that one with no file section (no tool action at all) is counted, never silently dropped.
+ */
+export function isPatchCall(item: unknown): boolean {
+  if (!isObj(item)) return false;
+  if (item.type === "custom_tool_call") return item.name === "apply_patch";
+  if (item.type === "local_shell_call") return shellPatch(isObj(item.action) ? item.action.command : undefined) !== undefined;
+  if (item.type !== "function_call" || item.namespace !== undefined) return false;
+  const name = str(item.name);
+  if (name === "apply_patch") return true;
+  if (name === undefined || !SHELL_TOOLS.has(name)) return false;
+  const args = parseArgs(item.arguments);
+  return shellPatch(isObj(args) ? (args.cmd ?? args.command) : undefined) !== undefined;
+}
+
+/**
  * The tool actions in one rollout entry: a response_item payload (`function_call`, `custom_tool_call`, `local_shell_call`,
  * `web_search_call`) or a completed item (`CommandExecution`, `FileChange`, `McpToolCall`, `ImageView`, `Extension`,
- * `CollabAgentToolCall`, `DynamicToolCall`). One entry per call, or per file for apply_patch; none for Code Mode cells,
- * commands the person ran, input sent to a running command, and entries that are not tool actions. Command, patch and
- * argument text never leave.
+ * `CollabAgentToolCall`, `DynamicToolCall`). One entry per call, or per file for apply_patch (a shell call that runs it
+ * included); none for Code Mode cells, commands the person ran, input sent to a running command, and entries that are
+ * not tool actions. Command, patch and argument text never leave.
  */
 export function cxToolCalls(item: unknown): CxToolCall[] {
   if (!isObj(item)) return [];
@@ -169,11 +229,11 @@ export function cxToolCalls(item: unknown): CxToolCall[] {
     case "custom_tool_call":
       return item.name === "apply_patch" ? patchCalls(typeof item.input === "string" ? item.input : "") : callOf(str(item.name), undefined, undefined);
     case "local_shell_call":
-      return [command("local_shell", isObj(item.action) ? item.action.command : undefined)];
+      return command("local_shell", isObj(item.action) ? item.action.command : undefined);
     case "web_search_call":
       return [plain("web_search", "web")];
     case "CommandExecution":
-      return typeof item.source === "string" && NOT_AGENT_COMMANDS.has(item.source) ? [] : [command("exec_command", item.command)];
+      return typeof item.source === "string" && NOT_AGENT_COMMANDS.has(item.source) ? [] : command("exec_command", item.command);
     case "FileChange":
       return fileChanges(item.changes);
     case "McpToolCall":

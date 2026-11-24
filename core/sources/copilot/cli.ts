@@ -1,11 +1,10 @@
-import { statSync } from "node:fs";
 import path from "node:path";
 import type { Env } from "../../env/env";
 import { joinFor } from "../../env/paths";
-import { safeStat } from "../../io/fs";
-import { readJsonl } from "../../io/jsonl";
-import { isBusyError, openRo, type RoDb } from "../../io/sqlite";
-import { toEpochMs } from "../../io/time";
+import { isDir, safeStat } from "../../io/fs";
+import type { RoDb } from "../../io/sqlite";
+import { timeIssue, toEpochMs } from "../../io/time";
+import { TASK_GAP_MS } from "../../model/constants";
 import type { Ev, MarkerEv, PromptEv, SessionEv, ToolEv, TurnEv } from "../../model/events";
 import type { Origin, ToolCategory } from "../../model/ids";
 import { classifyCommand } from "../../text/commands";
@@ -13,14 +12,17 @@ import { classifyIntent } from "../../text/intent";
 import { promptFeatures } from "../../text/structure";
 import { listDir, Tally } from "../common/coverage";
 import { extOfPath, isObj, str, VERSION, type Obj } from "../common/guards";
+import { eachRow, Pass, q, readStore } from "../common/sqlite";
+import { streamJsonlFile } from "../common/stream";
 import type { Candidate, PluginCoverage, ScanCtx } from "../types";
-import { cpModel, cpSessionId, TASK_GAP_MS, TOOL } from "./map";
+import { cpModel, cpSessionId, TOOL } from "./ids";
 
 export const CLI_SOURCE = "copilot.cli";
 
 /**
  * Session event types of the Copilot CLI (`session-state/<id>/events.jsonl`), from the event names the VS Code Copilot
- * extension handles (0.66) and the CLI SDK's session event list; not seen on this machine. Any other type is drift.
+ * extension handles (0.66) and the CLI SDK's session event list; not verified against a real CLI store. Any other type
+ * is drift.
  */
 const KNOWN_EVENTS: ReadonlySet<string> = new Set([
   "session.start", "session.resume", "session.error", "session.idle", "session.info", "session.model_change", "session.title_changed",
@@ -34,14 +36,8 @@ const KNOWN_EVENTS: ReadonlySet<string> = new Set([
   "tool.execution_complete", "subagent.started", "subagent.completed", "subagent.failed", "subagent.selected", "hook.start", "hook.end",
   "skill.invoked", "permission.requested", "exit_plan_mode.requested",
 ]);
-/** An event type as a drift key: dotted lower-case schema tokens are kept, anything else is `(other)` / `(none)`. */
 /** An event type the reader does not know, as a drift key: never echoed. */
 const eventKey = (t: unknown): string => `event:${typeof t !== "string" ? "(none)" : "(other)"}`;
-/**
- * `host_type` values the programs write: `vscode` (the extension's copy of the store) and `github` (the CLI's store,
- * where it names the repository's host). Anything else is `other`.
- */
-const HOST_TYPES: ReadonlySet<string> = new Set(["vscode", "github"]);
 
 /** The CLI's built-in tools (the tool table the VS Code extension renders CLI sessions with, 0.66). */
 const CLI_TOOLS: ReadonlyMap<string, ToolCategory> = new Map<string, ToolCategory>([
@@ -67,20 +63,35 @@ const PATH_TOOLS = new Set(["edit", "str_replace", "insert", "create", "str_repl
 const EXIT_TAIL = /<exited with exit code (\d{1,3})>\s*$/;
 const PATCH_FILE = /^\*\*\* (?:Add|Update|Delete) File: (.+)$/m;
 /** Context blocks the CLI wraps into a user message's content (what the VS Code extension strips before showing it). */
-const INJECTED = [/<reminder>[\s\S]*?<\/reminder>\s*/g, /<attachments>[\s\S]*?<\/attachments>\s*/g, /<userRequest>[\s\S]*?<\/userRequest>\s*/g,
-  /<user_query>[\s\S]*?<\/user_query>\s*/g, /<context>[\s\S]*?<\/context>\s*/g, /<current_datetime>[\s\S]*?<\/current_datetime>\s*/g,
-  /<pr_metadata[^>]*\/?>\s*/g];
-const userText = (content: string): string => INJECTED.reduce((t, re) => t.replace(re, ""), content).trim();
+const INJECTED: readonly [string, string][] = [["<reminder>", "</reminder>"], ["<attachments>", "</attachments>"], ["<userRequest>", "</userRequest>"],
+  ["<user_query>", "</user_query>"], ["<context>", "</context>"], ["<current_datetime>", "</current_datetime>"], ["<pr_metadata", ">"]];
+const SPACE = /\s/;
+
+/**
+ * `t` without each `open`…`close` block (the first `close` after its `open`, left to right) and the spaces after it. Found
+ * by position, never by a backtracking pattern, so text of any length costs linear time: once an `open` has no `close`
+ * after it, no later one has either.
+ */
+function stripBlocks(t: string, open: string, close: string): string {
+  let out = "";
+  let pos = 0;
+  for (;;) {
+    const a = t.indexOf(open, pos);
+    if (a < 0) break;
+    const b = t.indexOf(close, a + open.length);
+    if (b < 0) break;
+    let end = b + close.length;
+    while (end < t.length && SPACE.test(t[end]!)) end++;
+    out += t.slice(pos, a);
+    pos = end;
+  }
+  return pos === 0 ? t : out + t.slice(pos);
+}
+
+/** The person's text of a user message: the context blocks the CLI wraps into it removed, trimmed. */
+export const userText = (content: string): string => INJECTED.reduce((t, [open, close]) => stripBlocks(t, open, close), content).trim();
 /** Bounded per-file state: tool calls awaiting their completion. */
 const PENDING_TOOLS = 4096;
-
-const isDir = (p: string): boolean => {
-  try {
-    return statSync(p).isDirectory();
-  } catch {
-    return false;
-  }
-};
 
 /** The older CLIs' session folder (one JSON file per session): not read, but never a silent absence. */
 const OLD_STATE_DIR = "history-session-state";
@@ -149,7 +160,12 @@ class CliReader {
     if (ts !== undefined) this.tick(ts);
     else this.tally.badTime(v.timestamp, "event.timestamp"); // every event carries its time: without one the field moved
     const d = isObj(v.data) ? v.data : {};
-    const timed = (f: (at: number) => void): void => (ts === undefined ? this.tally.skip("no-ts") : f(ts));
+    // an event without a usable time drops what it carries: skipped no-ts when the time is missing or shapeless (drift);
+    // a well-formed one outside the plausible range is bad data, counted once, as bad-ts
+    const timed = (f: (at: number) => void): void => {
+      if (ts !== undefined) f(ts);
+      else if (timeIssue(v.timestamp) === "shape") this.tally.skip("no-ts");
+    };
     switch (type) {
       case "session.start": this.sessionStart(d); break;
       case "session.model_change": this.addModel(str(d.newModel)); break;
@@ -261,9 +277,10 @@ class CliReader {
       if (SHELL_TOOLS.has(name)) {
         const cmd = str(args.command);
         if (cmd !== undefined) {
-          const { category, checks } = classifyCommand(cmd);
+          const { category, checks, toolchain } = classifyCommand(cmd);
           ev.category = category;
           if (checks.length > 0) ev.checks = checks;
+          if (toolchain !== undefined) ev.toolchain = toolchain;
         }
       }
       if (name === "str_replace_editor") ev.category = args.command === "view" ? "read" : args.command === "create" ? "write" : "edit";
@@ -313,44 +330,22 @@ class CliReader {
   }
 }
 
+/** Streams one session's `events.jsonl`; its SessionEv follows whenever the file was a regular file (read in full or in part). */
 async function scanEvents(file: string, sessionId: string, ctx: ScanCtx, tally: Tally): Promise<void> {
-  const st = safeStat(file);
-  if (!st?.isFile()) return;
   const reader = new CliReader(sessionId, ctx, tally);
-  let complete = true;
-  try {
-    for await (const item of readJsonl(file, { signal: ctx.signal })) {
-      if ("skip" in item) {
-        tally.skip(item.skip);
-        continue;
-      }
-      tally.records++;
-      try {
-        reader.record(item.value);
-      } catch {
-        tally.skip("bad-record");
-      }
-    }
-  } catch {
-    complete = false;
-    tally.skip("io-error");
-    ctx.log("warn", "cp.io-error");
-  }
-  if (ctx.signal.aborted) complete = false;
-  if (complete) {
-    tally.files++;
-    tally.bytes += st.size;
-  }
-  reader.finish();
+  const r = await streamJsonlFile(file, ctx, tally, (v) => reader.record(v), { ioLog: "cp.io-error" });
+  if (r.stat) reader.finish();
 }
 
 // ---- the session store (schema verified locally on the VS Code extension's copy; the CLI keeps one of the same name) ----
 
-/** Columns read; every other column is never selected (turn texts, summaries, repository, branch, agent names). */
-const STORE_SESSION_COLUMNS = ["id", "cwd", "host_type", "created_at", "updated_at"] as const;
+/**
+ * Columns read; every other column is never selected (turn texts, summaries, repository, branch, agent names, and
+ * `host_type`, which names the repository's host, not a client).
+ */
+const STORE_SESSION_COLUMNS = ["id", "cwd", "created_at", "updated_at"] as const;
 const STORE_TURN_COLUMNS = ["session_id", "timestamp"] as const;
-const PAGE = 5_000;
-const q = (name: string): string => `"${name}"`;
+const STORE_PAGE = 5_000;
 
 /** The allowlisted columns of `table` present in the store; a missing table or column is drift. */
 function storeColumns(db: RoDb, tables: Set<string>, table: string, wanted: readonly string[], tally: Tally): string[] | undefined {
@@ -363,38 +358,29 @@ function storeColumns(db: RoDb, tables: Set<string>, table: string, wanted: read
   return wanted.filter((c) => have.has(c));
 }
 
-/** Rows of `table` in rowid pages; a page that fails ends the table as an io-error (busy stores included). */
-// TODO(Plan 2 Task 0): this pager is synchronous and never yields to the event loop, so a signal or an abort waits
-// for the whole table. Move it onto the shared async pager (common/sqlite.ts) that awaits maybeYield() between pages.
-function* storePages(db: RoDb, table: string, cols: string[], tally: Tally, ctx: ScanCtx): Generator<Obj[]> {
+/**
+ * Maps every row of `table` in rowid pages, on the shared pager (`Pass`): a first page that fails other than busy is
+ * drift `store.table-unreadable:<table>` (a page that does not advance: `store.page-stalled:<table>`); a busy store, or a later page that fails, is an io-error; either ends the table, with
+ * warn `cp.db-busy` for a busy store and `cp.db-query` for any other failure. A row the mapping fails on is skipped as
+ * bad-record and the others go on.
+ */
+async function eachStoreRow(db: RoDb, table: string, cols: string[], map: (r: Obj) => void, ctx: ScanCtx, tally: Tally): Promise<void> {
   const sql = `SELECT rowid AS rid, ${cols.map(q).join(", ")} FROM ${q(table)} WHERE rowid > ? ORDER BY rowid LIMIT ?`;
-  let after = Number.MIN_SAFE_INTEGER;
-  for (;;) {
-    if (ctx.signal.aborted) return;
-    let rows: Obj[];
-    try {
-      rows = db.all<Obj>(sql, after, PAGE);
-    } catch (e) {
-      tally.skip("io-error");
-      ctx.log("warn", isBusyError(e) ? "cp.db-busy" : "cp.db-query");
-      return;
-    }
-    tally.records += rows.length;
-    if (rows.length > 0) yield rows;
-    if (rows.length < PAGE) return;
-    after = rows[rows.length - 1]!.rid as number;
-  }
+  await new Pass(db, table, tally, ctx, "cp.db-query", { page: STORE_PAGE, busyLogCode: "cp.db-busy", driftPrefix: "store." }).byRowid(sql, (rows) => {
+    for (const r of rows) eachRow(() => map(r), tally);
+  });
 }
 
-function storeSession(r: Obj, source: string, ctx: ScanCtx, tally: Tally): void {
+/** The client whose session store it is: the VS Code extension's copy, or the CLI's own store. */
+export type StoreSurface = "vscode" | "cli";
+
+function storeSession(r: Obj, source: string, surface: StoreSurface, ctx: ScanCtx, tally: Tally): void {
   const raw = str(r.id);
   if (raw === undefined) return tally.skip("bad-row");
   const start = toEpochMs(r.created_at, ctx.now);
-  if (start === undefined) return tally.skip("no-ts");
+  if (start === undefined) return tally.noTime(r.created_at);
   const end = Math.max(start, toEpochMs(r.updated_at, ctx.now) ?? start);
-  const s: SessionEv = { k: "session", tool: TOOL, source, id: cpSessionId(raw, ctx), window: "lifetime", origin: "human", start, end, models: [] };
-  const host = str(r.host_type);
-  if (host !== undefined) s.surface = HOST_TYPES.has(host) ? host : "other";
+  const s: SessionEv = { k: "session", tool: TOOL, source, id: cpSessionId(raw, ctx), window: "lifetime", origin: "human", start, end, models: [], surface };
   const cwd = str(r.cwd);
   if (cwd !== undefined) s.projectKey = ctx.registerCwd(cwd);
   ctx.emit(s);
@@ -406,52 +392,23 @@ function storeTurn(r: Obj, source: string, ctx: ScanCtx, tally: Tally): void {
   const raw = str(r.session_id);
   if (raw === undefined) return tally.skip("bad-row");
   const ts = toEpochMs(r.timestamp, ctx.now);
-  if (ts === undefined) return tally.skip("no-ts");
+  if (ts === undefined) return tally.noTime(r.timestamp);
   ctx.emit({ k: "turn", tool: TOOL, source, ts, sessionId: cpSessionId(raw, ctx), window: "lifetime" });
   tally.span(ts);
 }
 
 /**
- * The session store (`session-store.db`): a lifetime SessionEv per `sessions` row and a lifetime TurnEv per `turns` row,
- * from the allowlisted columns only. A store that cannot be opened or read is an io-error; it is always closed. True when
- * its tables could be listed.
+ * The session store (`session-store.db`): a lifetime SessionEv per `sessions` row — its surface the client whose store
+ * it is — and a lifetime TurnEv per `turns` row, from the allowlisted columns only. A store that cannot be opened or read
+ * is an io-error (warn `cp.db-unopenable`, `cp.db-unreadable`); it is always closed. True when its tables could be listed.
  */
-export function readSessionStore(file: string, source: string, ctx: ScanCtx, tally: Tally): boolean {
-  const db = openRo(file, ctx.temp);
-  if (!db) {
-    tally.skip("io-error");
-    ctx.log("warn", "cp.db-unopenable");
-    return false;
-  }
-  let listed = false;
-  try {
-    const tables = new Set(db.tables());
-    listed = true;
-    tally.files++;
-    tally.bytes += safeStat(file)?.size ?? 0;
+export function readSessionStore(file: string, source: string, surface: StoreSurface, ctx: ScanCtx, tally: Tally): Promise<boolean> {
+  return readStore(file, ctx, tally, "cp", async (db, tables) => {
     const sCols = storeColumns(db, tables, "sessions", STORE_SESSION_COLUMNS, tally);
-    if (sCols?.includes("id")) {
-      for (const rows of storePages(db, "sessions", sCols, tally, ctx)) for (const r of rows) eachRow(() => storeSession(r, source, ctx, tally), tally);
-    }
+    if (sCols?.includes("id")) await eachStoreRow(db, "sessions", sCols, (r) => storeSession(r, source, surface, ctx, tally), ctx, tally);
     const tCols = storeColumns(db, tables, "turns", STORE_TURN_COLUMNS, tally);
-    if (tCols?.includes("session_id")) {
-      for (const rows of storePages(db, "turns", tCols, tally, ctx)) for (const r of rows) eachRow(() => storeTurn(r, source, ctx, tally), tally);
-    }
-  } catch {
-    tally.skip("io-error");
-    ctx.log("warn", "cp.db-unreadable");
-  } finally {
-    db.close();
-  }
-  return listed;
-}
-
-function eachRow(map: () => void, tally: Tally): void {
-  try {
-    map();
-  } catch {
-    tally.skip("bad-record");
-  }
+    if (tCols?.includes("session_id")) await eachStoreRow(db, "turns", tCols, (r) => storeTurn(r, source, ctx, tally), ctx, tally);
+  });
 }
 
 /**
@@ -477,18 +434,21 @@ export async function scanCli(c: Candidate, ctx: ScanCtx): Promise<void> {
   if (isDir(path.join(c.root, OLD_STATE_DIR))) tally.unknownKey(`layout:${OLD_STATE_DIR}`); // the older CLI layout, not read
   const store = path.join(c.root, "session-store.db");
   const hasStore = safeStat(store)?.isFile() ?? false;
-  const storeRead = !ctx.signal.aborted && hasStore && readSessionStore(store, CLI_SOURCE, ctx, life);
+  const storeRead = !ctx.signal.aborted && hasStore && (await readSessionStore(store, CLI_SOURCE, "cli", ctx, life));
   const bad = (tally.skipped["bad-record"] ?? 0) + (life.skipped["bad-record"] ?? 0);
   if (bad > 0) ctx.log("warn", "cp.bad-record", bad);
   const hasOld = isDir(path.join(c.root, OLD_STATE_DIR));
   for (const [t, has, readable] of [[tally, hasState || hasOld, true], [life, hasStore, storeRead]] as const) ctx.emit(windowCoverage(t, has, readable));
 }
 
-/** A window's coverage: `absent` when its store is not there, `error` (note `unreadable`) when it is but could not be read. */
+/**
+ * A window's coverage: `absent` when its store is not there, `error` (note `unreadable`) when it is but could not be
+ * read — unless it is a locked store above MAX_COPY_BYTES, which keeps that reason (note `too-large`).
+ */
 export function windowCoverage(t: Tally, has: boolean, readable: boolean): PluginCoverage {
   const cov = t.coverage();
   if (!has) cov.status = "absent";
-  else if (!readable) {
+  else if (!readable && t.note !== "too-large") {
     cov.status = "error";
     cov.note = "unreadable";
   }

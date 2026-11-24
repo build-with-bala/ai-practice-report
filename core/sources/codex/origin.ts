@@ -23,21 +23,34 @@ export interface CxSource {
   agentType?: string;
   /** A source that is neither a string nor a `{subagent: …}` object: format drift for the caller to count. */
   unknownShape: boolean;
+  /** A source string the CLI is not known to write: drift for the caller to count, and never a human. */
+  unknownValue: boolean;
 }
 
+/** The origin of a source string the CLI writes: `exec` a script, `mcp` a peer, `internal` the CLI's own work, else the person. */
+const KNOWN_ORIGIN = (source: string): Origin => (source === "exec" ? "scripted" : source === "mcp" ? "peer" : source === "internal" ? "system" : "human");
+
 /**
- * The origin of a thread from its `source` — a string (`cli`, `exec`, `vscode`, `mcp`, …) or an object `{subagent: …}` —
- * and its `originator`: `exec` → scripted; `mcp` (Codex run through its MCP server by another client) → peer; a subagent
- * source → subagent, with parent (`thread_spawn.parent_thread_id`, else `parentThreadId`), depth and role; any other
- * string, or none → human. An `originator` of exactly `Claude Code` makes the thread peer, unless its source is a
- * subagent one (subagents inherit the originator and stay subagents). Shared by both readers so they cannot diverge.
+ * The origin of a thread from its `source` — a string (`cli`, `exec`, `vscode`, `mcp`, `internal`, …), or an object with
+ * one key, the source's name, holding its data (`{subagent: …}`, `{internal: …}`) — and its `originator`: `exec` →
+ * scripted; `mcp` (Codex run through its MCP server by another client) → peer; `internal` (the CLI's own work: memory
+ * consolidation, a guardian) → system; a subagent source → subagent, with parent (`thread_spawn.parent_thread_id`,
+ * else `parentThreadId`), depth and role; another string the CLI writes, or none → human. An object keyed by another
+ * known name maps as that name does, and its data is never read. Anything else — a string the CLI is not known to write
+ * (`unknownValue`), an array, an object with another key or several keys, a number (`unknownShape`) — is system and
+ * drift: nothing of unknown shape is ever a human. An `originator` of exactly `Claude Code` makes the thread peer,
+ * unless its source is a subagent one (subagents inherit the originator and stay subagents). Shared by both readers so
+ * they cannot diverge.
  */
 export function cxSource(source: unknown, originator: unknown, ctx: ScanCtx, parentThreadId?: unknown): CxSource {
-  const s: CxSource = { origin: "human", subagent: false, unknownShape: false };
+  const s: CxSource = { origin: "human", subagent: false, unknownShape: false, unknownValue: false };
+  const keys = isObj(source) ? Object.keys(source) : [];
   if (typeof source === "string") {
-    s.origin = source === "exec" ? "scripted" : source === "mcp" ? "peer" : "human";
-    s.surface = SOURCES.has(source) ? source : "other";
-  } else if (isObj(source) && "subagent" in source) {
+    const known = SOURCES.has(source);
+    s.origin = known ? KNOWN_ORIGIN(source) : "system";
+    s.surface = known ? source : "other";
+    s.unknownValue = !known;
+  } else if (isObj(source) && keys.length === 1 && keys[0] === "subagent") {
     s.origin = "subagent";
     s.subagent = true;
     s.surface = "subagent";
@@ -48,7 +61,11 @@ export function cxSource(source: unknown, originator: unknown, ctx: ScanCtx, par
     if (depth !== undefined && Number.isInteger(depth) && depth >= 0) s.spawnDepth = depth;
     const role = str(spawn?.agent_role);
     if (role !== undefined) s.agentType = BUILTIN_ROLES.has(role) ? role : ctx.hash(role);
+  } else if (isObj(source) && keys.length === 1 && SOURCES.has(keys[0]!)) {
+    s.origin = KNOWN_ORIGIN(keys[0]!);
+    s.surface = keys[0]!;
   } else if (source !== undefined) {
+    s.origin = "system";
     s.unknownShape = true;
     s.surface = "other";
   }

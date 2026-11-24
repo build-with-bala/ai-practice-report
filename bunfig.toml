@@ -1,0 +1,3 @@
+# The same per-test timeout locally as in CI (a runaway guard, never a speed budget).
+[test]
+timeout = 30000

@@ -7,17 +7,17 @@ import { scan } from "../../../core/scan";
 import { cpCli, cpJetbrains, cpVscode } from "../../../core/sources/copilot";
 import { copilotInstalled, installDirs } from "../../../core/sources/copilot/install";
 import { replayJournal } from "../../../core/sources/copilot/journal";
-import { uriToPath } from "../../../core/sources/copilot/map";
+import { uriToPath } from "../../../core/sources/common/uri";
 import { registry } from "../../../core/sources/registry";
 import type { SourcePlugin } from "../../../core/sources/types";
 import { keyedHash, normalizePath } from "../../../core/text/hash";
 import { classifyIntent } from "../../../core/text/intent";
 import { detectEnv } from "../../../core/env/env";
 import { CANARY, expectNoCanaries } from "../../kit/canary";
-import { fakeHome, type FakeHome } from "../../kit/home";
+import { fakeHome, lockAboveCopyLimit, type FakeHome } from "../../kit/home";
 import {
   buildCopilot, CliEvents, CP_EXT_VERSION, cpSid, editGroup, fileUrl, jetbrainsRel, markdown, MIN, request, S_J, S_L, sessionRoot, terminal, tool,
-  userRel, type JournalRecord,
+  userRel, writeSessionStore, type JournalRecord,
 } from "../../fixtures/copilot";
 import { fixtureStart } from "../../fixtures/claude-code";
 
@@ -230,7 +230,8 @@ describe("copilot vscode: Task 13 scenario", () => {
     const r = await run([cpVscode]);
     const tools = toolsOf(r, S_J);
     expect(tools).toHaveLength(2);
-    expect(tools.find((t) => t.name === "run_in_terminal")).toMatchObject({ category: "test", checks: ["test"], ok: true, exit: 0, ms: 4_200 });
+    expect(tools.find((t) => t.name === "run_in_terminal")).toMatchObject({ category: "test", checks: ["test"], toolchain: "js", ok: true, exit: 0, ms: 4_200 });
+    expect(tools.find((t) => t.category === "edit")!.toolchain).toBeUndefined();
     expect(tools.find((t) => t.name === "run_in_terminal")!.callId).toBe(keyedHash(r.salt, `call_run_in_terminal_${CANARY.secret}`));
     expect(tools.find((t) => t.category === "edit")).toMatchObject({ name: "textEditGroup", editExt: "py" });
     expect(tools.every((t) => t.ts === fx.t0 + 5 * MIN)).toBe(true);
@@ -388,6 +389,31 @@ describe("copilot vscode: mapping rules", () => {
     expect([...r.store.forSession(sidOf(id), "prompt")].sort((a, b) => a.ts - b.ts).map((p) => p.origin)).toEqual(["human", "human", "human", "system", "human"]);
   });
 
+  test("a request whose time is well-formed but implausible counts once, as bad-ts: no no-ts, no drift", async () => {
+    const id = cpSid("oldts");
+    writeLegacy("w", sessionRoot(id, [request({ ts: 631152000000, text: "a request stamped 1990" }), request({ ts: t0(), text: "a request of today" })]));
+    const r = await run([cpVscode]);
+    const c = covOf(r, "copilot.vscode");
+    expect(c.skipped["bad-ts"]).toBe(1);
+    expect(c.skipped["no-ts"]).toBeUndefined();
+    expect(c.unknownTypes).toEqual({});
+    expect(r.store.forSession(sidOf(id), "prompt")).toHaveLength(1);
+  });
+
+  test("a request without a time is drift request.timestamp:shape, and is skipped no-ts once with its prompt and tools", async () => {
+    const id = cpSid("nots");
+    const timeless = request({ ts: t0(), text: "a request without its time", parts: [tool("copilot_readFile")] });
+    delete timeless.timestamp;
+    writeLegacy("w", sessionRoot(id, [timeless, request({ ts: t0() + MIN })]));
+    const r = await run([cpVscode]);
+    const c = covOf(r, "copilot.vscode");
+    expect(c.unknownTypes).toEqual({ "request.timestamp:shape": 1 });
+    expect(c.skipped["no-ts"]).toBe(1);
+    expect(c.skipped["bad-ts"]).toBeUndefined();
+    expect(toolsOf(r, id)).toEqual([]);
+    expect(r.store.forSession(sidOf(id), "prompt")).toHaveLength(1);
+  });
+
   test("model ids: vendor prefix dropped, then the shared shape guard", async () => {
     const id = cpSid("models");
     writeLegacy("w", sessionRoot(id, [
@@ -517,7 +543,7 @@ describe("copilot vscode: mapping rules", () => {
     writeLegacy("w2", sessionRoot(id, reqs, { created: at }));
     const r = await run([cpVscode]);
     expect(r.store.forSession(sidOf(id), "prompt")).toHaveLength(3);
-    expect(covOf(r, "copilot.vscode").skipped).toEqual({ parse: 1, duplicate: 1 });
+    expect(covOf(r, "copilot.vscode").skipped).toEqual({ partial: 1, duplicate: 1 }); // the truncated copy's cut-off last line
   });
 
   test("a copy without requests does not hide one with requests; with only partial copies, the fullest is read", async () => {
@@ -537,7 +563,7 @@ describe("copilot vscode: mapping rules", () => {
     const r = await run([cpVscode]);
     expect(r.store.forSession(sidOf(a), "prompt")).toHaveLength(2);
     expect(r.store.forSession(sidOf(b), "prompt")).toHaveLength(2);
-    expect(covOf(r, "copilot.vscode").skipped).toEqual({ parse: 2, duplicate: 2 });
+    expect(covOf(r, "copilot.vscode").skipped).toEqual({ partial: 2, duplicate: 2 }); // the partial copies' cut-off last lines
   });
 
   test("a journal that yields no session falls back to the legacy file of the same session", async () => {
@@ -689,6 +715,7 @@ describe("copilot cli (session events and store, from the CLI's schema)", () => 
       ["report_intent", "meta", undefined, true, undefined, 1_000, undefined, undefined], // bookkeeping: counted apart, never dropped
       ["mcp", "mcp", undefined, false, undefined, 1_000, undefined, CANARY.mcp],
     ]);
+    expect(toolsOf(r, cliSid).map((t) => t.toolchain)).toEqual(["js", undefined, undefined, undefined]); // bash `npm test`
     // one TurnEv per exchange: a user message over its model calls (a turn_start/turn_end pair is one model call)
     expect(r.store.forSession(sidOf(cliSid), "turn").map((t) => [t.status, t.ms])).toEqual([["completed", 14_000], ["interrupted", 2_000]]);
     expect(r.store.forSession(sidOf(cliSid), "marker").map((m) => [m.kind, m.detail])).toEqual([["interrupt", "user"]]);
@@ -716,12 +743,13 @@ describe("copilot cli (session events and store, from the CLI's schema)", () => 
     __observeQueries((s) => sql.push(s));
     const r = await run([cpCli]);
     __observeQueries(undefined);
-    expect(r.store.session(sidOf(cliSid))).toMatchObject({ window: "lifetime", origin: "human", surface: "github", start: at, end: at + 9 * MIN, projectKey: keyedHash(r.salt, normalizePath(CANARY.path)) });
-    expect(r.store.session(sidOf(keyedHash(r.salt, "not-a-uuid")))).toMatchObject({ surface: "other", start: at, end: at });
+    // the CLI's own store: surface cli, whatever host_type names (the repository's host, not a client)
+    expect(r.store.session(sidOf(cliSid))).toMatchObject({ window: "lifetime", origin: "human", surface: "cli", start: at, end: at + 9 * MIN, projectKey: keyedHash(r.salt, normalizePath(CANARY.path)) });
+    expect(r.store.session(sidOf(keyedHash(r.salt, "not-a-uuid")))).toMatchObject({ surface: "cli", start: at, end: at });
     expect(r.store.forSession(sidOf(cliSid), "turn").map((t) => [t.window, t.ts - at])).toEqual([["lifetime", MIN], ["lifetime", 2 * MIN]]);
     const selects = sql.filter((s) => /^\s*SELECT/i.test(s) && !/sqlite_master|pragma_table_info/.test(s));
     expect(selects.length).toBeGreaterThan(0);
-    for (const s of selects) expect(s).not.toMatch(/user_message|assistant_response|summary|repository|branch|agent_name|agent_description|file_path|\*/);
+    for (const s of selects) expect(s).not.toMatch(/user_message|assistant_response|summary|repository|branch|agent_name|agent_description|file_path|host_type|\*/);
     expect(covOf(r, "copilot.cli", "lifetime")).toMatchObject({ status: "ok", files: 1, records: 4 }); // the store: the lifetime window
     expect(covOf(r, "copilot.cli")).toMatchObject({ status: "absent", files: 0, records: 0 }); // no session-state: no detail window
     expectNoCanaries([...allEvents(r), r.coverage, r.warnings]);
@@ -745,9 +773,31 @@ describe("copilot cli (session events and store, from the CLI's schema)", () => 
       ["apply_patch", "edit", undefined, "py", undefined, undefined], ["powershell", "build", ["build"], undefined, true, 0],
       ["other", "other", undefined, undefined, undefined, undefined],
     ]);
+    expect(toolsOf(r, id).find((t) => t.name === "powershell")!.toolchain).toBe("dotnet");
     expect(r.store.session(sidOf(id))!.version).toBeUndefined();
     expect(covOf(r, "copilot.cli").versions).toEqual([]);
     expectNoCanaries([...allEvents(r), r.coverage]);
+  });
+
+  test("an event whose time is well-formed but implausible counts once, as bad-ts; one without a time is drift and no-ts", async () => {
+    const id = cpSid("cli5");
+    const e = new CliEvents(t0())
+      .ev("session.start", { sessionId: id }, 0)
+      .ev("user.message", { content: "Fix the importer" })
+      .ev("user.message", { content: "a message stamped 1990" })
+      .ev("tool.execution_start", { toolCallId: "x1", toolName: "bash", arguments: { command: "npm test" } })
+      .ev("user.message", { content: "a message without a time" })
+      .ev("user.message", { content: "And add a test" });
+    e.records[2]!.timestamp = "1990-01-01T00:00:00.000Z";
+    e.records[3]!.timestamp = 631152000000;
+    delete e.records[4]!.timestamp;
+    h.writeJsonl(path.join(".copilot", "session-state", id, "events.jsonl"), e.records);
+    const r = await run([cpCli]);
+    const c = covOf(r, "copilot.cli");
+    expect(c.skipped).toEqual({ "bad-ts": 2, "no-ts": 1 });
+    expect(c.unknownTypes).toEqual({ "event.timestamp:shape": 1 });
+    expect(r.store.forSession(sidOf(id), "prompt")).toHaveLength(2);
+    expect(toolsOf(r, id)).toEqual([]);
   });
 
   test("a turn_end after an abort does not end the exchange again; a turn_end for a model call never started ends nothing", async () => {
@@ -786,6 +836,21 @@ describe("copilot cli (session events and store, from the CLI's schema)", () => 
     const r = await run([cpCli]);
     expect(r.store.forSession(sidOf(id), "turn").map((t) => [t.status, t.ms, t.ts - at])).toEqual([["completed", 4_000, 5_000], ["interrupted", 3_000, 9_000]]);
     expect(toolsOf(r, id).map((t) => [t.name, t.checks, t.ok, t.outcome])).toEqual([["bash", ["test"], undefined, "interrupted"]]);
+  });
+
+  test.skipIf(process.platform === "win32")("a store locked and above the copy limit keeps its reason: too-large, not unreadable, with a warning and a log", async () => {
+    const file = writeSessionStore(h, path.join(".copilot", "session-store.db"), { id: cliSid, host: "github", at: t0() });
+    const release = lockAboveCopyLimit(file);
+    const logs: string[] = [];
+    let r: Result;
+    try {
+      r = await scan({ env: h.env, plugins: [cpCli], onLog: (level, code) => { if (code !== "scan.gc") logs.push(`${level} ${code}`); } });
+    } finally {
+      release();
+    }
+    expect(covOf(r, "copilot.cli", "lifetime")).toMatchObject({ status: "empty", note: "too-large", files: 0, skipped: { "too-large": 1 } });
+    expect(r.warnings.map((w) => [w.code, w.source])).toEqual([["too-large", "copilot.cli"]]);
+    expect(logs).toEqual(["warn cp.db-too-large"]);
   });
 
   test("no session-state and no store under ~/.copilot: absent", async () => {
@@ -829,5 +894,15 @@ describe("copilot vscode: the extension's session store", () => {
     expect(r.store.forSession(sidOf(S_J), "turn").filter((t) => t.window === "lifetime")).toHaveLength(1);
     expect([covOf(r, "copilot.vscode").records, covOf(r, "copilot.vscode", "lifetime").records]).toEqual([4, 2]); // chat files; store rows
     expectNoCanaries([...allEvents(r), r.coverage, r.warnings]);
+  });
+
+  test("store sessions take the surface of the store they come from, never host_type: vscode in the extension's copy, cli in the CLI's", async () => {
+    const at = t0();
+    const vs = cpSid("vsrow");
+    const cli = cpSid("clirow");
+    writeSessionStore(h, path.join(user(), "globalStorage", "github.copilot-chat", "session-store.db"), { id: vs, host: "github", at });
+    writeSessionStore(h, path.join(".copilot", "session-store.db"), { id: cli, host: "github", at });
+    const r = await run([cpVscode, cpCli]);
+    expect([vs, cli].map((id) => [r.store.session(sidOf(id))?.window, r.store.session(sidOf(id))?.surface])).toEqual([["lifetime", "vscode"], ["lifetime", "cli"]]);
   });
 });

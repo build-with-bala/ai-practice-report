@@ -38,7 +38,7 @@ export const agHistory: SourcePlugin = {
   primary: { lifetime: ["prompt"] },
   describe: {
     reads: ["<home>/.gemini/antigravity-cli/history.jsonl — one line per prompt or slash command typed in the CLI: display, timestamp, conversationId"],
-    neverReads: ["display text is parsed in memory for intent, features and a keyed hash, and never kept; the workspace paths are never kept"],
+    neverReads: ["display text is parsed in memory for intent, features and a keyed hash, and never kept; the workspace paths are never kept, only their keyed project hashes"],
   },
   locate: cliRoots,
   scan: scanHistory,
@@ -71,7 +71,6 @@ export const agBrain: SourcePlugin = {
   tier: "P0",
   beta: false,
   windows: ["lifetime"],
-  primary: { lifetime: ["marker"] },
   describe: {
     reads: [
       "<home>/.gemini/antigravity/brain/<conversation>/{task,implementation_plan,walkthrough}.md and <home>/.gemini/antigravity-cli/brain/<conversation>/… — existence and last modification time only",

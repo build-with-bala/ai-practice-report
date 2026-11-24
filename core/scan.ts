@@ -1,13 +1,16 @@
 import { randomBytes } from "node:crypto";
 import { detectEnv, type Env } from "./env/env";
 import { homesToScan } from "./env/paths";
-import { reraise, trapSignals, type TermSignal } from "./io/signals";
+import { collectRepoSignals, type RepoSignalOptions, type RepoSignals } from "./git/index";
+import { holdStreamGc, STREAM_GC } from "./io/jsonl";
+import { enterScanTrap } from "./io/signals";
 import { ScanTemp } from "./io/temp";
 import { maybeYield } from "./io/yield";
 import type { CoverageEv, Ev } from "./model/events";
 import type { PluginCoverage } from "./sources/types";
 import type { ToolId } from "./model/ids";
 import { EventStore } from "./model/store";
+import { INERT_SKIPS } from "./sources/common/coverage";
 import { withCheckCategory } from "./sources/common/tools";
 import { registry } from "./sources/registry";
 import { windowsOf, type Candidate, type ScanCtx, type SourcePlugin, type TempDirs } from "./sources/types";
@@ -18,31 +21,82 @@ export interface ScanOptions { env?: Env; plugins?: SourcePlugin[]; tools?: Tool
   concurrency?: number;
   onProgress?: (p: { plugin: string; done: number; total: number }) => void;
   /**
-   * Aborts the scan. Plugins stop at their next check (JSONL readers within about 25 ms; a synchronous SQLite pass at
-   * its next page); the scan cleans up its temp files and resolves with what was read: every coverage a plugin emits
+   * Aborts the scan. Plugins stop at their next check (JSONL readers within about 25 ms; an SQLite pass at its next
+   * page); the scan cleans up its temp files and resolves with what was read: every coverage a plugin emits
    * after the abort says `status: "error", note: "aborted"` (its counts and the events before it are kept, but the
    * source was not read to its end), and plugins that never started get the same coverage, empty.
    */
   signal?: AbortSignal;
   /**
-   * Signal policy, default true: while scan() runs it traps SIGINT and SIGTERM. The first one aborts the scan (as
-   * `signal` does), which unwinds through its cleanup — private copies and the `aipr-scan-*` folder are removed — and
-   * then raises the same signal again with the trap released: by its default action the process ends, by that signal
-   * (a non-zero exit status), and nothing after scan() runs. Pass false when the application owns these signals:
-   * scan() installs no handler, and the application aborts it through `signal` to get the partial result.
+   * Signal policy, default true: while scan() runs it traps SIGINT and SIGTERM, in one trap that every scan running at
+   * once shares. The first signal aborts them all (as `signal` does); each unwinds through its cleanup — private copies
+   * and its `aipr-scan-*` folder are removed — and once the last has, the same signal is raised again with the trap
+   * released: by its default action the process ends, by that signal (a non-zero exit status), and nothing after
+   * scan() runs. A signal that lands in a scan's last synchronous work is caught too: scan() gives the event loop a
+   * turn before it leaves the trap. A second signal ends the process at once, once every scan's temp files are removed.
+   * Pass false when the application owns these signals: scan() installs no handler, and the application aborts it
+   * through `signal` to get the partial result.
    */
   handleSignals?: boolean;
   onLog?: (level: "debug" | "info" | "warn", code: string, n?: number) => void;
+  /**
+   * Repo signals, default true: after the sources are read, the repos holding recent sessions' folders (found by
+   * ancestor checks, never by crawling) are read with read-only git (`ScanResult.repos`). False switches them off — no
+   * git runs; options tune them. Progress is reported as plugin `repo-signals`.
+   */
+  repoSignals?: boolean | RepoSignalOptions;
+  /**
+   * The streaming reader's garbage-collection pacer, default `auto`: on for the scan. `off` turns it off for the scan
+   * (an application that manages memory itself). The pacer is shared by every scan in the process: while scans overlap
+   * it is on if any of them asked for `auto`, and off only while all of them asked for `off`; when the last ends it is
+   * restored as it was before (`holdStreamGc`). When its reading is over, a scan collects once more when the pacer is on
+   * and RSS is above its floor (`GcPacer.settle`), so the caller's analysis reuses the pages the scan's garbage holds.
+   * Every scan logs `scan.gc` (debug) once, with the number of collections the pacer ran during the scan's lifetime.
+   * The pacer is process-wide, so that count includes collections caused by an overlapping scan's reading.
+   */
+  gc?: "auto" | "off";
   /** @internal test hook: builds the temp registry inside the scan's temp folder, when a private copy first needs one. */
   tempFactory?: (base: string) => TempDirs }
 export interface Warning { code: "drift" | "error" | "too-large" | "temp-leftover" | "beta"; tool: ToolId | "scan"; source: string; detail: string }
 export interface ScanResult { store: EventStore; coverage: CoverageEv[]; warnings: Warning[]; cwds: Map<string, string>;
-  salt: Uint8Array; startedAt: number; finishedAt: number; tempClean: boolean }
+  salt: Uint8Array; startedAt: number; finishedAt: number; tempClean: boolean;
+  /** Repo signals: status `off` when switched off, `partial` when the scan was aborted before or during them. */
+  repos: RepoSignals }
 
 const DEFAULT_CONCURRENCY = 4;
+/** Sessions that ended within this long before the scan are recent: only their folders are looked at for repos. */
+const RECENT_MS = 180 * 86_400_000;
+const repoSignalsOff = (status: "off" | "partial"): RepoSignals => ({ status, repos: [], roots: new Map(), skipped: {}, ms: 0 });
+
+/**
+ * The repo-signal after-pass over what the sources found: the projectKeys of recent sessions (any window), the
+ * detail-window sessions per projectKey, and the earliest detail-window start.
+ */
+async function repoPass(store: EventStore, cwds: ReadonlyMap<string, string>, o: { salt: Uint8Array; now: number; signal: AbortSignal;
+  options: RepoSignalOptions; onProgress?: ScanOptions["onProgress"] }): Promise<RepoSignals> {
+  const recent = new Set<string>();
+  const detailSessions = new Map<string, number>();
+  let detailFrom: number | undefined;
+  for (const s of store.all("session")) {
+    if (s.window === "detail") detailFrom = detailFrom === undefined ? s.start : Math.min(detailFrom, s.start);
+    if (s.projectKey === undefined) continue;
+    if (s.end >= o.now - RECENT_MS) recent.add(s.projectKey);
+    if (s.window === "detail") detailSessions.set(s.projectKey, (detailSessions.get(s.projectKey) ?? 0) + 1);
+  }
+  const progress = (done: number, total: number) => { try { o.onProgress?.({ plugin: "repo-signals", done, total }); } catch { /* never fails a scan */ } };
+  return collectRepoSignals({ cwds, recent, detailSessions, detailFrom, salt: o.salt, now: o.now, signal: o.signal, onProgress: progress }, o.options);
+}
 /** Event kinds that say their window; every other kind counts toward any window of its plugin. */
 const WINDOWED: ReadonlySet<string> = new Set(["session", "prompt", "turn"]);
 const yieldKey = (k: string, window: string): string => (WINDOWED.has(k) ? `${k}@${window}` : k);
+/** The records of a coverage that should have yielded events: all those read, but for the ones skipped on purpose. */
+const yielding = (c: CoverageEv): number => c.records - INERT_SKIPS.reduce((n, r) => n + (c.skipped[r] ?? 0), 0);
+/**
+ * Lines a stream found but could not use (`parse`, `oversize`): not records, yet a file made only of them is a format the
+ * reader no longer reads, never a quiet store.
+ */
+const UNUSABLE_SKIPS: readonly string[] = ["parse", "oversize"];
+const unusable = (c: CoverageEv): number => (c.files > 0 ? UNUSABLE_SKIPS.reduce((n, r) => n + (c.skipped[r] ?? 0), 0) : 0);
 
 /** Coverage the orchestrator writes for a plugin (absent, error, aborted): one per window the plugin reports. */
 function emptyCoverage(p: SourcePlugin, status: CoverageEv["status"], note?: string): CoverageEv[] {
@@ -67,13 +121,12 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
   const now = Date.now();
   const stop = new AbortController();
   const signal = opts.signal ? AbortSignal.any([opts.signal, stop.signal]) : stop.signal;
-  let caught: TermSignal | undefined;
-  const release = opts.handleSignals === false ? undefined : trapSignals((sig) => {
-    caught ??= sig;
-    stop.abort();
-  });
   const temp = new ScanTemp(env.tmp, opts.tempFactory);
+  const trap = opts.handleSignals === false ? undefined : enterScanTrap({ abort: () => stop.abort(), closeSync: () => { temp.close(); } });
   let tempClean = false;
+  let repos = repoSignalsOff(opts.repoSignals === false ? "off" : "partial");
+  const releaseGc = holdStreamGc(opts.gc === "off" ? "off" : "auto");
+  const collectionsBefore = STREAM_GC.collections;
 
   try {
     const aborted = new Set<SourcePlugin>();
@@ -113,14 +166,18 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
           }
           // the plugin's own flag decides beta
           const cov: CoverageEv = { ...e, beta: plugin.beta };
-          // records read but none of the window's primary kinds yielded: the format moved under the reader
           const kinds = plugin.primary?.[cov.window];
-          if (kinds && (cov.status === "ok" || cov.status === "drift") && cov.records > 0 && !kinds.some((k) => (yielded.get(yieldKey(k, cov.window)) ?? 0) > 0)) {
+          // a coverage written after the abort may describe a source read only in part, so it never looks complete: the
+          // abort stamp alone decides it
+          if (signal.aborted) Object.assign(cov, { status: "error", note: "aborted" });
+          // records read, or lines in files found that could not be used, but none of the window's primary kinds yielded:
+          // the format moved under the reader. Records read on purpose that yield nothing (INERT_SKIPS) do not count; files
+          // with no lines at all stay empty.
+          else if (kinds && (cov.status === "ok" || cov.status === "drift" || cov.status === "empty") && yielding(cov) + unusable(cov) > 0
+            && !kinds.some((k) => (yielded.get(yieldKey(k, cov.window)) ?? 0) > 0)) {
             cov.status = "drift";
             cov.unknownTypes = { ...cov.unknownTypes, "zero-yield": 1 };
           }
-          // a coverage written after the abort may describe a source read only in part, so it never looks complete
-          if (signal.aborted) Object.assign(cov, { status: "error", note: "aborted" });
           store.add(cov);
         },
         hash: (v) => keyedHash(salt, v),
@@ -163,9 +220,31 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
     for (const [plugin, count] of nonCoverage) {
       if (plugin.beta && count > 0) warnings.push({ code: "beta", tool: plugin.tool, source: plugin.id, detail: "beta reader" });
     }
+
+    if (opts.repoSignals !== false && !signal.aborted) {
+      const options = typeof opts.repoSignals === "object" ? opts.repoSignals : {};
+      repos = await repoPass(store, cwds, { salt, now, signal, options, onProgress: opts.onProgress });
+    }
   } finally {
-    tempClean = temp.close();
-    release?.();
+    // nested, so the temp folder is removed and the trap is left whatever a step before them throws
+    try {
+      try {
+        // the reading is over: one collection, while the scan's own pacer state still holds, so the caller's analysis
+        // reuses the pages the scan's garbage holds
+        STREAM_GC.settle();
+      } finally {
+        releaseGc();
+      }
+      try { opts.onLog?.("debug", "scan.gc", STREAM_GC.collections - collectionsBefore); } catch { /* never fails a scan */ }
+    } finally {
+      try {
+        tempClean = temp.close();
+      } finally {
+        // cleaned up: a trapped SIGINT/SIGTERM, one caught at the tail included, now ends the process by that signal
+        // once every scan inside the trap has cleaned up, so nothing after scan() runs
+        await trap?.leave();
+      }
+    }
   }
 
   // one drift and one too-large warning per source, whatever the number of its windows; drift a store's two windows
@@ -186,7 +265,5 @@ export async function scan(opts: ScanOptions = {}): Promise<ScanResult> {
   }
   for (const [source, tool] of tooLarge) warnings.push({ code: "too-large", tool, source, detail: "too-large" });
   if (!tempClean) warnings.push({ code: "temp-leftover", tool: "scan", source: "scan", detail: "cleanup-failed" });
-  // cleaned up: a trapped SIGINT/SIGTERM now takes its default action, ending the process before anything after scan()
-  if (caught !== undefined) reraise(caught);
-  return { store, coverage, warnings, cwds, salt, startedAt, finishedAt: Date.now(), tempClean };
+  return { store, coverage, warnings, cwds, salt, startedAt, finishedAt: Date.now(), tempClean, repos };
 }

@@ -1,25 +1,18 @@
-import { statSync } from "node:fs";
 import path from "node:path";
 import type { Env } from "../../env/env";
 import { vscodeUser } from "../../env/paths";
-import { safeStat } from "../../io/fs";
+import { isDir, safeStat } from "../../io/fs";
 import { listDir, Tally } from "../common/coverage";
+import { readStore } from "../common/sqlite";
 import type { Candidate, ScanCtx, SourcePlugin } from "../types";
 import { AGENT_CLI_SOURCE, agentCliRoots, scanAgentCli } from "./agentcli";
-import { DiskKv, IDE_SOURCE, readStore, TOOL } from "./diskkv";
+import { DiskKv } from "./diskkv";
+import { IDE_SOURCE, TOOL } from "./ids";
 import { LegacyKeys } from "./itemtable";
 import { scanTracking, TRACKING_SOURCE, trackingRoots } from "./tracking";
 
 /** Cursor's user data folder: macOS `~/Library/Application Support/Cursor/User`, Windows `%APPDATA%\Cursor\User`, Linux `~/.config/Cursor/User`. */
 export const cursorUserRoot = (env: Env): string => vscodeUser(env, "Cursor");
-
-const isDir = (p: string): boolean => {
-  try {
-    return statSync(p).isDirectory(); // follows a symlinked user folder
-  } catch {
-    return false;
-  }
-};
 
 /** The Cursor user folder when it exists (the scanning user's only, as for VS Code). */
 export function ideRoots(env: Env): Candidate[] {
@@ -55,7 +48,7 @@ function shareStoreDrift(a: Tally, b: Tally): void {
 async function scanIde(c: Candidate, ctx: ScanCtx): Promise<void> {
   const tally = new Tally(TOOL, IDE_SOURCE);
   const life = new Tally(TOOL, IDE_SOURCE, "lifetime");
-  const legacy = new LegacyKeys(ctx, tally);
+  const legacy = new LegacyKeys(ctx, tally, life);
   const globalStore = path.join(c.root, "globalStorage", "state.vscdb");
   let present = 0;
   let read = 0;
@@ -63,8 +56,8 @@ async function scanIde(c: Candidate, ctx: ScanCtx): Promise<void> {
   if (safeStat(globalStore)?.isFile()) {
     present++;
     fallback = false;
-    const ok = readStore(globalStore, ctx, tally, (db, tables) => {
-      const kv = tables.has("cursorDiskKV") ? new DiskKv(db, ctx, tally, life).read(tables) : { readable: true, composers: 0 };
+    const ok = await readStore(globalStore, ctx, tally, "cu", async (db, tables) => {
+      const kv = tables.has("cursorDiskKV") ? await new DiskKv(db, ctx, tally, life).read(tables) : { readable: true, composers: 0 };
       if (!kv.readable || kv.composers > 0 || ctx.signal.aborted) return;
       fallback = true;
       legacy.read(db, tables);
@@ -82,7 +75,7 @@ async function scanIde(c: Candidate, ctx: ScanCtx): Promise<void> {
     for (const file of workspaceStores(c.root, tally)) {
       if (ctx.signal.aborted) break;
       present++;
-      if (readStore(file, ctx, tally, (db, tables) => legacy.read(db, tables))) read++;
+      if (await readStore(file, ctx, tally, "cu", (db, tables) => legacy.read(db, tables))) read++;
     }
   }
   if (present > 0 && read === 0 && tally.note !== "too-large") throw new StoresUnreadable("no Cursor store could be read");
@@ -92,7 +85,8 @@ async function scanIde(c: Candidate, ctx: ScanCtx): Promise<void> {
   const cov = tally.coverage();
   if (present === 0) cov.status = "absent"; // no store at all
   const lcov = life.coverage();
-  if (!safeStat(globalStore)?.isFile()) lcov.status = "absent"; // no global store: no composer index
+  // no global store: no composer index, and the lifetime window is absent unless a workspace store held a prompt log
+  if (!safeStat(globalStore)?.isFile() && lcov.records === 0 && Object.keys(lcov.skipped).length === 0 && Object.keys(lcov.unknownTypes).length === 0) lcov.status = "absent";
   ctx.emit(cov);
   ctx.emit(lcov);
 }

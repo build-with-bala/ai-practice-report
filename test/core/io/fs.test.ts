@@ -1,14 +1,102 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { readJsonSmall, readJsonSmallResult, safeList, safeStat, walk } from "../../../core/io/fs";
+import { bornAt, fileState, isDir, isFile, readJsonSmall, readJsonSmallResult, readTextLines, readTextSmall, safeList, safeStat, walk } from "../../../core/io/fs";
 
 let root: string;
 beforeAll(() => {
   root = mkdtempSync(path.join(os.tmpdir(), "fs-test-"));
 });
 afterAll(() => rmSync(root, { recursive: true, force: true }));
+
+/** A link at `at` to the folder `target` (a junction on Windows: no privilege needed); false on Windows when none can be made. */
+function linkFolder(target: string, at: string): boolean {
+  try {
+    symlinkSync(target, at, process.platform === "win32" ? "junction" : undefined);
+    return true;
+  } catch (e) {
+    if (process.platform !== "win32") throw e;
+    return false;
+  }
+}
+
+describe("fileState, isDir, isFile", () => {
+  test("a file, a folder and a missing path; a path through a file is missing", () => {
+    const f = path.join(root, "st-file");
+    writeFileSync(f, "x");
+    const d = path.join(root, "st-dir");
+    mkdirSync(d);
+    expect(fileState(f)).toBe("file");
+    expect(fileState(d)).toBe("dir");
+    expect(fileState(path.join(root, "st-nope"))).toBe("missing");
+    expect(fileState(path.join(f, "inside"))).toBe("missing"); // ENOTDIR
+    expect([isFile(f), isDir(f), isFile(d), isDir(d), isFile(path.join(root, "st-nope"))]).toEqual([true, false, false, true, false]);
+  });
+  test("links are followed: a dangling link is missing, a link to a folder is a folder", () => {
+    const dangling = path.join(root, "st-dangling");
+    if (linkFolder(path.join(root, "st-gone"), dangling)) expect(fileState(dangling)).toBe("missing");
+    const target = path.join(root, "st-target");
+    mkdirSync(target);
+    const linked = path.join(root, "st-linked");
+    if (linkFolder(target, linked)) {
+      expect(fileState(linked)).toBe("dir");
+      expect(isDir(linked)).toBe(true);
+    }
+  });
+  const skipChmod = process.platform === "win32" || process.getuid?.() === 0;
+  test.skipIf(skipChmod)("a path inside a chmod 000 folder is an error, not missing", () => {
+    const d = path.join(root, "st-locked");
+    mkdirSync(d);
+    const f = path.join(d, "x");
+    writeFileSync(f, "");
+    chmodSync(d, 0o000);
+    try {
+      expect(fileState(f)).toBe("error");
+      expect(isFile(f)).toBe(false);
+    } finally {
+      chmodSync(d, 0o700);
+    }
+  });
+  test.skipIf(process.platform === "win32")("anything else that exists is other", () => {
+    expect(fileState("/dev/null")).toBe("other"); // a character device
+  });
+});
+
+describe("bornAt", () => {
+  /** The rule, written out apart from the code: the birth time in whole ms, only where the file system records one. */
+  const born = (p: string) => { const st = statSync(p); return st.birthtimeMs > 0 ? Math.floor(st.birthtimeMs) : undefined; };
+  const NOW = Date.now();
+
+  test("a file's or folder's birth time; none where the file system records none (never the change time); nothing there, none", () => {
+    const f = path.join(root, "born-file");
+    writeFileSync(f, "x");
+    const d = path.join(root, "born-dir");
+    mkdirSync(d);
+    expect(bornAt(f, NOW)).toBe(born(f));
+    expect(bornAt(d, NOW)).toBe(born(d));
+    expect(bornAt(path.join(root, "born-nope"), NOW)).toBeUndefined();
+    expect(bornAt(path.join(f, "inside"), NOW)).toBeUndefined();
+  });
+
+  test("a birth time outside the plausible range gives none", () => {
+    const f = path.join(root, "born-old");
+    writeFileSync(f, "x");
+    const old = new Date("1985-10-26T08:15:00Z");
+    utimesSync(f, old, old); // where an earlier mtime pulls the birth time back (APFS), the birth time is implausible
+    const st = statSync(f);
+    if (st.birthtimeMs > 0 && st.birthtimeMs < Date.UTC(2015, 0, 1)) expect(bornAt(f, NOW)).toBeUndefined();
+    // whatever the file system, a now before the birth bounds it out too
+    expect(bornAt(f, Date.UTC(2000, 0, 1))).toBeUndefined();
+  });
+
+  test("a link counts as what it points to", () => {
+    const target = path.join(root, "born-target");
+    mkdirSync(target);
+    const linked = path.join(root, "born-linked");
+    if (linkFolder(target, linked)) expect(bornAt(linked, NOW)).toBe(born(target));
+  });
+});
 
 describe("walk", () => {
   test("symlink loop terminates; respects maxDepth", () => {
@@ -99,6 +187,96 @@ describe("readJsonSmallResult", () => {
       expect(readJsonSmall(p)).toBeUndefined();
     } finally {
       chmodSync(p, 0o600);
+    }
+  });
+});
+
+describe("readTextLines", () => {
+  const lines = async (p: string, maxBytes: number, signal?: AbortSignal): Promise<string[]> => {
+    const out: string[] = [];
+    for await (const line of readTextLines(p, { maxBytes, signal })) out.push(line);
+    return out;
+  };
+
+  test("lines split at \\n, a \\r kept, a leading BOM dropped, characters split across read chunks intact; a last line without a newline", async () => {
+    const wide = "€".repeat(200_000); // 600 kB of 3-byte characters: read chunk ends fall inside some of them
+    const p = path.join(root, "t-lines.txt");
+    writeFileSync(p, `\uFEFF[ab]\r\n\uFEFFkeep\n\n${wide}\nlast`);
+    expect(await lines(p, 1_000_000)).toEqual(["[ab]\r", "\uFEFFkeep", "", wide, "last"]);
+    const ends = path.join(root, "t-ends.txt");
+    writeFileSync(ends, "a\nb\n");
+    expect(await lines(ends, 10)).toEqual(["a", "b"]);
+  });
+
+  test("maxBytes caps each line, never the file: a longer line, one read chunk or several, ends the read with a RangeError", async () => {
+    const p = path.join(root, "t-cap.txt");
+    writeFileSync(p, "aaaa\nbbbb\ncccc");
+    expect(await lines(p, 4)).toEqual(["aaaa", "bbbb", "cccc"]); // 14 bytes in all, 4 a line
+    writeFileSync(p, "aaaa\nbbbbb\ncccc\n");
+    await expect(lines(p, 4)).rejects.toBeInstanceOf(RangeError);
+    writeFileSync(p, `${"x".repeat(600_000)}\nok\n`);
+    expect(await lines(p, 600_000)).toEqual(["x".repeat(600_000), "ok"]);
+    await expect(lines(p, 599_999)).rejects.toBeInstanceOf(RangeError);
+    writeFileSync(p, "x".repeat(600_000));
+    await expect(lines(p, 599_999)).rejects.toBeInstanceOf(RangeError); // the last line too
+  });
+
+  test("an aborted read ends early; a missing path throws", async () => {
+    const p = path.join(root, "t-abort.txt");
+    writeFileSync(p, "a\nb\n");
+    const ac = new AbortController();
+    ac.abort();
+    expect(await lines(p, 10, ac.signal)).toEqual([]);
+    await expect(lines(path.join(root, "t-missing.txt"), 10)).rejects.toThrow();
+  });
+});
+
+/** A named pipe at `p` (POSIX): nothing writes to it, so a reader that opened it would wait forever. */
+function fifo(p: string): string {
+  const r = Bun.spawnSync(["mkfifo", p], { stdout: "ignore", stderr: "ignore" });
+  if (r.exitCode !== 0) throw new Error("mkfifo failed");
+  return p;
+}
+
+describe("readTextSmall", () => {
+  test("a small file whole, a leading BOM dropped; a missing path, a folder, a file over the cap", () => {
+    const p = path.join(root, "s-small.md");
+    writeFileSync(p, "\uFEFFhello\nworld\n");
+    expect(readTextSmall(p, 1024)).toEqual({ ok: true, text: "hello\nworld\n" });
+    expect(readTextSmall(p, 15)).toEqual({ ok: true, text: "hello\nworld\n" }); // 15 bytes: at the cap
+    expect(readTextSmall(p, 14)).toEqual({ ok: false, reason: "too-large" });
+    expect(readTextSmall(path.join(root, "s-missing.md"), 1024)).toEqual({ ok: false, reason: "missing" });
+    const d = path.join(root, "s-dir");
+    mkdirSync(d);
+    expect(readTextSmall(d, 1024)).toEqual({ ok: false, reason: "not-file" });
+  });
+
+  test("a link is read as the file it points to", () => {
+    const target = path.join(root, "s-target.md");
+    writeFileSync(target, "linked");
+    const at = path.join(root, "s-link.md");
+    try {
+      symlinkSync(target, at);
+    } catch (e) {
+      if (process.platform !== "win32") throw e;
+      return;
+    }
+    expect(readTextSmall(at, 1024)).toEqual({ ok: true, text: "linked" });
+  });
+
+  test.skipIf(process.platform === "win32")("a FIFO is no regular file: refused at once, never opened, so it cannot hang a read (POSIX)", () => {
+    const p = fifo(path.join(root, "s-fifo"));
+    expect(readTextSmall(p, 1024)).toEqual({ ok: false, reason: "not-file" });
+  });
+});
+
+describe("readTextLines: only a regular file", () => {
+  test.skipIf(process.platform === "win32")("a FIFO, a device and a folder throw at once, never opened (POSIX)", async () => {
+    const p = fifo(path.join(root, "l-fifo"));
+    const d = path.join(root, "l-dir");
+    mkdirSync(d);
+    for (const at of [p, "/dev/zero", d]) {
+      await expect((async () => { for await (const _ of readTextLines(at, { maxBytes: 1024 })) { /* drain */ } })()).rejects.toThrow(/not a regular file/);
     }
   });
 });

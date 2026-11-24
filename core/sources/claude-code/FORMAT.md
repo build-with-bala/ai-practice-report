@@ -9,10 +9,17 @@ Evidence: **(verified locally)** = the type or field was confirmed with the stru
 **(CLI program)** = read from the CLI program's code (2.1.326), not confirmed with the probe.
 This file records names and value types only, never values.
 
-**Zero-yield.** A coverage window that read records but yielded none of its reader's primary events is drift
-`zero-yield` (set by the scan), so a renamed field never passes as a quiet store. Primary events: `claude-code.transcripts` — a session,
-prompt or tool call; `claude-code.history` — a prompt; `claude-code.stats` — a day; `claude-code.config` — a
-setting, marker or identity.
+**Zero-yield.** A coverage window that read records, or found files whose lines it could not use (skipped `parse` or
+`oversize`), but yielded none of its reader's primary events is drift `zero-yield` (set by the scan), except records
+skipped as `copied` or `empty`, and coverage stamped `aborted`, so a renamed field or a changed container never passes
+as a quiet store; files with no lines at all stay `empty`; so does a
+file whose only unusable line is its last line with no line end (skipped `partial`: a record still being written). Primary events: `claude-code.transcripts` — a session,
+prompt or tool call; `claude-code.history` — a prompt; `claude-code.stats` — a day. `claude-code.config` is not
+guarded: its records are its own events, so it cannot read one without yielding one.
+
+**io-error.** A file or store that cannot be opened or read counts as skipped `io-error`, and so does a never-opened
+file — a credential, token or key file, by its name or by the name of the file behind a link (`core/io/observe.ts`):
+the engine refuses it before it is opened, so it reads as unreadable.
 
 ## Layout
 
@@ -30,7 +37,8 @@ not read: <sid>/tool-results/, <sid>/workflows/scripts/, subagents/workflows/wf_
 ```
 
 - `<slug>` is derived from the cwd and is never parsed; project identity comes from record `cwd`.
-- The CLI names a top-level transcript by its session id (a UUID), and its records' `sessionId` equals that stem.
+- The CLI names a top-level transcript by its session id (a UUID), and its records' `sessionId` equals that stem. A
+  top-level transcript is read through a link too: a link to a regular file counts as that file.
   Subagent and workflow-agent records repeat the parent's `sessionId` and add `agentId`.
 - Agent transcripts are named `agent-<id>` (`<id>` alphanumeric); workflow run folders `wf_<w>`. The `wf_<w>` folder
   name and the `workflows/wf_<w>.json` stem are the same run id.
@@ -131,8 +139,8 @@ manual), preTokens, postTokens, durationMs, preservedSegment, …}`, `logicalPar
   `toolUseId` (string — the parent's `tool_use.id`; not set for workflow agents, which no tool call starts), `model`
   (string), `requestShape` (`foreground` | `background`), `stoppedByUser` (bool), plus `description`, `name`,
   `workflowPhase` (text), `isFork`, `finished`, `requestNonInteractive`, `launchedWithDefaults`, `parentAgentId`,
-  `pickedEffortModel`, `spawnMode`. Read: `agentType`, `isBuiltIn`, `spawnDepth`, `model`, `toolUseId`,
-  `requestShape`, `stoppedByUser`.
+  `pickedEffortModel`, `spawnMode`. Read: `agentType`, `spawnDepth`, `model`, `toolUseId`, `requestShape`,
+  `stoppedByUser`.
 - `workflows/wf_<w>.json` (verified locally): `runId`, `taskId`, `status`, `agentCount`, `durationMs`, `totalToolCalls`,
   `totalTokens`, `startTime`, `timestamp`, `defaultModel`, `phases[]`, `workflowProgress[]`, `logs[]`, `args[]`,
   `result`, `summary`, `workflowName`, `script`, `scriptPath`. Read: `durationMs` only.
@@ -149,34 +157,64 @@ manual), preTokens, postTokens, durationMs, preservedSegment, …}`, `logicalPar
   renamed field) stays `human`; `subagent` for agent files, with `parentId` = the top-level session and, for workflow agents,
   `workflowId` = keyed hash of `wf_<w>`. `start`/`end` = min/max record timestamp, `models` = distinct
   non-synthetic assistant models (subagent fallback: meta `model`), `version` = last `version` seen, `projectKey` from
-  the first `cwd`, `surface` = first `entrypoint`, `agentType` raw for built-in agents (`isBuiltIn`, else the CLI's
-  built-in list) and a keyed hash for custom ones. A model string that is not id-shaped becomes `other`.
+  the first `cwd`, `surface` = first `entrypoint`, `agentType` = the meta's `agentType` when it is one of the CLI's
+  built-in agent types (`BUILTIN_AGENTS` in `tools.ts`: `general-purpose`, `Explore`, `Plan`, `claude`, `fork`,
+  `statusline-setup`, `output-style-setup`, `claude-code-guide`, `comment-thread-analyst`, `workflow-subagent`), else
+  its keyed hash — the meta's `isBuiltIn` does not decide, and is not read. A model string that is not id-shaped
+  becomes `other`.
 - `PromptEv` only from top-level files, per `ccPromptOrigin` (origin.ts): any `sdk*` entrypoint → scripted; a
   `turnOrigin`/`promptSource` value the mapping does not know → system, and counted in coverage `unknownTypes` as
   `turnOrigin:<other>` / `promptSource:<other>` (the value itself is never kept); the text is
   consulted only when both fields are absent. Slash-command and bash-mode markup is turned back into `/name args` /
   `!command` before intent, features and the text hash.
-- `ToolEv` per `tool_use` (deduplicated by id), closed by its `tool_result`; MCP tools get `name:"mcp"` and the server in
-  `mcpServer`; Agent/Task tools get `delegateTo` via meta `toolUseId`; `AskUserQuestion` and `ToolSearch` are `meta`.
+- `ToolEv` per `tool_use` (deduplicated by id; `callId` = the id's keyed hash, never the id), closed by its `tool_result`; `name` = the tool's name when it is a
+  built-in (below), `mcp` for MCP tools (the server in `mcpServer`), else `other`, so a name the person chose never
+  leaves as a tool name; Agent/Task tools get `delegateTo` via meta `toolUseId`; `AskUserQuestion` and `ToolSearch` are
+  `meta`.
+  - Built-in tools (`CC_BUILTIN_TOOLS` in `tools.ts`) with a category of their own: `Read` (read); `Grep`, `Glob`
+    (search); `Edit`, `MultiEdit`, `NotebookEdit` (edit); `Write` (write); `Agent`, `Task` (delegate); `Workflow`
+    (workflow); `TodoWrite`, `TaskCreate`, `TaskUpdate` (todo); `EnterPlanMode`, `ExitPlanMode` (plan); `WebFetch`,
+    `WebSearch` (web); `Skill` (skill); `Monitor` (monitor); `CronCreate`, `ScheduleWakeup` (schedule);
+    `AskUserQuestion`, `ToolSearch` (meta); `Bash`, `PowerShell` (by their command line: `classifyCommand`'s category,
+    `checks`, and the `toolchain` of the command that produced the first check — `bun test` → `js`).
+  - The CLI's other built-in tools, category `other` (CLI program, 2.1.327: its lists of built-in tool names, older
+    names included): `Artifact`, `ArtifactCheck`, `ArtifactComments`, `ArtifactData`, `BashOutput`, `ClaudeDesign`,
+    `CronDelete`, `CronList`, `EndConversation`, `EnterWorktree`, `ExitWorktree`, `ListAgents`, `ListMcpResourcesTool`,
+    `LSP`, `NotebookRead`, `OfferChromeSetup`, `Projects`, `propose_skills`, `PushNotification`,
+    `ReadMcpResourceDirTool`, `ReadMcpResourceTool`, `ReadNotifications`, `RemoteTrigger`, `ReportFindings`,
+    `SendFeedback`, `SendMessage`, `SendUserFile`, `SendUserMessage`, `SetGoal`, `ShareOnboardingGuide`,
+    `ShowOnboardingRolePicker`, `SubagentHandback`, `TaskGet`, `TaskList`, `TaskOutput`, `TaskStop`,
+    `WaitForMcpServers`.
   A reply with `toolDenialKind` did not run to an end of its own: `outcome` `denied` (`user-rejected`,
   `permission-rule`, `automode-blocked`, `automode-unavailable`, `automode-parsing-error`, and any other value — that
   one also drift `toolDenialKind:(other)`), `interrupted` or `cancelled`, as is a shell command whose `toolUseResult`
   says `interrupted: true`; such a call has no `ok` and no `exit`. Else `ok` = not `is_error`, and `exit` =
   `toolUseResult.exitCode`, else — for a failing Bash/PowerShell call — the `<n>` of its reply's leading `Exit code <n>`.
 - `UsageEv` and `AnchorEv` (`cc-msg`, `cc-req`) once per `message.id`, usage fields taking the maximum over the
-  message's block records.
+  message's block records; each `AnchorEv` names its session (`sessionId`). `idTail` = the id after `msg_` / `req_`,
+  only when it has a server id's shape (letters, digits, `_` and `-`, at most 128 characters); any other id gives no
+  anchor and is skipped `bad-anchor`.
 - `TurnEv` per `turn_duration` (`effort` outside `low|medium|high|xhigh|max` becomes `other`); `TotalsEv` from the
   last `cost-state` and from each workflow summary (`claude-code:wf:<workflowId>`); `IdentityEv` per distinct
-  `session-owner.accountUuid`; `FileFactEv` per fully read transcript.
-- `MarkerEv`: `interrupt` (`detail` `user` for the interrupt text, `stopped-by-user` for meta `stoppedByUser`),
+  `session-owner.accountUuid`; `FileFactEv` per fully read transcript, naming its session (`sessionId`).
+- `MarkerEv`: `interrupt` (`detail` `user` for the interrupt text; `stopped-by-user` for meta `stoppedByUser`, at the
+  session's last record with `proxyTs: true` — the meta says that the person stopped the subagent, not when),
   `compact-auto`/`compact-manual`, `permission-mode` (changes only), `pr-link` (one per PR, `detail` = keyed hash of the
   URL), `queue` (a human prompt with `promptSource:"queued"`), `denial` per refused call (`detail` = who refused:
   `user` for `user-rejected`, `rule` for `permission-rule`, `auto` for the `automode-*` kinds, `other`),
-  `plan-enter`/`plan-exit` (tools), `commit` (`toolUseResult.gitOperation.commit`, `detail` = keyed hash of the sha).
+  `plan-enter`/`plan-exit` (tools), `commit` (`toolUseResult.gitOperation.commit`; `detail` = keyed hash of the sha's
+  first 7 hex digits, lower-cased — the key repo signals give the same commit, so it is counted once; none when the
+  sha does not start with 7 hex digits).
 - `CoverageEv.skipped` reasons: `sniffed`, `oversize`, `parse`, `io-error`, `too-large`, `copied` (below),
   `bad-record` (a record the mapper could not handle; also logged once per root as `warn cc.bad-record`), `bad-ts` (a
-  well-formed time outside the plausible range), `no-ts` (a prompt, reply, tool call or turn duration whose record has
-  no time; the markers of a file that never gives one).
+  `user`, `assistant` or `system` record whose time is well-formed but outside the plausible range, counted once and
+  never also `no-ts`: its prompt, reply and turn duration are dropped; its tool calls and markers take the file's
+  clock, else are dropped with it), `no-ts` (a prompt, reply, tool call or turn duration whose record has no time,
+  absent or shapeless; the markers of a file that never gives one).
+- **One session, one file.** A session id whose top-level transcript appears in more than one project folder (a copy,
+  a link) is read from one of them only: the one modified last (tie: the larger, then the first by path), with the
+  session folder beside it. Each other top-level file is skipped `duplicate`, and the session folder beside it is not
+  read.
 - Drift, beyond unknown record types: `timestamp:shape` (a `user`, `assistant` or `system` record whose `timestamp` is
   absent or not a time), `user.content:shape` (`message.content` neither a string nor an array),
   `assistant.message:shape`, `assistant.content:shape`, `tool_use:shape` (a call without `id` or `name`),
@@ -207,18 +245,21 @@ readers report coverage with window `lifetime`.
 <root>/stats-cache.json                       claude-code.stats    the CLI's per-day aggregates behind /stats
 <global config>                               claude-code.config   $CLAUDE_CONFIG_DIR/.claude.json when that variable
                                                                    is set, else <home>/.claude.json (CLI program)
-<root>/settings.json                          claude-code.config   hooks
+<root>/settings.json                          claude-code.config   hooks, disableAllHooks
 <root>/plugins/installed_plugins.json         claude-code.config   installed plugins
 <home>/.agents/.skill-lock.json               claude-code.config   skills placed by the `skills` installer
 <root>/skills/<name>/SKILL.md                 claude-code.config   skill folders (often symlinks into <home>/.agents/skills)
 <root>/commands/<name>.md, agents/<name>.md   claude-code.config   custom slash commands, custom subagents
 <root>/projects/<slug>/memory/*.md            claude-code.config   auto-memory files
-not read: <root>/plugins/cache/ (only used to tell whether a skill folder resolves inside it), <root>/.config.json
-          (legacy global config), settings.local.json, managed settings, project .claude/ folders and .mcp.json
+not read: <root>/plugins/cache/ (only stat'ed: whether a skill folder resolves inside it, a plugin folder's birth
+          time), <root>/.config.json (legacy global config), settings.local.json, managed settings, project .claude/
+          folders and .mcp.json
 ```
 
 Symlinked config files (settings.json, the global config, installed_plugins.json, the skill lock) are read through the
-link: the target's own type and size are checked. history.jsonl and stats-cache.json are read only as regular files.
+link: the target's own type and size are checked. history.jsonl is read through a link too: anything at its path but a
+regular file, a link's target included, is skipped `not-file`. stats-cache.json is read only as a regular file: a link
+there counts as no file.
 
 ## history.jsonl (verified locally; schema per CLI program)
 
@@ -228,12 +269,14 @@ referenced from it and kept in `pastedContents`), `pastedContents` (object keyed
 ms), `project` (string — the working directory), `sessionId` (string; optional in the CLI's schema, so older lines may
 lack it). Local commands (`/model …`, `/effort …`, `/compact`) are recorded like any other prompt.
 
-Read: `display` (in memory only), `timestamp`, `sessionId`; `pastedContents` is only tested for having entries.
-Never read: the values inside `pastedContents`, `project`.
+Read: `display` (in memory only), `timestamp`, `sessionId`, `project` (in memory only, for its project key);
+`pastedContents` is only tested for having entries. Never read: the values inside `pastedContents`.
 
 - `PromptEv` per line: window `lifetime`, origin `human`, `sessionId` = `claude-code:<id>` (the id verbatim when
   UUID-shaped, else its keyed hash; omitted when absent or empty), intent and features from the text, `textHash` = keyed
-  hash of the trimmed text, `hasPaste` = `pastedContents` has entries. `isTaskStart` = first prompt of the session, or
+  hash of the trimmed text, `hasPaste` = `pastedContents` has entries, `projectKey` = the keyed hash of `project`
+  (the key a transcript session of that folder carries in `SessionEv.projectKey`; the folder is not registered for
+  repo signals, which are read only for session folders; absent without `project`). `isTaskStart` = first prompt of the session, or
   ≥ 30 min after that session's previous prompt; `simToPrev` compares with that session's previous prompt (lines of
   concurrent sessions interleave; state is kept for the 256 most recent sessions).
 - `MarkerEv` for local commands, with the prompt's `ts` and `sessionId` (argument text is never kept):
@@ -245,10 +288,10 @@ Never read: the values inside `pastedContents`, `project`.
   `count` = the day's prompts.
 - Drift (`unknownTypes`): `line:not-object`, `display:missing` (no string `display`), `timestamp:missing`,
   `timestamp:shape` (a `timestamp` that is not a time). Skipped: `parse`, `oversize`, `io-error`, `bad-ts` (a
-  well-formed time outside the plausible range), `empty` (blank
-  `display`), `bad-record`. Coverage `from`/`to` = first/last prompt time.
+  well-formed time outside the plausible range), `empty` (blank `display`), `bad-record`, `not-file` (a
+  `history.jsonl` that is not a regular file). Coverage `from`/`to` = first/last prompt time.
 
-## stats-cache.json (verified locally; semantics per CLI program)
+## stats-cache.json (semantics per CLI program)
 
 One JSON object: `version` (number — the cache format; the CLI program reads 1–5 and writes 5), `lastComputedDate`
 (`YYYY-MM-DD`), `dailyActivity[]` {`date` (`YYYY-MM-DD`), `messageCount`, `sessionCount`, `toolCallCount` (numbers)},
@@ -258,8 +301,9 @@ One JSON object: `version` (number — the cache format; the CLI program reads 1
 `longestSession` {`sessionId`, `duration`, `messageCount`, `timestamp`}, `firstSessionDate` (ISO string),
 `hourCounts` {`<hour>`: number}.
 
-How the CLI fills it (CLI program): a `date` is the **UTC** day (the date part of `toISOString`) — unlike history's
-local days, so the two are not comparable day by day; `messageCount` counts transcript messages of top-level sessions
+How the CLI fills it (CLI program): a `date` is a day key whose zone depends on the release that wrote the entry —
+older releases wrote the UTC date, newer ones the local date — and one cache can hold entries of both, so it is not
+comparable day by day with history's local days; `messageCount` counts transcript messages of top-level sessions
 whoever wrote them, not only typed prompts; `sessionCount` counts sessions that started that day; `toolCallCount` counts
 `tool_use` blocks, subagents included; `tokensByModel` sums input, output and cache tokens per model, subagents
 included; `hourCounts` keys are local hours of session starts. The CLI refreshes the cache now and then, not with
@@ -267,14 +311,16 @@ every session (`lastComputedDate`), so it can lag behind the transcripts.
 
 Read: `version`, `dailyActivity`, `dailyModelTokens`; the rest is parsed with the file and dropped.
 
-- `DailyEv{source:"claude-code.stats", zone:"utc", unit:"messages"}` per `dailyActivity` entry: `day` = `date`,
+- `DailyEv{source:"claude-code.stats", zone:"either", unit:"messages"}` per `dailyActivity` entry: `day` = `date`,
   `count` = `messageCount`, `sessions` = `sessionCount`, `toolCalls` = `toolCallCount`, `models` = that day's
-  `tokensByModel` (keys that are not model-id-shaped become `other`; equal keys are summed; negative counts are
-  ignored).
+  `tokensByModel` (keys that are not model-id-shaped become `other`; equal keys are summed; a count that is not a
+  non-negative safe integer is ignored). An entry whose day lies outside the plausible range (before 2015, or more than
+  two days ahead) is skipped `bad-ts`; one whose `messageCount`, `sessionCount` or `toolCallCount` is not a
+  non-negative safe integer is skipped `bad-count`.
 - Drift: `version:missing`, `version:newer` (above 5), `dailyActivity:missing`, `dailyActivity:shape` (an entry
   without a real `YYYY-MM-DD` date or a numeric `messageCount`), `dailyModelTokens:type`, `dailyModelTokens:shape`.
   Coverage `records` = entries read from both arrays; `from`/`to` = start of the first and end of the last
-  `dailyActivity` day, in UTC.
+  `dailyActivity` day, each day taken as a UTC day.
 
 ## Global config (`.claude.json`) — a mixed file (CLI program; the probe's path limit hides these fields)
 
@@ -295,8 +341,8 @@ the parse tree:
 - `pluginUsage` {`<plugin id>`: {`usageCount`, `lastUsedAt`, `lastUsedNumStartups`}} — entries start at
   `usageCount` 0 when a plugin is installed, and `lastUsedAt` is also refreshed without use, so only `usageCount` is read.
 - `mcpServers` {`<name>`: {…}} and `projects` {`<path>`: {`mcpServers` {`<name>`: {…}}, `allowedTools`, …}} — only
-  the server names (the keys) are read; never the definitions (`type`, `command`, `args`, `env`, `url`, `headers`) and
-  never the project paths.
+  the server names (the keys) are read; never the definitions (`type`, `command`, `args`, `env`, `url`, `headers`); a
+  project's path is read in memory only, for its project key, and never kept.
 
 Drift: an allowlisted field present with another JSON type → `<field>:type` (`promptQueueUseCount`, `lastPlanModeUse`,
 `firstStartTime`, `oauthAccount`, `skillUsage`, `pluginUsage`, `mcpServers`, `projects`, `projects.mcpServers`); a
@@ -305,7 +351,8 @@ usage entry without a numeric `usageCount` → `skillUsage:shape` / `pluginUsage
 ## settings.json, installed_plugins.json, the skill lock (verified locally)
 
 - settings.json `hooks` {`<Event>`: [{`matcher`?, `hooks`: [{`type`, `command`?, `timeout`?, …}]}]}. Drift:
-  `hooks:type`, `hooks:shape`.
+  `hooks:type`, `hooks:shape`. `disableAllHooks` (boolean; `true` turns every hook off, so the CLI runs none — the
+  CLI's documented setting, not confirmed with the probe). Drift: `disableAllHooks:type`.
 - plugins/installed_plugins.json {`version` (number), `plugins` {`<plugin id>`: [{`scope`, `installPath`, `version`,
   `installedAt`, `lastUpdated`, `gitCommitSha`, `directoryRepositoryKey`?}]}} — only the keys of `plugins` are read.
 - `.skill-lock.json` (written by the `skills` installer, shared by several agents) {`version`, `skills` {`<name>`:
@@ -325,7 +372,17 @@ allowlist; it is never exported raw.
 - `command` / `agent`: each `commands/<name>.md` / `agents/<name>.md` (names only), `authored`. A command's usage is
   the `skillUsage` entry of its name when no skill folder has that name.
 - `plugin`: each installed plugin id and each `pluginUsage` id, `installed`.
-- `mcp-server`: each distinct server name, global or per project, `unknown`.
+- `firstSeen` (when the artifact appeared: its birth time by stat, links followed, when the file system records one
+  and it is plausible; never the change time, which moves with every rename or restore; nothing is opened) on skill folders, command and agent files, and on a plugin whose folder in the
+  plugin cache is there: `<root>/plugins/cache/<marketplace>/<plugin>/` for the id `<plugin>@<marketplace>`, each part
+  a single path segment (the CLI installs a plugin's versions below it; the layout is not confirmed with the probe,
+  which reads files, not folders). None on usage-only names.
+- `mcp-server`: each distinct server name, `unknown`: once for the global table, and once per project whose entry
+  lists it, with that project's `projectKey` (the keyed hash of the project's path, the key its sessions carry; the
+  path is read in memory only). A memory file has no project key: its folder's name is derived from the project's
+  path and cannot be turned back into it.
+- `feature` `hooks-disabled`, `authored`, when settings.json has `disableAllHooks: true`: then no `hook` events, and
+  each hook entry left out is skipped `hooks-disabled`.
 - `hook`: one per hook entry, `authored`; `name` = the event key when it is shaped like a CLI event name
   (`^[A-Z][A-Za-z]{2,40}$`), else `other`; `checks` = `classifyCommand(command).checks` for hooks with a `command`
   (the command text is never kept).
@@ -334,12 +391,14 @@ allowlist; it is never exported raw.
   the CLI's `usageCount`, or 0 for an inventory item without a usage entry; absent when the global config is missing
   or unusable.
 - Coverage: `files`/`bytes` = the JSON files read; `records` = events emitted; `from` = `firstStartTime` (else the
-  earliest marker); `to` = the latest marker. Skipped reasons: `parse`, `io-error`, `too-large`, `not-file`.
+  earliest marker); `to` = the latest marker. Skipped reasons: `parse`, `io-error`, `too-large`, `not-file`,
+  `hooks-disabled`.
 
 ## Limits (lifetime layer)
 
-- stats-cache days are UTC days of messages and history days local days of prompts (`DailyEv.zone`, `DailyEv.unit`):
-  match them day by day only after bucketing history prompts (`PromptEv.ts`) by UTC day.
+- stats-cache days are days of messages keyed by the UTC or the local date, by release (`DailyEv.zone: "either"`), and
+  history days local days of prompts (`DailyEv.zone`, `DailyEv.unit`): a stats day can match either the UTC or the
+  local day of the same activity.
 - `skillUsage` counts at most one use per minute per name.
 - `lastPlanModeUse` is a single timestamp refreshed at most once a day, not a count.
 - history.jsonl and the transcripts both yield prompts, and history and transcripts both yield `compact-manual`

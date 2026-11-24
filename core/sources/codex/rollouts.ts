@@ -1,18 +1,19 @@
 import { readdirSync, type Stats } from "node:fs";
 import path from "node:path";
 import { safeStat } from "../../io/fs";
-import { readJsonl } from "../../io/jsonl";
-import { toEpochMs } from "../../io/time";
+import { timeIssue, toEpochMs } from "../../io/time";
+import { TASK_GAP_MS } from "../../model/constants";
 import type { Ev, FileFactEv, MarkerEv, PromptEv, RateLimitEv, RolloutFactEv, SessionEv, ToolEv, TurnEv } from "../../model/events";
 import { sid, type MarkerKind, type Origin } from "../../model/ids";
 import { classifyIntent } from "../../text/intent";
 import { promptFeatures } from "../../text/structure";
 import { listDir, Tally, typeKey } from "../common/coverage";
 import { isObj, num, safeModel, str, VERSION, type Obj } from "../common/guards";
+import { streamJsonlFile } from "../common/stream";
 import type { Candidate, ScanCtx } from "../types";
 import { cxEffort } from "./effort";
 import { cxSource, cxThreadId } from "./origin";
-import { cxOutcome, cxToolCalls, type CxOutcome, type CxToolCall } from "./tools";
+import { cxOutcome, cxToolCalls, isPatchCall, type CxOutcome, type CxToolCall } from "./tools";
 import { uuidV7Ms } from "./uuid";
 
 export const ROLLOUTS_SOURCE = "codex.rollouts";
@@ -92,7 +93,6 @@ export function sniffHeavy(head: string): boolean {
   return item !== null && (HEAVY_ITEMS.has(item[1]!) || (item[1] === "Extension" && item[2] === "image_gen.generation"));
 }
 
-const TASK_GAP_MS = 30 * 60_000;
 /** Line types whose payload the reader maps: one without an object payload has changed shape. */
 const MAPPED_RECORDS: ReadonlySet<string> = new Set(["session_meta", "turn_context", "response_item", "event_msg"]);
 /** Content part types of a user-role message (the CLI's ContentItem tags for input). */
@@ -133,14 +133,26 @@ const QUESTION_REPLY = "send_user_message_question_reply";
  * An input_text part the CLI adds around an attached image: its wrapper tags (`<image name=[Image #1]>`, `</image>`) or a
  * notice that the image was resized.
  */
-const ATTACHMENT_PART = /^\s*(?:<image\b[^>]*>\s*(?:<\/image>)?|<\/image>|<image_resize_notice>[\s\S]*<\/image_resize_notice>)\s*$/;
+const IMAGE_OPEN = /^<image\b[^>]*>/;
+const RESIZE_OPEN = "<image_resize_notice>";
+const RESIZE_CLOSE = "</image_resize_notice>";
+/** Whether a part is only that (spaces around it aside); trimmed first, so no pattern backtracks over a run of spaces. */
+function isAttachmentPart(part: string): boolean {
+  const t = part.trim();
+  if (t === "</image>") return true;
+  if (t.length >= RESIZE_OPEN.length + RESIZE_CLOSE.length && t.startsWith(RESIZE_OPEN) && t.endsWith(RESIZE_CLOSE)) return true;
+  const open = IMAGE_OPEN.exec(t);
+  if (!open) return false;
+  const rest = t.slice(open[0].length).trimStart();
+  return rest === "" || rest === "</image>";
+}
 const RESIZE_NOTICES = /^\s*(?:<image_resize_notice>[\s\S]*?<\/image_resize_notice>\s*)+/;
 
 /**
  * The person's text in a user-role message's content, or undefined when the CLI wrote the message itself. Input text parts
  * are joined with "\n" after dropping attached images' wrapper parts and resize notices; a question reply is unwrapped.
  */
-function promptText(content: unknown): { text: string; images: boolean } | undefined {
+export function promptText(content: unknown): { text: string; images: boolean } | undefined {
   const texts: string[] = [];
   let images = false;
   if (typeof content === "string") texts.push(content);
@@ -148,7 +160,7 @@ function promptText(content: unknown): { text: string; images: boolean } | undef
     for (const c of content) {
       if (!isObj(c)) continue;
       if (c.type === "input_image") images = true;
-      else if (c.type === "input_text" && typeof c.text === "string" && !ATTACHMENT_PART.test(c.text)) texts.push(c.text);
+      else if (c.type === "input_text" && typeof c.text === "string" && !isAttachmentPart(c.text)) texts.push(c.text);
     }
   }
   let text = texts.join("\n").replace(RESIZE_NOTICES, "");
@@ -213,6 +225,8 @@ class RolloutReader {
   private readonly done = new Set<string>();
   /** Shell-command events not emitted yet → whether a command line was found (by their call, or the item completing it). */
   private readonly commandLineFound = new WeakMap<ToolEv, boolean>();
+  /** The line being read has a well-formed but implausible time: counted once, as `bad-ts`. */
+  private badTs = false;
 
   constructor(
     private readonly file: string,
@@ -251,6 +265,14 @@ class RolloutReader {
     this.clock = ts;
   }
 
+  /**
+   * An event of a line without a usable time is dropped, skipped `no-ts` — unless the line's time was well-formed but
+   * implausible: that line was counted once already, as `bad-ts`.
+   */
+  private noTs(): void {
+    if (!this.badTs) this.tally.skip("no-ts");
+  }
+
   record(v: unknown): void {
     const type = isObj(v) ? v.type : undefined;
     if (!isObj(v) || typeof type !== "string" || !RECORD_TYPES.has(type)) {
@@ -265,6 +287,7 @@ class RolloutReader {
       return;
     }
     const ts = toEpochMs(v.timestamp, this.ctx.now);
+    this.badTs = ts === undefined && timeIssue(v.timestamp) === "implausible";
     if (ts !== undefined) this.tick(ts);
     else this.tally.badTime(v.timestamp); // every rollout line carries one: without it the field moved
     const p = isObj(v.payload) ? v.payload : undefined;
@@ -295,8 +318,9 @@ class RolloutReader {
     if (ts !== undefined) this.tick(ts);
 
     // origin, surface and subagent links, by the rules the thread index reader shares (origin.ts)
-    const { unknownShape, ...driver } = cxSource(p.source, p.originator, this.ctx, p.parent_thread_id);
+    const { unknownShape, unknownValue, ...driver } = cxSource(p.source, p.originator, this.ctx, p.parent_thread_id);
     if (unknownShape) this.tally.unknownKey("session_meta.source:shape");
+    if (unknownValue) this.tally.unknownKey("session_meta.source:(other)");
     const meta: Meta = { ...driver, inRepo: !!p.git };
     const version = str(p.cli_version);
     if (version !== undefined && VERSION.test(version)) {
@@ -355,7 +379,7 @@ class RolloutReader {
     if (typeof c !== "string" && !(Array.isArray(c) && (c.length === 0 || c.some((x) => isObj(x) && typeof x.type === "string" && INPUT_PARTS.has(x.type))))) {
       return this.tally.unknownKey("user.content:shape");
     }
-    if (ts === undefined) return this.tally.skip("no-ts");
+    if (ts === undefined) return this.noTs();
     const found = promptText(c);
     if (!found) return;
     const { text, images } = found;
@@ -378,6 +402,7 @@ class RolloutReader {
     const ev: ToolEv = { k: "tool", tool: TOOL, source: ROLLOUTS_SOURCE, ts, sessionId: this.sessionId, name: c.name, category: c.category };
     if (rawId !== undefined) ev.callId = this.ctx.hash(rawId);
     if (c.checks.length > 0) ev.checks = c.checks;
+    if (c.toolchain !== undefined) ev.toolchain = c.toolchain;
     if (c.editExt !== undefined) ev.editExt = c.editExt;
     if (c.added !== undefined) ev.linesAdded = c.added;
     if (c.removed !== undefined) ev.linesRemoved = c.removed;
@@ -408,9 +433,12 @@ class RolloutReader {
   private call(p: Obj, ts: number | undefined): void {
     const id = str(p.call_id);
     if (id !== undefined && (this.pending.has(id) || this.done.has(id))) return; // the same call again
-    if (ts === undefined) return this.tally.skip("no-ts");
+    if (ts === undefined) return this.noTs();
     const evs = cxToolCalls(p).map((c) => this.toolEv(c, ts, id));
-    if (evs.length === 0) return;
+    if (evs.length === 0) {
+      if (isPatchCall(p)) this.tally.skip("empty-patch"); // a patch with no file section: no edit to count, but counted
+      return;
+    }
     if (id === undefined) {
       for (const ev of evs) this.out(ev);
       return;
@@ -468,13 +496,14 @@ class RolloutReader {
     if (waiting) {
       this.pending.delete(id!);
       this.finished(id!);
-      // the command that ran decides a linked shell call's category and checks (the call may not have named it);
-      // input sent to a running command, like a command the person ran, names no command of its own
+      // the command that ran decides a linked shell call's category, checks and toolchain (the call may not have named
+      // it); input sent to a running command, like a command the person ran, names no command of its own
       const [ran] = item.type === "CommandExecution" && waiting.length === 1 ? cxToolCalls(item) : [];
       for (const ev of waiting) {
-        if (ran && ev.category === "shell") {
+        if (ran?.commandLine !== undefined && ev.category === "shell") {
           ev.category = ran.category;
           if (ran.checks.length > 0) ev.checks = ran.checks;
+          if (ran.toolchain !== undefined) ev.toolchain = ran.toolchain;
         }
         if (ran?.commandLine && this.commandLineFound.has(ev)) this.commandLineFound.set(ev, true);
         RolloutReader.apply(ev, outcome);
@@ -490,7 +519,7 @@ class RolloutReader {
     const calls = cxToolCalls(item);
     const at = toEpochMs(p.started_at_ms, this.ctx.now) ?? ts ?? this.clock;
     if (calls.length === 0) return;
-    if (at === undefined) return this.tally.skip("no-ts");
+    if (at === undefined) return this.noTs();
     for (const c of calls) {
       const ev = this.toolEv(c, at, id);
       RolloutReader.apply(ev, outcome);
@@ -510,7 +539,7 @@ class RolloutReader {
    */
   private tokenCount(p: Obj, ts: number | undefined, emit = true): void {
     if (ts === undefined) {
-      if (emit) this.tally.skip("no-ts");
+      if (emit) this.noTs();
       return;
     }
     const info = isObj(p.info) ? p.info : undefined;
@@ -540,7 +569,7 @@ class RolloutReader {
   private rateLimit(bucket: string | undefined, window: "primary" | "secondary", x: unknown, ts: number, emit: boolean): void {
     const used = isObj(x) ? num(x.used_percent) : undefined;
     if (!isObj(x) || used === undefined) return;
-    const ev: RateLimitEv = { k: "ratelimit", tool: TOOL, source: ROLLOUTS_SOURCE, ts, window, usedPercent: used };
+    const ev: RateLimitEv = { k: "ratelimit", tool: TOOL, source: ROLLOUTS_SOURCE, ts, window, usedPercent: used, sessionId: this.sessionId };
     const minutes = num(x.window_minutes);
     if (minutes !== undefined) ev.windowMinutes = minutes;
     const resets = resetTime(x, ts);
@@ -554,7 +583,7 @@ class RolloutReader {
   }
 
   private endTurn(p: Obj, ts: number | undefined, status: "completed" | "interrupted"): void {
-    if (ts === undefined) return this.tally.skip("no-ts");
+    if (ts === undefined) return this.noTs();
     const id = str(p.turn_id);
     const t = id === undefined ? undefined : this.turns.get(id);
     const ev: TurnEv = { k: "turn", tool: TOOL, source: ROLLOUTS_SOURCE, ts, sessionId: this.sessionId, window: "detail", status };
@@ -569,7 +598,7 @@ class RolloutReader {
 
   private marker(kind: MarkerKind, ts: number | undefined, detail?: string): void {
     const at = ts ?? this.clock;
-    if (at === undefined) return this.tally.skip("no-ts");
+    if (at === undefined) return this.noTs();
     const ev: MarkerEv = { k: "marker", tool: TOOL, source: ROLLOUTS_SOURCE, ts: at, sessionId: this.sessionId, kind };
     if (detail !== undefined) ev.detail = detail;
     this.out(ev);
@@ -591,7 +620,8 @@ class RolloutReader {
     if (uuidTs !== undefined) fact.uuidTs = uuidTs;
     if (this.fileTs !== undefined) fact.fileTs = this.fileTs;
     this.out(fact);
-    const f: FileFactEv = { k: "file", tool: TOOL, source: ROLLOUTS_SOURCE, pathHash: this.ctx.hash(this.file), bytes: stat.size, mtime: Math.floor(stat.mtimeMs) };
+    const f: FileFactEv = { k: "file", tool: TOOL, source: ROLLOUTS_SOURCE, pathHash: this.ctx.hash(this.file), bytes: stat.size, mtime: Math.floor(stat.mtimeMs),
+      sessionId: this.sessionId };
     if (stat.birthtimeMs > 0) f.birth = Math.floor(stat.birthtimeMs);
     if (stat.ctimeMs > 0) f.ctime = Math.floor(stat.ctimeMs);
     if (this.start !== undefined) f.firstTs = this.start;
@@ -616,40 +646,18 @@ class RolloutReader {
   }
 }
 
+/** One rollout: a thread already read from another rollout stops it (skipped `duplicate`); file facts only when read to its end. */
 async function scanFile(file: string, ctx: ScanCtx, tally: Tally, seen: Set<string>, commands: CommandCounts): Promise<void> {
-  const st = safeStat(file);
-  if (!st?.isFile()) return;
   const reader = new RolloutReader(file, fileTime(path.basename(file)), ctx, tally, seen, commands);
-  let complete = true;
-  try {
-    for await (const item of readJsonl(file, { sniffSkip: sniffHeavy, signal: ctx.signal })) {
-      if ("skip" in item) {
-        tally.skip(item.skip);
-        continue;
-      }
-      tally.records++;
-      try {
-        reader.record(item.value);
-      } catch {
-        tally.skip("bad-record");
-      }
-      if (reader.duplicate) break;
-    }
-  } catch {
-    complete = false;
-    tally.skip("io-error");
-    ctx.log("warn", "cx.io-error");
-  }
+  const r = await streamJsonlFile(file, ctx, tally, (v) => {
+    reader.record(v);
+    return reader.duplicate ? "stop" : undefined;
+  }, { sniffSkip: sniffHeavy, ioLog: "cx.io-error" });
   if (reader.duplicate) {
     tally.skip("duplicate");
     return;
   }
-  if (ctx.signal.aborted) complete = false;
-  if (complete) {
-    tally.files++;
-    tally.bytes += st.size;
-  }
-  reader.finish(complete ? st : undefined);
+  if (r.stat) reader.finish(r.read ? r.stat : undefined);
 }
 
 /**
