@@ -21,6 +21,9 @@ export const RELEASES: ReleaseTable = shipped as ReleaseTable;
 
 const DAY_MS = 86_400_000;
 const TOL_MS = 2 * DAY_MS;
+const FAR_MS = 30 * DAY_MS;
+const FAIL_MIN = 3;
+const FAIL_SHARE = 0.01;
 
 const dayMs = (day: string): number => Date.parse(`${day}T00:00:00Z`);
 
@@ -44,14 +47,16 @@ function firstUses(raw: ScanResult, sessionId: string, s: ForensicScope): Map<st
  * version. A check compares the release day with the model's first use in the session (the earliest of its events
  * inside the date range that carries the model), so a thread resumed after a release with the new model is not taken
  * for an early one; where no event carries it (a version, a model only the session row names), with the row's end. It
- * is violated when that time is more than 2 days before the release day. Any violation → fail; n/a when nothing
- * matched. `values`: `checked` (the checks made), `violations`, `sessions` (the rows with one). The result names no
- * model or version: counts only.
+ * is violated when that time is more than 2 days before the release day. Any violation → warn (`before-release`): early
+ * access is real, so a question. At least max(3, 1% of the dated sessions — the rows with a check) used a model or
+ * version more than 30 days before its release → fail (`long-before-release`). n/a when nothing matched. `values`:
+ * `checked` (the checks made), `violations`, `sessions` (the rows with a violation), `longBefore` (the rows more than
+ * 30 days early). The result names no model or version: counts only.
  */
 export function checkReleases(t: SessionTable, table: ReleaseTable, raw: ScanResult, s: ForensicScope = forensicScope(raw, t)): CheckResult {
   const models = table.models.map((m) => ({ re: new RegExp(m.match), at: dayMs(m.released) }));
-  let checked = 0, violations = 0;
-  const violating = new Set<string>();
+  let checked = 0, violations = 0, dated = 0;
+  const violating = new Set<string>(), far = new Set<string>();
   const tools = new Set<ToolId>();
   for (const row of s.rows()) {
     const checks: { at: number; used: number }[] = [];
@@ -66,18 +71,23 @@ export function checkReleases(t: SessionTable, table: ReleaseTable, raw: ScanRes
       const hit = table.tools[row.tool]?.find((v) => v.version === row.version);
       if (hit) checks.push({ at: dayMs(hit.released), used: row.end });
     }
-    if (checks.length > 0) tools.add(row.tool);
+    if (checks.length > 0) {
+      tools.add(row.tool);
+      dated++;
+    }
     for (const c of checks) {
       checked++;
       if (c.used < c.at - TOL_MS) {
         violations++;
         violating.add(row.id);
       }
+      if (c.used < c.at - FAR_MS) far.add(row.id);
     }
   }
   const base = { id: "C9" as const, n: checked, tools: [...tools].sort() };
   if (checked === 0) return { ...base, status: "n/a", reason: "no-match", values: {} };
-  const values = { checked, violations, sessions: violating.size } satisfies CheckValues;
+  const values = { checked, violations, sessions: violating.size, longBefore: far.size } satisfies CheckValues;
   if (violations === 0) return { ...base, status: "pass", reason: "ok", values };
-  return asked({ ...base, status: "fail", reason: "before-release", values });
+  if (far.size >= Math.max(FAIL_MIN, FAIL_SHARE * dated)) return asked({ ...base, status: "fail", reason: "long-before-release", values });
+  return asked({ ...base, status: "warn", reason: "before-release", values });
 }

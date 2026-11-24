@@ -51,10 +51,20 @@ describe("checkFileTimes (C5)", () => {
     expect(c.values.violations).toBe(1);
   });
 
-  test("ctime more than 24 h after mtime is a violation outside a restore cluster", () => {
+  test("ctime more than 24 h after mtime is no violation: at most a note, with the files and the largest window", () => {
     const c = fileTimesOf(scanResultOf(files(20, (i) => (i < 2 ? clean(i, { ctime: T0 + i * DAY + 30 * HOUR }) : clean(i)))), UTC);
-    expect(c.status).toBe("fail");
-    expect(c.values.violations).toBe(2);
+    expect([c.status, c.reason]).toEqual(["note", "changed-after-write"]);
+    expect(c.values).toEqual({ violations: 0, changedFiles: 2, bulkFiles: 1 });
+    expect(c.askAbout).toBe("2 trace files were changed more than a day after their last write, up to 1 of them within ten minutes. "
+      + "Were they moved, archived, synced, restored, or their permissions changed?");
+  });
+
+  test("a file whose last event is at or after the scan's start is still being written: no violation", () => {
+    const raw = scanResultOf(files(20, (i) => (i >= 17 ? clean(i, { mtime: T0 + i * DAY }) : clean(i))));
+    const start = T0 + 17 * DAY + HOUR;   // files 17 to 19 hold an event at or after the start
+    expect(fileTimesOf({ ...raw, startedAt: start }, UTC).values.violations).toBe(0);
+    expect(fileTimesOf({ ...raw, startedAt: start + DAY }, UTC).values.violations).toBe(1);
+    expect(fileTimesOf({ ...raw, startedAt: T0 + 40 * DAY }, UTC).status).toBe("fail");
   });
 
   test("copied directory: 20 files born in one 10-min window, 30 days of events, are a note with that date", () => {
@@ -104,40 +114,77 @@ describe("checkFileTimes (C5)", () => {
   });
 });
 
-describe("checkFileTimes (C5): bulk changes", () => {
+describe("checkFileTimes (C5): a change time after the last write is never a fail", () => {
   const moved = Date.UTC(2026, 10, 10, 8, 0);
   /** File `i` with its ctime moved to `at` (birth and mtime kept, as a date-preserving copy leaves them). */
   const migrated = (i: number, at: number): FileFactEv => clean(i, { ctime: at });
 
-  test("a migrated history: births spread, old mtimes, every ctime in one 10-min window, is a note with that date", () => {
+  test("a migrated history: births spread, old mtimes, every ctime in one 10-min window, is a note", () => {
     const c = fileTimesOf(scanResultOf(files(20, (i) => migrated(i * 1.5, moved + i * 10_000))), UTC);
-    expect([c.status, c.reason]).toEqual(["note", "bulk-change"]);
-    expect(c.values.date).toBe("2026-11-10");
-    expect(c.values.bulkFiles).toBe(20);
-    expect(c.values.violations).toBe(0);
-    expect(c.askAbout).toBe("20 trace files were last changed on 2026-11-10 although their content is older. Was this history copied, restored or migrated then?");
+    expect([c.status, c.reason]).toEqual(["note", "changed-after-write"]);
+    expect(c.values).toEqual({ violations: 0, changedFiles: 20, bulkFiles: 20 });
   });
 
-  test("an older migration: 40 of 100 files with ctime in one window, the rest clean, is a note", () => {
-    const c = fileTimesOf(scanResultOf(files(100, (i) => (i < 40 ? migrated(i * 0.3, moved + i * 5_000) : clean(i * 0.3)))), UTC);
-    expect(c.status).toBe("note");
-    expect(c.values.bulkFiles).toBe(40);
-  });
-
-  test("3 of 100 files with ctime long after mtime at scattered times fail", () => {
+  test("files changed after their last write at scattered times are a note, not a fail", () => {
     const c = fileTimesOf(scanResultOf(files(100, (i) => (i < 3 ? migrated(i * 0.3, moved + i * DAY) : clean(i * 0.3)))), UTC);
-    expect(c.status).toBe("fail");
-    expect(c.values.violations).toBe(3);
+    expect([c.status, c.reason]).toEqual(["note", "changed-after-write"]);
+    expect([c.values.changedFiles, c.values.bulkFiles, c.values.violations]).toEqual([3, 1, 0]);
   });
 
-  test("3 of 100 files changed inside one 10-min window, under the bulk minimum of 10, fail", () => {
-    const c = fileTimesOf(scanResultOf(files(100, (i) => (i < 3 ? migrated(i * 0.3, moved + i * 1_000) : clean(i * 0.3)))), UTC);
-    expect(c.status).toBe("fail");
-  });
-
-  test("mtime violators still count inside a bulk window", () => {
+  test("files with an event after their last write still fail inside a batch of changed files", () => {
     const c = fileTimesOf(scanResultOf(files(20, (i) => migrated(i * 1.5, moved + i * 10_000)).map((f, i) => (i < 3 ? { ...f, mtime: f.lastTs! - HOUR } : f))), UTC);
-    expect(c.status).toBe("fail");
+    expect([c.status, c.reason]).toEqual(["fail", "file-times"]);
     expect(c.values.violations).toBe(3);
+  });
+
+  test("the last-write rule fails at max(2, 1% of the files)", () => {
+    const late = (n: number, bad: number) => files(n, (i) => (i < bad ? clean(i * 0.1, { mtime: T0 + i * 0.1 * DAY }) : clean(i * 0.1)));
+    expect(fileTimesOf(scanResultOf(late(300, 2)), UTC).status).toBe("pass");
+    expect(fileTimesOf(scanResultOf(late(300, 3)), UTC).status).toBe("fail");
+    expect(fileTimesOf(scanResultOf(late(20, 2)), UTC).status).toBe("fail");
+  });
+
+  describe("honest histories read a note at most", () => {
+    const T = Date.UTC(2025, 10, 1, 8);
+    let seq = 0;
+    const file = (firstTs: number, over: Partial<FileFactEv> = {}, tool: "claude-code" | "codex" = "claude-code"): FileFactEv => ({
+      k: "file", tool, source: tool === "claude-code" ? "claude-code.transcripts" : "codex.rollouts", pathHash: `h${++seq}`, bytes: 1, birth: firstTs,
+      firstTs, lastTs: firstTs + HOUR, mtime: firstTs + HOUR + 1_000, ctime: firstTs + HOUR + 1_000, ...over,
+    });
+    const cleanRun = (n: number, from: number, step = 3 * HOUR) => Array.from({ length: n }, (_, i) => file(from + i * step));
+    const cases: [string, () => FileFactEv[]][] = [
+      ["4 Codex rollouts archived days after their last write, on different days", () => [...cleanRun(296, T),
+        ...[40, 80, 120, 160].map((d) => file(T + d * DAY, { ctime: T + d * DAY + (3 + (d % 5)) * DAY }, "codex"))]],
+      ["300 files migrated in one window a year ago, then 4,000 newer files", () => {
+        const at = T + 30 * DAY;
+        return [...Array.from({ length: 300 }, (_, i) => file(T - 200 * DAY + i * 12 * HOUR, { ctime: at + i * 1_000 })), ...cleanRun(4_000, at + DAY, 2 * HOUR)];
+      }],
+      ["one migration of two folders copied 20 minutes apart (950 and 50 files)", () => {
+        const at = T + 30 * DAY;
+        return [...Array.from({ length: 950 }, (_, i) => file(T - 300 * DAY + i * 6 * HOUR, { ctime: at + Math.floor(i * 500) })),
+          ...Array.from({ length: 50 }, (_, i) => file(T - 300 * DAY + i * 5 * DAY, { ctime: at + 20 * MIN + i * 1_000 }, "codex"))];
+      }],
+      ["a restore spread over 3 hours", () => Array.from({ length: 1_000 }, (_, i) => file(T - 300 * DAY + i * 6 * HOUR, { ctime: T + 30 * DAY + Math.floor(i * 10_800) }))],
+      ["sessions pulled weekly from a second machine", () => {
+        const pulled: FileFactEv[] = [];
+        for (let w = 0; w < 20; w++) {
+          for (let i = 0; i < 15; i++) pulled.push(file(T + w * 7 * DAY + i * 8 * HOUR, { birth: T + (w + 1) * 7 * DAY + i * 1_000, ctime: T + (w + 1) * 7 * DAY + i * 1_000 }));
+        }
+        return [...cleanRun(1_200, T), ...pulled];
+      }],
+      ["2 of 150 files touched by chmod or an xattr a week later", () => {
+        const all = cleanRun(150, T);
+        all[10] = { ...all[10]!, ctime: all[10]!.mtime + 7 * DAY };
+        all[90] = { ...all[90]!, ctime: all[90]!.mtime + 9 * DAY };
+        return all;
+      }],
+    ];
+    for (const [name, make] of cases) {
+      test(name, () => {
+        const c = fileTimesOf(scanResultOf(make()), UTC);
+        expect([name, c.status === "pass" || c.status === "note"]).toEqual([name, true]);
+        expect(c.values.violations).toBe(0);
+      });
+    }
   });
 });

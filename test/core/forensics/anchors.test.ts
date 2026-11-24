@@ -252,3 +252,84 @@ describe("checkAnchors: breakdown and what is left out", () => {
     expect(c2.values.unverifiedKinds).toBe(1);
   });
 });
+
+describe("checkAnchors: no fail on a single observation", () => {
+  test("60 ids with one record 15 min late are a C1 note carrying the count, not a fail", () => {
+    const evs = genuine().slice(0, 60).map((e, i) => (i === 30 ? { ...e, ts: e.ts + 15 * MIN } : e));
+    const [c1] = anchorsOf(scanResultOf(evs));
+    expect([c1.status, c1.reason, c1.values.offIds]).toEqual(["note", "off-time", 1]);
+  });
+
+  test("C1 fails at 3 ids off and more than 1%; 2 off over 1% are a note", () => {
+    const shift = (n: number, at: number[]) => genuine().slice(0, n).map((e, i) => (at.includes(i) ? { ...e, ts: e.ts + 2 * HOUR } : e));
+    const [three] = anchorsOf(scanResultOf(shift(200, [20, 80, 140])));
+    expect([three.status, three.values.offIds]).toEqual(["fail", 3]);
+    const [two] = anchorsOf(scanResultOf(shift(100, [20, 80])));
+    expect([two.status, two.values.offIds]).toEqual(["note", 2]);
+    const [few] = anchorsOf(scanResultOf(shift(400, [20, 80, 140])));
+    expect(few.status).toBe("pass"); // 3 of 400 is under 1%
+  });
+
+  test("C2 is n/a (too-few) below 200 ids, and still fails from 200", () => {
+    const [c1, c2] = anchorsOf(scanResultOf(genuine().slice(0, 199)));
+    expect([c1.status, c2.status, c2.reason]).toEqual(["pass", "n/a", "too-few"]);
+    const evs = genuine().slice(0, 200);
+    const times = evs.map((e) => e.ts).reverse();
+    const [, r2] = anchorsOf(scanResultOf(evs.map((e, i) => ({ ...e, ts: times[i]! }))));
+    expect(r2.status).toBe("fail");
+  });
+});
+
+describe("checkAnchors: a change of id encoding never fails anyone", () => {
+  /** `n` ids over 60 days; the first `old` minted in the genuine encoding, the rest in another under the same marker. */
+  function changed(n: number, old: number, seed = 9): AnchorEv[] {
+    const r = rng(seed);
+    return Array.from({ length: n }, (_, i) => {
+      const ts = T0 + Math.floor((i * 60 * 86_400_000) / n);
+      const tail = i < old ? genuineTail(ts, r) : `01${enc(20n * 58n ** 11n + BigInt(ts - T0) * 250n, 12)}${randomB58(r, 10)}`;
+      return anchor(ts, tail);
+    });
+  }
+
+  for (const old of [360, 280, 120, 20]) {
+    test(`a split of ${old}/${400 - old} on 400 ids is scheme-changed, with a question about a tool or provider change`, () => {
+      const [c1, c2] = anchorsOf(scanResultOf(changed(400, old)));
+      expect([c1.status, c1.reason, c2.status, c2.reason]).toEqual(["n/a", "scheme-changed", "n/a", "scheme-changed"]);
+      expect(c1.askAbout).toContain("tool, the provider or a gateway change");
+    });
+  }
+
+  test("a minority side of fewer than 10 ids is judged by the off-time rule", () => {
+    const [c1] = anchorsOf(scanResultOf(changed(400, 395)));
+    expect([c1.status, c1.reason, c1.values.offIds]).toEqual(["fail", "off-time", 5]);
+    const [two] = anchorsOf(scanResultOf(changed(400, 398)));
+    expect([two.status, two.reason]).toEqual(["pass", "ok"]); // 2 of 400 off: under 1%
+  });
+
+  test("edited times are not mistaken for a scheme change", () => {
+    const tail = genuine().map((e, i) => (i % 33 === 5 ? { ...e, ts: e.ts + 2 * 365 * 86_400_000 } : e)); // re-timed ids sort last
+    expect(anchorsOf(scanResultOf(tail))[0].status).toBe("fail");
+    const evs = genuine().map((e, i) => (i % 33 === 5 ? { ...e, ts: e.ts + 2 * HOUR } : e));
+    expect(anchorsOf(scanResultOf(evs))[0].reason).toBe("off-time");
+    const block = genuine().map((e, i) => (i >= 1_000 && i < 1_200 ? { ...e, ts: e.ts + 2 * HOUR } : e));
+    expect(anchorsOf(scanResultOf(block))[0].status).toBe("fail");
+  });
+});
+
+describe("checkAnchors: known limits (a later improvement changes these on purpose)", () => {
+  test("known limit: a genuine history re-timed as a whole (stretched 3 times, moved 90 days back) passes C1 and C2", () => {
+    const evs = genuine().map((e) => ({ ...e, ts: T0 - 90 * 86_400_000 + (e.ts - T0) * 3 }));
+    const [c1, c2] = anchorsOf(scanResultOf(evs));
+    expect([c1.status, c2.status]).toEqual(["pass", "pass"]);
+  });
+
+  test("known limit: ids invented to grow with time pass C1 and C2", () => {
+    const r = rng(21);
+    const evs = Array.from({ length: 500 }, (_, i) => {
+      const ts = T0 + i * 37 * MIN;
+      return anchor(ts, `01${enc(7n * 58n ** 11n + BigInt(ts - T0) * 77n, 12)}${randomB58(r, 10)}`);
+    });
+    const [c1, c2] = anchorsOf(scanResultOf(evs));
+    expect([c1.status, c2.status]).toEqual(["pass", "pass"]);
+  });
+});

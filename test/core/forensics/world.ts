@@ -133,18 +133,34 @@ export function world(): Tagged[] {
         add(t, "claude-code", period, project);
       }
       add({ k: "identity", tool: "claude-code", source: CC, scope: "session", hash: `acct-${project === "A" ? "a" : "b"}`, sessionId: id }, "claude-code", period, project);
+      // the session's own server ids and its trace file, which name it: they follow its project
+      for (const kind of ["cc-msg", "cc-req"] as const) {
+        for (let i = 0; i < 10; i++) {
+          const ats = start + i * 30 * MIN + Math.floor(r() * MIN);
+          const tail = `01${enc(3n * 58n ** 11n + BigInt(ats - T0) * 1_000n, 12)}${Array.from({ length: 10 }, () => B58[Math.floor(r() * 58)]!).join("")}`;
+          add({ k: "anchor", tool: "claude-code", source: CC, kind, ts: ats, idTail: tail, sessionId: id }, "claude-code", period, project);
+        }
+      }
+      add({ k: "file", tool: "claude-code", source: CC, pathHash: `s-${project}${period}`, bytes: 1, birth: start, firstTs: start, lastTs: start + HOUR,
+        mtime: start + HOUR + SEC, ctime: start + HOUR + SEC, sessionId: id }, "claude-code", period, project);
 
       // Codex: a session with prompts and tool calls, its rollout and its thread row
       const cid = `codex:${project}${period}`;
       const cstart = base + (project === "A" ? DAY : 3 * DAY);
-      add({ k: "session", tool: "codex", source: CX, id: cid, window: "detail", origin: "human", start: cstart, end: cstart + 2 * HOUR, models: ["model-w"],
+      add({ k: "session", tool: "codex", source: CX, id: cid, window: "detail", origin: "human", start: cstart, end: cstart + 10 * HOUR, models: ["model-w"],
         projectKey: `k${project}` }, "codex", period, project);
-      for (let i = 0; i < 5; i++) {
+      // 55 prompts: enough gaps for the rhythm flag to measure the session
+      for (let i = 0; i < 55; i++) {
         add({ k: "prompt", tool: "codex", source: CX, ts: cstart + i * 10 * MIN, sessionId: cid, window: "detail", origin: "human", intent: "spec",
           textHash: `cx-${project}${period}-${i}`, features }, "codex", period, project);
       }
       add({ k: "codex-rollout", tool: "codex", source: CX, threadId: cid, fileTs: cstart, uuidTs: cstart + 400 }, "codex", period, project);
       add({ k: "codex-thread-row", tool: "codex", source: "codex.threads", threadId: cid, createdAt: cstart + 300 }, "codex", period, project);
+      // the session's own usage-limit readings, in a ledger of their own
+      for (let i = 0; i < 4; i++) {
+        add({ k: "ratelimit", tool: "codex", source: CX, ts: cstart + i * 10 * MIN, window: "primary", usedPercent: 10 + i * 5, resetsAt: cstart + 5 * HOUR,
+          bucket: `s-${project}`, sessionId: cid }, "codex", period, project);
+      }
     }
     // a session of project B whose rollout has no thread row
     if (period === 1) {
@@ -195,6 +211,9 @@ export function world(): Tagged[] {
     { k: "identity", tool: "claude-code", source: CC, scope: "session", hash: "acct-gone", sessionId: "claude-code:gone" },
     { k: "codex-rollout", tool: "codex", source: CX, threadId: "codex:gone", fileTs: orphanAt, uuidTs: orphanAt + 400 },
     { k: "codex-thread-row", tool: "codex", source: "codex.threads", threadId: "codex:gone", createdAt: orphanAt + 300 },
+    { k: "anchor", tool: "claude-code", source: CC, kind: "cc-msg", ts: orphanAt, idTail: `01${"z".repeat(22)}`, sessionId: "claude-code:gone" },
+    { k: "file", tool: "claude-code", source: CC, pathHash: "gone", bytes: 1, firstTs: orphanAt, lastTs: orphanAt + HOUR, mtime: orphanAt, sessionId: "claude-code:gone" },
+    { k: "ratelimit", tool: "codex", source: CX, ts: orphanAt, window: "primary", usedPercent: 1, resetsAt: orphanAt + HOUR, sessionId: "codex:gone" },
   ];
   for (const ev of orphans) add(ev, ev.tool, 1).case = "orphan";
   return out;
