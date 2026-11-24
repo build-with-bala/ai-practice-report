@@ -85,6 +85,9 @@ function identity(p: string): string {
   return normalizePath(p);
 }
 
+/** Whether two paths name the same folder, whatever their spelling (`identity`). */
+export const sameFolder = (a: string, b: string): boolean => identity(a) === identity(b);
+
 /**
  * The repo of each rev-parse answer: the linked worktrees of one repo share its common dir (resolved against the
  * candidate's folder, and compared by file identity), so they are one repo — whose root is the main worktree (the common

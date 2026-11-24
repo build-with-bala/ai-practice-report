@@ -1,5 +1,5 @@
 import { commitStream, LOG_ARGS, SINCE_AS_FILTER_SINCE, sinceArg, type ParsedCommit } from "./commits";
-import { candidates, groupRepos, type Found, type Repo } from "./discover";
+import { candidates, groupRepos, sameFolder, type Found, type Repo } from "./discover";
 import { INSTRUCTION_FILES, MAX_FOLDER_FILES, MAX_REPO_FILE_BYTES, readRepoFiles, REPO_FILES, REPO_FOLDERS, SESSION_FOLDER_FILES } from "./files";
 import { resolveGit, runGit, type GitResult, type GitRunner } from "./run";
 import type { RepoFacts, RepoSignals } from "./types";
@@ -62,6 +62,8 @@ export const REPO_SIGNALS_DESCRIBE: { reads: string[]; runs: string[] } = {
     "git metadata of the repos that hold recent session folders (found by checking each folder's ancestors for .git, never by crawling): " +
       "commit times; whether the author is the repo's user.email (compared in memory, never kept); AI co-author and generated-with trailers; " +
       "revert and fix-up subjects; changed-file paths as keyed hashes. Commit messages, emails, paths and source files are never kept.",
+    "a repo is read only when the root git reports for a session folder's repo is that folder itself (a repo whose config names " +
+      "another folder as its worktree is skipped), and git runs only in such a folder.",
     `allowlisted repo files, from the worktree the most detail sessions ran in, read in memory (at most ${MAX_REPO_FILE_BYTES / 1024} KiB each; ` +
       "larger ones count as present, unread) and reduced to kinds, check kinds, booleans and counts — their text is never kept: " +
       `${[...Object.values(INSTRUCTION_FILES).filter((p) => !p.endsWith("/")), ...REPO_FILES].join(", ")}; ` +
@@ -218,7 +220,10 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
         const [root = "", commonDir = ""] = r.stdout.split("\n").map((l) => l.replace(/\r$/, ""));
         if (r.timedOut) skip("timeout");
         else if (r.code !== 0 || root === "" || commonDir === "" || r.truncated) skip("not-a-repo");
-        else found.push({ cand, root, commonDir });
+        // the root git reports is accepted only when it is the candidate folder itself: repo config (`core.worktree`)
+        // may name any other folder, whose files would then be read as this repo's. Everything runs in the candidate.
+        else if (!sameFolder(root, cand.dir)) skip("root-mismatch");
+        else found.push({ cand, root: cand.dir, commonDir });
       } catch {
         skip("error");
       }
@@ -276,18 +281,20 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
    * partial clone that cannot list paths without fetching).
    */
   async function readCommits(repo: Repo, facts: RepoFacts): Promise<{ commits: ParsedCommit[]; names: boolean } | typeof STOPPED> {
+    // git runs in a candidate folder (a worktree sessions ran in), never in a folder only git's answers named
+    const cwd = repo.trees[0]?.root ?? repo.root;
     // an older git would fetch a partial clone's missing trees to list paths (it has no GIT_NO_LAZY_FETCH): read it
     // without them. A partial clone says so by `extensions.partialClone` (older layouts) or its remote's `promisor`.
     let names = true;
     if (!atLeast(version, NO_LAZY_FETCH_SINCE)) {
       for (const key of PARTIAL_CLONE_KEYS) {
-        const r = await git(["config", "--get", key], repo.root);
+        const r = await git(["config", "--get", key], cwd);
         if (r === STOPPED) return STOPPED;
         if (r.code === 0 && r.stdout.trim() !== "") names = false;
         if (!names) break;
       }
     }
-    const id = await git(["config", "--get", "user.email"], repo.root);
+    const id = await git(["config", "--get", "user.email"], cwd);
     if (id === STOPPED) return STOPPED;
     const email = id.code === 0 ? id.stdout.trim() : "";
     if (email === "") return { commits: [], names };
@@ -308,7 +315,7 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
     const readLog = async (withNames: boolean) => {
       const parse = commitStream({ salt: input.salt, email, maxFiles });
       let streamed = false;
-      const r = await git(logArgs(withNames), repo.root, timeoutMs, LOG_BYTES, (chunk) => { streamed = true; parse.push(chunk); });
+      const r = await git(logArgs(withNames), cwd, timeoutMs, LOG_BYTES, (chunk) => { streamed = true; parse.push(chunk); });
       if (r === STOPPED) return STOPPED;
       if (!streamed && r.stdout !== "") parse.push(new TextEncoder().encode(r.stdout));
       return { r, parse };

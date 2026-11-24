@@ -354,6 +354,24 @@ describe("repo files in a scan", () => {
     expect(r.skipped).toEqual({ "files-error": 1 });
   });
 
+  test("a repo whose config names another folder as its worktree is skipped (root-mismatch), and nothing there is opened or run in", async () => {
+    const elsewhere = path.join(h.root, "elsewhere");
+    plant(elsewhere, { "CLAUDE.md": "`pytest`", ".claude/settings.json": JSON.stringify({ hooks: {} }) });
+    const root = repoWith("r", {});
+    git(root, ["config", "core.worktree", elsewhere]);
+    const opened: string[] = [];
+    __observeOpens((p) => opened.push(p));
+    const cwds: string[] = [];
+    const r = await run([root], { repoSignals: { runner: (a, o) => { cwds.push(o.cwd); return runGit(a, o); } } });
+    __observeOpens(undefined);
+    expect(r.repos.repos).toEqual([]);
+    expect(r.repos.skipped).toEqual({ "root-mismatch": 1 });
+    expect(r.repos.status).toBe("ok");
+    const real = realpathSync.native(elsewhere);
+    expect(opened.filter((p) => p.startsWith(elsewhere) || p.startsWith(real))).toEqual([]);
+    expect(cwds.filter((c) => c.startsWith(elsewhere) || c.startsWith(real))).toEqual([]);
+  });
+
   test("repoSignals: false reads no repo file", async () => {
     const root = repoWith("r", { "CLAUDE.md": "`pytest`" });
     const opened: string[] = [];
