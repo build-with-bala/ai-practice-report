@@ -332,6 +332,26 @@ describe("readStore", () => {
     expect([read, tally.skipped, tally.note, tally.files, logs]).toEqual([false, { "too-large": 1 }, "too-large", 0, ["zz.db-too-large"]]);
   });
 
+  test.skipIf(process.platform === "win32")("a busy store copied without its linked -wal is read, and skipped linked-wal", async () => {
+    const root = scratch();
+    const file = path.join(root, "s.db");
+    const w = new Database(file);
+    w.exec("CREATE TABLE t (a INTEGER)");
+    w.close();
+    const lock = new Database(file);
+    lock.exec("BEGIN EXCLUSIVE"); // a reader gets SQLITE_BUSY: openRo copies the store
+    writeFileSync(path.join(root, "elsewhere"), "not a wal");
+    symlinkSync(path.join(root, "elsewhere"), `${file}-wal`);
+    const tally = tallyOf();
+    try {
+      expect(await readStore(file, ctxFor({ tmp: root }), tally, "zz", () => {})).toBe(true);
+    } finally {
+      lock.exec("ROLLBACK");
+      lock.close();
+    }
+    expect([tally.files, tally.skipped]).toEqual([1, { "linked-wal": 1 }]);
+  });
+
   test("a linked store counts the bytes of its target, not of the link", async () => {
     const root = scratch();
     const target = path.join(root, "real", "store.db");
