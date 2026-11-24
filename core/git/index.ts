@@ -2,7 +2,7 @@ import { commitStream, LOG_ARGS, SINCE_AS_FILTER_SINCE, sinceArg, type ParsedCom
 import { candidates, groupRepos, sameFolder, type Found, type Repo } from "./discover";
 import { INSTRUCTION_FILES, MAX_FOLDER_FILES, MAX_REPO_FILE_BYTES, readRepoFiles, REPO_FILES, REPO_FOLDERS, SESSION_FOLDER_FILES } from "./files";
 import path from "node:path";
-import { resolveGit, runGit, type GitResult, type GitRunner } from "./run";
+import { OLDEST_GIT, resolveGit, runGit, type GitResult, type GitRunner } from "./run";
 import type { RepoFacts, RepoSignals } from "./types";
 
 export type { AiTool, CheckFacts, CommitFact, HookFacts, InstructionFacts, InstructionKind, RepoFacts, RepoSignals } from "./types";
@@ -86,10 +86,12 @@ export const REPO_SIGNALS_DESCRIBE: { reads: string[]; runs: string[] } = {
     "git rev-parse --show-toplevel --git-common-dir",
     "git config --get user.email",
     "git config --get extensions.partialClone, git config --get remote.origin.promisor (git older than 2.44 only)",
-    "git log --no-mailmap --exclude=refs/stash --all --no-merges --no-renames --since-as-filter=<date> --max-count=<n> --name-only -z (commit metadata only)",
-    "git log --no-mailmap -n50 --since-as-filter=<180 days ago> --format=%ct -- <instruction file paths> (commit times only; not for a partial clone read without paths)",
+    "git log --no-use-mailmap --exclude=refs/stash --all --no-merges --no-renames --since-as-filter=<date> --max-count=<n> --name-only -z (commit metadata only)",
+    "git log --no-use-mailmap -n50 --since-as-filter=<180 days ago> --format=%ct -- <instruction file paths> (commit times only; not for a partial clone read without paths)",
     "on a git older than 2.37, --since instead of --since-as-filter: there, a commit whose recorded date is older than the window " +
-      "hides the ancestors no other branch reaches, so their commits are not read",
+      "hides the ancestors no other branch reaches, so their commits are not read. --since-as-filter walks the whole history: on a " +
+      "very large one without a commit-graph a log can end by its timeout, and the pass then reads as partial, with a cut list",
+    `every argument is one git ${OLDEST_GIT.join(".")}, the oldest supported, accepts (--since-as-filter only from 2.37)`,
     "every git command: started by its absolute path on PATH (never from the repo folder), with no stdin, no pager and no prompt; " +
       "no transport at all (-c protocol.allow=never, GIT_ALLOW_PROTOCOL=none) and GIT_NO_LAZY_FETCH=1, so nothing is " +
       "fetched whatever the repo config says; fsmonitor and signature checks off; log output in UTF-8; no .mailmap; no system config; " +
@@ -143,7 +145,8 @@ const isEnoent = (e: unknown): boolean => (e as { code?: unknown } | null)?.code
  * an abort: any of them makes the pass `partial`. The others (`missing`, `not-a-repo`, `root-mismatch`, `too-many-repos`,
  * the deliberate `file-*` refusals and caps) are what the rules leave out, and keep it `ok`.
  */
-const UNFINISHED: readonly string[] = ["budget", "timeout", "error", "identity-error", "log-error", "files-error", "file-io-error"];
+const UNFINISHED: readonly string[] = ["budget", "timeout", "error", "identity-error", "config-error", "log-error", "history-error", "files-error",
+  "file-io-error"];
 
 /** Stopped by the budget or an abort before the command settled. */
 const STOPPED = Symbol("stopped");
@@ -324,6 +327,7 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
         const r = await git(["config", "--get", key], cwd);
         if (r === STOPPED) return STOPPED;
         if (r.timedOut) skip("timeout");
+        else if (r.code !== 0 && r.code !== 1) skip("config-error");
         // set, or not known to be unset: read without paths
         if ((r.code === 0 && r.stdout.trim() !== "") || r.timedOut || (r.code !== 0 && r.code !== 1)) names = false;
         if (!names) break;
@@ -345,9 +349,10 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
     // window start is `--since-as-filter` where git has it; on an older git, `--since` (see `sinceArg`) still lets a
     // commit whose recorded date is older than the window hide the ancestors no other branch reaches.
     const logArgs = (withNames: boolean): string[] => [
-      // `--exclude=refs/stash` before `--all`: a stash is no commit of the person's; `--no-mailmap`: the worktree's
-      // `.mailmap` (a file anyone can commit, or a FIFO) is never opened
-      "log", "--no-mailmap", "--exclude=refs/stash", "--all", "--no-merges", "--no-renames",
+      // `--exclude=refs/stash` before `--all`: a stash is no commit of the person's; `--no-use-mailmap`: the worktree's
+      // `.mailmap` (a file anyone can commit, or a FIFO) is never opened (the shorter `--no-mailmap` needs git 2.27).
+      // Each argument's oldest git: OLDEST_GIT. `--since-as-filter` walks the whole history (`sinceArg`)
+      "log", "--no-use-mailmap", "--exclude=refs/stash", "--all", "--no-merges", "--no-renames",
       ...(since === undefined ? [] : [sinceArg(since, atLeast(version, SINCE_AS_FILTER_SINCE))]),
       `--max-count=${maxCommits}`, ...(withNames ? ["--name-only"] : []), ...LOG_ARGS,
     ];

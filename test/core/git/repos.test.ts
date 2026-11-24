@@ -215,7 +215,7 @@ describe("repo signals: discovery from session folders and commits as keyed fact
     const r = await run([r4], { repoSignals: { runner: (a, o) => { seen.push(a.join(" ")); return runGit(a, o); } } });
     expect(r.repos.repos[0]).toMatchObject({ identity: false, commits: [] });
     // no commit log: only the instruction-file history (commit times by any author, Task 3) runs `log`
-    expect(seen.filter((c) => c.startsWith("log ")).map((c) => c.split(" ").slice(0, 3).join(" "))).toEqual(["log --no-mailmap -n50"]);
+    expect(seen.filter((c) => c.startsWith("log ")).map((c) => c.split(" ").slice(0, 3).join(" "))).toEqual(["log --no-use-mailmap -n50"]);
   });
 });
 
@@ -266,6 +266,47 @@ describe("repo signals: the log reads commits only, whatever the repo holds", ()
     expect(r.repos.repos[0]).toMatchObject({ instructions: { touched: 1 } });
     expect(r.repos.repos[0]!.commits).toHaveLength(1);
   }, 30_000);
+});
+
+describe("repo signals: every argument is one the oldest supported git accepts", () => {
+  /**
+   * The options git 2.13 (the oldest the engine supports) accepts for each subcommand the engine runs, as far as the
+   * engine uses them; `--since-as-filter` only from 2.37. Any other argument is refused as git refuses it (exit 129).
+   */
+  const accepts = (version: [number, number], a: readonly string[]): boolean => {
+    const [cmd, ...rest] = a;
+    const dashDash = rest.indexOf("--");
+    const opts = dashDash === -1 ? rest : rest.slice(0, dashDash);
+    const known: Record<string, RegExp> = {
+      "--version": /^$/,
+      "rev-parse": /^--(show-toplevel|git-common-dir)$/,
+      config: /^(--get|user\.email|extensions\.partialClone|remote\.origin\.promisor)$/,
+      log: new RegExp(`^(--no-use-mailmap|--exclude=refs/stash|--all|--no-merges|--no-renames|--since=\\S+|--max-count=\\d+|--name-only|-z|--format=\\S+|-n\\d+${
+        version[0] > 2 || (version[0] === 2 && version[1] >= 37) ? "|--since-as-filter=\\S+" : ""})$`),
+    };
+    const re = known[cmd!];
+    return re !== undefined && opts.every((x) => re.test(x));
+  };
+  const strict = (version: [number, number], refused: string[][]): GitRunner => async (a, o) => {
+    if (a[0] === "--version") return { code: 0, stdout: `git version ${version.join(".")}.0\n`, timedOut: false, truncated: false };
+    if (!accepts(version, a)) {
+      refused.push([...a]);
+      return { code: 129, stdout: "", timedOut: false, truncated: false };
+    }
+    return runGit(a, o);
+  };
+
+  for (const version of [[2, 13], [2, 36], [2, 37], [2, 51]] as [number, number][]) {
+    test(`git ${version.join(".")}: no argument is refused, and the repo reads whole`, async () => {
+      const r1 = makeRepo(path.join(h.root, "strict"), [1, 2].map((i) => ({ files: { "CLAUDE.md": `${i}` }, message: `c${i}`, at: ago(3 - i) })));
+      const refused: string[][] = [];
+      const r = await run([r1], { repoSignals: { runner: strict(version, refused) } });
+      expect(refused).toEqual([]);
+      expect(r.repos).toMatchObject({ status: "ok", skipped: {} });
+      expect(r.repos.repos[0]).toMatchObject({ instructions: { touched: 2 } });
+      expect(r.repos.repos[0]!.commits).toHaveLength(2);
+    });
+  }
 });
 
 describe("repo signals: the window start by git version", () => {
@@ -326,6 +367,16 @@ describe("repo signals: one repo, one count; hostile repos", () => {
     const p = await run([a, b], { salt, signal: ac.signal, onProgress: (x) => { if (x.plugin === "repo-signals" && x.done === x.total) ac.abort(); } });
     expect(p.repos.status).toBe("partial");
     expect(owners(p)).toEqual([[small, 3, 3], [large, 3, 0]]);
+  });
+
+  test("commits of the same time are listed by id, smallest first", async () => {
+    const at = ago(2);
+    const r1 = makeRepo(path.join(h.root, "ties"), [1, 2, 3, 4].map((i) => ({ files: { "n.txt": `${i}` }, message: `c${i}`, at })));
+    const commits = (await run([r1])).repos.repos[0]!.commits;
+    expect(commits).toHaveLength(4);
+    expect(new Set(commits.map((c) => c.ts)).size).toBe(1);
+    const ids = commits.map((c) => c.id!);
+    expect(ids).toEqual([...ids].sort());
   });
 
   test("a commit has one id in every clone (a keyed hash of its full sha, never the sha), and is mine in each", async () => {
@@ -496,6 +547,27 @@ describe("repo signals: a read that did not finish is never ok", () => {
     expect(logs).toEqual([true, false]);
     expect(r.repos).toMatchObject({ status: "partial", skipped: { "log-error": 1 } });
     expect(r.repos.repos[0]).toMatchObject({ commits: [], fileLists: false, instructions: { touched: 1 } });
+  });
+
+  test("an instruction history that fails or throws is counted (history-error), and the pass partial", async () => {
+    const isHistory = (a: readonly string[]) => a[0] === "log" && !a.includes("--all");
+    for (const answer of [() => Promise.resolve(res(128)), () => Promise.resolve(res(null, "", { truncated: true })), () => Promise.reject(new Error("boom"))]) {
+      const r1 = makeRepo(path.join(h.root, `hist-${Math.random().toString(36).slice(2)}`), [{ files: { "CLAUDE.md": "x" }, message: "docs", at: ago(2) }]);
+      const r = await run([r1], { repoSignals: { runner: except((a) => (isHistory(a) ? answer() : undefined)) } });
+      expect(r.repos).toMatchObject({ status: "partial", skipped: { "history-error": 1 } });
+      expect(r.repos.repos[0]!.commits).toHaveLength(1);
+    }
+  });
+
+  test("on a git older than 2.44, a partial-clone key read that fails is counted (config-error), and the pass partial", async () => {
+    const runner = except((a) => {
+      if (a[0] === "--version") return Promise.resolve(res(0, "git version 2.40.1\n"));
+      if (a[0] === "config" && a.includes("extensions.partialClone")) return Promise.resolve(res(128));
+      return undefined;
+    });
+    const r = await run([repo1()], { repoSignals: { runner } });
+    expect(r.repos).toMatchObject({ status: "partial", skipped: { "config-error": 1 } });
+    expect(r.repos.repos[0]).toMatchObject({ fileLists: false });
   });
 
   test("a timeout that ended the commit log makes the pass partial", async () => {

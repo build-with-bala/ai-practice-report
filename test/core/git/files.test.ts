@@ -268,7 +268,7 @@ describe("readRepoFiles: the allowlisted repo files, as booleans and counts", ()
     let opens = 0;
     __observeOpens(() => opens++);
     const skipped: Record<string, number> = {};
-    await readRepoFiles(root, [], { signal: ac.signal, runner: runGit, now: Date.now(), timeoutMs: 10_000,
+    await readRepoFiles(root, [], { signal: ac.signal, runner: runGit, now: Date.now(), timeoutMs: 10_000, sinceAsFilter: GIT_37,
       skip: (r) => { skipped[r] = (skipped[r] ?? 0) + 1; } });
     __observeOpens(undefined);
     clearTimeout(timer);

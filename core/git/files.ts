@@ -226,13 +226,14 @@ export interface RepoFileOptions {
    * folder, pipe or device where a file goes), `file-too-large`, `file-refused` (a never-opened name, or a link to one),
    * `file-io-error`, `file-parse` (settings that are no JSON object), `files-capped` (past MAX_FOLDER_FILES), and
    * `folders-capped` per session folder inside the worktree past MAX_FOLDER_FILES (its files are not read); `budget`
-   * once when the pass was stopped (abort or budget) before its end; and `timeout` when the history command timed out.
+   * once when the pass was stopped (abort or budget) before its end; `timeout` when the history command timed out, and
+   * `history-error` when it failed, was cut at its output cap, or threw.
    */
   skip?: (reason: string) => void;
   /** Whether git may read the history by path (default true; false for a partial clone read without paths). */
   history?: boolean;
-  /** Whether git has `--since-as-filter` (2.37 or later; default false): see `sinceArg`. */
-  sinceAsFilter?: boolean;
+  /** Whether git has `--since-as-filter` (2.37 or later): see `sinceArg`. No default: the caller says which walk. */
+  sinceAsFilter: boolean;
 }
 
 /**
@@ -367,15 +368,19 @@ export async function readRepoFiles(root: string, cwds: readonly string[], o: Re
     const paths = [...Object.values(INSTRUCTION_FILES), ...subs.flatMap((sub) => SESSION_FOLDER_FILES.map((n) => path.join(sub, n)))]
       .map((p) => `:(literal)${p.split(path.sep).join("/").replace(/\/$/, "")}`);
     try {
-      const r = await o.runner(["log", "--no-mailmap", `-n${HISTORY_MAX}`, sinceArg(since, o.sinceAsFilter ?? false), "--format=%ct", "--", ...paths],
+      // `--no-use-mailmap`, not `--no-mailmap` (git 2.27): see OLDEST_GIT
+      const r = await o.runner(["log", "--no-use-mailmap", `-n${HISTORY_MAX}`, sinceArg(since, o.sinceAsFilter), "--format=%ct", "--", ...paths],
         { cwd: root, timeoutMs: o.timeoutMs, maxBytes: HISTORY_BYTES, signal: o.signal });
-      if (r.timedOut) skip("timeout");
+      if (o.signal.aborted) skip("budget");
+      else if (r.timedOut) skip("timeout");
       else if (r.code === 0 && !r.truncated) {
         const times = r.stdout.split("\n").map((l) => Number(l.trim()) * 1000).filter((t) => Number.isFinite(t) && t >= since && t <= o.now + DAY_MS);
         instructions.touched = times.length;
         if (times.length > 0) instructions.lastTouched = Math.max(...times);
-      }
-    } catch { /* no history: touched stays 0 */ }
+      } else skip("history-error"); // a failed or cut history: touched stays 0, counted
+    } catch {
+      skip("history-error");
+    }
   }
   return { instructions, hooks, ci, precommit };
 }
