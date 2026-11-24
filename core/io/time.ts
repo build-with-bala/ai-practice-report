@@ -2,7 +2,12 @@ const MIN_MS = Date.UTC(2015, 0, 1);
 const TWO_DAYS = 2 * 86_400_000;
 const SECONDS_CUTOFF = 1e11; // below this a number is epoch seconds
 
-/** Epoch ms from seconds, ms, numeric strings or date strings; undefined if implausible. */
+/**
+ * Epoch ms from seconds, ms, numeric strings or date strings; undefined if implausible. A date string is read as
+ * `Date.parse` reads it: with a zone (`Z`, `+05:30`) at that zone; a date-time with no zone (`2026-11-20T10:00:00`) in
+ * the process time zone; a date alone (`2026-11-20`) as the start of that day in UTC. Every format a reader is known
+ * to meet carries a zone, so the two zone-less rules apply only to odd data.
+ */
 export function toEpochMs(v: unknown, now: number = Date.now()): number | undefined {
   if (typeof v === "number") return Number.isFinite(v) ? plausible(scale(v), now) : undefined;
   if (typeof v !== "string") return undefined;

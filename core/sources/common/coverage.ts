@@ -44,12 +44,12 @@ export class Tally {
     this.skipped[reason] = (this.skipped[reason] ?? 0) + 1;
   }
 
-  /** Unknown record types keep their name only when it looks like a schema token. */
+  /** An unknown record type, as a drift key that never echoes it (`typeKey`). */
   unknown(type: unknown): void {
     this.unknownKey(typeKey(type));
   }
 
-  /** A pre-shaped drift key (e.g. `turnOrigin:<value>`, `event_msg:<type>`). */
+  /** A drift key built by the reader from its own vocabulary (e.g. `turnOrigin:(other)`, `event_msg:(none)`): never a value read. */
   unknownKey(key: string): void {
     this.unknownTypes[key] = (this.unknownTypes[key] ?? 0) + 1;
   }

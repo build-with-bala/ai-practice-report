@@ -36,7 +36,6 @@ const KNOWN_EVENTS: ReadonlySet<string> = new Set([
   "tool.execution_complete", "subagent.started", "subagent.completed", "subagent.failed", "subagent.selected", "hook.start", "hook.end",
   "skill.invoked", "permission.requested", "exit_plan_mode.requested",
 ]);
-/** An event type as a drift key: dotted lower-case schema tokens are kept, anything else is `(other)` / `(none)`. */
 /** An event type the reader does not know, as a drift key: never echoed. */
 const eventKey = (t: unknown): string => `event:${typeof t !== "string" ? "(none)" : "(other)"}`;
 

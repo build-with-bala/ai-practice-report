@@ -34,7 +34,6 @@ const TURN_COLUMNS = ["thread_id", "status", "started_at", "completed_at", "dura
 /** `thread_turns.status` values of finished turns (the app server's TurnStatus); `inProgress` turns have not ended. */
 const FINISHED: ReadonlyMap<string, NonNullable<TurnEv["status"]>> = new Map([["completed", "completed"], ["failed", "failed"], ["interrupted", "interrupted"]]);
 const IN_PROGRESS = "inProgress";
-/** An unknown status keeps its value in the drift key when it has the enum's shape (camelCase letters), else `(other)`. */
 /** Sandbox modes: the state DB's policy types (FORMAT) and the CLI's own sandbox modes (CLI program). */
 const SANDBOX_MODES: ReadonlySet<string> = new Set(["read-only", "workspace-write", "danger-full-access", "external-sandbox", "disabled", "managed"]);
 /** Approval policies (CLI program; `on-failure` from older versions). */

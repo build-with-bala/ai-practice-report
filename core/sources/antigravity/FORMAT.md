@@ -35,7 +35,7 @@ the engine refuses it before it is opened, so it reads as unreadable.
   brain/<conversation id>/{task,implementation_plan,walkthrough}.md  antigravity.brain (existence only)
 <home>/.gemini/antigravity/brain/<conversation id>/<artifact>.md     antigravity.brain (the IDE's; unverified)
 vscodeUser(env, "Antigravity")/globalStorage/state.vscdb             antigravity.ide
-vscodeUser(env, "Antigravity IDE")/globalStorage/state.vscdb         antigravity.ide (both app folders verified locally)
+vscodeUser(env, "Antigravity IDE")/globalStorage/state.vscdb         antigravity.ide (the app's folder has either name)
 not read: brain/<id>/.system_generated/logs/{transcript_full.jsonl, chunks/, media/}, brain/<id>/.system_generated/
           {steps/, messages/, tasks/}, brain/<id>/{scratch/, .user_uploaded/}, the CLI's settings.json, its state and summary
           .pb/.pbtxt files, log/, cache/, annotations/, implicit/, knowledge/, presence/, plugin_data/, updater/, bin/;
@@ -253,8 +253,8 @@ SQLite, VS Code's `ItemTable` (`key` TEXT, `value` BLOB; verified locally) — w
 
 ## Brain artifacts (`antigravity.brain`)
 
-`<brain>/<conversation id>/task.md`, `implementation_plan.md`, `walkthrough.md` (the agent's plan artifacts; from the task
-brief; unverified). Each brain folder is its own candidate.
+`<brain>/<conversation id>/task.md`, `implementation_plan.md`, `walkthrough.md` (the agent's plan artifacts;
+unverified). Each brain folder is its own candidate.
 
 - **MarkerEv** `plan-artifact` per regular file present (`lstat` only: never opened), `detail` = `task`,
   `implementation_plan` or `walkthrough`, `ts` = its last modification with `proxyTs: true` (a file time stands in for

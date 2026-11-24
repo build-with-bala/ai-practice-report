@@ -194,8 +194,8 @@ export function copyBytes(file: string): number {
  *   than `o.maxCopyBytes` (default MAX_COPY_BYTES; `copyBytes`: the store and its `-wal`), when it is null.
  * A never-opened store (`noteOpen`) is refused at its first open, the header read: null, and nothing of it is read.
  * Anything at the path that is not a regular file (a folder, a pipe, a device; links followed) is null before any open,
- * so a pipe never blocks the read. A private copy takes the `-wal` and `-shm` only when they are regular files, never
- * through a link (SQLite itself refuses a linked companion). Read-only is the store's own file and `-wal`: with a `-wal`
+ * so a pipe never blocks the read. A private copy never follows a linked `-wal` or `-shm` (SQLite itself refuses a linked
+ * companion); one that is no file at all makes the copy fail. Read-only is the store's own file and `-wal`: with a `-wal`
  * present (a writer is or was there), SQLite may create or rewrite the `-shm` index beside the store, as any reader does.
  */
 export function openRo(file: string, temp: TempDirs, opener: (uri: string) => Database = defaultOpener, o?: { maxCopyBytes?: number }): RoDb | null {
@@ -228,7 +228,7 @@ export function openRo(file: string, temp: TempDirs, opener: (uri: string) => Da
     const dest = path.join(dir, path.basename(store));
     for (const suffix of ["", "-wal", "-shm"]) {
       if (!existsSync(store + suffix)) continue;
-      if (suffix !== "" && !lstatSync(store + suffix).isFile()) continue; // a linked or odd companion is never followed
+      if (suffix !== "" && lstatSync(store + suffix).isSymbolicLink()) continue; // a linked companion is never followed
       noteOpen(store + suffix, "copy");
       copyFileSync(store + suffix, dest + suffix);
     }
