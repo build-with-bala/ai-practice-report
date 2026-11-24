@@ -22,10 +22,10 @@ const forensicsOf = (raw: ScanResult, o: AnalyzeOptions): Forensics => {
 describe("analyze: forensics under exclusions", () => {
   test("excluding the only tool leaves nothing to verify", () => {
     const raw = personaScan("expert");
-    const id = raw.store.all("session")[0]!.id;
     const ids: IdentityEv[] = [
       { k: "identity", tool: "claude-code", source: "claude-code.config", scope: "config", hash: "acct" },
-      { k: "identity", tool: "claude-code", source: "claude-code.transcripts", scope: "session", hash: "acct", sessionId: id },
+      ...raw.store.all("session").slice(0, 5).map((s): IdentityEv =>
+        ({ k: "identity", tool: "claude-code", source: "claude-code.transcripts", scope: "session", hash: "acct", sessionId: s.id })),
     ];
     for (const e of ids) raw.store.add(e);
     const kept = forensicsOf(raw, UTC);
@@ -66,7 +66,8 @@ describe("analyze: forensics under exclusions", () => {
 
     const before = forensicsOf(raw, UTC), after = forensicsOf(raw, { ...UTC, exclude: { projects: [busiest] } });
     const c10a = byId(before, "C10"), c10b = byId(after, "C10");
-    expect(c10a.n - c10b.n).toBe(droppedPrompts);
+    const sum = (c: CheckResult) => Object.values(c.values).reduce<number>((a, x) => a + (x as number), 0);
+    expect(sum(c10a) - sum(c10b)).toBe(droppedPrompts);
     for (const key of Object.keys(c10a.values) as ProvenanceKey[]) expect([key, c10a.values[key]! - (c10b.values[key] ?? 0)]).toEqual([key, expected.get(key) ?? 0]);
     expect(byId(before, "soft:unclosed-tools").n - byId(after, "soft:unclosed-tools").n).toBe(droppedCalls);
   });
@@ -81,8 +82,8 @@ describe("analyze: forensics under exclusions", () => {
       const id = `claude-code:s${d}`;
       const s: SessionEv = { k: "session", tool: "claude-code", source: "claude-code.transcripts", id, window: "detail", origin: "human", start, end: start + DAY, models: [] };
       evs.push(s, { k: "identity", tool: "claude-code", source: "claude-code.transcripts", scope: "session", hash: d < 2 ? "acct-a" : "acct-b", sessionId: id });
-      for (let i = 0; i < 5; i++) {
-        const ts = start + i * 3_600_000;
+      for (let i = 0; i < 10; i++) {
+        const ts = start + i * 1_800_000;
         const p: PromptEv = { k: "prompt", tool: "claude-code", source: "claude-code.transcripts", ts, sessionId: id, window: "detail", origin: "human",
           intent: "spec", textHash: `p${d}-${i}`, features };
         const { sessionId: _, ...unbound } = p;
@@ -91,14 +92,15 @@ describe("analyze: forensics under exclusions", () => {
     }
     const raw = scanResultOf(evs);
     const before = forensicsOf(raw, UTC);
-    expect([byId(before, "C3").n, byId(before, "C4").n, byId(before, "C4").values.accounts]).toEqual([20, 4, 2]);
+    expect([byId(before, "C3").n, byId(before, "C4").n, byId(before, "C4").values.accounts]).toEqual([40, 4, 2]);
 
     const after = forensicsOf(raw, { ...UTC, exclude: { from: T0 + 15 * DAY } });
-    expect([byId(after, "C3").n, byId(after, "C3").status]).toEqual([10, "pass"]);
-    // the later sessions name only the second account, which the config does not: C4 fails on what is left
-    expect([byId(after, "C4").n, byId(after, "C4").status, byId(after, "C4").values.accounts]).toEqual([2, "fail", 1]);
+    expect([byId(after, "C3").n, byId(after, "C3").status]).toEqual([20, "pass"]);
+    // the later sessions name only the second account, which the config does not: C4 asks on what is left
+    expect([byId(after, "C4").n, byId(after, "C4").status, byId(after, "C4").values.accounts]).toEqual([2, "warn", 1]);
 
     const early = forensicsOf(raw, { ...UTC, exclude: { to: T0 + 15 * DAY } });
-    expect([byId(early, "C3").n, byId(early, "C4").n, byId(early, "C4").status]).toEqual([10, 2, "pass"]);
+    // two sessions naming the signed-in account are too few for a pass
+    expect([byId(early, "C3").n, byId(early, "C4").n, byId(early, "C4").status, byId(early, "C4").reason]).toEqual([20, 2, "n/a", "too-few"]);
   });
 });

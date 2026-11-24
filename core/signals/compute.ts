@@ -211,6 +211,7 @@ export function computeSignals(sample: readonly SessionStats[], g: Globals): Sig
     landedShare,
     reworkShare: g.reworkShare, prsPerWeek: g.prsPerWeek, aiCoauthoredShare: g.aiCoauthoredShare, commitAfterSession: g.commitAfterSession,
     guardrails: g.guardrails, headlessPerWeek: g.headlessPerWeek,
+    uncheckedCommandShare: d(new Span(), 0, null), // not computed yet: a null detail metric
     evidence, repoSignals: g.repoSignals,
   };
 }

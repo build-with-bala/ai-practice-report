@@ -55,7 +55,7 @@ const MODEL_CHARS = /^[a-z0-9.-]{1,64}$/;
 /** The public tier and variant words a model id may hold after its family (I3: an allowlist, not a prefix). */
 export const MODEL_WORDS: ReadonlySet<string> = new Set([
   "opus", "sonnet", "haiku", "mini", "nano", "pro", "flash", "ultra", "max", "turbo", "preview", "latest", "codex", "instant", "large", "medium",
-  "small", "lite", "plus", "thinking", "high", "low", "coder", "chat", "vision", "exp",
+  "small", "lite", "plus", "thinking", "high", "low", "coder", "chat", "vision", "exp", "fable", "mythos",
 ]);
 /** The letters a version may end in, from public ids: "o" (gpt-4o, "omni") and "b" (a parameter count: llama-3-70b). */
 export const VERSION_SUFFIXES: ReadonlySet<string> = new Set(["o", "b"]);
@@ -107,19 +107,38 @@ function publicTokens(tokens: readonly string[]): boolean {
 }
 
 /**
+ * The two public cloud forms of a model id: Amazon Bedrock's, an optional region word ("us.", "eu.", "apac."…), then
+ * "anthropic.", the id, then "-v<N>:<N>"; and Google Vertex AI's, the id then "@" and a real date "YYYYMMDD".
+ */
+const BEDROCK = /^(?:[a-z]{2,8}\.)?anthropic\.([a-z0-9.-]+)-v\d{1,3}:\d{1,3}$/;
+const VERTEX = /^([a-z0-9.-]+)@(\d{4})(\d{2})(\d{2})$/;
+
+/** The plain id of a cloud form (`BEDROCK`, `VERTEX`), else `raw` itself: the grammar then runs on the plain id. */
+function plainId(raw: string): string {
+  const b = BEDROCK.exec(raw);
+  if (b) return b[1]!;
+  const v = VERTEX.exec(raw);
+  if (v && realDate(+v[2]!, +v[3]!, +v[4]!)) return v[1]!;
+  return raw;
+}
+
+/**
  * A model id as exported. The rule guards against the ACCIDENTAL disclosure of a deployment or customer name riding on
  * a public family prefix ("gpt-4o-contoso-prod"); it is not a defence against a person who deliberately encodes data in
  * their own model ids — they control their own machine and their own export. A list of every public version was
  * rejected: each new model would read "<family>-other" until the tool is updated; the shape rules below are used instead.
  * - "ft:…" (a fine-tuned model) → "fine-tuned";
+ * - a cloud form ("us.anthropic.claude-sonnet-4-20250514-v1:0", "claude-opus-4-1@20250805") is first reduced to its
+ *   plain id (`plainId`), and the rules below run on that;
  * - an id of a known family (`MODEL_FAMILY_PATTERN`) whose "-"-separated tokens after the family pass `publicTokens`
  *   (at most 6 tokens: `MODEL_WORDS` words, at most 2 versions and one real date) → the id as is ("claude-opus-4-1-20250805", "gpt-4o-mini");
  * - another id of a known family → "<family>-other" ("gpt-4o-contoso-prod" → "gpt-other");
  * - anything else, or an id with characters other than a–z, 0–9, "." and "-", or longer than 64 → "other".
  * Ids that map to one export id have their counts summed by the caller.
  */
-export function modelExportId(raw: string): string {
-  if (raw.startsWith("ft:")) return "fine-tuned";
+export function modelExportId(id: string): string {
+  if (id.startsWith("ft:")) return "fine-tuned";
+  const raw = plainId(id);
   if (!MODEL_CHARS.test(raw)) return "other";
   const m = FAMILY.exec(raw);
   if (!m) return "other";

@@ -37,15 +37,16 @@ function decimal(units: number, places: number): string {
 }
 
 /**
- * The value under `k`, read once, when it is valid by the key's kind in `VALUE_KINDS`; else undefined. The call site
+ * The value under `k`, an own property read once, when it is valid by the key's kind in `VALUE_KINDS`; else undefined
+ * (a key inherited through the prototype chain is never read). The call site
  * names only the key: its kind (and so its check) comes from the shared table.
  */
 function num(v: CheckValues, k: Exclude<ValueKey, "date">): number | undefined {
-  const x: unknown = v[k];
+  const x: unknown = Object.hasOwn(v, k) ? v[k] : undefined;
   return isValueOf(VALUE_KINDS[k], x) ? (x as number) : undefined;
 }
 function dayOf(v: CheckValues): string | undefined {
-  const x: unknown = v.date;
+  const x: unknown = Object.hasOwn(v, "date") ? v.date : undefined;
   return isValueOf(VALUE_KINDS.date, x) ? (x as string) : undefined;
 }
 
@@ -73,12 +74,24 @@ const missingThreadRows: Ask = (v) => {
     : `${digits(m)} Codex session ${plural(m, "file has", "files have")} no entry in Codex's own thread index. Were session files copied in from somewhere else?`;
 };
 
+/** The questions C1 and C2 share: their n/a results for ids that exist but cannot be verified. */
+const unverifiedIds: { readonly [R in Reason]?: Ask } = {
+  "unknown-marker": (v) => {
+    const u = num(v, "unrecognized");
+    return u === undefined ? undefined
+      : `${digits(u)} server-issued ${plural(u, "id does", "ids do")} not start the way the service's ids do, so the ids could not be checked against their times. Were some sessions run through another provider or a gateway?`;
+  },
+  "scheme-changed": () => "The server-issued ids do not follow one line in time: their encoding seems to have changed, so they could not be checked against their times. Did the tool, the provider or a gateway change during this history?",
+  degenerate: () => "All server-issued ids, or all their recorded times, are the same, so their order could not be checked. Were these ids or times copied or rewritten?",
+};
+
 const QUESTIONS: { readonly [I in CheckId]?: { readonly [R in Reason]?: Ask } } = {
   C1: {
+    ...unverifiedIds,
     "off-time": (v) => {
       const s = num(v, "offShare");
       return s === undefined ? undefined
-        : `About ${pctUp1(s)}% of the server-issued ids do not match their recorded times, by more than 10 minutes. Were any trace times edited, or sessions added from somewhere else?`;
+        : `About ${pctUp1(s)}% of the server-issued ids do not match their recorded times, by more than 10 minutes. Was this machine's clock wrong for a while, were sessions run through a gateway that issues its own ids, or were trace times edited or sessions added from somewhere else?`;
     },
     "malformed-ids": (v) => {
       const m = num(v, "malformed");
@@ -87,6 +100,7 @@ const QUESTIONS: { readonly [I in CheckId]?: { readonly [R in Reason]?: Ask } } 
     },
   },
   C2: {
+    ...unverifiedIds,
     "out-of-order": (v) => {
       const r = num(v, "rho");
       return r === undefined ? undefined
@@ -102,7 +116,7 @@ const QUESTIONS: { readonly [I in CheckId]?: { readonly [R in Reason]?: Ask } } 
     "missing-stats-days": missingStatsDays,
   },
   C4: {
-    "no-match": () => "None of the sessions names the account this machine is signed in to. Were these sessions made under another account or on another machine?",
+    "no-match": () => "None of the sessions names the account this machine is signed in to now. Did you change accounts since, or were these sessions made on another machine?",
     "several-accounts": (v) => {
       const a = num(v, "accounts");
       return a === undefined ? undefined : `The sessions name ${digits(a)} different accounts. Were several accounts used on this machine?`;
@@ -112,17 +126,17 @@ const QUESTIONS: { readonly [I in CheckId]?: { readonly [R in Reason]?: Ask } } 
     "file-times": (v) => {
       const n = num(v, "violations");
       return n === undefined ? undefined
-        : `${digits(n)} trace files have file times that do not fit the events inside them: last modified before their last event, or changed more than a day after their last write. Were trace files edited, or their times reset?`;
+        : `${digits(n)} trace ${plural(n, "file was", "files were")} last modified before the last event ${plural(n, "it holds", "they hold")}. Were trace files edited, or their times set back?`;
     },
     "restore-cluster": (v) => {
       const d = dayOf(v), n = num(v, "days");
       return d === undefined || n === undefined ? undefined
         : `Most trace files were created on ${d} although their activity spans ${digits(n)} days. Was this history copied or restored from a backup then?`;
     },
-    "bulk-change": (v) => {
-      const d = dayOf(v), n = num(v, "bulkFiles");
-      return d === undefined || n === undefined ? undefined
-        : `${digits(n)} trace files were last changed on ${d} although their content is older. Was this history copied, restored or migrated then?`;
+    "changed-after-write": (v) => {
+      const n = num(v, "changedFiles"), w = num(v, "bulkFiles");
+      return n === undefined || w === undefined ? undefined
+        : `${digits(n)} trace ${plural(n, "file was", "files were")} changed more than a day after ${plural(n, "its", "their")} last write, up to ${digits(w)} of them within ten minutes. Were they moved, archived, synced, restored, or their permissions changed?`;
     },
   },
   C6: { "missing-thread-rows": missingThreadRows },
@@ -149,7 +163,12 @@ const QUESTIONS: { readonly [I in CheckId]?: { readonly [R in Reason]?: Ask } } 
     "before-release": (v) => {
       const s = num(v, "sessions");
       return s === undefined ? undefined
-        : `${digits(s)} ${plural(s, "session", "sessions")} used a model or tool version more than 2 days before its public release. Were session times edited?`;
+        : `${digits(s)} ${plural(s, "session", "sessions")} used a model or tool version more than 2 days before its public release. Did you have early access to it?`;
+    },
+    "long-before-release": (v) => {
+      const s = num(v, "longBefore");
+      return s === undefined ? undefined
+        : `${digits(s)} ${plural(s, "session", "sessions")} used a model or tool version more than 30 days before its public release. Were session times edited, or did you have early access to it?`;
     },
   },
   "soft:rhythm": {
@@ -185,6 +204,16 @@ const QUESTIONS: { readonly [I in CheckId]?: { readonly [R in Reason]?: Ask } } 
       const r = num(v, "recent"), m = num(v, "artifacts");
       return r === undefined || m === undefined ? undefined
         : `${digits(r)} of the ${digits(m)} ${plural(m, "tool or skill", "tools and skills")} in use ${plural(r, "was", "were")} first seen in the 7 days before this scan. Was this machine set up or migrated, or were its tools updated, in that week?`;
+    },
+  },
+  "soft:no-server-pass": {
+    "no-server-pass": () => "No check on server-issued data could confirm this history, so what was checked rests on the tools' own local records alone. Which tools and providers did you use?",
+  },
+  "soft:missing-ids": {
+    "missing-ids": (v) => {
+      const n = num(v, "turns");
+      return n === undefined ? undefined
+        : `${digits(n)} typed ${plural(n, "turn comes", "turns come")} from a tool that records server-issued ids, but none of them carries one. Were these sessions run through another provider or a gateway?`;
     },
   },
 };

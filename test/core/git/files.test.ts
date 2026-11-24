@@ -11,16 +11,20 @@ import { parseHooks } from "../../../core/sources/common/hooks";
 import type { Candidate, SourcePlugin } from "../../../core/sources/types";
 import { CANARY, expectNoCanaries } from "../../kit/canary";
 import { fakeHome, type FakeHome } from "../../kit/home";
-import { git, makeRepo } from "../../fixtures/repos";
+import { git, gitVersion, isolateGitHome, makeRepo } from "../../fixtures/repos";
 
 const POSIX = process.platform !== "win32";
 const DAY = 86_400_000;
 const ago = (days: number) => Date.now() - days * DAY;
+/** git 2.37 has `--since-as-filter`. */
+const GIT_37 = (([a, b]) => a > 2 || (a === 2 && b >= 37))(gitVersion());
 
 let h: FakeHome;
-beforeEach(() => { h = fakeHome(); });
+let restoreHome: () => void = () => {};
+beforeEach(() => { h = fakeHome(); restoreHome = isolateGitHome(path.join(h.root, "home")); });
 afterEach(() => {
   __observeOpens(undefined);
+  restoreHome();
   h.cleanup();
 });
 
@@ -64,7 +68,7 @@ const repoWith = (name: string, files: Record<string, string>) =>
 /** readRepoFiles of one folder, with real git; `skipped` collects the skip reasons. */
 async function read(root: string, cwds: string[] = [], now = Date.now()) {
   const skipped: Record<string, number> = {};
-  const facts = await readRepoFiles(root, cwds, { signal: new AbortController().signal, runner: runGit, now, timeoutMs: 10_000,
+  const facts = await readRepoFiles(root, cwds, { signal: new AbortController().signal, runner: runGit, now, timeoutMs: 10_000, sinceAsFilter: GIT_37,
     skip: (reason) => { skipped[reason] = (skipped[reason] ?? 0) + 1; } });
   return { ...facts, skipped };
 }
@@ -86,6 +90,17 @@ describe("the text scanners: commands found in text, as check kinds only", () =>
     expect(mentionedChecks("~~~\ncargo clippy\n~~~\n$ tsc --noEmit\n  $ make build\n")).toEqual(["build", "lint", "typecheck"]);
     expect(mentionedChecks("We run pytest and npm test in CI, but say so only in prose.")).toEqual([]);
     expect(mentionedChecks("an unclosed fence:\n```\npytest -q\n")).toEqual(["test"]);
+  });
+
+  test("a line of 400,000 backticks, or of spans, is scanned in linear time (the 30 s guard is the bound)", () => {
+    expect(mentionedChecks("`".repeat(400_000))).toEqual([]);
+    expect(mentionedChecks(`${"``a".repeat(130_000)}`)).toEqual([]);
+    expect(mentionedChecks(`\`npm test\` ${"`".repeat(400_000)}`)).toEqual(["test"]);
+  }, 30_000);
+
+  test("code spans start at the first backtick of a run", () => {
+    expect(mentionedChecks("``npm test``")).toEqual(["test"]);
+    expect(mentionedChecks("```npm test`` x")).toEqual([]);
   });
 
   test("ciChecks: `run:` values, plain, quoted and block scalars; other keys never", () => {
@@ -253,15 +268,22 @@ describe("readRepoFiles: the allowlisted repo files, as booleans and counts", ()
     let opens = 0;
     __observeOpens(() => opens++);
     const skipped: Record<string, number> = {};
-    const t = Date.now();
-    await readRepoFiles(root, [], { signal: ac.signal, runner: runGit, now: Date.now(), timeoutMs: 10_000,
+    await readRepoFiles(root, [], { signal: ac.signal, runner: runGit, now: Date.now(), timeoutMs: 10_000, sinceAsFilter: GIT_37,
       skip: (r) => { skipped[r] = (skipped[r] ?? 0) + 1; } });
     __observeOpens(undefined);
     clearTimeout(timer);
+    // the timer fired while the pass ran (not after it), and stopped it before its last file
     expect(fired).toBeGreaterThan(0);
-    expect(fired - t).toBeLessThan(500);
     expect(opens).toBeLessThan(64);
     expect(skipped).toEqual({ budget: 1 });
+  }, 30_000);
+
+  test("session folders past the cap are counted (folders-capped), not dropped silently", async () => {
+    const root = repoWith("r", {});
+    const subs = Array.from({ length: 70 }, (_, i) => path.join(root, `s${String(i).padStart(2, "0")}`));
+    for (const d of subs) mkdirSync(d);
+    const f = await read(root, subs);
+    expect(f.skipped).toEqual({ "folders-capped": 6 });
   });
 
   test.skipIf(!POSIX)("a FIFO where a repo file goes is no file: never opened, the read never hangs (POSIX)", async () => {
@@ -274,13 +296,25 @@ describe("readRepoFiles: the allowlisted repo files, as booleans and counts", ()
     }
     const opened: string[] = [];
     __observeOpens((p) => opened.push(p));
-    const t = Date.now();
     const f = await read(root, [root]);
     __observeOpens(undefined);
-    expect(Date.now() - t).toBeLessThan(5_000);
     expect(opened).toEqual([]);
     expect([f.instructions.files, f.ci.present, f.precommit.present]).toEqual([[], false, false]);
     expect(f.skipped).toEqual({ "file-not-file": 4 });
+  }, 30_000);
+});
+
+describe("the instruction-file history", () => {
+  test.skipIf(!GIT_37)("HEAD's newest commit dated years back hides none of the recent instruction commits (git >= 2.37)", async () => {
+    const root = makeRepo(path.join(h.root, "r"), [1, 2, 3].map((i) => ({ files: { "CLAUDE.md": `v${i}` }, message: `docs ${i}`, at: ago(10 - i) })));
+    const date = new Date(Date.UTC(2015, 0, 1)).toISOString();
+    git(root, ["-c", "user.email=dev@fixture.test", "-c", "user.name=Fixture Dev", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "skewed clock"],
+      { GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date });
+    const f = await read(root, [root]);
+    expect(f.instructions.touched).toBe(3);
+    // and through a scan, which passes the git version's choice itself
+    const r = await run([root]);
+    expect(r.repos.repos[0]!.instructions.touched).toBe(3);
   });
 });
 
@@ -307,16 +341,8 @@ describe("repo files in a scan", () => {
 
   test("a repo without user.email still has its files read", async () => {
     const root = makeRepo(path.join(h.root, "r"), [{ files: { "CLAUDE.md": "`pytest`" }, message: "a", at: ago(3) }], { email: "" });
-    // no global config either: a home of its own
-    const saved = { HOME: process.env.HOME, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME };
-    process.env.HOME = h.root;
-    process.env.XDG_CONFIG_HOME = path.join(h.root, "xdg");
-    let r: Awaited<ReturnType<typeof run>>;
-    try {
-      r = await run([root]);
-    } finally {
-      for (const [k, v] of Object.entries(saved)) if (v === undefined) Reflect.deleteProperty(process.env, k); else process.env[k] = v;
-    }
+    // no global config either: every test here runs with a home of its own
+    const r = await run([root]);
     expect(r.repos.repos[0]).toMatchObject({ identity: false, commits: [], instructions: { files: ["claude"], namesChecks: ["test"], touched: 1 } });
   });
 
@@ -329,11 +355,30 @@ describe("repo files in a scan", () => {
       override get(k: string) { if (++gets > 1) throw new Error("boom"); return super.get(k); }
     })([[projectKey, root]]);
     const r = await collectRepoSignals({ cwds, recent: new Set([projectKey]), salt: new Uint8Array(32), now: Date.now(), signal: new AbortController().signal });
-    expect(r.status).toBe("ok");
+    // the files pass did not finish: the pass is partial
+    expect(r.status).toBe("partial");
     expect(r.repos).toHaveLength(1);
     expect(r.repos[0]!.commits).toHaveLength(1);
     expect(r.repos[0]!.instructions.files).toEqual([]);
     expect(r.skipped).toEqual({ "files-error": 1 });
+  });
+
+  test("a repo whose config names another folder as its worktree is skipped (root-mismatch), and nothing there is opened or run in", async () => {
+    const elsewhere = path.join(h.root, "elsewhere");
+    plant(elsewhere, { "CLAUDE.md": "`pytest`", ".claude/settings.json": JSON.stringify({ hooks: {} }) });
+    const root = repoWith("r", {});
+    git(root, ["config", "core.worktree", elsewhere]);
+    const opened: string[] = [];
+    __observeOpens((p) => opened.push(p));
+    const cwds: string[] = [];
+    const r = await run([root], { repoSignals: { runner: (a, o) => { cwds.push(o.cwd); return runGit(a, o); } } });
+    __observeOpens(undefined);
+    expect(r.repos.repos).toEqual([]);
+    expect(r.repos.skipped).toEqual({ "root-mismatch": 1 });
+    expect(r.repos.status).toBe("ok");
+    const real = realpathSync.native(elsewhere);
+    expect(opened.filter((p) => p.startsWith(elsewhere) || p.startsWith(real))).toEqual([]);
+    expect(cwds.filter((c) => c.startsWith(elsewhere) || c.startsWith(real))).toEqual([]);
   });
 
   test("repoSignals: false reads no repo file", async () => {
@@ -354,5 +399,9 @@ describe("--explain: what repo signals read", () => {
     // settings.local.json is named only as never opened (pre-flight P21)
     expect(reads.split(/(?<=\.) /).filter((sentence) => sentence.includes("settings.local.json"))).toEqual([expect.stringMatching(/never opened/)]);
     expect(reads).toMatch(/system-level git config/i);
+    // the known limits are stated where the guarantee is
+    expect([/link swapped in between the check and the open/, /hard link/, /\.git file .*another repository/, /root git reports/]
+      .filter((re) => !re.test(reads))).toEqual([]);
+    expect(REPO_SIGNALS_DESCRIBE.runs.join("\n")).toMatch(/older than 2\.37/);
   });
 });

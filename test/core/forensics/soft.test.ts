@@ -81,30 +81,39 @@ describe("softFlags", () => {
       };
     };
 
+    /** Five measured sessions, the least the flag judges, each with gaps from `gap`. */
+    const five = (gap: (i: number) => number): Ev[] =>
+      ["s1", "s2", "s3", "s4", "s5"].flatMap((id): Ev[] => [sess(id), ...session(id, gap)]);
+
     test("constant gaps are raised, with the median CV and the sessions measured", () => {
-      const f = flag(session("s", () => MIN), "soft:rhythm");
+      const f = flag(five(() => MIN), "soft:rhythm");
       expect([f.status, f.reason]).toEqual(["note", "regular-rhythm"]);
-      expect(f.values).toEqual({ sessions: 1, medianCv: 0 });
-      expect(f.n).toBe(1);
+      expect(f.values).toEqual({ sessions: 5, medianCv: 0 });
+      expect(f.n).toBe(5);
       expect(f.askAbout).toBeString();
+    });
+
+    test("fewer than 5 measured sessions are too few to judge", () => {
+      const f = flag(five(() => MIN).filter((e) => !("sessionId" in e && e.sessionId === "s5") && !(e.k === "session" && e.id === "s5")), "soft:rhythm");
+      expect([f.status, f.reason, f.n]).toEqual(["n/a", "too-few", 4]);
     });
 
     test("gaps with a small jitter are raised", () => {
       const r = rng(3);
-      const f = flag(session("s", () => MIN + Math.round((r() - 0.5) * 10 * SEC)), "soft:rhythm");
+      const f = flag(five(() => MIN + Math.round((r() - 0.5) * 10 * SEC)), "soft:rhythm");
       expect(f.status).toBe("note");
       expect(f.values.medianCv as number).toBeLessThan(0.1);
     });
 
     test("uniformly random gaps between two bounds are raised", () => {
       const r = rng(4);
-      const f = flag(session("s", () => 30 * SEC + Math.round(r() * 270 * SEC)), "soft:rhythm");
+      const f = flag(five(() => 30 * SEC + Math.round(r() * 270 * SEC)), "soft:rhythm");
       expect(f.status).toBe("note");
       expect(f.values.medianCv as number).toBeLessThan(0.6);
     });
 
     test("a human-like heavy-tailed mix, CV near 1, is not raised", () => {
-      const f = flag(session("s", humanLike(5)), "soft:rhythm");
+      const f = flag(five(humanLike(5)), "soft:rhythm");
       expect([f.status, f.reason]).toEqual(["pass", "ok"]);
       expect(f.values.medianCv as number).toBeGreaterThan(0.8);
     });
@@ -278,6 +287,7 @@ describe("softFlags", () => {
   test("raised flags hold numbers and dates only, and texts stay within the covered characters", () => {
     const evs: Ev[] = [
       ...Array.from({ length: 61 }, (_, i) => prompt(T0 + i * MIN, { textHash: i < 5 ? "x" : `u${i}` }, 300)),
+      ...["s2", "s3", "s4", "s5"].flatMap((id): Ev[] => [sess(id), ...Array.from({ length: 61 }, (_, i) => prompt(T0 + i * MIN, { sessionId: id }))]),
       ...[80, 1, 2, 3, 4, 5].map((d) => lifetime(NOW - d * DAY)),
       ...Array.from({ length: 10 }, (_, i) => toolEv(i, { ok: undefined })),
       ...["a", "b", "c"].map((name) => config({ name, firstSeen: NOW - DAY })),

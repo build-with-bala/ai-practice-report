@@ -40,7 +40,9 @@ export interface AnalyzeOptions { reference?: "v0"; bootstrap?: number; seed?: n
  * - `forensics` is display only: it never changes a score, an evidence minimum or a confidence.
  * - `identity`: the distinct `IdentityEv` hashes (sorted) and their count: of kept tools, and for a session-scope hash
  *   that names a session, only when that session is a kept row (not excluded by project or date, no host copy).
- * - `exclusions`: the tools and projects the exclusions hit, and the sessions they dropped.
+ * - `exclusions`: the tools and projects the exclusions hit, and the sessions they dropped. `dateRange`: a start or an
+ *   end of the date range was given. `weeksOutside`: the number of distinct ISO weeks in which the person was active,
+ *   with a tool and project that are not excluded, and that lie outside the date range; 0 when no range was given.
  * - `diagnostics`: orphan events per kind, what the cross-tool dedupe found, and the scan's warnings, less those that
  *   name an excluded tool.
  */
@@ -48,7 +50,8 @@ export interface Analysis {
   meta: { core: string; reference: "v0"; bootstrap: number; seed: number; now: number; timeZone: string; repoSignals: RepoSignals["status"] };
   coverage: CoveragePanel; signals: Signals; dimensions: DimensionResult[]; overall: Overall; personas: string[];
   exposure: Exposure; stack: Stack; risk: RiskPosture; config: ConfigPanel; projects: ProjectSummary[]; forensics: Forensics;
-  identity: { accounts: number; hashes: string[] }; exclusions: { tools: number; projects: number; sessions: number };
+  identity: { accounts: number; hashes: string[] }; exclusions: { tools: number; projects: number; sessions: number;
+    dateRange?: boolean; weeksOutside?: number };
   diagnostics: { orphans: Partial<Record<Ev["k"], number>>; dedupe: { hostSessions: number; pairedPrompts: number; relabelled: number }; warnings: Warning[] };
   private: { dayParts: DayParts; config: Array<{ kind: ConfigEv["kind"]; name: string; key: string; provenance: ConfigEv["provenance"]; used: boolean }>;
     models: Record<string, number> };

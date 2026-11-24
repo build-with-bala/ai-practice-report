@@ -1,3 +1,4 @@
+import { promptWindowByTool } from "../analysis/promptwindow";
 import type { SessionTable } from "../analysis/types";
 import type { ScanResult } from "../scan";
 import { forensicScope, type ForensicScope } from "./scope";
@@ -12,12 +13,15 @@ import { toolsOf, type CheckResult, type CheckValues, type ProvenanceKey } from 
 /**
  * C10, `info`: prompt counts by tool × origin × window, keyed `<tool>/<origin>/<window>` in `values`. Prompts in scope
  * only (`ForensicScope.prompt`: kept tools, inside the date range, no session left out, no host copy); a scripted
- * prompt the dedupe relabelled counts as `human`. n/a without prompts. `n`: the prompts counted.
+ * prompt the dedupe relabelled counts as `human`. n/a without prompts. `n`: the prompts of each tool's one window
+ * (`promptWindowByTool`), so a prompt both windows hold counts once: the two windows are never summed.
  */
 export function provenance(raw: ScanResult, t: SessionTable, s: ForensicScope = forensicScope(raw, t)): CheckResult {
   const prompts = s.prompts();
   const tools = toolsOf(prompts);
   if (prompts.length === 0) return { id: "C10", status: "n/a", n: 0, reason: "no-data", values: {}, tools };
+  const chosen = promptWindowByTool(raw, t);
+  const n = prompts.filter((p) => chosen.get(p.tool) === p.window).length;
   const counts = new Map<ProvenanceKey, number>();
   for (const p of prompts) {
     const key: ProvenanceKey = `${p.tool}/${t.isHuman(p) ? "human" : p.origin}/${p.window}`;
@@ -25,5 +29,5 @@ export function provenance(raw: ScanResult, t: SessionTable, s: ForensicScope = 
   }
   const values: CheckValues = {};
   for (const key of [...counts.keys()].sort()) values[key] = counts.get(key)!;
-  return { id: "C10", status: "info", n: prompts.length, reason: "classify-only", values, tools };
+  return { id: "C10", status: "info", n, reason: "classify-only", values, tools };
 }

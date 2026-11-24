@@ -61,7 +61,7 @@ export const repoSignalsOff = (s: Signals): boolean => s.repoSignals === "off" |
  * A numeric guard, not a scoring rule: a component's z is clamped to [-Z_GUARD, Z_GUARD]. It guards extreme inputs (it
  * is 8 reference sigmas out), and keeps every later weighted sum finite, Task 8's overall included.
  */
-export const Z_GUARD = 8;
+export const Z_GUARD = 3;
 const clampZ = (z: number): number => (Number.isNaN(z) ? z : Math.min(Z_GUARD, Math.max(-Z_GUARD, z)));
 
 /** Scores one component against the reference, with weight 0 (the dimension sets the effective weights). */

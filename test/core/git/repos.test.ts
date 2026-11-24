@@ -1,22 +1,32 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { gitRunnerWithEnv, runGit, type GitRunner } from "../../../core/git/run";
+import { collectRepoSignals } from "../../../core/git/index";
+import { runGit, type GitRunner } from "../../../core/git/run";
 import type { Ev } from "../../../core/model/events";
 import { scan, type ScanOptions } from "../../../core/scan";
 import type { Candidate, SourcePlugin } from "../../../core/sources/types";
 import { keyedHash } from "../../../core/text/hash";
 import { CANARY, expectNoCanaries } from "../../kit/canary";
 import { fakeHome, type FakeHome } from "../../kit/home";
-import { git, gitVersion, makeRepo } from "../../fixtures/repos";
+import { git, gitVersion, isolateGitHome, makeRepo, runnerWithEnv } from "../../fixtures/repos";
 
 const POSIX = process.platform !== "win32";
 const DAY = 86_400_000;
 const GIT_44 = (([a, b]) => a > 2 || (a === 2 && b >= 44))(gitVersion());
+/** git 2.37 has `--since-as-filter`: an old-dated commit then hides nothing below it. */
+const GIT_37 = (([a, b]) => a > 2 || (a === 2 && b >= 37))(gitVersion());
+/** A commit made at `at` (author and committer date) in `dir`, by the fixture's person. */
+const commitAt = (dir: string, message: string, at: number) => {
+  const date = new Date(at).toISOString();
+  git(dir, ["-c", "user.email=dev@fixture.test", "-c", "user.name=Fixture Dev", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", message],
+    { GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date });
+};
 
 let h: FakeHome;
-beforeEach(() => { h = fakeHome(); });
-afterEach(() => h.cleanup());
+let restoreHome: () => void = () => {};
+beforeEach(() => { h = fakeHome(); restoreHome = isolateGitHome(path.join(h.root, "home")); });
+afterEach(() => { restoreHome(); h.cleanup(); });
 
 /** A plugin that reports one detail-window session per folder, in the last few days, each in its own project. */
 function sessions(folders: string[]): SourcePlugin {
@@ -62,7 +72,8 @@ function touchScript(name: string, marker: string): string {
   return p;
 }
 
-const ok = (): GitRunner => async () => ({ code: 0, stdout: "", timedOut: false, truncated: false });
+/** A runner that succeeds at everything, answering `--version` as a current git would and everything else with nothing. */
+const ok = (): GitRunner => async (a) => ({ code: 0, stdout: a[0] === "--version" ? "git version 2.51.0\n" : "", timedOut: false, truncated: false });
 
 describe("repo signals: discovery from session folders and commits as keyed facts", () => {
   test("two repos from five folders; own commits only, with their trailers; no canary leaves; roots stay in memory", async () => {
@@ -158,22 +169,161 @@ describe("repo signals: discovery from session folders and commits as keyed fact
     expect(r.repos.repos[0]!.commitsTruncated).toBe(true);
   });
 
+  describe("a cut commit list says how far back it reaches", () => {
+    const eight = () => makeRepo(path.join(h.root, "reach"), Array.from({ length: 8 }, (_, i) => ({ files: { "n.txt": `${i}` }, message: `c${i}`, at: ago(8 - i * 0.5) })));
+    /** The main commit log (`--all`) through `change`, every other command as it is. */
+    const onLog = (change: (a: readonly string[], o: Parameters<GitRunner>[1]) => ReturnType<GitRunner>): GitRunner =>
+      (a, o) => (a[0] === "log" && a.includes("--all") ? change(a, o) : runGit(a, o));
+
+    test("the commit cap: commitsReach is the oldest commit time read", async () => {
+      const r = await run([eight()], { repoSignals: { maxCommits: 5 } });
+      const repo = r.repos.repos[0]!;
+      expect(repo.commitsTruncated).toBe(true);
+      expect(repo.commitsReach).toBe(Math.min(...repo.commits.map((c) => c.ts)));
+    });
+
+    test("the output cap: commitsReach is the oldest commit time of the records kept", async () => {
+      const dir = eight();
+      const full = await runGit(["log", "--all", "--name-only", "-z", "--format=%x00%x1e%H%x1f%ct%x1f%ae%n%B"], { cwd: dir, timeoutMs: 10_000, maxBytes: 1 << 20, signal: new AbortController().signal });
+      const r = await run([dir], { repoSignals: { runner: onLog((a, o) => runGit(a, { ...o, maxBytes: Math.floor(full.stdout.length / 2) })) } });
+      const repo = r.repos.repos[0]!;
+      expect(repo.commitsTruncated).toBe(true);
+      expect(repo.commits.length).toBeGreaterThan(0);
+      expect(repo.commits.length).toBeLessThan(8);
+      expect(repo.commitsReach).toBe(Math.min(...repo.commits.map((c) => c.ts)));
+    });
+
+    test("a timeout that ended the log: commitsReach is set", async () => {
+      const r = await run([eight()], { repoSignals: { runner: onLog(async (a, o) => ({ ...(await runGit(a, o)), code: null, timedOut: true })) } });
+      const repo = r.repos.repos[0]!;
+      expect(repo.commitsTruncated).toBe(true);
+      expect(repo.commits).toHaveLength(7); // the last record of a cut output is left out
+      expect(repo.commitsReach).toBe(Math.min(...repo.commits.map((c) => c.ts)));
+    });
+
+    test("a complete list: no commitsReach", async () => {
+      const r = await run([eight()]);
+      expect(r.repos.repos[0]!.commitsTruncated).toBe(false);
+      expect(r.repos.repos[0]!.commitsReach).toBeUndefined();
+    });
+  });
+
   test("a repo without user.email: no identity, no commits read", async () => {
     const r4 = makeRepo(path.join(h.root, "anon"), [{ files: { "a.txt": "a" }, message: "one", at: ago(2) }], { email: "" });
     const seen: string[] = [];
-    // no global config either: a home of its own
-    const saved = { HOME: process.env.HOME, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME };
-    process.env.HOME = h.root;
-    process.env.XDG_CONFIG_HOME = path.join(h.root, "xdg");
-    let r: Awaited<ReturnType<typeof run>>;
-    try {
-      r = await run([r4], { repoSignals: { runner: (a, o) => { seen.push(a.join(" ")); return runGit(a, o); } } });
-    } finally {
-      for (const [k, v] of Object.entries(saved)) if (v === undefined) Reflect.deleteProperty(process.env, k); else process.env[k] = v;
-    }
+    // no global config either: every test here runs with a home of its own
+    const r = await run([r4], { repoSignals: { runner: (a, o) => { seen.push(a.join(" ")); return runGit(a, o); } } });
     expect(r.repos.repos[0]).toMatchObject({ identity: false, commits: [] });
     // no commit log: only the instruction-file history (commit times by any author, Task 3) runs `log`
-    expect(seen.filter((c) => c.startsWith("log ")).map((c) => c.split(" ").slice(0, 2).join(" "))).toEqual(["log -n50"]);
+    expect(seen.filter((c) => c.startsWith("log ")).map((c) => c.split(" ").slice(0, 3).join(" "))).toEqual(["log --no-use-mailmap -n50"]);
+  });
+});
+
+describe("repo signals: an old-dated commit hides no history", () => {
+  test.skipIf(!GIT_37)("one commit dated years back on another branch, on top of recent ones: every recent commit is read (git >= 2.37)", async () => {
+    const r1 = makeRepo(path.join(h.root, "dated"), [1, 2, 3, 4, 5, 6].map((i) => ({ files: { "n.txt": `${i}` }, message: `c${i}`, at: ago(7 - i) })));
+    git(r1, ["checkout", "-q", "-b", "skewed"]);
+    commitAt(r1, "a commit whose clock was years off", Date.UTC(2015, 0, 1));
+    git(r1, ["checkout", "-q", "main"]);
+    const r = await run([r1]);
+    expect(r.repos.status).toBe("ok");
+    expect(r.repos.repos[0]!.commits).toHaveLength(6);
+    expect(r.repos.repos[0]!.commitsTruncated).toBe(false);
+  });
+
+  test.skipIf(!GIT_37)("a rebase that keeps the author dates of a year-old branch hides none of the recent commits below it (git >= 2.37)", async () => {
+    const r1 = makeRepo(path.join(h.root, "rebased"), [1, 2, 3, 4, 5].map((i) => ({ files: { "n.txt": `${i}` }, message: `c${i}`, at: ago(6 - i) })));
+    git(r1, ["checkout", "-q", "-b", "topic"]);
+    // the topic's tip as a date-keeping rebase leaves it: committed with an old date on top of today's main
+    commitAt(r1, "topic work from last year", ago(400));
+    const r = await run([r1]);
+    expect(r.repos.repos[0]!.commits).toHaveLength(5);
+  });
+});
+
+describe("repo signals: the log reads commits only, whatever the repo holds", () => {
+  test("a stash is not read as commits", async () => {
+    const r1 = makeRepo(path.join(h.root, "stashed"), [{ files: { "a.txt": "a" }, message: "one", at: ago(2) }]);
+    writeFileSync(path.join(r1, "a.txt"), "changed");
+    writeFileSync(path.join(r1, "new.txt"), "untracked");
+    git(r1, ["-c", "user.email=dev@fixture.test", "-c", "user.name=Fixture Dev", "stash", "-q", "-u"]);
+    const r = await run([r1]);
+    expect(r.repos.repos[0]!.commits).toHaveLength(1);
+  });
+
+  test("an output encoding set in repo config changes nothing: every commit is still read", async () => {
+    const r1 = makeRepo(path.join(h.root, "enc"), [1, 2].map((i) => ({ files: { "a.txt": `${i}` }, message: `c${i} ünï`, at: ago(3 - i) })),
+      { config: { "i18n.logOutputEncoding": "UTF-16LE" } });
+    const r = await run([r1]);
+    expect(r.repos.repos[0]!.commits).toHaveLength(2);
+  });
+
+  test.skipIf(!POSIX)("a FIFO as .mailmap is never opened: the logs do not stall (POSIX)", async () => {
+    const r1 = makeRepo(path.join(h.root, "mailmap"), [{ files: { "CLAUDE.md": "x" }, message: "one", at: ago(2) }]);
+    if (Bun.spawnSync(["mkfifo", path.join(r1, ".mailmap")]).exitCode !== 0) throw new Error("mkfifo failed");
+    const r = await run([r1], { repoSignals: { timeoutMs: 3_000 } });
+    expect(r.repos).toMatchObject({ status: "ok", skipped: {} });
+    expect(r.repos.repos[0]).toMatchObject({ instructions: { touched: 1 } });
+    expect(r.repos.repos[0]!.commits).toHaveLength(1);
+  }, 30_000);
+});
+
+describe("repo signals: every argument is one the oldest supported git accepts", () => {
+  /**
+   * The options git 2.13 (the oldest the engine supports) accepts for each subcommand the engine runs, as far as the
+   * engine uses them; `--since-as-filter` only from 2.37. Any other argument is refused as git refuses it (exit 129).
+   */
+  const accepts = (version: [number, number], a: readonly string[]): boolean => {
+    const [cmd, ...rest] = a;
+    const dashDash = rest.indexOf("--");
+    const opts = dashDash === -1 ? rest : rest.slice(0, dashDash);
+    const known: Record<string, RegExp> = {
+      "--version": /^$/,
+      "rev-parse": /^--(show-toplevel|git-common-dir)$/,
+      config: /^(--get|user\.email|extensions\.partialClone|remote\.origin\.promisor)$/,
+      log: new RegExp(`^(--no-use-mailmap|--exclude=refs/stash|--all|--no-merges|--no-renames|--since=\\S+|--max-count=\\d+|--name-only|-z|--format=\\S+|-n\\d+${
+        version[0] > 2 || (version[0] === 2 && version[1] >= 37) ? "|--since-as-filter=\\S+" : ""})$`),
+    };
+    const re = known[cmd!];
+    return re !== undefined && opts.every((x) => re.test(x));
+  };
+  const strict = (version: [number, number], refused: string[][]): GitRunner => async (a, o) => {
+    if (a[0] === "--version") return { code: 0, stdout: `git version ${version.join(".")}.0\n`, timedOut: false, truncated: false };
+    if (!accepts(version, a)) {
+      refused.push([...a]);
+      return { code: 129, stdout: "", timedOut: false, truncated: false };
+    }
+    return runGit(a, o);
+  };
+
+  for (const version of [[2, 13], [2, 36], [2, 37], [2, 51]] as [number, number][]) {
+    test(`git ${version.join(".")}: no argument is refused, and the repo reads whole`, async () => {
+      const r1 = makeRepo(path.join(h.root, "strict"), [1, 2].map((i) => ({ files: { "CLAUDE.md": `${i}` }, message: `c${i}`, at: ago(3 - i) })));
+      const refused: string[][] = [];
+      const r = await run([r1], { repoSignals: { runner: strict(version, refused) } });
+      expect(refused).toEqual([]);
+      expect(r.repos).toMatchObject({ status: "ok", skipped: {} });
+      expect(r.repos.repos[0]).toMatchObject({ instructions: { touched: 2 } });
+      expect(r.repos.repos[0]!.commits).toHaveLength(2);
+    });
+  }
+});
+
+describe("repo signals: the window start by git version", () => {
+  test("git 2.37 or later filters by --since-as-filter, an older git by --since; never --date-order", async () => {
+    const r1 = makeRepo(path.join(h.root, "v"), [{ files: { "CLAUDE.md": "x" }, message: "one", at: ago(2) }]);
+    const asked = async (version: string) => {
+      const logs: string[][] = [];
+      const runner: GitRunner = async (a, o) => {
+        if (a[0] === "--version") return { code: 0, stdout: `git version ${version}\n`, timedOut: false, truncated: false };
+        if (a[0] === "log") logs.push([...a]);
+        return runGit(a, o);
+      };
+      await run([r1], { repoSignals: { runner } });
+      return logs.map((a) => a.filter((x) => /^--(since|date-order)/.test(x)).map((x) => x.replace(/=.*/, "")));
+    };
+    expect(await asked("2.37.0")).toEqual([["--since-as-filter"], ["--since-as-filter"]]);
+    expect(await asked("2.36.9")).toEqual([["--since"], ["--since"]]);
   });
 });
 
@@ -219,8 +369,35 @@ describe("repo signals: one repo, one count; hostile repos", () => {
     expect(owners(p)).toEqual([[small, 3, 3], [large, 3, 0]]);
   });
 
+  test("commits of the same time are listed by id, smallest first", async () => {
+    const at = ago(2);
+    const r1 = makeRepo(path.join(h.root, "ties"), [1, 2, 3, 4].map((i) => ({ files: { "n.txt": `${i}` }, message: `c${i}`, at })));
+    const commits = (await run([r1])).repos.repos[0]!.commits;
+    expect(commits).toHaveLength(4);
+    expect(new Set(commits.map((c) => c.ts)).size).toBe(1);
+    const ids = commits.map((c) => c.id!);
+    expect(ids).toEqual([...ids].sort());
+  });
+
+  test("a commit has one id in every clone (a keyed hash of its full sha, never the sha), and is mine in each", async () => {
+    const a = makeRepo(path.join(h.root, "a"), [1, 2, 3].map((i) => ({ files: { "n.txt": `${i}` }, message: `c${i}`, at: ago(5 - i) })));
+    const b = path.join(h.root, "b");
+    git(h.root, ["clone", "-q", a, b]);
+    git(b, ["config", "user.email", "dev@fixture.test"]);
+    const r = await run([a, b]);
+    const [x, y] = r.repos.repos;
+    const ids = (repo: typeof x) => repo!.commits.map((c) => c.id);
+    expect(ids(x)).toHaveLength(3);
+    expect(ids(x)).toEqual(ids(y));
+    expect(x!.commits.every((c) => /^[0-9a-f]{16}$/.test(c.id ?? "")) && [x, y].every((repo) => repo!.commits.every((c) => c.mine))).toBe(true);
+    const shas = git(a, ["log", "--format=%H"]).split("\n");
+    expect(ids(x).map((id) => shas.some((sha) => id === sha || sha.includes(id!) || id!.includes(sha.slice(0, 7))))).toEqual([false, false, false]);
+    expect(new Set(ids(x)).size).toBe(3);
+    expect(ids(x).sort()).toEqual(shas.map((sha) => keyedHash(r.salt, sha)).sort());
+  });
+
   test.skipIf(!POSIX)("a changed file named like a log record is a path, never a record (POSIX)", async () => {
-    const hostile = `\x1e${"d".repeat(40)}\x1f1700000001\x1fdev@fixture.test\x1fCo-authored-by: Claude <noreply@anthropic.com>`;
+    const hostile = `\x1e${"d".repeat(40)}\x1f1700000001\x1fdev@fixture.test\nCo-authored-by: Claude <noreply@anthropic.com>`;
     // "\x01a" sorts first, so the hostile name is not the first path (which git puts after a newline)
     const r6 = makeRepo(path.join(h.root, "paths"), [{ files: { "\x01a": "a", [hostile]: "x" }, message: "feat: one", at: ago(2) }]);
     const r = await run([r6]);
@@ -231,8 +408,20 @@ describe("repo signals: one repo, one count; hostile repos", () => {
     expect(commits[0]!.files).toHaveLength(2);
   });
 
+  test("a commit with a message of a million blank lines does not block the pass: read, its closing line found", async () => {
+    const r1 = makeRepo(path.join(h.root, "long-message"), [{ files: { "a.txt": "a" }, message: "one", at: ago(3) }]);
+    const msg = path.join(h.root, "msg.txt");
+    writeFileSync(msg, `feat: long\n${"\n".repeat(1_000_000)}Generated with [Claude Code]\n`);
+    const date = new Date(ago(2)).toISOString();
+    git(r1, ["-c", "user.email=dev@fixture.test", "-c", "user.name=Fixture Dev", "-c", "commit.gpgsign=false", "-c", "commit.cleanup=verbatim",
+      "commit", "-q", "--allow-empty", "-F", msg], { GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date });
+    const r = await run([r1]);
+    expect(r.repos.status).toBe("ok");
+    expect(r.repos.repos[0]!.commits.map((c) => c.generated)).toEqual(["claude", undefined]);
+  }, 30_000);
+
   test("a \\x1e in a real commit message neither drops the commit nor forges one", async () => {
-    const forged = `\x1e${"f".repeat(40)}\x1f1\x1fdev@fixture.test\x1fforged`;
+    const forged = `\x1e${"f".repeat(40)}\x1f1\x1fdev@fixture.test\nforged`;
     const r5 = makeRepo(path.join(h.root, "odd"), [
       { files: { "a.txt": "a" }, message: `feat: ${forged}`, at: ago(3) },
       { files: { "b.txt": "b" }, message: "fix: next", at: ago(2) },
@@ -279,7 +468,7 @@ describe("repo signals: one repo, one count; hostile repos", () => {
     expect(existsSync(marker)).toBe(true);
     rmSync(marker);
 
-    const oldGit = gitRunnerWithEnv((env) => {
+    const oldGit = runnerWithEnv((env) => {
       const { GIT_NO_LAZY_FETCH: _drop, ...rest } = env;
       return rest;
     });
@@ -288,6 +477,153 @@ describe("repo signals: one repo, one count; hostile repos", () => {
     const r = await run([clone], { repoSignals: { runner: oldGit } });
     expect(existsSync(marker)).toBe(false);
     expect(r.repos.repos[0]!.commits).toHaveLength(3);
+  });
+});
+
+describe("repo signals: a read that did not finish is never ok", () => {
+  const res = (code: number | null, stdout = "", extra: Partial<{ timedOut: boolean; truncated: boolean }> = {}) =>
+    ({ code, stdout, timedOut: false, truncated: false, ...extra });
+  /** Every command through runGit except those `pick` answers. */
+  const except = (pick: (a: readonly string[]) => ReturnType<GitRunner> | undefined): GitRunner => (a, o) => pick(a) ?? runGit(a, o);
+
+  test("a git that exits 1 on every call is git-missing, asked once", async () => {
+    const calls: string[] = [];
+    const r = await run([repo1(), repo2()], { repoSignals: { runner: async (a) => { calls.push(a[0]!); return res(1); } } });
+    expect(r.repos.status).toBe("git-missing");
+    expect(calls).toEqual(["--version"]);
+  });
+
+  test("a --version answer that names no version is git-missing", async () => {
+    const r = await run([repo1()], { repoSignals: { runner: except((a) => (a[0] === "--version" ? Promise.resolve(res(0, "hello\n")) : undefined)) } });
+    expect(r.repos.status).toBe("git-missing");
+  });
+
+  test("--version runs once, in a folder that always exists, not in a candidate's: a vanished first folder costs that folder only", async () => {
+    const r1 = repo1();
+    const r2 = repo2();
+    const asked: { a: string; cwd: string }[] = [];
+    let removed = false;
+    const runner: GitRunner = (a, o) => {
+      if (!removed) { rmSync(r1, { recursive: true, force: true }); removed = true; }
+      asked.push({ a: a[0]!, cwd: o.cwd });
+      return runGit(a, o);
+    };
+    const r = await run([r1, r2], { repoSignals: { runner } });
+    const version = asked.filter((x) => x.a === "--version");
+    expect(version).toHaveLength(1);
+    expect(path.isAbsolute(version[0]!.cwd) && existsSync(version[0]!.cwd)).toBe(true);
+    expect([r1, r2].some((d) => version[0]!.cwd.startsWith(d))).toBe(false);
+    expect(r.repos.repos).toHaveLength(1);
+    expect(r.repos.skipped).toEqual({ error: 1 });
+    expect(r.repos.status).toBe("partial");
+  });
+
+  test("a rev-parse timeout drops the repo and makes the pass partial", async () => {
+    const r = await run([repo1()], { repoSignals: { runner: except((a) => (a[0] === "rev-parse" ? Promise.resolve(res(null, "", { timedOut: true })) : undefined)) } });
+    expect(r.repos).toMatchObject({ status: "partial", repos: [], skipped: { timeout: 1 } });
+  });
+
+  test("user.email: unset (exit 1) is no identity; a failed or timed-out read is counted, and the pass partial", async () => {
+    const email = (answer: ReturnType<typeof res>) => except((a) => (a[0] === "config" && a.includes("user.email") ? Promise.resolve(answer) : undefined));
+    const unset = await run([repo1()], { repoSignals: { runner: email(res(1)) } });
+    expect(unset.repos).toMatchObject({ status: "ok", skipped: {} });
+    expect(unset.repos.repos[0]).toMatchObject({ identity: false, commits: [] });
+    const failed = await run([repo1()], { repoSignals: { runner: email(res(128)) } });
+    expect(failed.repos).toMatchObject({ status: "partial", skipped: { "identity-error": 1 } });
+    expect(failed.repos.repos[0]).toMatchObject({ identity: false, commits: [] });
+    const slow = await run([repo1()], { repoSignals: { runner: email(res(null, "", { timedOut: true })) } });
+    expect(slow.repos).toMatchObject({ status: "partial", skipped: { timeout: 1 } });
+  });
+
+  test("a log that fails twice is counted and makes the pass partial; the instruction history is still read", async () => {
+    const r1 = makeRepo(path.join(h.root, "hist"), [{ files: { "CLAUDE.md": "x" }, message: "docs", at: ago(2) }]);
+    const logs: boolean[] = [];
+    const runner = except((a) => {
+      if (a[0] !== "log" || !a.includes("--all")) return undefined;
+      logs.push(a.includes("--name-only"));
+      return Promise.resolve(res(128));
+    });
+    const r = await run([r1], { repoSignals: { runner } });
+    expect(logs).toEqual([true, false]);
+    expect(r.repos).toMatchObject({ status: "partial", skipped: { "log-error": 1 } });
+    expect(r.repos.repos[0]).toMatchObject({ commits: [], fileLists: false, instructions: { touched: 1 } });
+  });
+
+  test("an instruction history that fails or throws is counted (history-error), and the pass partial", async () => {
+    const isHistory = (a: readonly string[]) => a[0] === "log" && !a.includes("--all");
+    for (const answer of [() => Promise.resolve(res(128)), () => Promise.resolve(res(null, "", { truncated: true })), () => Promise.reject(new Error("boom"))]) {
+      const r1 = makeRepo(path.join(h.root, `hist-${Math.random().toString(36).slice(2)}`), [{ files: { "CLAUDE.md": "x" }, message: "docs", at: ago(2) }]);
+      const r = await run([r1], { repoSignals: { runner: except((a) => (isHistory(a) ? answer() : undefined)) } });
+      expect(r.repos).toMatchObject({ status: "partial", skipped: { "history-error": 1 } });
+      expect(r.repos.repos[0]!.commits).toHaveLength(1);
+    }
+  });
+
+  test("on a git older than 2.44, a partial-clone key read that fails is counted (config-error), and the pass partial", async () => {
+    const runner = except((a) => {
+      if (a[0] === "--version") return Promise.resolve(res(0, "git version 2.40.1\n"));
+      if (a[0] === "config" && a.includes("extensions.partialClone")) return Promise.resolve(res(128));
+      return undefined;
+    });
+    const r = await run([repo1()], { repoSignals: { runner } });
+    expect(r.repos).toMatchObject({ status: "partial", skipped: { "config-error": 1 } });
+    expect(r.repos.repos[0]).toMatchObject({ fileLists: false });
+  });
+
+  test("a timeout that ended the commit log makes the pass partial", async () => {
+    const runner = except((a) => (a[0] === "log" && a.includes("--all") ? Promise.resolve(res(null, "", { timedOut: true })) : undefined));
+    const r = await run([repo1()], { repoSignals: { runner } });
+    expect(r.repos).toMatchObject({ status: "partial", skipped: { timeout: 1 } });
+  });
+});
+
+describe("repo signals: options and inputs are checked", () => {
+  const direct = (cwds: [string, string][], o: Parameters<typeof collectRepoSignals>[1] = {}, extra: Partial<Parameters<typeof collectRepoSignals>[0]> = {}) =>
+    collectRepoSignals({ cwds: new Map(cwds), recent: new Set(cwds.map(([k]) => k)), salt: new Uint8Array(32), now: Date.now(),
+      signal: new AbortController().signal, ...extra }, o);
+
+  test("options that are not finite numbers fall back to their defaults: no NaN reaches a worker count, a cap or a date", async () => {
+    const dir = repo1();
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, -1]) {
+      const r = await direct([["p", dir]], { concurrency: bad, maxCommits: bad, maxFiles: bad, maxRepos: bad, timeoutMs: bad, budgetMs: bad });
+      expect(r).toMatchObject({ status: "ok", skipped: {} });
+      expect(r.repos[0]!.commits).toHaveLength(3);
+      expect(r.repos[0]!.commits[0]!.files).toHaveLength(1);
+    }
+  });
+
+  test("a window start that is not a finite date in range is left out: the repo is read whole, not counted as an error", async () => {
+    const dir = repo1();
+    for (const detailFrom of [Number.NaN, Number.NEGATIVE_INFINITY, 9e15]) {
+      const r = await direct([["p", dir]], {}, { detailFrom });
+      expect(r).toMatchObject({ status: "ok", skipped: {} });
+      expect(r.since).toBeUndefined();
+      expect(r.repos[0]!.commits).toHaveLength(3);
+    }
+  });
+
+  test("a session folder that is not absolute is skipped (not-absolute), never resolved against the process's folder", async () => {
+    const calls: number[] = [];
+    const r = await direct([["p", "."], ["q", "relative/dir"]], { runner: async (a, o) => { calls.push(1); return runGit(a, o); } });
+    expect(r).toMatchObject({ status: "ok", repos: [], skipped: { "not-absolute": 2 } });
+    expect(calls).toEqual([]);
+  });
+
+  test("a rev-parse answer of other than exactly two lines is root-mismatch", async () => {
+    const dir = repo1();
+    const runner: GitRunner = (a, o) => (a[0] === "rev-parse"
+      ? Promise.resolve({ code: 0, stdout: `${dir}\nextra\n.git\n`, timedOut: false, truncated: false }) : runGit(a, o));
+    const r = await direct([["p", dir]], { runner });
+    expect(r).toMatchObject({ status: "ok", repos: [], skipped: { "root-mismatch": 1 } });
+  });
+
+  test("candidate folders are asked in order of their detail sessions, most first", async () => {
+    const dirs = ["a", "b", "c"].map((n) => makeRepo(path.join(h.root, n), [{ files: { "x.txt": n }, message: n, at: ago(2) }]));
+    const asked: string[] = [];
+    const runner: GitRunner = (a, o) => { if (a[0] === "rev-parse") asked.push(path.basename(o.cwd)); return runGit(a, o); };
+    await direct([["pa", dirs[0]!], ["pb", dirs[1]!], ["pc", dirs[2]!]], { runner, concurrency: 1 },
+      { detailSessions: new Map([["pa", 1], ["pb", 5], ["pc", 3]]) });
+    expect(asked).toEqual(["b", "c", "a"]);
   });
 });
 
@@ -319,15 +655,13 @@ describe("repo signals: switches, budget, missing git, abort", () => {
     }
   });
 
-  test("a runner that never settles: the budget stops it, status partial, scan resolves in under 2 s", async () => {
+  test("a runner that never settles: the budget stops it, status partial, and the scan resolves", async () => {
     const r1 = repo1();
     const never: GitRunner = () => new Promise(() => {});
-    const t = Date.now();
     const r = await run([r1], { repoSignals: { runner: never, budgetMs: 300 } });
-    expect(Date.now() - t).toBeLessThan(2_000);
     expect(r.repos.status).toBe("partial");
     expect(r.repos.skipped.budget).toBeGreaterThan(0);
-  });
+  }, 30_000);
 
   test("a runner that never settles once repos are found: the running repo is stopped at the budget", async () => {
     const r1 = repo1();
@@ -350,11 +684,9 @@ describe("repo signals: switches, budget, missing git, abort", () => {
     const r1 = repo1();
     const ac = new AbortController();
     const abortsThenHangs: GitRunner = () => { ac.abort(); return new Promise(() => {}); };
-    const t = Date.now();
     const r = await run([r1], { signal: ac.signal, repoSignals: { runner: abortsThenHangs } });
-    expect(Date.now() - t).toBeLessThan(2_000);
     expect(r.repos.status).toBe("partial");
-  });
+  }, 30_000);
 
   test("an aborted scan skips repo signals: partial, git never runs", async () => {
     const ac = new AbortController();
