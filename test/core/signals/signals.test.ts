@@ -265,7 +265,7 @@ const signals = (repos: RepoFacts[], status: RepoSignals["status"] = "ok"): Repo
 function globalsOf(evs: Ev[], o: { repos?: RepoSignals; exclude?: Exclusions; now?: number } = {}): { g: Globals; stats: SessionStats[] } {
   const raw = scanResultOf([...COVERAGE, ...evs], o.repos ? { repos: o.repos } : {});
   const now = o.now ?? raw.finishedAt;
-  const t = buildSessionTable(raw, { now, timeZone: "UTC", ...(o.exclude ? { exclude: o.exclude } : {}) });
+  const t = buildSessionTable(raw, { timeZone: "UTC", ...(o.exclude ? { exclude: o.exclude } : {}) });
   const stats = buildSessionStats(t, raw.store, raw.repos, { timeZone: "UTC" });
   return { g: computeGlobals(t, stats, raw, { now }), stats };
 }

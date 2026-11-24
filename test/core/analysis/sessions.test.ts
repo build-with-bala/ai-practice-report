@@ -10,7 +10,7 @@ const T0 = Date.UTC(2026, 10, 2, 9, 0);
 const MIN = 60_000;
 const DAY = 86_400_000;
 const NOW = T0 + 30 * DAY;
-const opts = { now: NOW, timeZone: "UTC" };
+const opts = { timeZone: "UTC" };
 
 const sess = (id: string, over: Partial<SessionEv> = {}): SessionEv => ({
   k: "session", tool: "claude-code", source: "claude-code.transcripts", id, window: "detail", origin: "human",

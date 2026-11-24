@@ -8,7 +8,7 @@ import { withTz } from "../../kit/tz";
 
 const DAY = 86_400_000;
 const T0 = Date.UTC(2026, 10, 2, 12, 0);
-const opts = { now: T0 + 60 * DAY, timeZone: "UTC" };
+const opts = { timeZone: "UTC" };
 
 const sess = (id: string, over: Partial<SessionEv> = {}): SessionEv => ({
   k: "session", tool: "claude-code", source: "claude-code.transcripts", id, window: "detail", origin: "human",

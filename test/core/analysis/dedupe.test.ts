@@ -7,7 +7,7 @@ import { scanResultOf } from "../../kit/scanresult";
 const T0 = Date.UTC(2026, 10, 2, 9, 0);
 const SEC = 1_000;
 const MIN = 60 * SEC;
-const opts = { now: T0 + 86_400_000, timeZone: "UTC" };
+const opts = { timeZone: "UTC" };
 
 const sess = (id: string, tool: ToolId, over: Partial<SessionEv> = {}): SessionEv => ({
   k: "session", tool, source: `${tool}.x`, id, window: "detail", origin: "human", start: T0, end: T0 + 30 * MIN, models: [], ...over,

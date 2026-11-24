@@ -39,7 +39,7 @@ const config = (kind: ConfigEv["kind"], name: string, over: Partial<ConfigEv> = 
 
 function use(evs: Ev[], exclude?: Exclusions): ArtifactUse[] {
   const raw = scanResultOf([...COVERAGE, ...evs]);
-  const t = buildSessionTable(raw, { now: raw.finishedAt, timeZone: "UTC", ...(exclude ? { exclude } : {}) });
+  const t = buildSessionTable(raw, { timeZone: "UTC", ...(exclude ? { exclude } : {}) });
   return artifactUse(raw, t);
 }
 const one = (evs: Ev[], exclude?: Exclusions): ArtifactUse => {

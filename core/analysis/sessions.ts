@@ -94,7 +94,7 @@ function capabilitiesOf(raw: ScanResult, counted: (sessionId: string | undefined
  * outside the date range (with their descendants too: a subagent is part of its session's work). `timeZone` keys the
  * activity days. The table reads no clock and no analysis time.
  */
-export function buildSessionTable(raw: ScanResult, o: { timeZone: string; exclude?: Exclusions; /** Unread; kept so older callers still type-check. */ now?: number }): SessionTable {
+export function buildSessionTable(raw: ScanResult, o: { timeZone: string; exclude?: Exclusions }): SessionTable {
   checkExclusions(o.exclude);
   const ex = o.exclude ?? {};
   const toolEx = new Set<ToolId>(ex.tools ?? []);

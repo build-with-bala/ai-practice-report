@@ -61,7 +61,7 @@ const outcomesFor = (sessionId: string, ts: number, t: ToolId = "claude-code"): 
 
 function walk(evs: Ev[], o: { repos?: RepoSignals; timeZone?: string; exclude?: Exclusions } = {}): Map<string, SessionStats> {
   const raw = scanResultOf([...COVERAGE, ...evs], o.repos ? { repos: o.repos } : {});
-  const t = buildSessionTable(raw, { now: raw.finishedAt, timeZone: o.timeZone ?? "UTC", ...(o.exclude ? { exclude: o.exclude } : {}) });
+  const t = buildSessionTable(raw, { timeZone: o.timeZone ?? "UTC", ...(o.exclude ? { exclude: o.exclude } : {}) });
   const out = buildSessionStats(t, raw.store, raw.repos, { timeZone: o.timeZone ?? "UTC" });
   return new Map(out.map((s) => [s.id, s]));
 }
@@ -712,7 +712,7 @@ describe("walk: budget", () => {
       evs.push(i % 50 === 0 ? check("s", ts, i % 100 === 0) : i % 7 === 0 ? edit("s", ts, "ts", 3, 1) : tool("s", ts));
     }
     const raw = scanResultOf([...COVERAGE, ...evs]);
-    const t = buildSessionTable(raw, { now: raw.finishedAt, timeZone: "UTC" });
+    const t = buildSessionTable(raw, { timeZone: "UTC" });
     raw.store.forSession("s", "tool"); // the store's index is built by the first lookup: not the walk's cost
     const t0 = performance.now();
     const stats = buildSessionStats(t, raw.store, raw.repos, { timeZone: "UTC" });

@@ -53,7 +53,7 @@ const marker = (sessionId: string, ts: number, kind: MarkerKind, over: Partial<M
 function exp(evs: Ev[], o: { exclude?: Exclusions; firstParallelBucket?: number; timeZone?: string; now?: number } = {}): Exposure {
   const raw = scanResultOf([...COVERAGE, ...evs], { finishedAt: o.now ?? NOW });
   const timeZone = o.timeZone ?? "UTC";
-  const t = buildSessionTable(raw, { now: o.now ?? NOW, timeZone, ...(o.exclude ? { exclude: o.exclude } : {}) });
+  const t = buildSessionTable(raw, { timeZone, ...(o.exclude ? { exclude: o.exclude } : {}) });
   return exposure(t, raw, { now: o.now ?? NOW, timeZone, ...(o.firstParallelBucket === undefined ? {} : { firstParallelBucket: o.firstParallelBucket }) });
 }
 
@@ -214,7 +214,7 @@ describe("exposure", () => {
     };
     for (const evs of [[], [sess("a", NOW - DAY), prompt("a", NOW - DAY), life(NOW - DAY)]] as Ev[][]) {
       const raw = scanResultOf([...COVERAGE, ...evs], { finishedAt: NOW });
-      const t = buildSessionTable(raw, { now: NOW, timeZone: "UTC" });
+      const t = buildSessionTable(raw, { timeZone: "UTC" });
       const stats = buildSessionStats(t, raw.store, raw.repos, { timeZone: "UTC" });
       const g = computeGlobals(t, stats, raw, { now: NOW });
       const dims = scoreDimensions(computeSignals(stats, g), loadReference());

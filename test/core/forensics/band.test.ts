@@ -103,7 +103,7 @@ function claudeDays(inHistory: number, statsDays: (day: string, i: number) => bo
 
 const run = (events: Ev[], stats: readonly SessionStats[] = [], releases: ReleaseTable = TABLE): Forensics => {
   const raw = scanResultOf(events, { finishedAt: NOW });
-  const t = buildSessionTable(raw, { now: NOW, timeZone: "UTC" });
+  const t = buildSessionTable(raw, { timeZone: "UTC" });
   const f = runForensics(raw, t, stats, { now: NOW, timeZone: "UTC", releases });
   asks(f.checks);
   return f;
@@ -310,7 +310,7 @@ describe("runForensics: the server-backed share", () => {
     }));
     const events: Ev[] = [cov("claude-code", CC, "detail"), ...edited(anchors()), ...claudeDays(10), ...tools];
     const raw = scanResultOf(events, { finishedAt: NOW });
-    const t = buildSessionTable(raw, { now: NOW, timeZone: "UTC" });
+    const t = buildSessionTable(raw, { timeZone: "UTC" });
     const stats = buildSessionStats(t, raw.store, raw.repos, { timeZone: "UTC" });
     const before = JSON.stringify(stats);
     const f = runForensics(raw, t, stats, { now: NOW, timeZone: "UTC", releases: TABLE });
