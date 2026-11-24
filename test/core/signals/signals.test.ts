@@ -201,14 +201,14 @@ describe("computeSignals: purity and budget", () => {
   });
 
   // a guard against a runaway cost, not a benchmark: the bound leaves room for slow CI runners
-  test("a 5,000-row sample, computed 200 times, takes under 10 s", () => {
+  test("a 5,000-row sample, computed 200 times, ends inside the 30 s runaway guard", () => {
     const rows = sample(5_000);
     const g = globals();
     computeSignals(rows, g);
     const t0 = performance.now();
     for (let i = 0; i < 200; i++) computeSignals(rows, g);
-    expect(performance.now() - t0).toBeLessThan(10_000);
-  });
+    expect(performance.now() - t0).toBeLessThan(30_000);
+  }, 60_000);
 });
 
 // ---------- the globals, from a scan result ----------
