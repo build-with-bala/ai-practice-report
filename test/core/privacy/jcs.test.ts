@@ -9,7 +9,7 @@ describe("canonicalJson (RFC 8785)", () => {
   test("keys sort by UTF-16 code units, not by code point or locale", () => {
     // U+10000 is the pair D800 DC00, which sorts before U+E000 by code unit (but after it by code point)
     const k1 = "\u{10000}";
-    const k2 = "";
+    const k2 = "\uE000"; // a private-use character, written as its escape
     expect(canonicalJson({ [k2]: 2, [k1]: 1, B: 0, a: 0 })).toBe(`{"B":0,"a":0,"${k1}":1,"${k2}":2}`);
   });
 
