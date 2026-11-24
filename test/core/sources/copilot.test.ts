@@ -543,7 +543,7 @@ describe("copilot vscode: mapping rules", () => {
     writeLegacy("w2", sessionRoot(id, reqs, { created: at }));
     const r = await run([cpVscode]);
     expect(r.store.forSession(sidOf(id), "prompt")).toHaveLength(3);
-    expect(covOf(r, "copilot.vscode").skipped).toEqual({ parse: 1, duplicate: 1 });
+    expect(covOf(r, "copilot.vscode").skipped).toEqual({ partial: 1, duplicate: 1 }); // the truncated copy's cut-off last line
   });
 
   test("a copy without requests does not hide one with requests; with only partial copies, the fullest is read", async () => {
@@ -563,7 +563,7 @@ describe("copilot vscode: mapping rules", () => {
     const r = await run([cpVscode]);
     expect(r.store.forSession(sidOf(a), "prompt")).toHaveLength(2);
     expect(r.store.forSession(sidOf(b), "prompt")).toHaveLength(2);
-    expect(covOf(r, "copilot.vscode").skipped).toEqual({ parse: 2, duplicate: 2 });
+    expect(covOf(r, "copilot.vscode").skipped).toEqual({ partial: 2, duplicate: 2 }); // the partial copies' cut-off last lines
   });
 
   test("a journal that yields no session falls back to the legacy file of the same session", async () => {

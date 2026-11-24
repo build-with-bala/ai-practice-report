@@ -630,7 +630,7 @@ describe("antigravity cli: transcript.jsonl", () => {
     const r = await run([agCli]);
     expect([r.store.all("prompt").length, r.store.all("usage").length]).toEqual([1, 1]);
     expect(r.store.session(sidOf(P))).toMatchObject({ window: "detail", origin: "human", surface: "cli", start: at, end: at + 1_000 });
-    expect(covOf(r, "antigravity.cli")).toMatchObject({ records: 2, skipped: { parse: 1 }, files: 1 });
+    expect(covOf(r, "antigravity.cli")).toMatchObject({ records: 2, skipped: { partial: 1 }, files: 1 }); // the cut-off last line
   });
 });
 
