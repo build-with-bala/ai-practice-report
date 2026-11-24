@@ -137,7 +137,7 @@ describe("the boundary under a marker in every string field of a scan", () => {
 
 describe("the boundary under planted values at every string leaf and record key of an analysis", () => {
   /** Free text, a path, an email, a hex id, a uuid, an ISO time, a day, a month, a week, label-, model- and slug-shaped words, a semver with text. */
-  const VALUES = ["Free Text Here", "/Users/jdoe/acme", "jdoe@acme.test", "0123456789abcdef0123456789abcdef", "123e4567-e89b-12d3-a456-426614174000",
+  const VALUES = ["Free Text Here", "/srv/jdoe/acme", "jdoe@acme.test", "0123456789abcdef0123456789abcdef", "123e4567-e89b-12d3-a456-426614174000",
     "2026-11-02T10:42:07Z", "2026-11-02", "2026-11", "2026-W45", "P-ACME", "gpt-4o-acme", "acme-payroll", "custom #7", "github", "1.2.3-jdoe.acme"];
   const shape = (p: string): string => p.replace(/\[\d+\]/g, "[]");
 
