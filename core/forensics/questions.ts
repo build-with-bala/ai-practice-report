@@ -161,7 +161,7 @@ const QUESTIONS: { readonly [I in CheckId]?: { readonly [R in Reason]?: Ask } } 
     "ledger-contradictions": (v) => {
       const c = num(v, "contradictions");
       return c === undefined ? undefined
-        : `The usage-limit readings fell ${digits(c)} times within one limit window, where they only rise. Were traces from more than one machine or account combined here?`;
+        : `The usage-limit readings fell ${digits(c)} ${plural(c, "time", "times")} within one limit window, where they only rise. Were traces from more than one account or machine combined here, or did the service reset the limit?`;
     },
   },
   C9: {
