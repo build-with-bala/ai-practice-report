@@ -72,6 +72,8 @@ export interface Analysis {
 }
 
 const cmp = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+/** The largest epoch-ms time a Date can hold (±100,000,000 days). */
+const MAX_DATE_MS = 8.64e15;
 
 export { ExclusionError };
 
@@ -80,14 +82,18 @@ export { ExclusionError };
  * defaults to `raw.finishedAt`, and all randomness is the seeded bootstrap's. The order of work is fixed: labels and the
  * project exclusions, the session table, the per-session statistics, the globals, the signals, the dimensions, the
  * bootstrap (over the same statistics and globals as the point estimate), the overall, exposure and the panels, the
- * projects, the personas, forensics and identity. `now` must be finite; an unknown zone is a RangeError from `Intl`.
+ * projects, the personas, forensics and identity. `now` must be a finite time a date can hold, `seed` finite (`meta.seed`
+ * is the seed the generator uses: truncated, modulo 2^32), and `reference` a known table; each is a RangeError
+ * otherwise, as an unknown zone is (from `Intl`).
  */
 export function analyze(raw: ScanResult, o: AnalyzeOptions = {}): Analysis {
   const reference = o.reference ?? "v0";
   const B = o.bootstrap ?? DEFAULT_B;
-  const seed = o.seed ?? DEFAULT_SEED;
+  const given = o.seed ?? DEFAULT_SEED;
+  if (!Number.isFinite(given)) throw new RangeError("analyze: seed must be a finite number");
+  const seed = given >>> 0; // what the generator uses (mulberry32): truncated, modulo 2^32
   const now = o.now ?? raw.finishedAt;
-  if (!Number.isFinite(now)) throw new RangeError("analyze: now must be a finite epoch-ms time");
+  if (!Number.isFinite(now) || Math.abs(now) > MAX_DATE_MS) throw new RangeError("analyze: now must be a finite epoch-ms time a date can hold");
   const timeZone = o.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
   const ref = loadReference(reference);
 
