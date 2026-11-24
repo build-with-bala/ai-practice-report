@@ -371,5 +371,6 @@ export const AIPROF2: FieldSpec = obj({
     checks: arr(CHECK, 32),
   }),
   identity: obj({ accounts: int(), bindings: arr(KEYED_HASH, 64) }),
-  exclusions: obj({ tools: int(), projects: int(), sessions: int() }),
+  /** What the exclusions left out: tool, project and session counts, whether a date range was given, and the active weeks outside it (no dates). */
+  exclusions: obj({ tools: int(), projects: int(), sessions: int(), dateRange: bool(), weeksOutside: int() }),
 });

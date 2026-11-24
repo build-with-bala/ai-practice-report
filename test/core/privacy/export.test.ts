@@ -645,6 +645,35 @@ describe("exportPayload: the preview contract and deny by default", () => {
   });
 });
 
+describe("exportPayload: what was excluded", () => {
+  test("exclusions is exactly tools, projects, sessions, dateRange and weeksOutside; no date leaves", () => {
+    const a = analyze(personaScan("expert"), UTC);
+    delete a.exclusions.dateRange;
+    delete a.exclusions.weeksOutside;
+    expect(parsed(a).exclusions).toEqual({ tools: 0, projects: 0, sessions: 0, dateRange: false, weeksOutside: 0 }); // the defaults when absent
+    a.exclusions = { tools: 1, projects: 2, sessions: 3, dateRange: true, weeksOutside: 4 };
+    (a.exclusions as Json).from = Date.UTC(2026, 9, 1);
+    const out = parsed(a);
+    expect(out.exclusions).toEqual({ tools: 1, projects: 2, sessions: 3, dateRange: true, weeksOutside: 4 });
+    expect(JSON.stringify(out.exclusions)).not.toMatch(/\d{4}-\d{2}/);
+  });
+
+  test("a weeksOutside that is no count, or a dateRange that is no boolean, fails the export", () => {
+    const base = analyze(personaScan("expert"), UTC);
+    for (const [mutate, path] of [
+      [(a: Analysis) => { a.exclusions.weeksOutside = -1; }, "$.exclusions.weeksOutside"],
+      [(a: Analysis) => { a.exclusions.weeksOutside = 1.5; }, "$.exclusions.weeksOutside"],
+      [(a: Analysis) => { a.exclusions.dateRange = hostile("2026-10-01"); }, "$.exclusions.dateRange"],
+    ] as const) {
+      const a = structuredClone(base);
+      mutate(a);
+      let err: unknown;
+      try { exportPayload(a, OPTS); } catch (e) { err = e; }
+      expect(`${path} ${(err as ExportError | undefined)?.paths?.join(",")}`).toBe(`${path} ${path}`);
+    }
+  });
+});
+
 describe("the reading side rebuilds every question from the export", () => {
   /** Every exported check's question, rebuilt from the payload, equals the in-memory one; returns how many asked. */
   function rebuildAll(a: Analysis): number {

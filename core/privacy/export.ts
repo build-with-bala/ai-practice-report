@@ -207,7 +207,12 @@ function build(a: Analysis, o: ExportOptions): Record<string, unknown> {
       })),
     },
     identity: { accounts: a.identity.accounts, bindings: a.identity.hashes.slice(0, MAX_BINDINGS) },
-    exclusions: { tools: a.exclusions.tools, projects: a.exclusions.projects, sessions: a.exclusions.sessions },
+    // what the person asked to leave out: counts, and whether a date range was given (never its dates); a field the
+    // analysis does not set yet exports its default (no date range, no week outside it)
+    exclusions: {
+      tools: a.exclusions.tools, projects: a.exclusions.projects, sessions: a.exclusions.sessions,
+      dateRange: a.exclusions.dateRange ?? false, weeksOutside: a.exclusions.weeksOutside ?? 0,
+    },
   };
 }
 
