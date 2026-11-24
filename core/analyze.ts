@@ -50,9 +50,10 @@ export interface AnalyzeOptions { reference?: "v0"; bootstrap?: number; seed?: n
  *   whose session file is gone; the commits of a repository that still has another folder in the report. `dateRange`: a start or an
  *   end of the date range was given. `weeksOutside`: the number of distinct ISO weeks in which the person was active,
  *   with a tool and project that are not excluded, and that lie outside the date range; 0 when no range was given.
- * - `diagnostics`: orphan events per kind, what the cross-tool dedupe found, the scan's warnings, less those that
- *   name an excluded tool, and `dailyRowsLeftOut` (a tool's own per-day totals left out under a project exclusion,
- *   since they carry no project).
+ * - `diagnostics`: orphan events per kind inside the date range, and `orphanPrompts`, the orphan detail prompts per tool
+ *   (naming a session the store does not hold, or none); what the cross-tool dedupe found; the scan's warnings, less
+ *   those that name an excluded tool; and `dailyRowsLeftOut` (a tool's own per-day totals left out under a project
+ *   exclusion, since they carry no project).
  */
 export interface Analysis {
   meta: { core: string; reference: "v0"; bootstrap: number; seed: number; now: number; timeZone: string; repoSignals: RepoSignals["status"] };
@@ -61,7 +62,7 @@ export interface Analysis {
   identity: { accounts: number; hashes: string[] }; exclusions: { tools: number; projects: number; sessions: number;
     dateRange?: boolean; weeksOutside?: number };
   diagnostics: { orphans: Partial<Record<Ev["k"], number>>; dedupe: { hostSessions: number; pairedPrompts: number; relabelled: number }; warnings: Warning[];
-    dailyRowsLeftOut: number };
+    orphanPrompts: Partial<Record<ToolId, number>>; dailyRowsLeftOut: number };
   private: { dayParts: DayParts; config: Array<{ kind: ConfigEv["kind"]; name: string; key: string; provenance: ConfigEv["provenance"]; used: boolean }>;
     models: Record<string, number> };
 }
@@ -130,7 +131,7 @@ export function analyze(raw: ScanResult, o: AnalyzeOptions = {}): Analysis {
     identity: { accounts: hashes.size, hashes: [...hashes].sort(cmp) },
     exclusions: { ...t.exclusions },
     diagnostics: { orphans: { ...t.orphans }, dedupe: { ...t.dedupe }, warnings: raw.warnings.filter((w) => w.tool === "scan" || !t.scope.tools.has(w.tool)).map((w) => ({ ...w })),
-      dailyRowsLeftOut: t.dailyRowsLeftOut },
+      orphanPrompts: { ...t.orphanPrompts }, dailyRowsLeftOut: t.dailyRowsLeftOut },
     private: { dayParts: p.dayParts, config: p.privateConfig, models: p.privateModels },
   };
 }

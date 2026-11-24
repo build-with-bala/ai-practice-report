@@ -13,6 +13,9 @@ const SESSION_KINDS = ["prompt", "tool", "turn", "usage", "totals", "marker", "i
 const COPIED = ["projectKey", "effort", "background", "agentType", "workflowId", "surface", "mode", "approval", "sandbox", "version"] as const;
 
 const cmp = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+/** A copy of a count record with its keys in sorted order. */
+const sortedKeys = <K extends string>(r: Partial<Record<K, number>>): Partial<Record<K, number>> =>
+  Object.fromEntries(Object.entries(r).sort(([a], [b]) => cmp(a, b))) as Partial<Record<K, number>>;
 
 /**
  * Each session's parent: its own `parentId`, else the first (smallest) parent an `EdgeEv` names for it. A link that
@@ -189,11 +192,18 @@ export function buildSessionTable(raw: ScanResult, o: { timeZone: string; exclud
   // orphan events
   const orphans: Partial<Record<Ev["k"], number>> = {};
   if (orphanRows > 0) orphans.session = orphanRows;
+  // an event naming a session the store does not hold, of a kept tool, inside the date range (totals carry no time); a
+  // detail prompt that names no session at all is an orphan too, and orphan prompts are also counted per tool
+  const orphanPrompts: Partial<Record<ToolId, number>> = {};
   for (const k of SESSION_KINDS) {
     for (const e of raw.store.all(k)) {
       const id = (e as { sessionId?: string }).sessionId;
-      if (id === undefined || sessions.has(id) || !keepTool(e.tool)) continue;
+      const sessionless = id === undefined && e.k === "prompt" && e.window === "detail";
+      if ((id === undefined && !sessionless) || (id !== undefined && sessions.has(id)) || !keepTool(e.tool)) continue;
+      const ts = (e as { ts?: number }).ts;
+      if (ts !== undefined && !inRange(ts)) continue;
       orphans[k] = (orphans[k] ?? 0) + 1;
+      if (e.k === "prompt" && e.window === "detail") orphanPrompts[e.tool] = (orphanPrompts[e.tool] ?? 0) + 1;
     }
   }
 
@@ -223,6 +233,6 @@ export function buildSessionTable(raw: ScanResult, o: { timeZone: string; exclud
   return {
     rows, detailTop, hosts, repoOf, scope: { from, to, tools: toolEx, projects: projEx }, timeZone: o.timeZone, isHuman, activity, capabilities: capabilitiesOf(raw, (id) => id !== undefined && rows.has(id) && !hosts.has(id)),
     dedupe: { hostSessions: d.hosts.size, pairedPrompts: d.pairedPrompts, relabelled: d.relabelled.size },
-    exclusions: { tools: toolsHit.size, projects: projectsHit.size, sessions: dropped.size }, orphans, dailyRowsLeftOut,
+    exclusions: { tools: toolsHit.size, projects: projectsHit.size, sessions: dropped.size }, orphans, orphanPrompts: sortedKeys(orphanPrompts), dailyRowsLeftOut,
   };
 }

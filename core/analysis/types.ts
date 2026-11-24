@@ -46,7 +46,9 @@ export interface Activity { detailDays: string[]; lifetimeDays: string[]; detail
  * least 3 paired prompts — equal text hash, within 60 s, more than 2 words — making at least half of BOTH sessions'
  * such prompts, decided over every detail-window session and prompt before any exclusion; see dedupe.ts), the
  * projectKey → repoKey map, activity and capabilities, and what was dropped or unplaced.
- * `orphans`: events (per kind) whose `sessionId` names no session, and `session` = rows whose parent is missing.
+ * `orphans`: events (per kind) of kept tools inside the date range whose `sessionId` names no session of the store, detail
+ * prompts that name no session at all, and `session` = rows whose parent is missing. `orphanPrompts`: those orphan
+ * detail prompts per tool (counted nowhere else).
  */
 export interface SessionTable {
   rows: Map<string, SessionRow>; detailTop: SessionRow[]; hosts: Set<string>; repoOf: Map<string, string>;
@@ -64,6 +66,7 @@ export interface SessionTable {
   activity: Activity; capabilities: Capabilities;
   dedupe: { hostSessions: number; pairedPrompts: number; relabelled: number };
   exclusions: { tools: number; projects: number; sessions: number }; orphans: Partial<Record<Ev["k"], number>>;
+  orphanPrompts: Partial<Record<ToolId, number>>;
   /** Per-day rows left out because a project exclusion is in force and a per-day row carries no project. */
   dailyRowsLeftOut: number;
 }

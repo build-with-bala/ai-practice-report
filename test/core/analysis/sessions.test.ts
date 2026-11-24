@@ -221,3 +221,20 @@ describe("buildSessionTable: capabilities", () => {
     expect([...SWITCH_TOOLS]).toEqual(["claude-code"]);
   });
 });
+
+describe("buildSessionTable: detail prompts that name no session", () => {
+  test("are counted per tool, in orphans.prompt too, and only inside the date range", () => {
+    const evs: Ev[] = [sess("s")];
+    for (let i = 0; i < 20; i++) evs.push(prompt(undefined, T0 + i * DAY, { tool: "cursor", source: "cursor.legacy" }));
+    evs.push(prompt("missing", T0, { tool: "codex", source: "codex.rollouts" }));
+    evs.push(prompt(undefined, T0, { window: "lifetime" })); // a lifetime prompt with no session is no orphan
+    const t = buildSessionTable(scanResultOf(evs), opts);
+    expect(t.orphanPrompts).toEqual({ codex: 1, cursor: 20 });
+    expect(t.orphans.prompt).toBe(21);
+    const u = buildSessionTable(scanResultOf(evs), { ...opts, exclude: { from: T0 + 10 * DAY } });
+    expect(u.orphanPrompts).toEqual({ cursor: 10 });
+    expect(u.orphans.prompt).toBe(10);
+    const v = buildSessionTable(scanResultOf(evs), { ...opts, exclude: { tools: ["cursor"] } });
+    expect(v.orphanPrompts).toEqual({ codex: 1 });
+  });
+});
