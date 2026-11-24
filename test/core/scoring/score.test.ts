@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Metric } from "../../../core/analysis/types";
 import type { Window } from "../../../core/model/ids";
-import { COMPONENTS, type MetricKey } from "../../../core/scoring/components";
+import { COMPONENTS, type MetricKey, Z_LIMIT } from "../../../core/scoring/components";
 import { loadReference, type ReferenceEntry } from "../../../core/scoring/reference";
 import { displayScore, scoreDimensions, type DimensionResult } from "../../../core/scoring/score";
 import type { Evidence, Signals } from "../../../core/signals/types";
@@ -244,14 +244,21 @@ describe("degenerate input (Review Focus 2)", () => {
     expect(j.zRaw!).toBeCloseTo(zs.reduce((a, c) => a + c.weight * c.z!, 0), 12);
     expect(j.z!).toBeCloseTo(j.zRaw! * 10 / 11, 12);
   });
-  test("overflowing inputs stay finite (R1): component z is guarded to [-8, 8] and shrinkage cannot overflow", () => {
+  test("one signal cannot set a whole dimension: a component's z is limited to [-3, 3]", () => {
+    const e = ref.components["lev.sticky"]!;
+    const at = (zWanted: number) => dim(scoreDimensions(signalsAt("p50", { stickyMean: metric(e.p50 + zWanted * (e.p90 - e.p50) / 1.2816) }), ref), "leverage");
+    expect(at(2.5).components[0]!.z).toBeCloseTo(2.5, 9);
+    expect(at(5).components[0]!.z).toBe(3);
+    expect(at(-5).components[0]!.z).toBe(-3);
+    expect(Z_LIMIT).toBe(3);
+  });
+  test("overflowing inputs stay finite (R1): component z is limited to [-3, 3] and shrinkage cannot overflow", () => {
     const hi = dim(scoreDimensions(signalsAt("p50", { stickyMean: metric(1e308) }), ref), "leverage");
-    expect(hi.components[0]!.z).toBe(8);
+    expect(hi.components[0]!.z).toBe(3);
     expect(hi.status).toBe("scored");
     expect(Number.isFinite(hi.z!)).toBe(true);
     const lo = dim(scoreDimensions(signalsAt("p50", { stickyMean: metric(-1e308) }), ref), "leverage");
-    expect(lo.components[0]!.z).toBe(-8);
-    expect(lo.score).toBe(1);
+    expect(lo.components[0]!.z).toBe(-3);
     const big = 1e300;
     const ev = evidence(1, 6, { typedTurns: big, sessions: big, days: big, episodes: big, editTurns: big, followUps: big,
       tierEpisodes: big, editEpisodesInRepo: big, repos: big });

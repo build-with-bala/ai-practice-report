@@ -47,7 +47,7 @@ export const COMPONENTS: readonly ComponentSpec[] = Object.freeze([
  * A component as scored. `status` (builder's call 3): `ok` for a value; `not-measured` when it needs repo signals that
  * are off (a null with reason `repo-signals-off`, or any repo component while repo signals are `off` or `git-missing`);
  * otherwise a null is `not-measurable`. `raw` is the signal's value, `x` its transformed, oriented value, `z` the
- * unshrunk z against the reference, clamped to [-Z_GUARD, Z_GUARD]. `weight` is the effective weight in its dimension:
+ * unshrunk z against the reference, limited to [-Z_LIMIT, Z_LIMIT] (a scoring rule). `weight` is the effective weight in its dimension:
  * the pinned weight spread over the measured components when the dimension is `scored` or `insufficient`, else 0 (and 0
  * for an unmeasured component; `COMPONENTS` keeps the pinned one). `n` and `meta` are the signal's own.
  */
@@ -58,11 +58,13 @@ export interface ComponentResult { id: string; weight: number; status: "ok" | "n
 export const repoSignalsOff = (s: Signals): boolean => s.repoSignals === "off" || s.repoSignals === "git-missing";
 
 /**
- * A numeric guard, not a scoring rule: a component's z is clamped to [-Z_GUARD, Z_GUARD]. It guards extreme inputs (it
- * is 8 reference sigmas out), and keeps every later weighted sum finite, Task 8's overall included.
+ * A scoring rule: a component's z is limited to [-Z_LIMIT, Z_LIMIT] before it enters its dimension, so one signal far
+ * off the reference (a long sitting, a rare commit, an unusual commit-message style) cannot set a whole dimension on
+ * its own. Three reference sigmas is beyond the 99.8th percentile of the reference. It also keeps every later weighted
+ * sum finite, the overall included.
  */
-export const Z_GUARD = 8;
-const clampZ = (z: number): number => (Number.isNaN(z) ? z : Math.min(Z_GUARD, Math.max(-Z_GUARD, z)));
+export const Z_LIMIT = 3;
+const clampZ = (z: number): number => (Number.isNaN(z) ? z : Math.min(Z_LIMIT, Math.max(-Z_LIMIT, z)));
 
 /** Scores one component against the reference, with weight 0 (the dimension sets the effective weights). */
 export function scoreComponent(spec: ComponentSpec, s: Signals, ref: ReferenceTable): ComponentResult {
