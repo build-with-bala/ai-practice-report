@@ -34,10 +34,11 @@ export interface CheckFacts { present: boolean; checks: CheckKind[] }
 /**
  * One repository found from session folders. `repoKey` = keyedHash(salt, normalizePath(root)); `projectKeys`: the
  * session projects inside it; `identity`: the repo has a `user.email`, so the person's commits can be told apart (none
- * are read without it); `commitsTruncated`: the history held more commits than were read (`maxCommits`, or the output
- * cap); `commitsReach`: set when the commit list was cut short (the commit cap, the output cap or a timeout) — the
- * commit time (epoch ms) of the oldest record that was read; absent when the list is complete back to the time asked
- * for; `fileLists`: changed paths were read (false for a partial clone read without them, where rework is not
+ * are read without it); `commitsTruncated`: the history held more commits than were read (`maxCommits`, the output
+ * cap, or a timeout that ended the log); `commitsReach`: set when the commit list was cut short (the commit cap, the
+ * output cap or a timeout) — the smallest commit time (epoch ms) among the records read, any author's (the scan's `now`
+ * when none was read): sessions before it cannot be matched to commits; absent when the list is complete back to the
+ * time asked for; `fileLists`: changed paths were read (false for a partial clone read without them, where rework is not
  * measurable). `instructions`, `hooks`, `ci` and `precommit` come from the repo's allowlisted files, read from the
  * worktree the most detail-window sessions ran in (`readRepoFiles`).
  */

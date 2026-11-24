@@ -307,20 +307,24 @@ export interface CommitOptions { salt: Uint8Array; email: string; maxFiles: numb
  * `classifyCommit` reads, up to `o.maxFiles` changed paths as keyed hashes, and `owner` true (a later pass decides
  * between repos). The last record is held back as facts until the next one or the end, so a `cut` output (its last
  * record possibly incomplete) leaves it out, as `logRecords` does. `records`: every author's records, the left-out one
- * not counted.
+ * not counted; `oldest`: the smallest commit time (epoch ms) among those records, absent when there is none.
  */
-export function commitStream(o: CommitOptions): { push(chunk: Uint8Array): void; end(cut: boolean): { commits: ParsedCommit[]; records: number } } {
+export function commitStream(o: CommitOptions): { push(chunk: Uint8Array): void; end(cut: boolean): { commits: ParsedCommit[]; records: number; oldest?: number } } {
   const email = o.email.trim().toLowerCase();
   const commits: ParsedCommit[] = [];
   let last: ParsedCommit | null | undefined; // the last record's facts (null: another author's), not yet kept
   let records = 0;
+  let oldest: number | undefined; // the smallest commit time (ms) of the records counted, any author's
+  let lastTs = 0;
   const keep = () => {
     if (last === undefined) return;
     if (last !== null) commits.push(last);
     records++;
+    if (oldest === undefined || lastTs < oldest) oldest = lastTs;
   };
   const stream = new LogStream((r) => {
     keep();
+    lastTs = r.ct * 1000;
     const sha = r.sha.toLowerCase();
     last = r.email.trim().toLowerCase() !== email ? null : { sha, fact: { id: commitId(o.salt, sha), ts: r.ct * 1000, shaKey: shaKey(o.salt, r.sha),
       ...classifyCommit(r.message), files: r.files.slice(0, o.maxFiles).map((f) => keyedHash(o.salt, f)), owner: true, mine: true } };
@@ -331,7 +335,7 @@ export function commitStream(o: CommitOptions): { push(chunk: Uint8Array): void;
       stream.end();
       if (!cut) keep();
       last = undefined;
-      return { commits, records };
+      return oldest === undefined ? { commits, records } : { commits, records, oldest };
     },
   };
 }

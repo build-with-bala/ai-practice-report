@@ -329,12 +329,14 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
     }
     // a cut output's last record may be incomplete: it is left out
     const cut = r.truncated || r.timedOut;
-    const { commits, records } = parse.end(cut);
+    const { commits, records, oldest } = parse.end(cut);
     if (!r.truncated && !r.timedOut && r.code !== 0) return { commits: [], names }; // an empty repo, or a history git cannot read
     // git lists commits in no strict date order without `--date-order`: one stable order for every consumer
     commits.sort(byNewest);
     facts.commits = commits.map((c) => c.fact);
     facts.commitsTruncated ||= r.truncated || records >= maxCommits;
+    // a cut list reaches back only to its oldest record read (any author's); with none read, to nothing before now
+    if (facts.commitsTruncated) facts.commitsReach = oldest ?? input.now;
     return { commits, names };
   }
 }

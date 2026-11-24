@@ -167,6 +167,45 @@ describe("repo signals: discovery from session folders and commits as keyed fact
     expect(r.repos.repos[0]!.commitsTruncated).toBe(true);
   });
 
+  describe("a cut commit list says how far back it reaches", () => {
+    const eight = () => makeRepo(path.join(h.root, "reach"), Array.from({ length: 8 }, (_, i) => ({ files: { "n.txt": `${i}` }, message: `c${i}`, at: ago(8 - i * 0.5) })));
+    /** The main commit log (`--all`) through `change`, every other command as it is. */
+    const onLog = (change: (a: readonly string[], o: Parameters<GitRunner>[1]) => ReturnType<GitRunner>): GitRunner =>
+      (a, o) => (a[0] === "log" && a.includes("--all") ? change(a, o) : runGit(a, o));
+
+    test("the commit cap: commitsReach is the oldest commit time read", async () => {
+      const r = await run([eight()], { repoSignals: { maxCommits: 5 } });
+      const repo = r.repos.repos[0]!;
+      expect(repo.commitsTruncated).toBe(true);
+      expect(repo.commitsReach).toBe(Math.min(...repo.commits.map((c) => c.ts)));
+    });
+
+    test("the output cap: commitsReach is the oldest commit time of the records kept", async () => {
+      const dir = eight();
+      const full = await runGit(["log", "--all", "--name-only", "-z", "--format=%x00%x1e%H%x1f%ct%x1f%ae%n%B"], { cwd: dir, timeoutMs: 10_000, maxBytes: 1 << 20, signal: new AbortController().signal });
+      const r = await run([dir], { repoSignals: { runner: onLog((a, o) => runGit(a, { ...o, maxBytes: Math.floor(full.stdout.length / 2) })) } });
+      const repo = r.repos.repos[0]!;
+      expect(repo.commitsTruncated).toBe(true);
+      expect(repo.commits.length).toBeGreaterThan(0);
+      expect(repo.commits.length).toBeLessThan(8);
+      expect(repo.commitsReach).toBe(Math.min(...repo.commits.map((c) => c.ts)));
+    });
+
+    test("a timeout that ended the log: commitsReach is set", async () => {
+      const r = await run([eight()], { repoSignals: { runner: onLog(async (a, o) => ({ ...(await runGit(a, o)), code: null, timedOut: true })) } });
+      const repo = r.repos.repos[0]!;
+      expect(repo.commitsTruncated).toBe(true);
+      expect(repo.commits).toHaveLength(7); // the last record of a cut output is left out
+      expect(repo.commitsReach).toBe(Math.min(...repo.commits.map((c) => c.ts)));
+    });
+
+    test("a complete list: no commitsReach", async () => {
+      const r = await run([eight()]);
+      expect(r.repos.repos[0]!.commitsTruncated).toBe(false);
+      expect(r.repos.repos[0]!.commitsReach).toBeUndefined();
+    });
+  });
+
   test("a repo without user.email: no identity, no commits read", async () => {
     const r4 = makeRepo(path.join(h.root, "anon"), [{ files: { "a.txt": "a" }, message: "one", at: ago(2) }], { email: "" });
     const seen: string[] = [];
