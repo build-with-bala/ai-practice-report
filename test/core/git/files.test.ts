@@ -347,7 +347,8 @@ describe("repo files in a scan", () => {
       override get(k: string) { if (++gets > 1) throw new Error("boom"); return super.get(k); }
     })([[projectKey, root]]);
     const r = await collectRepoSignals({ cwds, recent: new Set([projectKey]), salt: new Uint8Array(32), now: Date.now(), signal: new AbortController().signal });
-    expect(r.status).toBe("ok");
+    // the files pass did not finish: the pass is partial
+    expect(r.status).toBe("partial");
     expect(r.repos).toHaveLength(1);
     expect(r.repos[0]!.commits).toHaveLength(1);
     expect(r.repos[0]!.instructions.files).toEqual([]);

@@ -1,6 +1,7 @@
 import { commitStream, LOG_ARGS, SINCE_AS_FILTER_SINCE, sinceArg, type ParsedCommit } from "./commits";
 import { candidates, groupRepos, sameFolder, type Found, type Repo } from "./discover";
 import { INSTRUCTION_FILES, MAX_FOLDER_FILES, MAX_REPO_FILE_BYTES, readRepoFiles, REPO_FILES, REPO_FOLDERS, SESSION_FOLDER_FILES } from "./files";
+import path from "node:path";
 import { resolveGit, runGit, type GitResult, type GitRunner } from "./run";
 import type { RepoFacts, RepoSignals } from "./types";
 
@@ -128,6 +129,13 @@ const atLeast = (v: [number, number] | undefined, min: readonly [number, number]
 
 const isEnoent = (e: unknown): boolean => (e as { code?: unknown } | null)?.code === "ENOENT";
 
+/**
+ * Skip reasons that mean a read did not finish — a repo dropped, or its data cut, by a timeout, an error, the budget or
+ * an abort: any of them makes the pass `partial`. The others (`missing`, `not-a-repo`, `root-mismatch`, `too-many-repos`,
+ * the deliberate `file-*` refusals and caps) are what the rules leave out, and keep it `ok`.
+ */
+const UNFINISHED: readonly string[] = ["budget", "timeout", "error", "identity-error", "log-error", "files-error", "file-io-error"];
+
 /** Stopped by the budget or an abort before the command settled. */
 const STOPPED = Symbol("stopped");
 
@@ -177,7 +185,7 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
     if (since !== undefined) out.since = since;
     return out;
   };
-  const partial = () => (input.signal.aborted || budget.signal.aborted ? "partial" : "ok");
+  const partial = () => (input.signal.aborted || budget.signal.aborted || UNFINISHED.some((k) => (skipped[k] ?? 0) > 0) ? "partial" : "ok");
 
   /** Runs `job` over `items`, `width` at once; items not started once stopped count as `budget`. */
   const pool = async <T>(items: readonly T[], job: (item: T) => Promise<void>): Promise<void> => {
@@ -197,18 +205,20 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
     exe = resolveGit(process.env);
     if (exe === undefined) return result("git-missing");
 
-    // git itself: missing (ENOENT), and its version
+    // git itself: missing (ENOENT, a non-zero exit, a timeout, or no version in its answer), and its version. Asked
+    // once per pass, in the root of git's own path — a folder that always exists, and no candidate's
     try {
-      const v = await git(["--version"], cands[0]!.dir, timeoutMs);
+      const v = await git(["--version"], path.parse(exe).root, timeoutMs);
       if (v === STOPPED) {
         skip("budget", cands.length);
         return result("partial");
       }
-      version = versionOf(v.stdout);
+      version = v.code === 0 && !v.timedOut ? versionOf(v.stdout) : undefined;
+      if (version === undefined) return result("git-missing");
     } catch (e) {
       if (isEnoent(e)) return result("git-missing");
       skip("error", cands.length);
-      return result("ok");
+      return result("partial");
     }
 
     // each candidate's root
@@ -290,12 +300,20 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
       for (const key of PARTIAL_CLONE_KEYS) {
         const r = await git(["config", "--get", key], cwd);
         if (r === STOPPED) return STOPPED;
-        if (r.code === 0 && r.stdout.trim() !== "") names = false;
+        if (r.timedOut) skip("timeout");
+        // set, or not known to be unset: read without paths
+        if ((r.code === 0 && r.stdout.trim() !== "") || r.timedOut || (r.code !== 0 && r.code !== 1)) names = false;
         if (!names) break;
       }
     }
+    // the person's email: exit 1 is git's own answer for a key that is not set (no identity); any other failure is a
+    // read that did not finish, counted
     const id = await git(["config", "--get", "user.email"], cwd);
     if (id === STOPPED) return STOPPED;
+    if (id.timedOut || id.truncated || (id.code !== 0 && id.code !== 1)) {
+      skip(id.timedOut ? "timeout" : "identity-error");
+      return { commits: [], names };
+    }
     const email = id.code === 0 ? id.stdout.trim() : "";
     if (email === "") return { commits: [], names };
     facts.identity = true;
@@ -320,6 +338,7 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
       if (!streamed && r.stdout !== "") parse.push(new TextEncoder().encode(r.stdout));
       return { r, parse };
     };
+    const history = names; // whether the instruction history may read paths, whatever the commit log below does
     let log = await readLog(names);
     if (log === STOPPED) return STOPPED;
     // with lazy fetch off, a partial clone that lacks trees cannot list paths (git fails): read it again without them
@@ -337,7 +356,11 @@ export async function collectRepoSignals(input: RepoSignalInput, o: RepoSignalOp
     // a cut output's last record may be incomplete: it is left out
     const cut = r.truncated || r.timedOut;
     const { commits, records, oldest } = parse.end(cut);
-    if (!r.truncated && !r.timedOut && r.code !== 0) return { commits: [], names }; // an empty repo, or a history git cannot read
+    // a log that failed (twice, when the first asked for paths): no commits, counted. An empty repo exits 0.
+    if (!r.truncated && !r.timedOut && r.code !== 0) {
+      skip("log-error");
+      return { commits: [], names: history };
+    }
     // git lists commits in no strict date order without `--date-order`: one stable order for every consumer
     commits.sort(byNewest);
     facts.commits = commits.map((c) => c.fact);

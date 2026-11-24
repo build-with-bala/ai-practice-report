@@ -71,7 +71,8 @@ function touchScript(name: string, marker: string): string {
   return p;
 }
 
-const ok = (): GitRunner => async () => ({ code: 0, stdout: "", timedOut: false, truncated: false });
+/** A runner that succeeds at everything, answering `--version` as a current git would and everything else with nothing. */
+const ok = (): GitRunner => async (a) => ({ code: 0, stdout: a[0] === "--version" ? "git version 2.51.0\n" : "", timedOut: false, truncated: false });
 
 describe("repo signals: discovery from session folders and commits as keyed facts", () => {
   test("two repos from five folders; own commits only, with their trailers; no canary leaves; roots stay in memory", async () => {
@@ -397,6 +398,82 @@ describe("repo signals: one repo, one count; hostile repos", () => {
     const r = await run([clone], { repoSignals: { runner: oldGit } });
     expect(existsSync(marker)).toBe(false);
     expect(r.repos.repos[0]!.commits).toHaveLength(3);
+  });
+});
+
+describe("repo signals: a read that did not finish is never ok", () => {
+  const res = (code: number | null, stdout = "", extra: Partial<{ timedOut: boolean; truncated: boolean }> = {}) =>
+    ({ code, stdout, timedOut: false, truncated: false, ...extra });
+  /** Every command through runGit except those `pick` answers. */
+  const except = (pick: (a: readonly string[]) => ReturnType<GitRunner> | undefined): GitRunner => (a, o) => pick(a) ?? runGit(a, o);
+
+  test("a git that exits 1 on every call is git-missing, asked once", async () => {
+    const calls: string[] = [];
+    const r = await run([repo1(), repo2()], { repoSignals: { runner: async (a) => { calls.push(a[0]!); return res(1); } } });
+    expect(r.repos.status).toBe("git-missing");
+    expect(calls).toEqual(["--version"]);
+  });
+
+  test("a --version answer that names no version is git-missing", async () => {
+    const r = await run([repo1()], { repoSignals: { runner: except((a) => (a[0] === "--version" ? Promise.resolve(res(0, "hello\n")) : undefined)) } });
+    expect(r.repos.status).toBe("git-missing");
+  });
+
+  test("--version runs once, in a folder that always exists, not in a candidate's: a vanished first folder costs that folder only", async () => {
+    const r1 = repo1();
+    const r2 = repo2();
+    const asked: { a: string; cwd: string }[] = [];
+    let removed = false;
+    const runner: GitRunner = (a, o) => {
+      if (!removed) { rmSync(r1, { recursive: true, force: true }); removed = true; }
+      asked.push({ a: a[0]!, cwd: o.cwd });
+      return runGit(a, o);
+    };
+    const r = await run([r1, r2], { repoSignals: { runner } });
+    const version = asked.filter((x) => x.a === "--version");
+    expect(version).toHaveLength(1);
+    expect(path.isAbsolute(version[0]!.cwd) && existsSync(version[0]!.cwd)).toBe(true);
+    expect([r1, r2].some((d) => version[0]!.cwd.startsWith(d))).toBe(false);
+    expect(r.repos.repos).toHaveLength(1);
+    expect(r.repos.skipped).toEqual({ error: 1 });
+    expect(r.repos.status).toBe("partial");
+  });
+
+  test("a rev-parse timeout drops the repo and makes the pass partial", async () => {
+    const r = await run([repo1()], { repoSignals: { runner: except((a) => (a[0] === "rev-parse" ? Promise.resolve(res(null, "", { timedOut: true })) : undefined)) } });
+    expect(r.repos).toMatchObject({ status: "partial", repos: [], skipped: { timeout: 1 } });
+  });
+
+  test("user.email: unset (exit 1) is no identity; a failed or timed-out read is counted, and the pass partial", async () => {
+    const email = (answer: ReturnType<typeof res>) => except((a) => (a[0] === "config" && a.includes("user.email") ? Promise.resolve(answer) : undefined));
+    const unset = await run([repo1()], { repoSignals: { runner: email(res(1)) } });
+    expect(unset.repos).toMatchObject({ status: "ok", skipped: {} });
+    expect(unset.repos.repos[0]).toMatchObject({ identity: false, commits: [] });
+    const failed = await run([repo1()], { repoSignals: { runner: email(res(128)) } });
+    expect(failed.repos).toMatchObject({ status: "partial", skipped: { "identity-error": 1 } });
+    expect(failed.repos.repos[0]).toMatchObject({ identity: false, commits: [] });
+    const slow = await run([repo1()], { repoSignals: { runner: email(res(null, "", { timedOut: true })) } });
+    expect(slow.repos).toMatchObject({ status: "partial", skipped: { timeout: 1 } });
+  });
+
+  test("a log that fails twice is counted and makes the pass partial; the instruction history is still read", async () => {
+    const r1 = makeRepo(path.join(h.root, "hist"), [{ files: { "CLAUDE.md": "x" }, message: "docs", at: ago(2) }]);
+    const logs: boolean[] = [];
+    const runner = except((a) => {
+      if (a[0] !== "log" || !a.includes("--all")) return undefined;
+      logs.push(a.includes("--name-only"));
+      return Promise.resolve(res(128));
+    });
+    const r = await run([r1], { repoSignals: { runner } });
+    expect(logs).toEqual([true, false]);
+    expect(r.repos).toMatchObject({ status: "partial", skipped: { "log-error": 1 } });
+    expect(r.repos.repos[0]).toMatchObject({ commits: [], fileLists: false, instructions: { touched: 1 } });
+  });
+
+  test("a timeout that ended the commit log makes the pass partial", async () => {
+    const runner = except((a) => (a[0] === "log" && a.includes("--all") ? Promise.resolve(res(null, "", { timedOut: true })) : undefined));
+    const r = await run([repo1()], { repoSignals: { runner } });
+    expect(r.repos).toMatchObject({ status: "partial", skipped: { timeout: 1 } });
   });
 });
 

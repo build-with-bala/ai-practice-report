@@ -46,11 +46,15 @@ export interface RepoFacts { repoKey: string; projectKeys: string[]; identity: b
   instructions: InstructionFacts; hooks: HookFacts; ci: CheckFacts; precommit: CheckFacts }
 
 /**
- * What repo signals found. `status`: `ok`; `partial` (the time budget ran out or the scan was aborted: some repos were
- * not read, or not to their end); `off` (switched off); `git-missing` (no git to run). `roots`: repoKey → the raw root
+ * What repo signals found. `status`: `ok`; `partial` (a read did not finish: the time budget ran out, the scan was
+ * aborted, or a timeout or error dropped a repo or cut its data — any count of `budget`, `timeout`, `error`,
+ * `identity-error`, `log-error`, `files-error` or `file-io-error` in `skipped`); `off` (switched off); `git-missing` (no
+ * git to run: none on PATH, or `git --version` failed, timed out or named no version). `roots`: repoKey → the raw root
  * path, held in memory only (for the repo-file pass and display on this machine) and never part of an analysis or an
- * export. `skipped`: session folders or repos left out, by reason (`missing`, `not-a-repo`, `too-many-repos`, `budget`,
- * `timeout`, `error`), and repo files left unread (`file-not-file`, `file-too-large`, `file-refused`, `file-io-error`,
+ * export. `skipped`: session folders or repos left out, by reason (`missing`, `not-a-repo`, `root-mismatch` (the root
+ * git reports is not the session's repo folder itself, or its answer is malformed), `too-many-repos`, `budget`,
+ * `timeout`, `error`, `identity-error` (`user.email` could not be read: the repo is listed without commits),
+ * `log-error` (the commit log failed: the repo is listed without commits)), and repo files left unread (`file-not-file`, `file-too-large`, `file-refused`, `file-io-error`,
  * `file-parse`, `file-outside`, `files-capped`: `readRepoFiles`; `files-error`: a files pass that failed, the repo's
  * commits kept). `since`: the earliest commit time asked for (epoch ms). `ms`: time taken.
  */
