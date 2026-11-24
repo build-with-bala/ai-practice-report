@@ -87,7 +87,8 @@ function pasteMatches(prompts: readonly PromptEv[], pasted: readonly PromptEv[])
  *   matches at most one transcript prompt.
  * - Missing days: UTC days with human transcript prompts, inside the span of the stats cache's days, for which the
  *   stats cache holds neither that day nor the day before or after it; at least 2 such days and 2% of those days →
- *   fail, fewer → note. The CLI keyed its days by the UTC date in older releases and by the local date in newer ones,
+ *   warn, fewer → note. Never a fail: sessions made on another machine and synced in are days this machine's own
+ *   history and stats never saw, an honest act that needs an answer. The CLI keyed its days by the UTC date in older releases and by the local date in newer ones,
  *   so one cache can hold both; at any instant the local date is the UTC date or a day either side of it, so a day
  *   either side counts as present (this covers travel across zones too). The day's `zone` label is not read: no
  *   label can be trusted to say which key a day was written under.
@@ -154,7 +155,7 @@ export function checkClaudeHistory(raw: ScanResult, t: SessionTable, s: Forensic
       values.missingDays = missing;
       values.days = days.size;
       parts.push(missing >= FAIL_DAYS && missing / days.size >= FAIL_DAY_SHARE
-        ? { status: "fail", reason: "missing-stats-days", compared }
+        ? { status: "warn", reason: "missing-stats-days", compared }
         : missing > 0 ? { status: "note", reason: "missing-stats-days", compared } : { status: "pass", reason: "ok-stats-only", compared });
     }
   }

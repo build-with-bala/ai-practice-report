@@ -381,7 +381,7 @@ describe("wording: every reason and question the forensic checks produce", () =>
       "soft:no-server-pass:no-server-pass",
     ].sort());
     const statuses = new Set(results.filter((c) => c.id === "C3").map((c) => c.status));
-    expect(statuses.has("note") && statuses.has("fail") && statuses.has("warn")).toBe(true);
+    expect([statuses.has("note"), statuses.has("warn"), statuses.has("fail")]).toEqual([true, true, false]); // C3 never fails
   });
 
   test("values hold numbers and dates only, and reasons are short codes", () => {

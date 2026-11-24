@@ -36,21 +36,21 @@ describe("checkRollouts: C6, every rollout has a thread row", () => {
     expect(c6.tools).toEqual(["codex"]);
   });
 
-  test("2 rollouts missing their rows fail", () => {
+  test("2 rollouts missing their rows warn, never fail: they may have been made on another machine", () => {
     const [c6] = run([...indexed(5), rollout(9), rollout(10)]);
-    expect([c6.status, c6.reason]).toEqual(["fail", "missing-thread-rows"]);
+    expect([c6.status, c6.reason]).toEqual(["warn", "missing-thread-rows"]);
     expect(c6.values).toEqual({ missing: 2, rollouts: 7, beforeIndex: 0 });
-    expect(c6.askAbout).toBe("2 Codex session files have no entry in Codex's own thread index. Were session files copied in from somewhere else?");
+    expect(c6.askAbout).toBe("2 Codex session files have no entry in Codex's own thread index. Were these sessions made on another machine and copied here?");
   });
 
   test("1 rollout missing its row is a note with the same question", () => {
     const [c6] = run([...indexed(5), rollout(9)]);
     expect([c6.status, c6.reason]).toEqual(["note", "missing-thread-rows"]);
     expect(c6.values).toEqual({ missing: 1, rollouts: 6, beforeIndex: 0 });
-    expect(c6.askAbout).toBe("1 Codex session file has no entry in Codex's own thread index. Were session files copied in from somewhere else?");
+    expect(c6.askAbout).toBe("1 Codex session file has no entry in Codex's own thread index. Were these sessions made on another machine and copied here?");
   });
 
-  test("the fail threshold is max(2, 1% of the checked rollouts)", () => {
+  test("the warn threshold is max(2, 1% of the checked rollouts)", () => {
     /** `total` rollouts, the last `missing` of them without a row. */
     const of = (total: number, missing: number): Ev[] =>
       [threadsCov(), ...Array.from({ length: total }, (_, i) => {
@@ -60,9 +60,9 @@ describe("checkRollouts: C6, every rollout has a thread row", () => {
     const status = (total: number, missing: number) => run(of(total, missing))[0].status;
     expect(status(1_000, 1)).toBe("note");
     expect(status(1_000, 9)).toBe("note");
-    expect(status(1_000, 10)).toBe("fail");
+    expect(status(1_000, 10)).toBe("warn");
     expect(status(20, 1)).toBe("note");
-    expect(status(20, 2)).toBe("fail");
+    expect(status(20, 2)).toBe("warn");
   });
 
   test("rollouts named before the index's earliest row are not checked", () => {
@@ -88,7 +88,7 @@ describe("checkRollouts: C6, every rollout has a thread row", () => {
     const idEarly = rollout(33, { fileTs: createdAt + HOUR, uuidTs: createdAt - HOUR });
     const [c6] = run([threadsCov(), dated(0), behind, nameOnlyEarly, nameOnlyLate, idEarly, dated(33)]);
     expect(c6.values).toEqual({ missing: 2, rollouts: 2, beforeIndex: 2 });
-    expect(c6.status).toBe("fail");
+    expect(c6.status).toBe("warn");
   });
 
   test("a rollout whose own row was created a few ms after its id's time is not before the index", () => {
@@ -117,7 +117,7 @@ describe("checkRollouts: C6, every rollout has a thread row", () => {
 
   test("without any createdAt every rollout is checked", () => {
     const [c6] = run([threadsCov(), rollout(0), rollout(1), row(2)]);
-    expect([c6.status, c6.values.beforeIndex]).toEqual(["fail", 0]);
+    expect([c6.status, c6.values.beforeIndex]).toEqual(["warn", 0]);
   });
 
   test("the 10-min rule reads a rollout's start on its id's clock where it has one", () => {
@@ -143,7 +143,7 @@ describe("checkRollouts: C6, every rollout has a thread row", () => {
 
   test("a drifted store with records is read", () => {
     const [c6] = run([threadsCov({ status: "drift" }), rollout(0), rollout(1)]);
-    expect(c6.status).toBe("fail");
+    expect(c6.status).toBe("warn");
   });
 
   test("no rollouts is n/a", () => {

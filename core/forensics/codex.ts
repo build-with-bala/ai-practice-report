@@ -38,7 +38,8 @@ const FAIL_SHARE = 0.005;
  * C6, every rollout in scope has a thread-index row in scope (by `threadId`). Rollouts that began at or after 10 min
  * before `now` are left out: the CLI may not have written their row yet. n/a without a read thread index (coverage of a
  * kept tool's `codex.threads`, `ok` or `drift` with records), or without rollouts. Rollouts missing their row: at least
- * max(2, 1% of the rollouts checked) → fail; fewer, but at least 1 → note with the same question (a genuine machine can
+ * max(2, 1% of the rollouts checked) → warn (never a fail: rollouts copied in from another machine are honest); fewer,
+ * but at least 1 → note with the same question (a genuine machine can
  * hold a stray one). The index cannot vouch for sessions older than itself: when a row carries `createdAt`, rollouts
  * that began more than 1 s before the earliest one are not checked (a row is created a few ms after its id's time) (`beforeIndex`; without any `createdAt` every rollout is).
  * `createdAt` is an absolute time and a file name a local one, so a rollout's start — for the 10-min rule too — is read
@@ -71,8 +72,9 @@ function checkThreadRows(s: ForensicScope, now: number): CheckResult {
   const missing = checked.filter((r) => !have.has(r.threadId)).length;
   const base = { id: "C6" as const, n: checked.length, values: { missing, rollouts: checked.length, beforeIndex } satisfies CheckValues, tools };
   if (missing === 0) return { ...base, status: checked.length >= MIN_PASS ? "pass" : "n/a", reason: checked.length >= MIN_PASS ? "ok" : "too-few" };
+  // never a fail: sessions made on another machine and copied in have no row in this machine's index
   const fail = missing >= Math.max(MISSING_MIN, MISSING_SHARE * checked.length);
-  return { ...base, status: fail ? "fail" : "note", reason: "missing-thread-rows" };
+  return { ...base, status: fail ? "warn" : "note", reason: "missing-thread-rows" };
 }
 
 /**

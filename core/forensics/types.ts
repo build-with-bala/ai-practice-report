@@ -4,6 +4,11 @@ import type { Origin, ToolId, Window } from "../model/ids";
  * Forensics: integrity checks over a scan result (spec §6.6). They let a reader judge whether a trace history is genuine
  * or was edited, copied or fabricated. Every check is pure and synchronous, like the rest of the analysis.
  *
+ * The line between the statuses, which every check applies: `fail` = cannot happen unless data or times were altered,
+ * or the clock was wrong; `warn` = can happen honestly and needs an answer; `note` = worth asking about. No check fails
+ * on a single observation, nor on something an honest person does (moving files, changing accounts, syncing sessions in
+ * from another machine, living away from UTC, early access).
+ *
  * A result holds no free text from traces: `values` holds finite numbers, and one day ("YYYY-MM-DD") under `date`,
  * under closed keys (`ValueKey`); `reason` is a closed code (`Reason`); and `askAbout` is the one fixed English question
  * `questionFor` (questions.ts) builds from `id`, `reason` and `values`, whose only variable parts are those numbers and
