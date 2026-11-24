@@ -347,55 +347,83 @@ export const VERSION_PATTERN = /^(?:0|[1-9]\d{0,3})\.(?:0|[1-9]\d{0,3})\.(?:0|[1
 /** A project's opaque label: "P-" and the upper-case hex of 4, 6, 8 … or 16 digits, the shortest unique in the store. */
 const PROJECT_LABEL = str(/^P-(?:[0-9A-F]{2}){2,8}$/, "pseudonymous");
 /**
- * The combining marks a revealed name may not hold, though they are `\p{M}`: the variation selectors U+FE00–U+FE0F and
- * U+E0100–U+E01EF (invisible, 256 of them: a channel for hidden bytes), the combining grapheme joiner U+034F
- * (invisible), the overlays U+0334–U+0338 (a tilde, strokes and solidi drawn through a letter, the last much like a
- * slash), the whole block of combining marks for symbols U+20D0–U+20FF (the overlays U+20D2–U+20E5 among them, and
- * the enclosing circles and keycaps), and every enclosing mark (`\p{Me}`).
+ * The combining marks a revealed name may not hold, though they are `\p{M}`: the variation selectors U+FE00-U+FE0F and
+ * U+E0100-U+E01EF (invisible, 256 of them: a channel for hidden bytes), the combining grapheme joiner U+034F
+ * (invisible), the overlays U+0334-U+0338 (a tilde, strokes and solidi drawn through a letter, the last much like a
+ * slash), the whole block of combining marks for symbols U+20D0-U+20FF (the overlays U+20D2-U+20E5 among them, and
+ * the enclosing circles and keycaps), and every enclosing mark (`\p{Me}`). Every default-ignorable code point, marks
+ * among them (the Mongolian free variation selectors, the Khmer inherent vowels), is refused before this list is read.
  */
-const BARRED_MARK = /[︀-️\u{E0100}-\u{E01EF}͏̴-̸⃐-⃿\p{Me}]/u;
+const BARRED_MARK = /[\uFE00-\uFE0F\u{E0100}-\u{E01EF}\u034F\u0334-\u0338\u20D0-\u20FF\p{Me}]/u;
+const LETTER = /^\p{L}$/u;
 const LETTER_OR_DIGIT = /^[\p{L}\p{N}]$/u;
 const MARK = /^\p{M}$/u;
-const JOINER = /^[‌‍]$/u;
-/** Invisible code points (Unicode Default_Ignorable_Code_Point: tags, bidi controls, fillers, soft hyphen…), the two joiners aside. */
+/** The zero-width non-joiner U+200C and joiner U+200D. */
+const JOINER = /^[\u200C\u200D]$/u;
+/** The Tibetan syllable mark (tsheg), written between the syllables of a word. */
+const TSHEG = "\u0F0B";
+/** Invisible code points (Unicode Default_Ignorable_Code_Point: tags, bidi controls, fillers, invisible marks…). */
 const IGNORABLE = /^\p{Default_Ignorable_Code_Point}$/u;
-/** At most this many combining marks in a row (enough for a stacked Indic or vowelled Arabic letter). */
+/** At most this many combining marks in a row (enough for a stacked Indic or vowelled Arabic letter); a joiner does not end a run. */
 const MAX_MARKS = 4;
 /** At most this many code points, counted in NFC. */
 const MAX_NAME = 64;
+/** The shapes of the payload's opaque ids, any letter case: a name with exactly one of them could pass for an id. */
+const ID_SHAPES = [/^P-(?:[0-9A-F]{2}){2,8}$/i, /^[0-9A-F]{16}$/i];
 
 /**
  * True for a project name the person may reveal, in any script. The name must already be in NFC (the export
- * normalizes it first, so one name has one byte form) and hold 1 to 64 code points, each a letter, a digit, a space,
- * ". _ -", an allowed combining mark (`\p{M}` less `BARRED_MARK`) or a zero-width non-joiner or joiner (U+200C,
- * U+200D). It starts with a letter or digit and ends with a letter, digit or mark. A mark follows a letter, a digit
- * or another mark, at most 4 in a row. A joiner stands between two characters that are each a letter or a mark (so
- * never first, last or two in a row). No other invisible code point, control, path separator or markup can appear.
+ * normalizes it first, so one name has one byte form), hold 1 to 64 code points, and not have exactly the shape of a
+ * project label or a keyed hash. Code point by code point:
+ * - a default-ignorable code point (`\p{Default_Ignorable_Code_Point}`) is refused, whatever its category, unless it
+ *   is a joiner in a place the joiner rule allows; this is tested before any other rule;
+ * - a letter or digit is allowed anywhere, and the name starts with one;
+ * - a space, ".", "_" or "-" is allowed, but never last;
+ * - an allowed combining mark (`\p{M}` less `BARRED_MARK`) follows a letter, a digit or another mark, or a joiner
+ *   whose left neighbour is a letter or a mark; at most 4 marks in a row, a joiner not ending the run;
+ * - a joiner (U+200C, U+200D) has a letter or mark on its left, and on its right a letter or a mark, or nothing when
+ *   it directly follows a mark (an old-style Malayalam chillu ends a word so); never two in a row, never first, and
+ *   at most one between two letters, so joiners carry no string of bits;
+ * - the Tibetan syllable mark U+0F0B stands between two letters or marks;
+ * - nothing else (no control, separator, punctuation beyond the four above, symbol or markup).
+ * The name ends with a letter, a digit, a mark, or a joiner after a mark.
  */
 export function isRevealedName(name: string): boolean {
   if (typeof name !== "string" || name.normalize("NFC") !== name) return false;
   const cps = [...name];
-  if (cps.length < 1 || cps.length > MAX_NAME || !LETTER_OR_DIGIT.test(cps[0]!)) return false;
-  const letterOrMark = (c: string | undefined): boolean => c !== undefined && (/^\p{L}$/u.test(c) || (MARK.test(c) && !BARRED_MARK.test(c)));
+  if (cps.length < 1 || cps.length > MAX_NAME || !LETTER_OR_DIGIT.test(cps[0]!) || ID_SHAPES.some((re) => re.test(name))) return false;
+  const allowedMark = (c: string | undefined): boolean => c !== undefined && MARK.test(c) && !BARRED_MARK.test(c) && !IGNORABLE.test(c);
+  const letterOrMark = (c: string | undefined): boolean => c !== undefined && (LETTER.test(c) || allowedMark(c));
   let marks = 0;
+  let joinersSinceLetter = 0;
   for (let i = 0; i < cps.length; i++) {
     const c = cps[i]!;
+    const prev = cps[i - 1];
+    const next = cps[i + 1];
+    if (JOINER.test(c)) {
+      if (!letterOrMark(prev) || ++joinersSinceLetter > 1) return false;
+      if (next === undefined ? !allowedMark(prev) : !letterOrMark(next)) return false;
+      continue; // a joiner neither ends nor starts a run of marks
+    }
+    if (IGNORABLE.test(c)) return false; // before any other rule: no invisible code point, whatever its category
     if (MARK.test(c)) {
-      if (BARRED_MARK.test(c) || ++marks > MAX_MARKS) return false;
-      const prev = cps[i - 1]!; // never first: cps[0] is a letter or digit
-      if (!(LETTER_OR_DIGIT.test(prev) || MARK.test(prev))) return false;
+      if (!allowedMark(c) || ++marks > MAX_MARKS) return false;
+      const afterJoiner = prev !== undefined && JOINER.test(prev) && letterOrMark(cps[i - 2]);
+      if (!(prev !== undefined && (LETTER_OR_DIGIT.test(prev) || MARK.test(prev) || afterJoiner))) return false;
       continue;
     }
     marks = 0;
-    if (JOINER.test(c)) {
-      if (!letterOrMark(cps[i - 1]) || !letterOrMark(cps[i + 1])) return false;
+    if (LETTER_OR_DIGIT.test(c)) {
+      joinersSinceLetter = 0;
       continue;
     }
-    if (IGNORABLE.test(c)) return false;
-    if (!(LETTER_OR_DIGIT.test(c) || c === " " || c === "." || c === "_" || c === "-")) return false;
+    if (c === TSHEG) {
+      if (!letterOrMark(prev) || !letterOrMark(next)) return false;
+      continue;
+    }
+    if (!(c === " " || c === "." || c === "_" || c === "-") || next === undefined) return false;
   }
-  const last = cps[cps.length - 1]!;
-  return LETTER_OR_DIGIT.test(last) || MARK.test(last);
+  return true;
 }
 /** A revealed project name (`isRevealedName`). */
 const REVEALED_NAME = str({ test: isRevealedName }, "revealed");
