@@ -1,7 +1,7 @@
 import { dayEnd, dayStart, isoWeek } from "../analysis/activity";
 import { artifactUse } from "../analysis/artifacts";
 import { analysisScope } from "../analysis/scope";
-import { CONFIG_SOURCES, PR_LINK_TOOLS, SWITCH_TOOLS, type Metric, type SessionTable } from "../analysis/types";
+import { CONFIG_SOURCES, PR_LINK_TOOLS, STARTED_ORIGINS, SWITCH_TOOLS, type Metric, type SessionTable } from "../analysis/types";
 import type { CoverageEv } from "../model/events";
 import type { SessionStats } from "../analysis/walk";
 import type { CommitFact, RepoFacts } from "../git/types";
@@ -41,7 +41,8 @@ function toolDays(t: SessionTable, tools: ReadonlySet<ToolId>, window: "detailDa
  * date range never count, and nothing of an excluded tool counts.
  *
  * - **Buckets.** An active bucket holds an action of at least one `detailTop` row (scripted rows too); a parallel one,
- *   of at least 2 rows. `firstParallelBucket` is the start of the earliest parallel bucket (pre-flight P14).
+ *   of at least 2 rows someone started (a person, a script or a schedule: delegated work — another tool's agent, a
+ *   subagent row whose parent link is missing — never makes a bucket parallel); `peakConcurrency` counts those rows too. `firstParallelBucket` is the start of the earliest parallel bucket (pre-flight P14).
  * - **Repos.** An active repo is the `repoKey` of at least one `detailTop` row; repo-wide totals (rework, co-authored
  *   share) read the repos of kept detail-window rows (no host copy), so a repo only an excluded project or tool, or
  *   only lifetime-window sessions, used never counts; the artifacts' child types and MCP calls read the same rows.
@@ -60,12 +61,14 @@ export function computeGlobals(t: SessionTable, stats: readonly SessionStats[], 
   const repoOff = repoStatus === "off" || repoStatus === "git-missing";
 
   // buckets (§6.4 parallelism)
+  // every row's work makes a bucket active; only sessions someone started (`STARTED_ORIGINS`) make it parallel
   const perBucket = new Map<number, number>();
   const bucketSpan = new Span();
   for (const s of stats) {
     if (s.buckets.length === 0) continue;
     bucketSpan.add(s);
-    for (const b of s.buckets) perBucket.set(b, (perBucket.get(b) ?? 0) + 1);
+    const started = STARTED_ORIGINS.has(s.origin) ? 1 : 0;
+    for (const b of s.buckets) perBucket.set(b, (perBucket.get(b) ?? 0) + started);
   }
   let parallel = 0;
   let peak = 0;

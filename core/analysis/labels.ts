@@ -1,10 +1,10 @@
 import type { ToolId } from "../model/ids";
 import { keyedHash } from "../text/hash";
 import { dayKey, isoWeek } from "./activity";
-import type { SessionTable } from "./types";
+import { isTopLevel, type SessionTable } from "./types";
 
 /**
- * One project (a projectKey of kept rows): `sessions` = its top-level kept sessions (no parent, no host copy);
+ * One project (a projectKey of kept rows): `sessions` = its top-level kept sessions (`isTopLevel`, no host copy);
  * `activeWeeks` = the distinct ISO weeks in which one of its human top-level sessions started; `tools` (sorted) = the
  * tools of those sessions; `inRepo` = its projectKey lies in a repo of the repo signals; `lastWeek` = the ISO week of
  * its latest session end (clipped to the date range). Keys are keyed hashes and labels opaque (spec §6.7).
@@ -54,7 +54,7 @@ export function projects(t: SessionTable, labels: Map<string, string>): ProjectS
   interface Acc { sessions: number; weeks: Set<string>; tools: Set<ToolId>; lastEnd: number }
   const acc = new Map<string, Acc>();
   for (const r of t.rows.values()) {
-    if (r.projectKey === undefined || r.parentId !== undefined || t.hosts.has(r.id)) continue;
+    if (r.projectKey === undefined || !isTopLevel(r) || t.hosts.has(r.id)) continue;
     let a = acc.get(r.projectKey);
     if (!a) acc.set(r.projectKey, (a = { sessions: 0, weeks: new Set(), tools: new Set(), lastEnd: -Infinity }));
     a.sessions++;

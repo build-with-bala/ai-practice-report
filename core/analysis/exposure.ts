@@ -4,7 +4,7 @@ import { fixedMetric, Span } from "../signals/types";
 import { dayEnd, dayKey, dayStart, isoWeek } from "./activity";
 import { promptWindowByTool } from "./promptwindow";
 import { analysisScope, type AnalysisScope } from "./scope";
-import type { Metric, SessionTable } from "./types";
+import { isTopLevel, type Metric, type SessionTable } from "./types";
 import { isAction } from "./walk";
 
 export type Feature = "subagents" | "workflows" | "background-agents" | "plan-mode" | "skills" | "mcp" | "headless" | "parallel-sessions"
@@ -25,7 +25,8 @@ export type DurationArc = "<10m" | "10-60m" | "1-4h" | ">4h";
  *   only daily totals, its lifetime days): a union of day sets, never a sum of windows, and no tool gives both.
  *   `detailPrompts` and `lifetimePrompts` = human prompts in scope of the tools whose prompt window is that window, so
  *   no prompt counts in both columns.
- * - `tools`: per tool and window (sorted), the top-level sessions (kept rows with no parent, no host copy), the human
+ * - `tools`: per tool and window (sorted), the top-level sessions (kept rows with no parent, no host copy, started by a
+ *   person, a script or a schedule: `isTopLevel`; delegated rows count as subagent work), the human
  *   prompts in scope and the actions (walk rule 2) of every kept row, inside the date range; `from`/`to` span the
  *   sessions (clipped to the range) and the prompts.
  * - `rotation`: tools with an active day (either window) among the 90 day keys ending at now's day, and with any.
@@ -132,7 +133,7 @@ export function exposure(t: SessionTable, raw: ScanResult, o: { now: number; tim
   for (const r of t.rows.values()) {
     if (t.hosts.has(r.id)) continue;
     const acc = accOf(r.tool, r.window);
-    if (r.parentId === undefined) {
+    if (isTopLevel(r)) {
       acc.sessions++;
       const c = clip(r);
       acc.span.addTs(c.start);
@@ -227,7 +228,7 @@ function firstSeen(t: SessionTable, raw: ScanResult, scope: AnalysisScope, first
   for (const r of t.rows.values()) {
     if (t.hosts.has(r.id)) continue;
     const features: Feature[] = [];
-    if (r.parentId !== undefined || r.origin === "subagent") features.push("subagents");
+    if (!isTopLevel(r)) features.push("subagents"); // a child, or delegated work with no parent link
     if (r.workflowId !== undefined) features.push("workflows");
     if (r.background === true) features.push("background-agents");
     if (r.parentId === undefined && (r.origin === "scripted" || r.origin === "scheduled")) features.push("headless");

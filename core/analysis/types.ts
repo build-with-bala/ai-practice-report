@@ -1,6 +1,15 @@
 import type { Ev, PromptEv } from "../model/events";
 import type { Origin, ToolId, Window } from "../model/ids";
 
+/**
+ * The origins of a session someone started — a person, a script or a schedule. A row of any other origin (another
+ * tool's agent, a subagent whose parent link is missing, the system) is delegated work: it never makes a bucket
+ * parallel, and it is no top-level session of the report.
+ */
+export const STARTED_ORIGINS: ReadonlySet<Origin> = new Set<Origin>(["human", "scripted", "scheduled"]);
+/** A top-level session of the report: no parent, and started by a person, a script or a schedule. */
+export const isTopLevel = (r: { parentId?: string; origin: Origin }): boolean => r.parentId === undefined && STARTED_ORIGINS.has(r.origin);
+
 /** What every metric says about its evidence: one window, the sources it read, the span covered and the sample size. */
 export interface MetricMeta { window: Window; sources: string[]; from?: number; to?: number; n: number }
 /**

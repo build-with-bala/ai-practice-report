@@ -7,7 +7,7 @@ import { langOfExt, type EditLang } from "../text/langs";
 import { artifactUse } from "./artifacts";
 import { promptWindowByTool } from "./promptwindow";
 import { analysisScope } from "./scope";
-import type { MetricMeta, SessionTable } from "./types";
+import { isTopLevel, type MetricMeta, type SessionTable } from "./types";
 import { isAction } from "./walk";
 
 export type StackRole = "frontend" | "backend" | "mobile" | "data";
@@ -38,7 +38,7 @@ export interface ConfigPanel { byKind: Partial<Record<ConfigEv["kind"], { author
 /**
  * What was read, per tool and window of kept tools (sorted): each source once (sorted) with its status — the first of
  * error, drift, present-undecodable, ok, empty, absent among its candidates — and beta flag; `from`/`to` span the
- * coverage's, each clipped to the date range (a span wholly outside it adds none); `sessions` = top-level kept rows of that tool and window, `prompts` = its human prompts in scope;
+ * coverage's, each clipped to the date range (a span wholly outside it adds none); `sessions` = top-level kept rows (`isTopLevel`) of that tool and window, `prompts` = its human prompts in scope;
  * `formatChanged` when any source drifted.
  */
 export interface CoveragePanel { rows: Array<{ tool: ToolId; window: Window; sources: Array<{ source: string; status: CoverageEv["status"]; beta: boolean }>;
@@ -167,7 +167,7 @@ export function panels(t: SessionTable, raw: ScanResult, o: { timeZone: string }
   const sessionsOf = new Map<string, number>();
   const privateModels: Record<string, number> = {};
   for (const r of t.rows.values()) {
-    if (r.parentId !== undefined || t.hosts.has(r.id)) continue;
+    if (!isTopLevel(r) || t.hosts.has(r.id)) continue;
     const key = `${r.tool}\u0000${r.window}`;
     sessionsOf.set(key, (sessionsOf.get(key) ?? 0) + 1);
     for (const m of new Set(r.models)) privateModels[m] = (privateModels[m] ?? 0) + 1;
