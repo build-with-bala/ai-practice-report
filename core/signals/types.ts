@@ -25,7 +25,15 @@ export interface Signals {
   stickyMean: Metric; p90Run: Metric; actionsPerTurn: Metric;
   parallelShare: Metric; peakConcurrency: number; backgroundShare: Metric;
   fanoutPerEpisode: Metric; childTypes: Record<ChildType, number>; workflowRunsPerEpisode: Metric; maxDepth: number;
-  correctionRate: Metric; healthyInterruptShare: Metric; turnsPerWork: Metric; queuePerTurn: Metric;
+  correctionRate: Metric; healthyInterruptShare: Metric;
+  /**
+   * Unscored. Typed turns per instruction, discounted by the work the instruction set off: per instruction (an episode's
+   * first typed turn or a later brief, with the follow-up turns after it) turns / log2(2 + actions), averaged. It follows
+   * how much work one instruction sets off and how follow-up turns are worded (a longer follow-up starts a new
+   * instruction), so it is shown for context and not scored.
+   */
+  turnsPerWork: Metric;
+  queuePerTurn: Metric;
   maintainedShare: Metric; artifacts: Metric; memoryFiles: number; briefScore: Metric; hygiene: Metric;
   switchesPerWeek: Metric; rho: Metric; tokensPerLanded: Metric; usdPerLanded: Metric;
   landedShare: Metric; reworkShare: Metric; prsPerWeek: Metric; aiCoauthoredShare: Metric; commitAfterSession: Metric;

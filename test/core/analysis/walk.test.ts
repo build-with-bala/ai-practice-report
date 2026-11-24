@@ -405,21 +405,21 @@ describe("walk: interrupts and briefs (rules 10–11)", () => {
   };
   const perWork = (st: SessionStats): number => st.turnsPerWorkSum / st.workEpisodes;
 
-  test("turns per work measures steering, not the length of a sitting: equal for sittings of 3 to 40 turns", () => {
-    const want = 1 / Math.log2(12);
-    for (const n of [3, 6, 12, 25, 40]) expect([n, perWork(one(sitting(n, 10)))]).toEqual([n, expect.closeTo(want, 12) as unknown as number]);
-    // one follow-up turn after every brief: the same at every length too
-    const pairs = 2 / Math.log2(22);
-    for (const n of [6, 12, 40]) expect(perWork(one(sitting(n, 10, (i) => i % 2 === 1)))).toBeCloseTo(pairs, 12);
+  // turns per work is shown unscored: these state what it reads
+  test("turns per work follows the length of a sitting when the follow-ups are short continue turns", () => {
+    // one brief, then "continue" turns (classified as continuations): one instruction holding every turn
+    const at = (n: number): number => perWork(one(sitting(n, 10, () => true)));
+    for (const n of [3, 6, 12, 25]) expect(at(n)).toBeCloseTo(n / Math.log2(2 + 10 * n), 12);
+    expect(at(3)).toBeLessThan(at(6));
+    expect(at(6)).toBeLessThan(at(25));
   });
 
-  test("clearing the context every 5 turns does not change it; follow-up turns raise it", () => {
-    const base = perWork(one(sitting(25, 10)));
-    expect(perWork(one(sitting(25, 10, () => false, 5)))).toBeCloseTo(base, 12);
-    const some = perWork(one(sitting(25, 10, (i) => i % 4 === 1)));
-    const more = perWork(one(sitting(25, 10, (i) => i % 4 !== 0)));
-    expect(base).toBeLessThan(some);
-    expect(some).toBeLessThan(more);
+  test("turns per work follows how follow-ups are worded: the same sitting with long follow-ups (new briefs) reads as one turn each", () => {
+    const short = perWork(one(sitting(25, 10, () => true)));
+    const long = perWork(one(sitting(25, 10, () => false)));
+    expect(long).toBeCloseTo(1 / Math.log2(12), 12);
+    expect(short).toBeGreaterThan(5 * long);
+    expect(one(sitting(25, 10, () => true)).turns).toBe(one(sitting(25, 10, () => false)).turns); // the same work and turn count
   });
 
   test("slash-command turns are no turns of their instruction; their actions are its work", () => {

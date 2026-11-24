@@ -29,7 +29,7 @@ const metric = (value: number | null, o: { n?: number; window?: Window; source?:
 };
 /** Evidence at `k` times every minimum, with `weeks` distinct weeks. */
 const evidence = (k: number, weeks: number, over: Partial<Evidence> = {}): Evidence => ({
-  typedTurns: 60 * k, sessions: 5 * k, days: 14 * k, weeks, episodes: 20 * k, editTurns: 20 * k, followUps: 30 * k, briefs: 0,
+  typedTurns: 60 * k, sessions: 5 * k, days: 14 * k, weeks, episodes: 20 * k, editTurns: 20 * k, followUps: 30 * k, briefs: 15 * k,
   failingChecks: 0, interrupts: 0, workEpisodes: 0, tierEpisodes: 30 * k, editEpisodesInRepo: 10 * k, landed: 0, repos: 3 * k,
   buckets: 0, bgKnown: 0, artifacts: 0, lifetimeWeeks: weeks, ownCommits: 0, ...over,
 });
@@ -96,8 +96,8 @@ describe("scoreDimensions at the anchors", () => {
     const d = dim(scoreDimensions(signalsAt("p50"), ref), "context");
     const art = d.components.find((c) => c.id === "ctx.artifacts")!;
     expect(art.n).toBe(N);
-    expect(art.meta).toEqual({ window: "detail", sources: ["claude-code.transcripts"], from: T0 + 13 * DAY, to: T0 + 43 * DAY, n: N });
-    expect(d.meta).toEqual({ window: "detail", sources: ["claude-code.transcripts", "git"], from: T0 + 12 * DAY, to: T0 + 45 * DAY, n: 200 });
+    expect(art.meta).toEqual({ window: "detail", sources: ["claude-code.transcripts"], from: T0 + 12 * DAY, to: T0 + 42 * DAY, n: N }); // ctx.artifacts is component 12
+    expect(d.meta).toEqual({ window: "detail", sources: ["claude-code.transcripts", "git"], from: T0 + 11 * DAY, to: T0 + 44 * DAY, n: 200 });
   });
   test("displayScore is open-tailed: 99 at most, with the mark whenever it shows 99", () => {
     expect(displayScore(2.4)).toEqual({ score: 99, openTail: true });
@@ -213,7 +213,7 @@ describe("evidence, confidence and shrinkage", () => {
   });
   test("every dimension names its binding part", () => {
     const parts = scoreDimensions(signalsAt("p50"), ref).map((d) => d.part);
-    expect(parts).toEqual(["typedTurns", "days", "editTurns", "followUps", "episodes", "tierEpisodes", "editEpisodesInRepo"]);
+    expect(parts).toEqual(["typedTurns", "days", "editTurns", "briefs", "episodes", "tierEpisodes", "editEpisodesInRepo"]);
   });
 });
 
@@ -261,7 +261,7 @@ describe("degenerate input (Review Focus 2)", () => {
     expect(lo.components[0]!.z).toBe(-3);
     expect(lo.score).toBe(5);
     const big = 1e300;
-    const ev = evidence(1, 6, { typedTurns: big, sessions: big, days: big, episodes: big, editTurns: big, followUps: big,
+    const ev = evidence(1, 6, { typedTurns: big, sessions: big, days: big, episodes: big, editTurns: big, followUps: big, briefs: big,
       tierEpisodes: big, editEpisodesInRepo: big, repos: big });
     const ds = [hi, lo, ...scoreDimensions(signalsAt("p90", { evidence: ev, stickyMean: metric(1e308) }), ref)];
     expect(finiteDeep(ds)).toBe(true);

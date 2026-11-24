@@ -54,8 +54,8 @@ describe("persona calibration", () => {
         expect({ id: a.id, lower: a.x < b.x }).toEqual({ id: a.id, lower: true });
       }
       // the novice is insufficient on 3 dimensions, has no background share, and lands under 5 units (no cost per landed
-      // unit); its 0 artifacts are a measured 0. The others score everything
-      expect([dims, comps]).toEqual(lo === "novice" ? [4, 20] : [7, 22]);
+      // unit); its 0 artifacts are a measured 0. The others score all 21 components
+      expect([dims, comps]).toEqual(lo === "novice" ? [4, 19] : [7, 21]);
     }
   });
 
@@ -102,14 +102,14 @@ describe("persona golden output", () => {
   const GOLDEN: Record<"intermediate" | "expert", { dims: Record<DimensionId, [number, [number, number]]>; overall: Pick<Overall, "score" | "interval" | "band" | "coverage"> }> = {
     intermediate: {
       dims: {
-        leverage: [50, [49, 52]], orchestration: [50, [47, 52]], verification: [50, [46, 53]], steering: [50, [40, 64]],
+        leverage: [50, [49, 52]], orchestration: [50, [47, 52]], verification: [50, [46, 53]], steering: [50, [35, 67]],
         context: [50, [49, 50]], judgment: [50, [43, 62]], delivery: [49, [44, 55]],
       },
       overall: { score: 50, interval: [48, 52], band: "developing", coverage: "7/7" },
     },
     expert: {
       dims: {
-        leverage: [87, [87, 87]], orchestration: [85, [84, 85]], verification: [87, [85, 90]], steering: [87, [83, 92]],
+        leverage: [87, [87, 87]], orchestration: [85, [84, 85]], verification: [87, [85, 90]], steering: [88, [82, 93]],
         context: [86, [86, 86]], judgment: [87, [83, 90]], delivery: [89, [88, 91]],
       },
       overall: { score: 87, interval: [86, 88], band: "exceptional", coverage: "7/7" },

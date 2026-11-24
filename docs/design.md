@@ -234,7 +234,7 @@ Rules every plugin follows:
 | **Leverage** | 0.6 z(mean s_t·log2(1+A_t)) + 0.4 z(log p90 successful run) | 60 turns, 5 sessions, 10 days |
 | **Orchestration** | 0.35 z(parallel buckets share) + 0.30 z(finished fan-out / episode) + 0.20 z(headless runs / active week) + 0.15 z(background share) | 14 days, 20 episodes |
 | **Verification** | 0.5 z(VAE weighted by log lines changed) + 0.3 z(closure) + 0.2·guardrails (check-running hooks, CI/pre-commit, instructions naming test commands) | 20 edit turns |
-| **Steering** | 0.4 z(−correction rate after briefs) + 0.3 z(healthy-interrupt share) + 0.3 z(−human turns per log work) | 30 follow-up turns |
+| **Steering** | 0.5 z(−correction rate after briefs) + 0.5 z(healthy-interrupt share). Turns per work (typed turns per instruction, discounted by the work it set off) is shown, not scored: it follows how much work one instruction sets off and how follow-up turns are worded, so it measures leverage, the length of a sitting or wording, not steering | 15 briefs or 15 interrupts |
 | **Context** | 0.35·(active repos with maintained instruction files) + 0.35 z(used artifacts, provenance-weighted) + 0.15·hygiene + 0.15 z(task-start brief structure) | 20 episodes or 3 repos |
 | **Judgment** | 0.4 z(deliberate switches / active week) + 0.4 z(ρ tier vs task size) + 0.2 z(−cost per landed unit) | 30 episodes with known model+effort |
 | **Delivery** | 0.5 z(edit episodes → commit/PR ≤ 24 h) + 0.35 z(−rework ≤ 72 h) + 0.15 z(PRs / active week) | 10 edit episodes in git repos |

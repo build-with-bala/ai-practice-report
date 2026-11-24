@@ -302,7 +302,7 @@ describe("Review Focus 3: one persona under two zones", () => {
     if (hourUtc === 12) expect(localDay(firstWork, "Pacific/Auckland")).not.toBe(localDay(firstWork, "UTC"));
     else expect(localDay(firstWork, "Pacific/Auckland")).toBe(localDay(firstWork, "UTC"));
     const u = xs(utc);
-    expect(u.length).toBe(22);
+    expect(u.length).toBe(21);
     expect(xs(akl).filter(([id]) => !perWeek.has(id))).toEqual(u.filter(([id]) => !perWeek.has(id)));
     expect(u.filter(([, x]) => x !== null).length).toBeGreaterThan(10);
   });
