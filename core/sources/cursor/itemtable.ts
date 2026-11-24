@@ -163,7 +163,8 @@ export class LegacyKeys {
       this.add("inline-message", Array.isArray(head.conversation) ? head.conversation.length : 0);
       const model = isObj(head.modelConfig) ? str(head.modelConfig.modelName) : undefined;
       const agent = head.isAgentic === true || head.unifiedMode === "agent";
-      this.session(raw, toEpochMs(head.createdAt, this.ctx.now), toEpochMs(head.lastUpdatedAt, this.ctx.now), agent, model === undefined ? [] : [safeModel(model)]);
+      this.session(raw, toEpochMs(head.createdAt, this.ctx.now), toEpochMs(head.lastUpdatedAt, this.ctx.now), agent, model === undefined ? [] : [safeModel(model)],
+        [head.createdAt, head.lastUpdatedAt]);
     }
   }
 
@@ -182,13 +183,14 @@ export class LegacyKeys {
       }
       this.add("inline-message", messages);
       const ts = toEpochMs(tab.lastSendTime, this.ctx.now);
-      this.session(raw, ts, ts, false, []);
+      this.session(raw, ts, ts, false, [], [tab.lastSendTime]);
     }
   }
 
-  private session(raw: string, created: number | undefined, updated: number | undefined, agent: boolean, models: string[]): void {
+  /** `rawTimes`: the values the times came from, so a time outside the plausible range counts `bad-ts`, not `no-ts`. */
+  private session(raw: string, created: number | undefined, updated: number | undefined, agent: boolean, models: string[], rawTimes: unknown[]): void {
     const start = created ?? updated;
-    if (start === undefined) return this.tally.skip("no-ts");
+    if (start === undefined) return this.tally.noTime(...rawTimes);
     const end = Math.max(start, updated ?? start);
     const s: SessionEv = {
       k: "session", tool: TOOL, source: IDE_SOURCE, id: cuSessionId(raw, this.ctx), window: "detail", origin: "human", start, end, models,

@@ -4,10 +4,11 @@ import path from "node:path";
 import { localDay } from "../../../core/io/time";
 import { scan } from "../../../core/scan";
 import { ccConfig, ccStats } from "../../../core/sources/claude-code";
-import { cxConfig } from "../../../core/sources/codex";
-import { cpVscode } from "../../../core/sources/copilot";
+import { cxConfig, cxThreads } from "../../../core/sources/codex";
+import { cpCli, cpVscode } from "../../../core/sources/copilot";
 import { cuIde, cuTracking } from "../../../core/sources/cursor";
 import type { SourcePlugin } from "../../../core/sources/types";
+import { threadRow, turnRow, writeStateDb as writeCodexState, writeTurnsDb } from "../../fixtures/codex";
 import { userRel } from "../../fixtures/copilot";
 import { bubble, composer, globalRel, writeStateDb } from "../../fixtures/cursor";
 import { fakeHome, type FakeHome } from "../../kit/home";
@@ -114,5 +115,52 @@ describe("Cursor: an implausible time is bad-ts, not no-ts", () => {
     expect(detail.skipped["no-ts"]).toBeUndefined();
     const tracking = r.coverage.find((c) => c.source === "cursor.tracking")!;
     expect(tracking.skipped).toEqual({ "bad-ts": 1, "no-ts": 1 });
+  });
+});
+
+describe("lifetime stores: an implausible time is bad-ts, not no-ts", () => {
+  const old = Date.UTC(1990, 0, 1);
+  const iso = (ms: number) => new Date(ms).toISOString();
+
+  test("Copilot CLI's session store: a session and a turn dated 1990", async () => {
+    const now = Date.now();
+    h.sqlite(path.join(".copilot", "session-store.db"), [
+      "CREATE TABLE sessions (id TEXT PRIMARY KEY, cwd TEXT, created_at TEXT, updated_at TEXT)",
+      "CREATE TABLE turns (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, timestamp TEXT)",
+    ], {
+      sessions: [["s-old", null, iso(old), iso(old)], ["s-none", null, null, null], ["s-ok", null, iso(now - 60_000), iso(now)]],
+      turns: [[1, "s-ok", iso(old)], [2, "s-ok", null], [3, "s-ok", iso(now - 1_000)]],
+    });
+    const r = await run([cpCli]);
+    const life = r.coverage.find((c) => c.window === "lifetime")!;
+    expect([life.skipped["bad-ts"], life.skipped["no-ts"]]).toEqual([2, 2]);
+  });
+
+  test("Codex's thread index: a thread and a turn dated 1990", async () => {
+    const now = Date.now();
+    const id = (n: number) => `019a0000-0000-7000-8000-00000000000${n}`;
+    writeCodexState(h, ".codex/state_5.sqlite", [
+      { ...threadRow(id(1), now - 60_000), created_at: null, created_at_ms: old },
+      { ...threadRow(id(2), now - 60_000), created_at: null, created_at_ms: null },
+      threadRow(id(3), now - 60_000),
+    ]);
+    writeTurnsDb(h, ".codex/thread_history_1.sqlite", [
+      turnRow(id(3), "t1", "completed", old / 1000, old / 1000, 10),
+      turnRow(id(3), "t2", "completed", null, null, 10),
+      turnRow(id(3), "t3", "completed", (now - 2_000) / 1000, (now - 1_000) / 1000, 10),
+    ]);
+    const r = await run([cxThreads]);
+    const cov = r.coverage[0]!;
+    expect([cov.skipped["bad-ts"], cov.skipped["no-ts"]]).toEqual([2, 2]);
+  });
+
+  test("Cursor's legacy composer index: a head dated 1990", async () => {
+    writeStateDb(h, globalRel(h), [], [["composer.composerData", { allComposers: [
+      { composerId: "00000000-0000-4000-a000-0000000000b1", createdAt: old, lastUpdatedAt: old },
+      { composerId: "00000000-0000-4000-a000-0000000000b2" },
+    ] }]], { kv: false });
+    const r = await run([cuIde]);
+    const detail = r.coverage.find((c) => c.window === "detail")!;
+    expect([detail.skipped["bad-ts"], detail.skipped["no-ts"]]).toEqual([1, 1]);
   });
 });

@@ -378,7 +378,7 @@ function storeSession(r: Obj, source: string, surface: StoreSurface, ctx: ScanCt
   const raw = str(r.id);
   if (raw === undefined) return tally.skip("bad-row");
   const start = toEpochMs(r.created_at, ctx.now);
-  if (start === undefined) return tally.skip("no-ts");
+  if (start === undefined) return tally.noTime(r.created_at);
   const end = Math.max(start, toEpochMs(r.updated_at, ctx.now) ?? start);
   const s: SessionEv = { k: "session", tool: TOOL, source, id: cpSessionId(raw, ctx), window: "lifetime", origin: "human", start, end, models: [], surface };
   const cwd = str(r.cwd);
@@ -392,7 +392,7 @@ function storeTurn(r: Obj, source: string, ctx: ScanCtx, tally: Tally): void {
   const raw = str(r.session_id);
   if (raw === undefined) return tally.skip("bad-row");
   const ts = toEpochMs(r.timestamp, ctx.now);
-  if (ts === undefined) return tally.skip("no-ts");
+  if (ts === undefined) return tally.noTime(r.timestamp);
   ctx.emit({ k: "turn", tool: TOOL, source, ts, sessionId: cpSessionId(raw, ctx), window: "lifetime" });
   tally.span(ts);
 }
